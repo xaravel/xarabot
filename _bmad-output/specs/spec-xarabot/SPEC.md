@@ -175,7 +175,7 @@ Xarabot makes this layer its own versioned, open-source product, built on top of
 
 ## Assumptions
 
-- **Local checkout:** `~/repos/xarabot`. The GitHub repo `xaravel/xarabot` is not created yet.
+- **Local checkout:** `~/repos/xarabot`. Its remote is the public GitHub repo `xaravel/xarabot` (https://github.com/xaravel/xarabot).
 - **BMAD:** Xarabot drives the BMAD skills installed in the consuming repo (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`, `bmad-correct-course`); it does not vendor or fork BMAD. "Product management" in scope means driving those planning artifacts (sprint status, epics, retros, course corrections), not a separate tool.
 - **Quick wins:** CAP-9 and the batch routing of Maintainer-only retro items port what Xaravel PR #216 adds to `iteration.md`. CAP-10's blocking tag was trimmed from #216, because it pays off only with parallel lanes; it is first built in Xarabot.
 - **Pipelining:** CAP-16 is optional and built last.
