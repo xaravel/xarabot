@@ -38,4 +38,6 @@ A Xaravel course correction adds an Epic before Epic 9 that adopts Xarabot. Inpu
 - add the Xarabot config and `.agents/skills` to `conformance/protected-paths`;
 - make `decisions/MAINT-2026-10-16-unattended-orchestrator.md` its Standing Authority file, covering Codex's review mode, lanes and parallel Epics;
 - add `xaravel/framework` to `edanisko-xarabot`'s `xaravel` installation, register it under edanisko, and move `docs/ops/identities.md`, `ruleset:identity` and the `Agent pushes` ruleset redesign from a separate user account to the App. The Maintainer does the live GitHub steps;
-- end the MAINT amendments that allow `--admin` merges.
+- end the MAINT amendments that allow `--admin` merges;
+- write `.xarabot/epics.yaml` with Epic 8's checkpoint (serial parity is `8: {depends_on: [7], checkpoint: true}`); checkpoints are never inferred, so without it lanes skip the pending go. Whether Phases run their Epics in parallel, and whether the Phase 4 progress review is a checkpoint, are adoption decisions; today's order is prose in `epics.md` and `CHECKPOINT EPICS: 8` in `tools/orchestrator/iteration.md`;
+- 47 Story headings in `epics.md` have no manifest (35 inside Epics that have manifests, 12 in outline Epics 71–74). Each is unclaimable and keeps its Epic from counting as done until its manifest is written.

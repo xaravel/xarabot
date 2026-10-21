@@ -6,6 +6,7 @@
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
 - **Claim:** a lane's exclusive hold on a unit, made by compare-and-swap on a git ref, kept alive by heartbeat, expiring 30 minutes after the last heartbeat.
 - **Story manifest:** the per-Story record in the consuming repo that gives the Story's path globs (directly, or through a repo mapping such as Xaravel's `component`) and its dependencies. Claims and the guard use its globs. Its format is spine AD-10.
+- **Epic graph file (`.xarabot/epics.yaml`):** the consuming repo's record of each Epic's dependencies and checkpoint. An Epic it does not list depends on the next lower Epic number in `epics.md`; a checkpoint is never inferred. It is Xarabot config, so a Protected Path: a change to it, or to the Epic headings or a manifest's Epic, merges only with the Maintainer's approval.
 - **`next`:** the command that returns the one unit a lane builds next.
 - **Adapter:** the code that runs one vendor's agent CLI for a unit and returns its JSON result.
 - **Checkpoint Epic:** an Epic after whose retrospective the Maintainer must say "go" before the Epics that depend on it, directly or through others, start; Epics not depending on it keep running (Xaravel: Epic 8).
@@ -14,7 +15,7 @@
 - **Write check:** the 0.x runner check that refuses a builder diff touching coordinator-owned files, manifests, agent config or Protected Paths before the squash (CAP-18).
 - **Inbox:** the single list of everything waiting on one human. Each owner has one; the Maintainer's also holds rulings, Escalations, retro items and Human Live Steps.
 - **Maintainer:** the human who owns the consuming repo's rulings, Protected Paths and releases.
-- **Protected Path:** a path in the consuming repo that changes only through a Maintainer-approved Infrastructure Story (Xaravel AD-16).
+- **Protected Path:** a path in the consuming repo that changes only through a Maintainer-approved Infrastructure Story (Xaravel AD-16), or, for the Epic graph file, a Maintainer-approved planning PR.
 - **Infrastructure Story:** a Story that changes Protected Paths, approved by the Maintainer before a lane builds it.
 - **Escalation:** a question an agent raises instead of deciding a contract matter. A human decision binds to its exact text by hash, and an open Escalation blocks its unit's merge (CAP-20).
 - **Lesson:** a cross-Epic lesson recorded from a retrospective (Xaravel: `lessons.md`), injected into later sessions (CAP-21).

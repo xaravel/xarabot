@@ -94,8 +94,10 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | State | Home | Writer |
 | --- | --- | --- |
 | Epic and Story planned or done | `sprint-status.yaml` on `main` | coordinator (its own PRs) |
-| Retro verdicts, items and checkpoint go | `retro-gates.yaml` on `main` | coordinator |
-| Story manifests and `epics.md` | `main` | coordinator (planning units) |
+| Retro verdicts and items | `retro-gates.yaml` on `main` | coordinator |
+| Checkpoint go | `retro-gates.yaml` on `main` | `reconcile`'s runner code, applying a Maintainer ruling (AD-28); never an agent session |
+| Story manifests and `epics.md` | `main` | coordinator (planning units); a change to the effective Epic graph is Maintainer-gated (AD-11) |
+| Epic graph | `.xarabot/epics.yaml` on `main` | coordinator (planning units, Maintainer-gated, AD-11) or the Maintainer |
 | Ledger records in `claimed` or `merging` | ledger (AD-4) | the lane that holds the unit. Any lane may take over a stale record by compare-and-swap at `generation` + 1 (AD-6, AD-13). |
 | Ledger records in `parked` | ledger | the lane that parks the unit. The coordinator's `reconcile` unit may take a held record at `generation` + 1 to enqueue it. |
 | Ledger records in `released`; an Infrastructure approval | ledger | the lane releasing the unit, or the coordinator applying a ruling (AD-28) |
@@ -168,12 +170,12 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | --- | --- |
 | About to enqueue | `merging`, written before the enqueue call |
 | Merged | `merged` |
-| Finished PR waiting for its owner's approval | `parked`, globs **held** |
+| Finished PR waiting for its owner's approval, or the Maintainer's for a graph change (AD-11) | `parked`, holding **only the paths its diff changes** |
 | Blocked: Escalation, Human Live Step, `intent-gap`, `verification`, `other`, review disagreement past the cap, CI-fix cap reached, write-check refusal, or the result `no-op` | `parked`, globs **released**, inbox item |
 | Session crash, a missing or invalid result, a timeout, or a budget overrun | `released` with `attempts` + 1. Once `attempts` ≥ 3 it becomes `parked` (blocked) instead. |
 | A stale claim taken over by another lane | stays `claimed` under the new holder, with `attempts` + 1. Once `attempts` ≥ 3 it becomes `parked` (blocked) instead. |
 | A recurring unit (`planning`, `reconcile`) with nothing to commit | `merged` with no PR. The coordinator deletes it at once, and no inbox item is raised. |
-| An owner-gated PR ejected or dequeued from the queue | `parked`, globs held, `approved_sha` cleared. It never returns to `claimed`. |
+| An approval-gated PR (owner or Maintainer) ejected or dequeued from the queue | `parked`, holding only the paths its diff changes, `approved_sha` cleared. It never returns to `claimed`. |
 | Infrastructure Story with no matching approval | `parked` (`needs-approval`), globs released, item in the Maintainer's inbox |
 | Idle | no record |
 | `STOP` | the current unit finishes first; no new claim |
@@ -231,26 +233,54 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     - The spec file's path comes from repo config (`story_spec_path`, by default BMAD's `implementation_artifacts/spec-<sprint_key>.md`).
   - **Infrastructure Stories** can be claimed only while the ledger holds an approval whose `manifest_sha` matches the current manifest.
 
-### AD-11: The Epic graph lives in `epics.md` as fixed bullets
+### AD-11: The Epic graph lives in `.xarabot/epics.yaml`, serial by default
 
 - **Binds:** CAP-2, CAP-5, CAP-10.
-- **Prevents:** a graph read from prose, and the gate Story and the manifest loader counting different sets of Stories.
+- **Prevents:** a graph read from prose, loaders and gates computing different graphs, work escaping a checkpoint through an ungated file, consumers carrying a BMAD override, and the gate Story and the manifest loader counting different sets of Stories.
 - **Rule:**
-  - **The bullets.** Every Epic carries `- **Depends on:** Epic N, …` (or `none`), and may carry `- **Checkpoint:** yes`.
-  - **What an Epic's Stories are:** exactly the manifests whose `epic` names it.
-  - **Validation stops every lane and posts an alert** on any of these: a missing bullet, a dangling reference, a cycle, or a Story heading in `epics.md` with no manifest (or a manifest with no heading).
-  - **Package edges.** `package.json` workspace edges are added only through a repo-configured map from Epics to packages.
-  - **Generating the bullets.** `bmad-create-epics-and-stories` emits them through a `bmad-customize` override.
+  - **One resolver.** A pure `resolveGraph(snapshot)` in `src/core` builds the effective graph from `.xarabot/epics.yaml`, the Epic and Story headings in `epics.md`, each manifest's `epic` and the package edges, all read from the snapshot's one `main` SHA. Gates and `next` read only its output.
+  - **The file.** `.xarabot/epics.yaml` has a strict, versioned schema (AD-27): `version`, and `epics`, a map from Epic number to entry.
+    - Keys match `^[1-9][0-9]*$` and are converted to numbers, because `Bun.YAML` yields string keys.
+    - `depends_on` is a list of positive integers (`[]` for none). An omitted `depends_on` means the default below.
+    - `checkpoint` accepts only the literal `true`.
+    - Duplicate Epic keys make the file invalid. They are found by scanning the raw text, because `Bun.YAML` silently keeps the last. A multi-document file or a null `epics` is invalid.
+  - **The default.** An Epic the file does not list, or lists without `depends_on`, depends on the next lower Epic number present in `epics.md`; the lowest depends on none. A repo with no file runs its Epics serially. A checkpoint is never inferred.
+  - **Effective dependencies** are (`depends_on` or the default) plus the package edges, which are added only through a repo-configured map from Epics to packages.
+  - **The grammar.** `epics.md` is read as stock `bmad-create-epics-and-stories` writes it, with no BMAD override:
+    - an Epic is a level-2 `## Epic <int>:` heading outside fenced code. `### Epic N:` lines under `## Epic List` are ignored;
+    - a Story is a level-3 `### Story <int>.<int>[a-z]?:` heading under its Epic. Its id string keeps the letter (`2.6a`).
+  - **What an Epic's Stories are:** exactly the manifests whose `epic` names it. A manifest's `epic` must equal its `story_id` prefix and the Epic of its heading.
+  - **A Story heading with no manifest** can't be claimed, is listed in the Maintainer's inbox, and keeps its Epic from counting as done. An Epic with no Stories is never done and holds its dependents.
+  - **Where the file is read.** It is repo-layer config (AD-20), read only from freshly fetched `origin/main`, and a Protected Path. Absence is decided only from the tree listing of the snapshot's `main` SHA; any other read error fails closed.
+  - **Validation stops every lane and posts an alert** on any of these:
+    - an invalid file;
+    - an entry or `depends_on` naming an Epic with no heading;
+    - a cycle;
+    - a manifest with no heading, or whose `epic` doesn't match;
+    - `retro-gates.yaml` marking an Epic as awaiting a checkpoint go that the graph doesn't mark.
+  - **Graph inputs** are `epics.md`, `.xarabot/epics.yaml` and the manifest directory.
+    - Only `planning` units may change them (AD-30). A planning unit that does holds the pseudo-glob `xarabot:graph`, so graph changes go one at a time (AD-13).
+    - A planning session edits `.xarabot/epics.yaml` in its diff like any planning file; the package prompt template states its schema (AD-29).
+  - **Changing the graph.**
+    - Before enqueue, the runner runs `resolveGraph` and the whole validation list above on the PR's merge result (the merge it recomputes for AD-16). A failure parks the PR blocked.
+    - Any change to the effective graph needs the Maintainer's approval, appends included. The effective graph covers edges (package edges included), checkpoints, the Epic set and numbers, and each Epic's Story set.
+    - A PR whose merge result changes the resolved graph, whatever files it touches, takes `xarabot:graph` in its ledger record before enqueue; a second such PR waits.
+    - An Epic with a retro verdict takes no new Stories; new work goes in a new Epic.
+    - The runner posts the delta on the PR: changed edges and checkpoints, and the Epics each checkpoint without a go holds.
+    - When the Maintainer approves, the runner records `approved_graph`, the hash of the resolved graph of the approved head's merge result. Enqueue recomputes it against current `main`; on a mismatch the approval is void and requested again.
+  - **Fixed once used.** An Epic number or Story id can't be renumbered or removed once it has a status beyond `backlog` in `sprint-status.yaml`, a `retro-gates.yaml` record, a ledger record in any state, or a PR on its branch; such a PR parks blocked.
+  - **Retiring a checkpoint.** Only a checkpoint whose go is recorded may be retired, by removing `checkpoint: true`; the go record stays.
 
 ### AD-12: Gates on the graph
 
 - **Binds:** CAP-5, CAP-10.
 - **Prevents:** "next Epic" tests that can't be written, and parallel Epics slipping past a checkpoint.
-- **Rule:** distance is measured along `Depends on` edges, starting from Epic E.
+- **Rule:** distance is measured along the graph's dependency edges (AD-11), starting from Epic E.
   - **Starting an Epic.** Epic D starts only when every Epic it depends on has all its Stories merged **and its retro done**.
   - **Retro items.** A `blocking` item from E's retro holds every Epic at distance 1 or more. Any other open item holds every Epic at distance 2 or more. Items with status `open`, `in-progress` or `waiting` count as open; `deferred` and `done` don't.
   - **Checkpoints.** A checkpoint Epic C holds every Epic that depends on it, directly or through others, until the Maintainer's go is recorded. Epics already in flight finish the Stories they hold and take no new ones.
   - **The `blocking` tag** comes from the retro result (AD-14), through a `bmad-customize` override for `bmad-retrospective`.
+  - **Graph changes** take effect at the next claim; Stories already claimed finish. A checkpoint added after an Epic's retro holds its dependents from the next claim until the go.
 
 ### AD-13: How `next` chooses
 
@@ -260,9 +290,13 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
   - **Signature.** `next(snapshot, laneRole)` returns either a unit or `idle` with a reason.
   - **Globs for every unit kind.**
     - Every unit kind holds globs.
-    - Planning, retro and checkpoint units hold the planning paths: `epics.md`, the manifest directory, `sprint-status.yaml`, `retro-gates.yaml` and the configured Epic context path (`epic-<N>-context.md`).
-    - A retro item carries its `globs` in `retro-gates.yaml`. Without globs it can't be claimed.
+    - Planning units hold the planning paths: the graph inputs (`epics.md`, `.xarabot/epics.yaml`, the manifest directory), `sprint-status.yaml`, `retro-gates.yaml` and the configured Epic context path (`epic-<N>-context.md`). A planning unit that changes a graph input also holds the pseudo-glob `xarabot:graph` (AD-11).
+    - Retro and checkpoint units hold `sprint-status.yaml`, `retro-gates.yaml` and the Epic context path, never the graph inputs.
+    - A retro item carries its `globs` in `retro-gates.yaml`. Without globs it can't be claimed. Its globs may not include graph inputs, status files, or anything the write check refuses a builder (AD-30).
+    - `reconcile` holds no globs.
+    - A parked, approval-gated PR holds only the paths its diff changes (AD-7).
     - The overlap check applies to every role.
+  - **Approval-gated coordinator PRs** (a Protected Path or a graph change) never touch `sprint-status.yaml` or `retro-gates.yaml` (enforced by AD-30); `reconcile` writes their status entries after the merge. A change to both the Epic set and the graph goes in one PR.
   - **Builders** take only eligible Stories (AD-12) whose record is absent, `released`, or a stale `claimed` or `merging` record (AD-6), and whose globs don't overlap. They pick the lowest Epic number first, then the lowest Story number.
   - **Epic context.** The coordinator compiles each Epic's BMAD context file (`epic-<N>-context.md`) in planning, before the Epic's Stories become eligible. The runner reverts any change a builder session makes to it before squashing.
   - **The coordinator** works in this order:
@@ -277,7 +311,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     4. Retro.
     5. Retro items.
     6. Checkpoint.
-  - **Planning shape.** 0.x supports only BMAD's classic shape: `epics.md`, `sprint-status.yaml` and manifests.
+  - **Planning shape.** 0.x supports only BMAD's classic shape: `epics.md`, `sprint-status.yaml` and manifests, plus the Epic graph file (AD-11).
 
 ### AD-14: Results, one shape per unit kind
 
@@ -336,8 +370,10 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     - Enqueue happens only if the PR head equals `passed_sha`, or if the head's tree equals the merge of `passed_sha` with the head's `main` parent.
     - The enqueuing lane recomputes that merge itself in `runner.git`. It never trusts the record or the commit's author for this.
   - **Owner-gated PRs** (Protected Paths) are enqueued only while the owner's approval is on the current head (`approved_sha` equals the head).
+  - **Graph-changing PRs** (AD-11) are enqueued only while the Maintainer's approval is on the current head and `approved_graph` matches; the bot owner's approval alone never counts.
+  - **`reconcile` PRs** carry only runner-written content, so they get no agent review and no agent loopback. On a conflict or an ejection, `reconcile` regenerates them on fresh `main`.
   - **Any later change by an agent re-runs the review.** That covers CI fixes and conflict resolution, and each re-run counts as a loopback, at most 2. Past the cap, the unit parks blocked.
-  - **Coordinator PRs** follow the same rule.
+  - **Coordinator PRs** follow the same rule, except `reconcile` PRs (below).
   - **At lane start,** the lane refuses to run if the reviewer adapter isn't allowed.
   - **BMAD's own review hook** may run for earlier feedback, but it never counts as the gate.
 
@@ -398,11 +434,11 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
 - **Prevents:** a lane obeying policy that its own branch edited, and merges continuing after authority is revoked.
 - **Rule:**
   - **Package layer:** defaults, schemas, the prompt template.
-  - **Repo layer:** `.xarabot/` (`config.yaml`, `policy.yaml`, `human-live-steps.yaml`, `prompts/`) plus the Standing Authority file at the path config names. This layer is read **only from freshly fetched `origin/main`**.
+  - **Repo layer:** `.xarabot/` (`config.yaml`, `policy.yaml`, `human-live-steps.yaml`, `epics.yaml`, `prompts/`) plus the Standing Authority file at the path config names. This layer is read **only from freshly fetched `origin/main`**.
   - **Host layer:** `host.yaml`, `XARABOT_HOST` and `XARABOT_MAX_BUILDERS`.
   - **Format.** All config is YAML with a versioned schema.
   - **Standing Authority.** It is valid when it exists on `main` and its YAML frontmatter validates against the Standing Authority schema. `[ASSUMPTION: Xaravel's MAINT file gains that frontmatter in its adoption Epic]`
-  - **Fail closed.** If config, policy or the Standing Authority is missing, invalid or can't be fetched, the lane stops.
+  - **Fail closed.** If config, policy or the Standing Authority is missing, invalid or can't be fetched, the lane stops. The one exception: an absent `epics.yaml` means the serial default (AD-11); any error reading it still stops the lane.
   - **Re-checks from freshly fetched `main`:**
     - the Standing Authority, before every claim, push, enqueue and merge;
     - the adapter and reviewer allowances, before every session launch and every enqueue.
@@ -489,7 +525,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     - the ledger tip and its records
     - the `main` SHA
     - the config, policy and Standing Authority
-    - manifests and the Epic graph
+    - manifests and the resolved Epic graph (`resolveGraph`, AD-11), all from the one `main` SHA
     - `sprint-status.yaml` and `retro-gates.yaml`
     - the PR state of every ledger unit
     - the lane's identity and role
@@ -508,7 +544,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     - `rebuild` also closes the PR (AD-9) and clears `builder_providers[]`, because the diff starts again from `main`.
     - `release` keeps `builder_providers[]`, because the existing diff carries over. A unit parked because no reviewer is left therefore needs `rebuild`.
     - `dismiss` removes only the inbox item and leaves the ledger unchanged.
-  - **Applying it.** The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
+  - **Applying it.** Rulings, the checkpoint go included, are applied by `reconcile`'s runner code, never by an agent session. The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **Local-only mode (v1)** uses `xarabot rule <verb> <unit-id>`.
 
 ### AD-29: Prompt assembly is pure
@@ -530,7 +566,9 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
       - an Infrastructure Story with a matching approval (AD-10). This covers the repo's Protected Paths only, never coordinator-owned files, manifests or `.xarabot/**`;
       - the unit's own BMAD Story spec file;
       - the `status:` line of the unit's own Story file.
-  - **Coordinator diffs** may touch only the planning paths and their unit's globs.
+  - **Coordinator diffs** may touch only the paths their unit holds (AD-13). Only a `planning` unit may touch a graph input, and under `.xarabot/**` only `.xarabot/epics.yaml`. A diff touching both a graph input and `sprint-status.yaml` or `retro-gates.yaml` is refused.
+  - **The checkpoint go.** Any agent diff, builder or coordinator, that changes a checkpoint go in `retro-gates.yaml` is refused (AD-28).
+  - **Whose diff.** The diff checked is the agent session's own change, never runner-written content such as `reconcile`'s.
   - **A refusal** parks the unit as blocked (AD-7) and is logged with its reason.
 
 ### AD-31: Bootstrap runs as a dedicated macOS user; self-hosting waits for the sandbox
@@ -628,7 +666,7 @@ stateDiagram-v2
   merging --> merging: heartbeat / stale takeover while still queued
   merging --> merged: PR merged
   merging --> claimed: builder PR ejected (same holder)
-  merging --> parked: owner-gated PR ejected or dequeued (held)
+  merging --> parked: approval-gated PR ejected or dequeued (held)
   merging --> released: stale and not queued (attempts + 1) / stop --now or budget (dequeue first)
   parked --> merging: reconcile takes approved PR at approved_sha (generation + 1)
   parked --> merged: PR found merged
@@ -700,6 +738,7 @@ bootstrap/     # join.ts; the bootstrap loop copy runs as a dedicated macOS user
 - **The spec-folder planning shape** (`stories.yaml`, folder+id dispatch). Waits until a consumer uses it.
 - **The local-only forge adapter (v1).** This covers its compare-and-swap with `update-ref`, its checks, a local inbox, signing with the lane key and `xarabot approve`, all within AD-4, AD-27 and AD-28.
 - **The v1 guard diff check and CI re-check** (CAP-18, CAP-19): globs, renames, symlinks, submodules, mode changes, the dependency-file list, and gates judged in the merge group. They extend AD-30.
+- **A CI check that runs `resolveGraph` on human-authored PRs** waits for CAP-19 in v1. Until then the Maintainer's approval and the post-merge validation (AD-11) cover them.
 - **Removing a PR already in the queue when authority is revoked** waits for CAP-19 in v1. Until then this is an accepted 0.x gap.
 - **Xarabot-owned Escalations (v1, CAP-20).** In 0.x, Xaravel's `tools/escalations/` is read through config.
 - **Injecting Lessons (v1, CAP-21).** They come from fetched `origin/main` when each session starts.
@@ -712,11 +751,4 @@ bootstrap/     # join.ts; the bootstrap loop copy runs as a dedicated macOS user
 - **Open items:**
   - **The App permission the merge queue's `enqueuePullRequest` needs.** GitHub's docs don't state it. Verify with a live test before the merge-plumbing Story.
   - **Which response from `PATCH git/refs` means "retry the swap"** (409 or 422). The contract suite settles it.
-  - **Spec updates through `bmad-spec`:**
-    - codex's model name, `gpt-sol-6.1` → `gpt-6.1-sol`;
-    - drop the read-only-token option;
-    - the dependents-only checkpoint (AD-12);
-    - the runner-enforced review (AD-16);
-    - the sandbox in the first Epic, and the bootstrap running as a dedicated macOS user (AD-31);
-    - the 0.x write check (AD-30);
-    - pi 1.3.0.
+  - **BMAD overrides a consumer would carry** (spec open question): the retro `blocking` tag (AD-12) and result writing from `on_complete` (AD-14). The Maintainer decides whether they move into Xarabot-owned files, as the Epic graph did (AD-11), or Xarabot installs them. Revisit before the retro and result Stories.
