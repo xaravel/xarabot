@@ -44,8 +44,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:** One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own worktree, state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`).
   - **success:** On Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
 - **CAP-5 · Parallel Epics (0.x)**
-  - **intent:** Epics whose dependencies are done run at the same time, ordered by the dependency graph instead of strictly in sequence.
-  - **success:** In Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once, and a checkpoint Epic still stops later Epics until the Maintainer's go.
+  - **intent:** Epics run at the same time, ordered by the dependency graph instead of strictly in sequence: an Epic starts once every Epic it depends on has all its Stories merged and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go.
+  - **success:** In Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once. While a checkpoint go is pending, Epics depending on the checkpoint Epic take no new Stories, and Epics not depending on it keep running.
 - **CAP-6 · Plumbing in code (0.x)**
   - **intent:** CI polling, the merge queue, mergeability checks, conflict resolution in the status YAML files, status comments, the progress line and sleeping through usage limits run in Xarabot code; the agent session only does the unit's work and returns a JSON result. The lessons in `brownfield-xaravel.md` § Lessons (CI polling, Conflicts, Merges) bind this code.
   - **success:** The agent prompt carries no CI, merge or status instructions; every session's output validates against the result schema; a usage-limit hit makes the lane sleep until the reset instead of failing.
@@ -53,22 +53,22 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:**
     - Each lane runs its coding agent through an adapter: `claude`, `codex` or `pi`.
     - Every adapter takes the same three lane settings: `agent`, `model` and `effort`. `effort` is one scale for all adapters (`low`, `medium`, `high`, `xhigh`, `max`); each adapter maps it onto its CLI's own setting.
-    - Each adapter's default settings use a top model; lane config can change model and effort.
+    - `claude` and `codex` default to a top model; a `pi` lane sets its model explicitly. Lane config can change model and effort.
     - The consuming repo's policy says which adapters may run unattended.
   - **success:**
     - The same unit runs to a valid JSON result through each adapter.
-    - A lane with no `model` set runs its adapter's default top model; switching agent, model or effort is a config change only.
+    - A `claude` or `codex` lane with no `model` set runs its adapter's default top model; a `pi` lane with no `model` refuses to start. Switching agent, model or effort is a config change only.
     - Each adapter maps `effort` per `agent-adapters.md` § Model and effort; a value an adapter cannot honor stops the lane at start instead of being dropped silently.
     - A lane whose adapter the repo's policy does not allow unattended refuses to start unattended.
 - **CAP-8 · Cross-vendor review (0.x)**
-  - **intent:** A diff built by one vendor's agent is reviewed by another vendor's agent before it merges: Claude reviews Codex- and pi-built diffs, and Codex reviews Claude-built ones. Its findings are blocking review loopbacks.
-  - **success:** Every builder PR carries a review from a vendor other than its builder's, and no PR merges with that review's findings unresolved. If the two vendors still disagree after the loopback cap, or the reviewer adapter is not allowed or unavailable, the unit does not merge and is listed in its owner's inbox.
+  - **intent:** Before a diff merges, the runner has it reviewed by an agent whose model comes from a vendor other than every model that built it. Vendor means the model's vendor, never the adapter's: Codex reviews Anthropic-built diffs, and Claude reviews the rest (`agent-adapters.md`). The review binds to the commit it reviewed; any later agent change, such as a CI fix or a conflict resolution, re-runs it. Its findings are blocking review loopbacks. BMAD's own review hook may run for earlier feedback but never counts as this review.
+  - **success:** Every builder PR carries a review, naming the commit it reviewed, from a model vendor outside its builders'. No PR merges with blocking findings unresolved or with a diff other than the reviewed one. After 2 loopbacks, or when no allowed reviewer from another vendor is left, the unit does not merge and is listed in its owner's inbox.
 - **CAP-9 · Inboxes (0.x)**
   - **intent:** Each owner sees everything waiting on them in one inbox and rules on it in one sitting a day: their bot's PRs awaiting approval and their blocked units. The Maintainer's inbox also holds rulings, Escalations, waiting retro items and Human Live Steps. On a solo repo the two are one list.
   - **success:** One daily digest per inbox lists every waiting item with its link and age; an item that newly stops all lanes notifies at once; no other per-item waiting notices are sent.
 - **CAP-10 · Retro gating (0.x)**
-  - **intent:** A retro action item holds back the next Epic only when the retro tags it `blocking`; other items are worked alongside later Stories.
-  - **success:** `next` tests: an untagged open item does not gate the next Epic but does gate the Epic after it; a `blocking` item gates the next Epic.
+  - **intent:** A retro action item from Epic E holds back the Epics that depend directly on E only when the retro tags it `blocking`; other items are worked alongside later Stories.
+  - **success:** `next` tests on the dependency graph: an untagged open item does not gate an Epic one step from E but does gate one two or more steps away; a `blocking` item gates every Epic depending on E.
 - **CAP-11 · Telemetry (0.x)**
   - **intent:** Each lane records per unit: agent, model, effort, unit, start, end, outcome, review loopbacks, CI fixes, and tokens and wall-clock cost (labeled an estimate for subscription runs), so agents and lanes can be compared.
   - **success:** A report over a chosen period shows, per agent and model, units done, median unit time, first-pass review rate, CI-fix count and cost, and feeds the consuming repo's dashboard.
@@ -99,15 +99,16 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **CAP-17 · Actor registry (v1)**
   - **intent:** The consuming repo keeps an Actor registry: humans by GitHub login, their roles and tracks, and the `<login>-xarabot` App each one owns (its App ID). CODEOWNERS, rulesets and guard policy are generated from it.
   - **success:** Registering a person and their bot and merging gives them their role's rights everywhere; a bot not registered to a human is refused; a hand edit to a generated file fails a drift check.
-- **CAP-18 · Guard (sandbox 0.x; diff check and CI v1)**
+- **CAP-18 · Guard (sandbox and write check 0.x; diff check and CI v1)**
   - **intent:** One fail-closed guard, the same for every adapter:
-    - **Sandbox (0.x):** the coding agent runs with only its unit's worktree writable and no GitHub credentials (§ Constraints, "Agents never touch GitHub").
-    - **Diff check (v1):** the runner refuses a returned diff that touches files outside the claim's globs, Protected Paths outside an approved Infrastructure Story, or dependency files the repo has not allowed.
+    - **Sandbox (0.x):** the coding agent runs with only its unit's worktree writable, and with no GitHub credentials and no GitHub host (§ Constraints, "Agents never touch GitHub").
+    - **Write check (0.x):** before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`) or Protected Paths. Only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's own BMAD Story spec file, and the `status:` line of its own Story file.
+    - **Diff check (v1):** extends the write check to refuse files outside the claim's globs and dependency files the repo has not allowed.
     - **CI (v1):** CI re-checks the same rules.
     - **Hooks:** per-agent write-time hooks, where an agent has them, give earlier feedback but are never the boundary.
   - **success:**
     - Each refusal case has a test for each adapter.
-    - An out-of-scope diff is never committed, and is logged with its reason.
+    - An out-of-scope diff is never committed, and is logged with its reason; from 0.x, a builder diff touching a write-check path parks its unit blocked.
     - From 0.x, an agent session cannot push, approve or merge, because it has no token.
     - A guard error blocks rather than allows.
 - **CAP-19 · Gates from the base branch (v1)**
@@ -133,7 +134,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 **Stack**
 - **Toolchain:** Bun only: Bun 1.4.3, TypeScript 7 with `--strict`, oxlint. No Node, npm, pnpm, Jest, Vitest, ESLint or Prettier as tools.
-- **Models:** each adapter's default lane settings use a top model (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
+- **Models:** `claude` and `codex` default to a top model and `pi` lanes name theirs (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
+- **Planning shape:** 0.x reads the classic BMAD shape only: `epics.md`, `sprint-status.yaml` and Story manifests. The spec-folder shape (`stories.yaml`) waits until a consumer uses it.
 - **Forges:** GitHub (0.x) and local-only (v1), each behind one forge interface (CAP-24). GitLab and other forges come later.
 - **No platform assumptions:** Xarabot does not assume AWS, SSO, hardware signing keys, a Claude-only sandbox, a JavaScript repo or a particular repo layout; any of those is an optional repo-supplied integration.
 
@@ -141,15 +143,15 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **Agents never touch GitHub (from 0.x):**
   - Coding agents run sandboxed with no GitHub credentials (CAP-18).
   - Only the Xarabot runner holds the bot's private key, mints its tokens and talks to GitHub: claims, pushes, PRs, CI polling and merges. In local-only mode the same holds for the local `main` and the claims ref.
-  - A session that needs to read GitHub, such as a retro reading PR history, gets a read-only token or data the runner prefetched.
+  - No session gets a GitHub token or reaches a GitHub host. A session that needs GitHub data, such as a retro reading PR history, reads files the runner fetched beforehand.
 - **Identity:** lanes act only as their owner's bot (CAP-13): never a shared bot, an org-owned App, a bot user account or a human's own account.
 - **No co-author markers:** no `Co-Authored-By` trailers or similar non-authoritative markers. The bot account is the only marker of lane-made work.
 
 **Process and release**
 - **License and release:** open source as `xaravel/xarabot`, MIT license, published to npm as `@xaravel/xarabot` and installed with `bun add`. Consumers pin it exactly. Releases are cut only by the Maintainer, from CI.
 - **Xarabot builds itself:** it has its own repo, BMAD plan, epics and changelog.
-  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the Xarabot host, as `edanisko-xarabot`, created before bootstrap by `bootstrap/join.ts` (which `xarabot join` later absorbs), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP and history.
-  - **Self-host:** the moment that lane works, Xarabot's own runner replaces the copy, and every later Xarabot Story is built by Xarabot.
+  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the Xarabot host, as `edanisko-xarabot`, created before bootstrap by `bootstrap/join.ts` (which `xarabot join` later absorbs), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP, history and the agent sandbox (CAP-18). The copy runs as a dedicated macOS user on the Xarabot host that holds only the bot's private key, the Claude credential and its own clone: no `gh` login, ssh key or GitHub keychain item.
+  - **Self-host:** the moment that lane works with its sandbox, Xarabot's own runner replaces the copy, and every later Xarabot Story is built by Xarabot. No Xarabot lane runs unsandboxed.
   - **Pinned runner:** the self-hosted runner runs a pinned Xarabot version (release or tag) that only the Maintainer advances, never re-execing from the branch it builds. Recovery is pinning back to the last good version.
 - **Releases:** a 0.x release carries only what Xaravel's adoption needs; v1 adds the rest (`releases.md`).
 - **Xaravel adoption:** planned and run in Xaravel. Xaravel is paused after Phase 0, its old loop stopped; a Xaravel course correction adds an Epic before Epic 9 that adopts Xarabot and removes `tools/orchestrator/` (`brownfield-xaravel.md`).
@@ -167,7 +169,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - roles, tracks, Protected Paths, dependency-command list and Human Live Steps.
 
 **Operating limits**
-- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
+- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs.
 - **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
@@ -192,14 +194,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 - **BMAD:** Xarabot drives the BMAD skills installed in the consuming repo (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`, `bmad-correct-course`). "Product management" in scope means driving those planning artifacts (sprint status, epics, retros, course corrections), not a separate tool.
 - **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
-- **For architecture to decide or verify:**
-  - Claims live on a dedicated `xarabot/claims` branch, updated by fast-forward-only push as the compare-and-swap; a custom `refs/` namespace is used only if GitHub accepts and protects it.
-  - The sandbox wrapper per OS and adapter: codex's own sandbox, Claude Code's own sandbox, and a generic wrapper for `pi` (Seatbelt on macOS, bubblewrap or landlock on Linux).
-  - Codex's reasoning-effort key and values, and how `effort: max` maps onto them.
-  - The JSON result schema and the Story manifest format.
-  - The bot App's minimum permissions (Contents, Pull requests, Checks, and what the merge queue needs), whether an App review could count toward required approvals (the guard refuses approvals either way), and where `xarabot join` stores the private key on macOS and Linux.
-  - The forge interface, and the local-only adapter's claims and checks on a single host.
-  - The claim and gate mechanics the 2026-10-20 review raised (heartbeat interval and fencing, claim rule per outcome, takeover, coordinator uniqueness across machines, gate scope on the dependency graph, guard diff details, token-free install and verify): `_bmad-output/planning-artifacts/reviews/spec-xarabot-review-2026-10-20.json`.
+- **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised: the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), the Story manifest (AD-10), the Epic graph and gates (AD-11, AD-12), the result schema (AD-14), one sandbox for every adapter (AD-17), effort mapping (AD-21), keys and App rights (AD-26), the forge port's contract suite and error kinds (AD-27, AD-32) and the write check (AD-30).
+- **Still open in the spine:** the App permission the merge queue needs (verified live before the merge-plumbing Story), which `PATCH git/refs` response means "retry the swap", and the local-only adapter (v1).
 
 ## Open Questions
 

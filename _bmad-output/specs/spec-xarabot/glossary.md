@@ -5,12 +5,13 @@
 - **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
 - **Claim:** a lane's exclusive hold on a unit, made by compare-and-swap on a git ref, kept alive by heartbeat, expiring 30 minutes after the last heartbeat.
-- **Story manifest:** the per-Story record in the consuming repo that gives the Story's path globs (directly, or through a repo mapping such as Xaravel's `component`) and its dependencies. Claims and the guard use its globs. Its format is an architecture decision.
+- **Story manifest:** the per-Story record in the consuming repo that gives the Story's path globs (directly, or through a repo mapping such as Xaravel's `component`) and its dependencies. Claims and the guard use its globs. Its format is spine AD-10.
 - **`next`:** the command that returns the one unit a lane builds next.
 - **Adapter:** the code that runs one vendor's agent CLI for a unit and returns its JSON result.
-- **Checkpoint Epic:** an Epic after whose retrospective the Maintainer must say "go" before later Epics start (Xaravel: Epic 8).
+- **Checkpoint Epic:** an Epic after whose retrospective the Maintainer must say "go" before the Epics that depend on it, directly or through others, start; Epics not depending on it keep running (Xaravel: Epic 8).
 - **Retro gate:** the record of an Epic's retrospective verdict and its open action items (`retro-gates.yaml`).
-- **Blocking action item:** a retro action item tagged `blocking`. It holds back the next Epic; untagged items do not.
+- **Blocking action item:** a retro action item tagged `blocking`. It holds back every Epic depending on its Epic; an untagged open item holds back only Epics two or more dependency steps away (CAP-10).
+- **Write check:** the 0.x runner check that refuses a builder diff touching coordinator-owned files, manifests, agent config or Protected Paths before the squash (CAP-18).
 - **Inbox:** the single list of everything waiting on one human. Each owner has one; the Maintainer's also holds rulings, Escalations, retro items and Human Live Steps.
 - **Maintainer:** the human who owns the consuming repo's rulings, Protected Paths and releases.
 - **Protected Path:** a path in the consuming repo that changes only through a Maintainer-approved Infrastructure Story (Xaravel AD-16).
