@@ -1,0 +1,6 @@
+# Claude Code: per-user settings and local worktrees
+.claude/settings.local.json
+.claude/worktrees/
+
+# BMAD: per-user install answers (team config lives in _bmad/config.toml and _bmad/custom/config.toml)
+_bmad/config.user.toml
