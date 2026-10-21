@@ -1,5 +1,5 @@
 <!-- bmad:context -->
-<!-- Verified 2026-10-20 against 7d2685c. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
+<!-- Verified 2026-10-20 against 1a052d8. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
 
 ## Xarabot
 
@@ -7,7 +7,7 @@ Runs BMAD projects unattended: lanes, `next` unit selection, claims, CI and merg
 
 ## Policy
 
-- Never push to `main`; open a PR. Branch as `story/<story-id>` for Story work and `planning/<topic>` for planning and docs work. `main` has no ruleset yet, so nothing will stop you.
+- Never push to `main`; open a PR. Branch as `story/<story-id>` for Story work and `planning/<topic>` for planning and docs work. The `Protect main` ruleset refuses direct pushes, force-pushes and deletion, with no bypass.
 - Never add `Co-Authored-By` trailers, "Generated with" lines or similar markers to commits or PRs; the bot account is the only marker of lane-made work.
 - Never create a `CLAUDE.md` anywhere in this repo — Claude Code stops reading `AGENTS.md` when one exists. Put instructions here.
 - Change these only when the Maintainer asks for that change: `AGENTS.md`; `_bmad-output/specs/` (through `bmad-spec`); `_bmad/`, `.claude/skills/` and `.agents/skills/` (re-run the installer, or `bmad-customize` into `_bmad/custom/`); `.github/`.
