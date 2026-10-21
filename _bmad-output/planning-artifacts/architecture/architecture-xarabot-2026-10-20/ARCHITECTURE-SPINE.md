@@ -130,7 +130,8 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
     - `owner`, `host`, `lane`, `generation`
     - `globs` (stored resolved, as of the claim)
     - `heartbeat_at`
-    - `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`
+    - `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`, `approved_sha`
+    - `builder_providers[]`: every model provider whose session changed the diff
     - `park` (`kind`, `reason`, `inbox_owner`, `globs_held`)
     - `attempts`, `loopbacks`, `ci_fixes`. These counters live in the record, so a takeover never resets a cap.
     - `approval` (`by`, `manifest_sha`)
@@ -169,13 +170,18 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Merged | `merged` |
 | Finished PR waiting for its owner's approval | `parked`, globs **held** |
 | Blocked: Escalation, Human Live Step, `intent-gap`, `verification`, `other`, review disagreement past the cap, CI-fix cap reached, write-check refusal, or the result `no-op` | `parked`, globs **released**, inbox item |
-| Session crash, a missing or invalid result, a timeout, a budget overrun, or a claim that expired and was taken over | `released` with `attempts` + 1; the 3rd time it becomes `parked` (blocked) instead |
+| Session crash, a missing or invalid result, a timeout, or a budget overrun | `released` with `attempts` + 1. Once `attempts` ≥ 3 it becomes `parked` (blocked) instead. |
+| A stale claim taken over by another lane | stays `claimed` under the new holder, with `attempts` + 1. Once `attempts` ≥ 3 it becomes `parked` (blocked) instead. |
+| A recurring unit (`planning`, `reconcile`) with nothing to commit | `merged` with no PR. The coordinator deletes it at once, and no inbox item is raised. |
+| An owner-gated PR ejected or dequeued from the queue | `parked`, globs held, `approved_sha` cleared. It never returns to `claimed`. |
 | Infrastructure Story with no matching approval | `parked` (`needs-approval`), globs released, item in the Maintainer's inbox |
 | Idle | no record |
 | `STOP` | the current unit finishes first; no new claim |
 | `stop --now`, or STOP during a usage-limit sleep | the lane's own `STOP` marker is written, then `released` without counting an attempt |
 
-Every move out of `merging` other than to `merged` dequeues the PR first.
+Every move out of `merging` other than to `merged` dequeues the PR first. Every cap (`attempts`, `loopbacks`, `ci_fixes`) is tested with `>=`.
+
+**`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, it becomes `parked` (held). No attempt is counted either way.
 
 ### AD-8: The coordinator role is a claim
 
@@ -204,7 +210,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
     - `retro-item`: item status `done`.
     - `checkpoint`: the go recorded.
     - `planning` and `reconcile`: the PR merged.
-  - **Wip.** The lane commits wip locally as `[orchestrator wip]` before any reset. The runner never pushes wip.
+  - **Wip.** Before any reset, the runner snapshots the clone's working tree as `wip/<unit>` in `runner.git` (AD-15). It never pushes wip.
   - **Restart.** A restarted lane resumes its wip only if it still holds the claim at the same generation.
   - **Cross-owner takeover (v1).** The previous owner's PR is closed with a comment, and a new PR is opened under the new owner's bot. `pr_owner` follows the new PR.
 
@@ -222,6 +228,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
   - **The resolved globs** are stored in the ledger at claim time.
   - **Unclaimable.** A Story whose globs resolve to nothing can't be claimed and goes to the inbox.
   - **Allowed outside the globs:** a Story's diff may also carry its own BMAD Story spec file and the `status:` line of its own Story file. Nothing else outside the globs is allowed.
+    - The spec file's path comes from repo config (`story_spec_path`, by default BMAD's `implementation_artifacts/spec-<sprint_key>.md`).
   - **Infrastructure Stories** can be claimed only while the ledger holds an approval whose `manifest_sha` matches the current manifest.
 
 ### AD-11: The Epic graph lives in `epics.md` as fixed bullets
@@ -253,7 +260,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
   - **Signature.** `next(snapshot, laneRole)` returns either a unit or `idle` with a reason.
   - **Globs for every unit kind.**
     - Every unit kind holds globs.
-    - Planning, retro and checkpoint units hold the planning paths: `epics.md`, the manifest directory, `sprint-status.yaml` and `retro-gates.yaml`.
+    - Planning, retro and checkpoint units hold the planning paths: `epics.md`, the manifest directory, `sprint-status.yaml`, `retro-gates.yaml` and the configured Epic context path (`epic-<N>-context.md`).
     - A retro item carries its `globs` in `retro-gates.yaml`. Without globs it can't be claimed.
     - The overlap check applies to every role.
   - **Builders** take only eligible Stories (AD-12) whose record is absent, `released`, or a stale `claimed` or `merging` record (AD-6), and whose globs don't overlap. They pick the lowest Epic number first, then the lowest Story number.
@@ -287,12 +294,21 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
   - **A missing or invalid result** counts as a failed attempt.
   - **Never taken from the agent:** agent, model, effort, tokens and cost (parsed by the adapter from the CLI's own output), timings, the diff, the files touched, authorship.
 
-### AD-15: The runner owns every commit, push and forge text
+### AD-15: The runner owns every commit, push and forge text, in a repository of its own
 
-- **Binds:** CAP-6, CAP-13; SPEC "No co-author markers".
-- **Prevents:** wrong authors, co-author trailers, diffs on a stale base that revert other Stories, and agent text closing issues or pinging people.
+- **Binds:** CAP-6, CAP-13, CAP-18; SPEC "No co-author markers".
+- **Prevents:**
+  - wrong authors and co-author trailers;
+  - diffs on a stale base that revert other Stories;
+  - agent text closing issues or pinging people;
+  - git config the agent planted running code as the runner.
 - **Rule:**
-  - **The commit.** The runner merges `origin/main` into the session's work, runs `reset --soft origin/main`, and makes one commit authored by `<login>-xarabot[bot]`. It records `base_sha` and `head_sha`.
+  - **The runner's own repository.** Each lane has a runner-private repository, `runner.git` in the lane state folder, which the sandbox can neither read nor write.
+    - The runner never runs git against the agent clone's `.git`.
+    - Before each session it rebuilds the clone, `.git` included, from `runner.git` at `base_sha`.
+    - Afterwards it reads only the clone's working tree.
+  - **The commit.** In `runner.git` the runner takes the working tree's changes against `base_sha`, applies them on top of `origin/main` as a three-way merge (a conflict follows AD-19), and makes one commit authored by `<login>-xarabot[bot]`. It records `base_sha` and `head_sha`.
+  - **Wip** is kept as a `wip/<unit>` ref in `runner.git`, never in the clone.
   - **Agent text.** A pure sanitizer strips trailers, closing keywords and `@mentions` from `summary` and `body` before any commit message, PR text or comment uses them.
   - **Only the runner** pushes, opens PRs, comments, enqueues and merges.
   - **Never:** an admin merge, or GitHub auto-merge.
@@ -302,9 +318,20 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Binds:** CAP-8.
 - **Prevents:** a review the builder reports about itself, and a merged diff that differs from the reviewed one.
 - **Rule:**
-  - **Picking the reviewer.** The reviewer is chosen by the builder's **model provider**: Anthropic is reviewed by `codex`, OpenAI by `claude`, any other provider by `claude`. pi lanes must set `model` explicitly. If the model a session reports differs from its config, the attempt fails.
-  - **The session.** The review runs as its own read-only session over the squashed diff at `head_sha`. Its `reviewed_sha` is recorded, and the review is posted on the PR naming that SHA.
-  - **Passing.** A review with no blocking findings also sets `passed_sha`. Enqueue happens only if the PR head equals `passed_sha`, or differs from it only by a clean merge of `main` made by the runner. A review with blocking findings never sets `passed_sha`, so a lane that takes over picks up the loopback, not the enqueue.
+  - **Picking the reviewer.** The reviewer must come from a provider not in the record's `builder_providers[]`.
+    - The order of preference: `codex` for Anthropic-built diffs, `claude` for OpenAI-built ones, `claude` for any other.
+    - If no allowed reviewer is left, the unit parks blocked.
+    - pi lanes must set `model` explicitly.
+    - If the model a session reports differs from its config, the attempt fails.
+  - **The session.** The review runs over a fresh checkout of `head_sha` that the runner makes from `runner.git`, never in the builder's clone.
+    - Agent config paths (AD-30) are restored from `main`, so nothing the builder wrote can configure the reviewer.
+    - Hooks are off, and the reviewer gets a freshly seeded vendor home.
+    - The runner records `reviewed_sha` itself, and the review is posted on the PR naming that SHA.
+  - **Passing.**
+    - A review with no blocking findings also sets `passed_sha`. A review with blocking findings never does, so a lane that takes over picks up the loopback, not the enqueue.
+    - Enqueue happens only if the PR head equals `passed_sha`, or if the head's tree equals the merge of `passed_sha` with the head's `main` parent.
+    - The enqueuing lane recomputes that merge itself in `runner.git`. It never trusts the record or the commit's author for this.
+  - **Owner-gated PRs** (Protected Paths) are enqueued only while the owner's approval is on the current head (`approved_sha` equals the head).
   - **Any later change by an agent re-runs the review.** That covers CI fixes and conflict resolution, and each re-run counts as a loopback, at most 2. Past the cap, the unit parks blocked.
   - **Coordinator PRs** follow the same rule.
   - **At lane start,** the lane refuses to run if the reviewer adapter isn't allowed.
@@ -317,12 +344,12 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Rule:**
   - **The only launcher.** Only `src/sandbox/` spawns agent and reviewer processes. A lint rule bans `Bun.spawn` under `src/adapters/agent/`.
   - **The mechanism.** On macOS, `sandbox-exec` with a generated profile, re-tested on every new macOS major version. On Linux, `bwrap` with `--unshare-pid`. Each agent's own sandbox is turned off inside it.
-  - **A private vendor home per lane.** Each lane gets its own vendor home under its state folder, holding only that vendor's credential. The adapter points the CLI at it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory).
+  - **A private vendor home per session.** Each lane keeps its own vendor home under its state folder, re-seeded before every session (builder or reviewer) so that it holds only that vendor's credential. The adapter points the CLI at it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory).
     - On macOS, `claude` gets its credential as `CLAUDE_CODE_OAUTH_TOKEN`, because the keychain is unreadable.
     - The operator's own `~/.claude`, `~/.codex` and `~/.pi` are neither readable nor writable.
     - `[ASSUMPTION: pi's directory override is confirmed in the pi adapter Story]`
   - **Reads** are denied by default. Allowed: system paths, the lane's clone, the lane's vendor home and its temp folder. `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot` (or `~/.config/xarabot`), `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials` and `~/.netrc` are always denied.
-  - **Writes** are allowed to the lane's full clone (never a linked worktree), except `.git/hooks`, `.git/config`, `.git/info` and `.git/modules`, plus the lane's vendor home and its temp folder.
+  - **Writes** are allowed to the lane's full clone (never a linked worktree), `.git` included, because the runner never trusts it (AD-15). The lane's vendor home and its temp folder are writable too. `runner.git` is never readable or writable.
   - **Environment.** Only an allowlist of variables passes through. The git credential helper is reset and Unix sockets are denied.
   - **Network** goes only through Xarabot's Bun proxy, to the vendor's API hosts plus hosts the repo adds. **A GitHub host is never allowed.** `[ASSUMPTION: the proxy's hostname allowlist is proven by a spike in the sandbox Story]`
   - **GitHub data.** A session that needs it reads files the runner fetched beforehand into the temp folder.
@@ -334,8 +361,10 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Prevents:** code an agent wrote running next to the bot's token, and the token leaking through the environment, argv or logs.
 - **Rule:**
   - **Repo commands** the runner needs, such as regenerating a lockfile, run inside the AD-17 sandbox with no token.
-  - **The runner's own git** runs with:
-    - `core.hooksPath=/dev/null`, and no `fsmonitor`, filters, external diff or textconv;
+  - **The runner's own git** runs only against `runner.git` (AD-15), with:
+    - `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`;
+    - `credential.helper=` reset before the runner's own helper is added;
+    - `core.hooksPath=/dev/null`, and no `fsmonitor`, filters, external diff, textconv or signing program;
     - `GIT_NO_REPLACE_OBJECTS=1` and `protocol.file.allow=never`;
     - no submodule recursion.
   - **The diffs** for the write check (AD-30) and for review are computed by the runner from git objects under those settings.
@@ -369,8 +398,13 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
   - **Host layer:** `host.yaml`, `XARABOT_HOST` and `XARABOT_MAX_BUILDERS`.
   - **Format.** All config is YAML with a versioned schema.
   - **Standing Authority.** It is valid when it exists on `main` and its YAML frontmatter validates against the Standing Authority schema. `[ASSUMPTION: Xaravel's MAINT file gains that frontmatter in its adoption Epic]`
-  - **Fail closed.** If config, policy or the Standing Authority is missing, invalid or can't be fetched, the lane stops. The Standing Authority is re-checked before every claim, push, enqueue and merge.
-  - **Protected Paths in the consumer:** `.xarabot/**`, the Standing Authority file, `.agents/skills/**`, `.claude/skills/**`, `AGENTS.md` and `.github/**`.
+  - **Fail closed.** If config, policy or the Standing Authority is missing, invalid or can't be fetched, the lane stops.
+  - **Re-checks from freshly fetched `main`:**
+    - the Standing Authority, before every claim, push, enqueue and merge;
+    - the adapter and reviewer allowances, before every session launch and every enqueue.
+  - **Protected Paths in the consumer:**
+    - `.xarabot/**`, the Standing Authority file and `.github/**`;
+    - **agent config at any depth:** `**/.agents/**`, `**/.claude/**`, `**/.codex/**`, `**/.pi/**`, `**/.mcp.json`, `**/AGENTS.md`, `**/CLAUDE.md`.
 
 ### AD-21: Lanes are host config, bound to a repo; effort defaults to `high`
 
@@ -393,7 +427,10 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Prevents:** lanes that can't be stopped for hours, sessions that hang, and sleeps that never end.
 - **Rule:**
   - **STOP markers.** `~/.xarabot/STOP` stops the whole host, and a lane's own `STOP` stops that lane. Both are checked at process start, before `next` and before each claim. A STOP also ends a usage-limit sleep (AD-7).
-  - **`stop --now`** first writes the lane's `STOP` marker, so launchd or systemd can't relaunch it into a new claim. Then it kills the lane's process tree by its recorded PIDs (`lane.pid`, `agent.pid`, `wait.pid`), after checking each PID's start time and command, and applies AD-7.
+  - **`stop --now`:**
+    1. Write the lane's `STOP` marker, so launchd or systemd can't relaunch it into a new claim.
+    2. Kill by recorded PID, in the order `lane.pid`, `agent.pid`, `wait.pid`, checking each PID's start time and command first.
+    3. The CLI itself applies AD-7.
   - **Session limits.** An agent session has 3 hours. A session still alive 5 minutes after its result file appears is killed.
   - **Usage limits.** Sleep until the reset plus 2 minutes, or 15 minutes if the reset can't be parsed, never more than 8 hours. The sleep can be woken, the heartbeat continues, and the unit budget (AD-2) still applies.
 
@@ -462,6 +499,10 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Rule:**
   - **Grammar:** `/xarabot <verb> <unit-id>`, where the verb is `go` (a checkpoint), `approve` (an Infrastructure Story), `rebuild`, `release` or `dismiss`.
   - **Who counts.** `go` and `approve` are accepted **only from the Maintainer** (set in config). `rebuild`, `release` and `dismiss` are accepted from the item's owner or the Maintainer.
+  - **What each verb does to the record:**
+    - `release` and `rebuild` reset `attempts`, `loopbacks` and `ci_fixes` to 0.
+    - `rebuild` also closes the PR (AD-9).
+    - `dismiss` removes only the inbox item and leaves the ledger unchanged.
   - **Applying it.** The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **Local-only mode (v1)** uses `xarabot rule <verb> <unit-id>`.
 
@@ -479,9 +520,9 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
 - **Binds:** CAP-4, CAP-18 (part of 0.x); AD-3.
 - **Prevents:** builders writing coordinator-owned files, and agents widening their own policy before the v1 diff check exists.
 - **Rule:**
-  - **Builder diffs are refused** if they touch any of: coordinator-owned files (AD-3), manifests, `.xarabot/**`, the Standing Authority file, `.agents/skills/**`, `.claude/skills/**`, `AGENTS.md`, `.github/**`, or the repo's Protected Paths.
+  - **Builder diffs are refused** if they touch any of: coordinator-owned files (AD-3), manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config at any depth (AD-20), or the repo's Protected Paths.
     - **Exceptions:**
-      - an Infrastructure Story with a matching approval (AD-10);
+      - an Infrastructure Story with a matching approval (AD-10). This covers the repo's Protected Paths only, never coordinator-owned files, manifests or `.xarabot/**`;
       - the unit's own BMAD Story spec file;
       - the `status:` line of the unit's own Story file.
   - **Coordinator diffs** may touch only the planning paths and their unit's globs.
@@ -516,7 +557,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first.
     - the `xarabot/claims` ruleset (AD-4);
     - the merge queue enabled on `main`;
     - squash messages set to PR title + body;
-    - Protected Paths requiring the owner's review;
+    - Protected Paths requiring the owner's review, with stale approvals dismissed on push and approval of the most recent push required;
     - the App installed with `issues: write`.
 
 ## Consistency Conventions
@@ -570,6 +611,7 @@ graph LR
 ```mermaid
 stateDiagram-v2
   [*] --> claimed: next + CAS claim
+  [*] --> parked: Infrastructure Story without approval (needs-approval)
   released --> claimed: next + CAS claim (generation + 1)
   released --> merged: PR found merged
   claimed --> claimed: heartbeat / loopback / stale takeover (generation + 1, attempts + 1)
@@ -577,12 +619,13 @@ stateDiagram-v2
   claimed --> parked: awaits owner approval (globs held) / blocked or needs-approval (globs released)
   claimed --> released: failed attempt < 3 / stop --now
   claimed --> parked: 3rd failed attempt or 3rd stale takeover
-  claimed --> merged: PR found merged
+  claimed --> merged: PR found merged / recurring unit with nothing to commit
   merging --> merging: heartbeat / stale takeover while still queued
   merging --> merged: PR merged
-  merging --> claimed: ejected (same holder)
-  merging --> released: stale and not queued (dequeue, attempts + 1)
-  parked --> merging: reconcile takes approved PR (generation + 1)
+  merging --> claimed: builder PR ejected (same holder)
+  merging --> parked: owner-gated PR ejected or dequeued (held)
+  merging --> released: stale and not queued (attempts + 1) / stop --now or budget (dequeue first)
+  parked --> merging: reconcile takes approved PR at approved_sha (generation + 1)
   parked --> merged: PR found merged
   parked --> released: ruling rebuild / release / approve
   merged --> [*]: coordinator deletes once done on main
@@ -595,7 +638,9 @@ stateDiagram-v2
   STOP                                # host-wide stop
   runner/<version>/                   # pinned runner (AD-25)
   repos/<owner>__<name>/lanes/<lane>/
-    clone/                            # full clone; sandbox-writable except .git/hooks, .git/config
+    clone/                            # agent clone, rebuilt from runner.git per session; sandbox-writable
+    runner.git/                       # runner-private repo (AD-15); sandbox-unreadable
+    vendor/                           # per-lane vendor home, re-seeded per session (AD-17)
     journal.jsonl  lane.pid  agent.pid  wait.pid  outcome  STOP
     logs/
 $XDG_CONFIG_HOME/xarabot/             # default ~/.config/xarabot; sandbox-unreadable
