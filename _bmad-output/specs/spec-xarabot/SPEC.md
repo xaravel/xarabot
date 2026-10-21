@@ -67,7 +67,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:** Each owner sees everything waiting on them in one inbox and rules on it in one sitting a day: their bot's PRs awaiting approval and their blocked units. The Maintainer's inbox also holds rulings, Escalations, waiting retro items and Human Live Steps. On a solo repo the two are one list.
   - **success:** One daily digest per inbox lists every waiting item with its link and age; an item that newly stops all lanes notifies at once; no other per-item waiting notices are sent.
 - **CAP-10 · Retro gating (0.x)**
-  - **intent:** A retro action item from Epic E holds back the Epics that depend directly on E only when the retro tags it `blocking`; other items are worked alongside later Stories.
+  - **intent:** A retro action item from Epic E holds back the Epics that depend directly on E only when the retro tags it `blocking`; other items are worked alongside later Stories. The retro's tag stands unless the Maintainer changes it with a ruling.
   - **success:** `next` tests on the dependency graph: an untagged open item does not gate an Epic one step from E but does gate one two or more steps away; a `blocking` item gates every Epic depending on E.
 - **CAP-11 · Telemetry (0.x)**
   - **intent:** Each lane records per unit: agent, model, effort, unit, start, end, outcome, review loopbacks, CI fixes, and tokens and wall-clock cost (labeled an estimate for subscription runs), so agents and lanes can be compared.
@@ -136,6 +136,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **Toolchain:** Bun only: Bun 1.4.3, TypeScript 7 with `--strict`, oxlint. No Node, npm, pnpm, Jest, Vitest, ESLint or Prettier as tools.
 - **Models:** `claude` and `codex` default to a top model and `pi` lanes name theirs (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
 - **Planning shape:** 0.x reads the classic BMAD shape only: `epics.md`, `sprint-status.yaml` and Story manifests, plus the Epic graph file. The spec-folder shape (`stories.yaml`) waits until a consumer uses it.
+- **No BMAD overrides:** Xarabot runs stock BMAD skills. Anything else it needs comes from its own prompt template, its own files or artifacts the runner reads; it never writes or requires `_bmad/custom/` in a consuming repo.
+- **Interactive skills stay with the Maintainer:** lanes drive only BMAD skills with a headless run (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`). `bmad-create-epics-and-stories` and `bmad-correct-course` are run by the Maintainer; when a retro or a blocked unit calls for a course correction, it goes to the Maintainer's inbox.
 - **Forges:** GitHub (0.x) and local-only (v1), each behind one forge interface (CAP-24). GitLab and other forges come later.
 - **No platform assumptions:** Xarabot does not assume AWS, SSO, hardware signing keys, a Claude-only sandbox, a JavaScript repo or a particular repo layout; any of those is an optional repo-supplied integration.
 
@@ -193,11 +195,11 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 ## Assumptions
 
-- **BMAD:** Xarabot drives the BMAD skills installed in the consuming repo (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`, `bmad-correct-course`). "Product management" in scope means driving those planning artifacts (sprint status, epics, retros, course corrections), not a separate tool.
+- **BMAD:** Xarabot drives the stock BMAD skills installed in the consuming repo that run headless (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`). "Product management" in scope means driving those planning artifacts (sprint status, retros) and routing course corrections to the Maintainer, not a separate tool.
 - **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
 - **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised: the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), the Story manifest (AD-10), the Epic graph and gates (AD-11, AD-12), the result schema (AD-14), one sandbox for every adapter (AD-17), effort mapping (AD-21), keys and App rights (AD-26), the forge port's contract suite and error kinds (AD-27, AD-32) and the write check (AD-30).
 - **Still open in the spine:** the App permission the merge queue needs (verified live before the merge-plumbing Story), which `PATCH git/refs` response means "retry the swap", and the local-only adapter (v1).
 
 ## Open Questions
 
-- **Remaining BMAD overrides:** the spine still has a consuming repo carry two `bmad-customize` overrides: the retro `blocking` tag (AD-12, `bmad-retrospective`) and result writing from skills' `on_complete` hooks (AD-14). Move them into Xarabot-owned files, as with the Epic graph, or have Xarabot install them?
+None.
