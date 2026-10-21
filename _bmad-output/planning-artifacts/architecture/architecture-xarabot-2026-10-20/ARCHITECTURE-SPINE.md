@@ -96,10 +96,10 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Epic and Story planned or done | `sprint-status.yaml` on `main` | coordinator (its own PRs) |
 | Retro verdicts, items and checkpoint go | `retro-gates.yaml` on `main` | coordinator |
 | Story manifests and `epics.md` | `main` | coordinator (planning units) |
-| Ledger records in `claimed` or `merging` | ledger (AD-4) | the lane that holds the unit |
-| Ledger records in `parked` | ledger | the lane that parks the unit |
+| Ledger records in `claimed` or `merging` | ledger (AD-4) | the lane that holds the unit. Any lane may take over a stale record by compare-and-swap at `generation` + 1 (AD-6, AD-13). |
+| Ledger records in `parked` | ledger | the lane that parks the unit. The coordinator's `reconcile` unit may take a held record at `generation` + 1 to enqueue it. |
 | Ledger records in `released`; an Infrastructure approval | ledger | the lane releasing the unit, or the coordinator applying a ruling (AD-28) |
-| Ledger records in `merged` | ledger | any lane that sees the PR merged (an idempotent edit). Only the coordinator deletes the record, and only once `main` marks the unit done. |
+| Ledger records in `merged` | ledger | any lane that sees the PR merged (an idempotent edit). Only the coordinator deletes the record, and only once the unit is done on `main` (AD-9). |
 | Branch, PR, CI and merge queue | forge | runner, through the `Forge` port |
 | Inbox digest body | forge issue | coordinator |
 | Urgent alert comment | forge issue | any lane (AD-23) |
@@ -130,9 +130,9 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
     - `owner`, `host`, `lane`, `generation`
     - `globs` (stored resolved, as of the claim)
     - `heartbeat_at`
-    - `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`
+    - `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`
     - `park` (`kind`, `reason`, `inbox_owner`, `globs_held`)
-    - `attempts`
+    - `attempts`, `loopbacks`, `ci_fixes`. These counters live in the record, so a takeover never resets a cap.
     - `approval` (`by`, `manifest_sha`)
   - **States:** `claimed`, `merging`, `parked`, `released`, `merged`. The diagram in the Structural Seed is normative.
   - **Records are never deleted** except `merged` records, which the coordinator removes (AD-3). `generation` only ever goes up, and `attempts` is kept on release.
@@ -145,7 +145,14 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-3, CAP-6, CAP-15.
 - **Prevents:** a lane that went quiet and lost its claim pushing or merging over the lane that took over.
 - **Rule:**
-  - A heartbeat runs every 5 minutes. A `claimed` record expires 30 minutes after its last heartbeat. `merging` and `parked` records never expire.
+  - A heartbeat runs every 5 minutes, for `claimed` and `merging` records alike.
+  - **A stale `claimed` record** (no heartbeat for 30 minutes) can be taken over by any lane: `generation` + 1, `attempts` + 1, and on the 3rd it becomes `parked` (blocked) instead.
+  - **A stale `merging` record:**
+    - If its PR merged, it becomes `merged`.
+    - If its PR is still in the queue, any lane may take it over and keep watching it.
+    - Otherwise it becomes `released`, with `attempts` + 1 and `pr` kept.
+  - `parked` records never expire.
+  - **Retries.** The lane gives up a compare-and-swap retry loop after 10 tries or when the call's deadline passes, whichever comes first.
   - Right before each push, PR change, enqueue or merge, the lane does a heartbeat swap that requires its own `owner/host/lane` and `generation`. If the swap fails, the lane abandons the unit.
   - Pushes use `--force-with-lease` against the record's `head_sha`.
   - Enqueue and merge pass the expected head SHA.
@@ -163,9 +170,12 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Finished PR waiting for its owner's approval | `parked`, globs **held** |
 | Blocked: Escalation, Human Live Step, `intent-gap`, `verification`, `other`, review disagreement past the cap, CI-fix cap reached, write-check refusal, or the result `no-op` | `parked`, globs **released**, inbox item |
 | Session crash, a missing or invalid result, a timeout, a budget overrun, or a claim that expired and was taken over | `released` with `attempts` + 1; the 3rd time it becomes `parked` (blocked) instead |
+| Infrastructure Story with no matching approval | `parked` (`needs-approval`), globs released, item in the Maintainer's inbox |
 | Idle | no record |
 | `STOP` | the current unit finishes first; no new claim |
-| `stop --now`, or STOP during a usage-limit sleep | dequeue if `merging`, then `released` without counting an attempt |
+| `stop --now`, or STOP during a usage-limit sleep | the lane's own `STOP` marker is written, then `released` without counting an attempt |
+
+Every move out of `merging` other than to `merged` dequeues the PR first.
 
 ### AD-8: The coordinator role is a claim
 
@@ -182,10 +192,18 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Prevents:** duplicate PRs, units built twice after a merge outside the process, and branch collisions between unit kinds.
 - **Rule:**
   - **Branch names.** Stories use `<story-namespace><story-id>` (Xarabot: `story/9.3`). Every other unit uses `<xarabot-namespace><kind>-<id>` (default `xarabot/retro-item-9.12`). Repo config sets both namespaces.
+  - **One-shot and recurring units.** `story`, `retro`, `retro-item` and `checkpoint` are one-shot. `planning` and `reconcile` recur, so each run's id carries a run number (`planning:<slug>.<n>`, `reconcile:<n>`), with `n` one more than the last on the ledger.
   - **Every claim** looks at the unit's branch and every PR on it, in any state:
     - A merged PR means write `merged`.
-    - An open PR means adopt it.
+    - An open PR means adopt it. The record's `head_sha` is set to the PR's actual head.
     - A closed PR, or no PR, means start from `origin/main`.
+  - **A `rebuild` ruling** closes the unit's open PR and clears `reviewed_sha` and `passed_sha`.
+  - **Done on `main`**, per kind:
+    - `story`: `done` in `sprint-status.yaml`.
+    - `retro`: a verdict in `retro-gates.yaml`.
+    - `retro-item`: item status `done`.
+    - `checkpoint`: the go recorded.
+    - `planning` and `reconcile`: the PR merged.
   - **Wip.** The lane commits wip locally as `[orchestrator wip]` before any reset. The runner never pushes wip.
   - **Restart.** A restarted lane resumes its wip only if it still holds the claim at the same generation.
   - **Cross-owner takeover (v1).** The previous owner's PR is closed with a comment, and a new PR is opened under the new owner's bot. `pr_owner` follows the new PR.
@@ -203,6 +221,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
   - **Glob normalization:** strip `./`; reject `!`, `..` and absolute paths; compare by character prefix, case-folded. Two globs overlap unless their literal prefixes are disjoint.
   - **The resolved globs** are stored in the ledger at claim time.
   - **Unclaimable.** A Story whose globs resolve to nothing can't be claimed and goes to the inbox.
+  - **Allowed outside the globs:** a Story's diff may also carry its own BMAD Story spec file and the `status:` line of its own Story file. Nothing else outside the globs is allowed.
   - **Infrastructure Stories** can be claimed only while the ledger holds an approval whose `manifest_sha` matches the current manifest.
 
 ### AD-11: The Epic graph lives in `epics.md` as fixed bullets
@@ -237,9 +256,15 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
     - Planning, retro and checkpoint units hold the planning paths: `epics.md`, the manifest directory, `sprint-status.yaml` and `retro-gates.yaml`.
     - A retro item carries its `globs` in `retro-gates.yaml`. Without globs it can't be claimed.
     - The overlap check applies to every role.
-  - **Builders** take only eligible Stories (AD-12) whose record is absent or `released` and whose globs don't overlap. They pick the lowest Epic number first, then the lowest Story number.
+  - **Builders** take only eligible Stories (AD-12) whose record is absent, `released`, or a stale `claimed` or `merging` record (AD-6), and whose globs don't overlap. They pick the lowest Epic number first, then the lowest Story number.
+  - **Epic context.** The coordinator compiles each Epic's BMAD context file (`epic-<N>-context.md`) in planning, before the Epic's Stories become eligible. The runner reverts any change a builder session makes to it before squashing.
   - **The coordinator** works in this order:
-    1. `reconcile`: apply rulings, enqueue approved held PRs under the fence, write `merged` records, mark units done, route Maintainer-only retro items in batch.
+    1. `reconcile`:
+       - apply rulings;
+       - take approved held PRs at `generation` + 1, fence, and enqueue them;
+       - write `merged` records;
+       - mark units done;
+       - route Maintainer-only retro items in batch.
     2. Open coordinator PR.
     3. Planning.
     4. Retro.
@@ -279,7 +304,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Rule:**
   - **Picking the reviewer.** The reviewer is chosen by the builder's **model provider**: Anthropic is reviewed by `codex`, OpenAI by `claude`, any other provider by `claude`. pi lanes must set `model` explicitly. If the model a session reports differs from its config, the attempt fails.
   - **The session.** The review runs as its own read-only session over the squashed diff at `head_sha`. Its `reviewed_sha` is recorded, and the review is posted on the PR naming that SHA.
-  - **Enqueue** happens only if the PR head equals `reviewed_sha`, or differs from it only by a clean merge of `main` made by the runner.
+  - **Passing.** A review with no blocking findings also sets `passed_sha`. Enqueue happens only if the PR head equals `passed_sha`, or differs from it only by a clean merge of `main` made by the runner. A review with blocking findings never sets `passed_sha`, so a lane that takes over picks up the loopback, not the enqueue.
   - **Any later change by an agent re-runs the review.** That covers CI fixes and conflict resolution, and each re-run counts as a loopback, at most 2. Past the cap, the unit parks blocked.
   - **Coordinator PRs** follow the same rule.
   - **At lane start,** the lane refuses to run if the reviewer adapter isn't allowed.
@@ -292,8 +317,12 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Rule:**
   - **The only launcher.** Only `src/sandbox/` spawns agent and reviewer processes. A lint rule bans `Bun.spawn` under `src/adapters/agent/`.
   - **The mechanism.** On macOS, `sandbox-exec` with a generated profile, re-tested on every new macOS major version. On Linux, `bwrap` with `--unshare-pid`. Each agent's own sandbox is turned off inside it.
-  - **Reads** are denied by default. Allowed: system paths, the lane's clone, the agent's state folder (`~/.claude`, `~/.codex`, `~/.pi`, which hold its vendor login) and its temp folder. `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot` (or `~/.config/xarabot`), `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials` and `~/.netrc` are always denied.
-  - **Writes** are allowed to the lane's full clone (never a linked worktree), except `.git/hooks` and `.git/config`, plus the agent's state folder and its temp folder.
+  - **A private vendor home per lane.** Each lane gets its own vendor home under its state folder, holding only that vendor's credential. The adapter points the CLI at it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory).
+    - On macOS, `claude` gets its credential as `CLAUDE_CODE_OAUTH_TOKEN`, because the keychain is unreadable.
+    - The operator's own `~/.claude`, `~/.codex` and `~/.pi` are neither readable nor writable.
+    - `[ASSUMPTION: pi's directory override is confirmed in the pi adapter Story]`
+  - **Reads** are denied by default. Allowed: system paths, the lane's clone, the lane's vendor home and its temp folder. `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot` (or `~/.config/xarabot`), `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials` and `~/.netrc` are always denied.
+  - **Writes** are allowed to the lane's full clone (never a linked worktree), except `.git/hooks`, `.git/config`, `.git/info` and `.git/modules`, plus the lane's vendor home and its temp folder.
   - **Environment.** Only an allowlist of variables passes through. The git credential helper is reset and Unix sockets are denied.
   - **Network** goes only through Xarabot's Bun proxy, to the vendor's API hosts plus hosts the repo adds. **A GitHub host is never allowed.** `[ASSUMPTION: the proxy's hostname allowlist is proven by a spike in the sandbox Story]`
   - **GitHub data.** A session that needs it reads files the runner fetched beforehand into the temp folder.
@@ -305,8 +334,12 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Prevents:** code an agent wrote running next to the bot's token, and the token leaking through the environment, argv or logs.
 - **Rule:**
   - **Repo commands** the runner needs, such as regenerating a lockfile, run inside the AD-17 sandbox with no token.
-  - **The runner's own git** runs with `core.hooksPath=/dev/null` and with no `fsmonitor` or filters.
-  - **The token** reaches git only through a credential helper over stdin. It never appears in env, argv, a file or a log.
+  - **The runner's own git** runs with:
+    - `core.hooksPath=/dev/null`, and no `fsmonitor`, filters, external diff or textconv;
+    - `GIT_NO_REPLACE_OBJECTS=1` and `protocol.file.allow=never`;
+    - no submodule recursion.
+  - **The diffs** for the write check (AD-30) and for review are computed by the runner from git objects under those settings.
+  - **The token** reaches git only through a credential helper over stdin, scoped to the forge's URL. It never appears in env, argv, a file or a log.
 
 ### AD-19: CI and merge plumbing `[ADOPTED Lessons]`, plus the fix loop
 
@@ -360,7 +393,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Prevents:** lanes that can't be stopped for hours, sessions that hang, and sleeps that never end.
 - **Rule:**
   - **STOP markers.** `~/.xarabot/STOP` stops the whole host, and a lane's own `STOP` stops that lane. Both are checked at process start, before `next` and before each claim. A STOP also ends a usage-limit sleep (AD-7).
-  - **`stop --now`** kills the lane's process tree by its recorded PIDs (`lane.pid`, `agent.pid`, `wait.pid`), after checking each PID's start time and command. It then applies AD-7.
+  - **`stop --now`** first writes the lane's `STOP` marker, so launchd or systemd can't relaunch it into a new claim. Then it kills the lane's process tree by its recorded PIDs (`lane.pid`, `agent.pid`, `wait.pid`), after checking each PID's start time and command, and applies AD-7.
   - **Session limits.** An agent session has 3 hours. A session still alive 5 minutes after its result file appears is killed.
   - **Usage limits.** Sleep until the reset plus 2 minutes, or 15 minutes if the reset can't be parsed, never more than 8 hours. The sleep can be woken, the heartbeat continues, and the unit budget (AD-2) still applies.
 
@@ -369,7 +402,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-9, CAP-23.
 - **Prevents:** notification spam, alerts that never fire because their only writer is stopped, and the 3-pinned-issue limit.
 - **Rule:**
-  - **The issue.** Each owner has one issue labelled `xarabot-inbox`, assigned to them. Only the Maintainer's is pinned.
+  - **The issue.** Each owner has one issue labelled `xarabot-inbox`, assigned to them. Only the Maintainer's is pinned, and the Maintainer pins it once by hand (a Human Live Step).
   - **The digest.** The coordinator rewrites the body daily from the ledger's `parked` records, PR states and `retro-gates.yaml`. Maintainer-only retro items are routed in batch.
   - **Urgent alerts.** Any lane may post a single @mention comment for a condition that newly stops every lane. Alerts are deduplicated by (condition, `main` SHA). The comment is allowed even while the lane is failing closed.
   - **App permissions.** The App gains `issues: write`. Adding it to an App that already exists is a Human Live Step.
@@ -389,7 +422,8 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-1; SPEC "Pinned runner".
 - **Prevents:** a bad Story breaking the runner that would build the fix.
 - **Rule:**
-  - **Which version.** A lane runs `~/.xarabot/runner/<version>/`, where the version comes from `runner_version` in `.xarabot/config.yaml` on its repo's `origin/main`. A consumer's exact `@xaravel/xarabot` pin must equal it, and the lane refuses to start if it doesn't.
+  - **Which version.** A lane runs `~/.xarabot/runner/<version>/`, where the version comes from `runner_version` in `.xarabot/config.yaml` on its repo's `origin/main`.
+  - **Consumers.** A consuming repo's exact `@xaravel/xarabot` pin must equal `runner_version`, or the lane refuses to start. Xarabot's own repo has no such dependency; for it, `runner_version` alone is the pin.
   - **Who changes it.** Only the Maintainer advances `runner_version`, since `.xarabot/**` is protected. Recovery means pinning back.
   - **Install.** `xarabot lane install` installs that version and writes the launchd plist or systemd unit, with a restart throttle (AD-33).
 
@@ -408,7 +442,16 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** all Epics.
 - **Prevents:** different validators for the same shape, and adapters drifting apart.
 - **Rule:**
-  - **Schemas.** Every runtime-validated shape has one schema in `src/core/schemas/`, and its TS type is inferred from it. That covers config, policy, the Standing Authority, manifests, ledger records, results, `retro-gates.yaml`, rulings, the journal and status. `[ASSUMPTION: zod 4]`
+  - **Schemas.** Every runtime-validated shape has one schema in `src/core/schemas/`, and its TS type is inferred from it. That covers config, policy, the Standing Authority, manifests, ledger records, results, `retro-gates.yaml`, rulings, prefetched GitHub data, the journal, status and the `Snapshot`. `[ASSUMPTION: zod 4]`
+  - **The `Snapshot`.** Its fields are named, so every core function reads the same names:
+    - `now`
+    - the ledger tip and its records
+    - the `main` SHA
+    - the config, policy and Standing Authority
+    - manifests and the Epic graph
+    - `sprint-status.yaml` and `retro-gates.yaml`
+    - the PR state of every ledger unit
+    - the lane's identity and role
   - **YAML and globs.** YAML is parsed with `Bun.YAML`, and globs are matched with `Bun.Glob`.
   - **Contract suites.** Each port has one suite in `test/contracts/`, and every adapter passes it. The suites include many lanes racing on the ledger and every forge error kind (AD-32).
 
@@ -418,7 +461,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Prevents:** parked units nobody can clear, checkpoints with no way to record the go, and Infrastructure Stories with no recorded approval.
 - **Rule:**
   - **Grammar:** `/xarabot <verb> <unit-id>`, where the verb is `go` (a checkpoint), `approve` (an Infrastructure Story), `rebuild`, `release` or `dismiss`.
-  - **Who counts.** A command is accepted only from the item's owner, or from the Maintainer (set in config) for `go` and `approve`.
+  - **Who counts.** `go` and `approve` are accepted **only from the Maintainer** (set in config). `rebuild`, `release` and `dismiss` are accepted from the item's owner or the Maintainer.
   - **Applying it.** The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **Local-only mode (v1)** uses `xarabot rule <verb> <unit-id>`.
 
@@ -437,7 +480,10 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Prevents:** builders writing coordinator-owned files, and agents widening their own policy before the v1 diff check exists.
 - **Rule:**
   - **Builder diffs are refused** if they touch any of: coordinator-owned files (AD-3), manifests, `.xarabot/**`, the Standing Authority file, `.agents/skills/**`, `.claude/skills/**`, `AGENTS.md`, `.github/**`, or the repo's Protected Paths.
-    - **Exceptions:** an Infrastructure Story with a matching approval (AD-10), and the `status:` line of the unit's own Story file.
+    - **Exceptions:**
+      - an Infrastructure Story with a matching approval (AD-10);
+      - the unit's own BMAD Story spec file;
+      - the `status:` line of the unit's own Story file.
   - **Coordinator diffs** may touch only the planning paths and their unit's globs.
   - **A refusal** parks the unit as blocked (AD-7) and is logged with its reason.
 
@@ -478,7 +524,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Concern | Convention |
 | --- | --- |
 | Epic and Story ids | The Epic key is an integer; Epic slugs are only metadata. `story_id` matches `^\d+\.\d+[a-z]?$` and sorts numerically by part, then by suffix. |
-| Unit ids | `story:<story_id>`, `retro:<epic>`, `retro-item:<epic>.<n>`, `planning:<slug>`, `checkpoint:<epic>`, `reconcile`. A ledger file name replaces `:` with `__`. |
+| Unit ids | `story:<story_id>`, `retro:<epic>`, `retro-item:<epic>.<n>`, `checkpoint:<epic>`, `planning:<slug>.<n>`, `reconcile:<n>`. A ledger file name replaces `:` with `__`. |
 | Lane identity | `<owner>/<host-uuid>/<lane>`. Lane names are `coordinator` and `builder-1` … `builder-N`, unique per host and repo. |
 | Files and names | kebab-case files, `camelCase` functions, `PascalCase` types, one port per file in `src/ports/`. |
 | Errors | `src/core/` returns `{ ok: true, value } \| { ok: false, error: { kind, message } }` and never throws. The shell catches at the unit boundary. |
@@ -525,18 +571,21 @@ graph LR
 stateDiagram-v2
   [*] --> claimed: next + CAS claim
   released --> claimed: next + CAS claim (generation + 1)
-  claimed --> claimed: heartbeat / loopback / takeover after expiry (generation + 1)
-  claimed --> merging: fence + enqueue
-  claimed --> parked: awaits owner approval (globs held) / blocked (globs released)
+  released --> merged: PR found merged
+  claimed --> claimed: heartbeat / loopback / stale takeover (generation + 1, attempts + 1)
+  claimed --> merging: fence + enqueue at passed_sha
+  claimed --> parked: awaits owner approval (globs held) / blocked or needs-approval (globs released)
   claimed --> released: failed attempt < 3 / stop --now
-  claimed --> parked: 3rd failed attempt
+  claimed --> parked: 3rd failed attempt or 3rd stale takeover
   claimed --> merged: PR found merged
+  merging --> merging: heartbeat / stale takeover while still queued
   merging --> merged: PR merged
-  merging --> claimed: ejected or dequeued
-  parked --> merging: reconcile enqueues approved PR
+  merging --> claimed: ejected (same holder)
+  merging --> released: stale and not queued (dequeue, attempts + 1)
+  parked --> merging: reconcile takes approved PR (generation + 1)
   parked --> merged: PR found merged
-  parked --> released: ruling rebuild / release
-  merged --> [*]: coordinator marks done on main
+  parked --> released: ruling rebuild / release / approve
+  merged --> [*]: coordinator deletes once done on main
 ```
 
 **Host layout and source tree:**
