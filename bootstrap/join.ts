@@ -4,7 +4,8 @@
 //
 //   bun bootstrap/join.ts [--repo xaravel/xarabot] [--login <github-login>] [--port 8765]
 //
-// Two clicks: "Create GitHub App" on GitHub's manifest page, then "Install" on the repo.
+// Two clicks: "Create GitHub App" on GitHub's manifest page, then "Install" on the org (all
+// repositories by default, so later repos adopt Xarabot with no GitHub step).
 // The private key goes to ~/.config/xarabot/apps/<name>/private-key.pem (mode 600) and is
 // never printed. Re-running skips creation and only installs and verifies.
 
@@ -16,7 +17,7 @@ import { join } from "node:path";
 const API = "https://api.github.com";
 
 type AppRecord = { id: number; slug: string; owner: string; html_url: string };
-type Installation = { id: number; account: { login: string } };
+type Installation = { id: number; account: { login: string }; repository_selection: "all" | "selected" };
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -141,7 +142,7 @@ async function main(): Promise<void> {
     (await gh<Installation[]>("/app/installations", appJwt(app, pem))).find((i) => i.account.login === org);
   let inst = await find();
   if (!inst) {
-    console.log(`Opening the install page. Pick "${org}", choose "Only select repositories", select ${repoName}, click Install.`);
+    console.log(`Opening the install page. Pick "${org}", keep "All repositories" (or select ${repoName} if your org prefers), click Install.`);
     console.log(`If you are not an owner of ${org}, GitHub sends an install request for an owner to approve.`);
     openBrowser(`https://github.com/apps/${app.slug}/installations/new`);
     const deadline = Date.now() + 15 * 60_000;
@@ -159,9 +160,9 @@ async function main(): Promise<void> {
   const reach = repositories.map((r) => r.full_name);
   const bot = (await (await fetch(`${API}/users/${encodeURIComponent(`${app.slug}[bot]`)}`)).json()) as { id: number };
 
-  console.log(`\nInstalled on ${org} (installation ${inst.id}). Reaches: ${reach.join(", ") || "nothing"}`);
+  const scope = inst.repository_selection === "all" ? "all repositories" : `selected: ${reach.join(", ") || "nothing"}`;
+  console.log(`\nInstalled on ${org} (installation ${inst.id}), ${scope}.`);
   if (!reach.includes(repo)) throw new Error(`the installation does not reach ${repo}; add it in the App's installation settings`);
-  if (reach.length > 1) console.log(`Warning: it reaches ${reach.length} repos; Xarabot needs only ${repo}.`);
   console.log(`Bot login: ${app.slug}[bot]`);
   console.log(`Commit identity: ${app.slug}[bot] <${bot.id}+${app.slug}[bot]@users.noreply.github.com>`);
 }

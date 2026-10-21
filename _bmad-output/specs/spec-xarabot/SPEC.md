@@ -18,7 +18,7 @@ Terms are defined in `glossary.md`; each capability's release is in its heading 
 
 ## Why
 
-Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source product, built on top of BMAD: a durable harness for team management, product management, the SDLC and agent management. It carries what Xaravel learned about bot identities and about stopping agents deterministically with paths and permissions. It is built to run any BMAD project unattended: a team adds it with `bun add`, and from then on works in BMAD with the orchestration layer and the coding job runners. Its first and reference consumer is Xaravel, run unattended on the M1.
+Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source product, built on top of BMAD: a durable harness for team management, product management, the SDLC and agent management. It carries what Xaravel learned about bot identities and about stopping agents deterministically with paths and permissions. It is built to run any BMAD project unattended: a team adds it with `bun add`, and from then on works in BMAD with the orchestration layer and the coding job runners. Its first and reference consumer is Xaravel, run unattended on its Xarabot host.
 - **What Xaravel proved:** its unattended loop (`tools/orchestrator/` in `xaravel/framework`) builds, reviews and merges BMAD Stories with no human watching: 51 Stories in 73 hours.
 - **What holds it back:** it runs as one lane, picks its work from prompt prose, and spent a third of those hours between Epics (`baseline-metrics.md`).
 - **Why now:** it lives inside one repo, so no other project can run unattended without copying it. The Maintainer is about to bring other people onto agent-built work and needs a planned way to do it.
@@ -41,8 +41,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
     - A killed lane's unit becomes claimable 30 minutes after its last heartbeat.
     - Both hold across machines.
 - **CAP-4 · Parallel lanes (0.x)**
-  - **intent:** One host, macOS or Linux, runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own worktree, state folder and scheduled job (launchd or systemd).
-  - **success:** On the M1, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
+  - **intent:** One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own worktree, state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`).
+  - **success:** On Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
 - **CAP-5 · Parallel Epics (0.x)**
   - **intent:** Epics whose dependencies are done run at the same time, ordered by the dependency graph instead of strictly in sequence.
   - **success:** In Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once, and a checkpoint Epic still stops later Epics until the Maintainer's go.
@@ -74,15 +74,16 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **success:** A report over a chosen period shows, per agent and model, units done, median unit time, first-pass review rate, CI-fix count and cost, and feeds the consuming repo's dashboard.
 - **CAP-12 · TUI (0.x)**
   - **intent:** An operator sees every lane at once in a read-only terminal UI: its unit, claim, CI and merge state, and the inbox, on the host itself or from another machine over ssh.
-  - **success:** One command on a laptop shows the live state of every lane on the M1 over ssh and refreshes on its own; the same command works locally on the host.
+  - **success:** One command on a laptop shows the live state of every lane on the Xarabot host named by `XARABOT_HOST`, over ssh, and refreshes on its own; the same command works locally on the host.
 - **CAP-13 · Bot identity (0.x)**
   - **intent:**
-    - Each human owns one bot: a GitHub App owned by their own account, `<login>-xarabot` (for example `edanisko-xarabot`), acting as `<login>-xarabot[bot]`. `xarabot join` creates it from a manifest and installs it once per consuming org, with that org owner's approval.
+    - Each human owns one bot: a GitHub App owned by their own account, `<login>-xarabot` (for example `edanisko-xarabot`), acting as `<login>-xarabot[bot]`. `xarabot join` creates it from a manifest and installs it once per consuming org, with that org owner's approval: on all repositories by default, so a repo adopts Xarabot by adding its files with no GitHub step, or on selected repositories where the org prefers.
     - Every commit, push and PR their lanes make is made as that bot, never as the human. The owning human is responsible for the bot's work.
     - The bot has no admin, bypass or approve rights. The runner mints short-lived installation tokens from the App's private key; no long-lived token is stored.
     - A PR touching no Protected Path merges on its required checks and the CAP-8 review; a PR touching a Protected Path needs its owner's approving review. A repo's policy can require more.
   - **success:**
     - `xarabot join` creates the owner's App with one confirm click and installs it with one more, or with an install request an org owner approves.
+    - With a selected-repositories installation, adopting a repo the installation does not cover stops with the repo to add.
     - Every lane-made commit and PR is authored by the owner's bot.
     - The owner can approve and merge their bot's PR straight away, a Protected Path PR included.
     - The bot cannot approve any PR or merge past required checks or reviews, and Xarabot never issues an admin merge.
@@ -147,7 +148,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 **Process and release**
 - **License and release:** open source as `xaravel/xarabot`, MIT license, published to npm as `@xaravel/xarabot` and installed with `bun add`. Consumers pin it exactly. Releases are cut only by the Maintainer, from CI.
 - **Xarabot builds itself:** it has its own repo, BMAD plan, epics and changelog.
-  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the M1, as `edanisko-xarabot`, created before bootstrap by `bootstrap/join.ts` (which `xarabot join` later absorbs), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP and history.
+  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the Xarabot host, as `edanisko-xarabot`, created before bootstrap by `bootstrap/join.ts` (which `xarabot join` later absorbs), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP and history.
   - **Self-host:** the moment that lane works, Xarabot's own runner replaces the copy, and every later Xarabot Story is built by Xarabot.
   - **Pinned runner:** the self-hosted runner runs a pinned Xarabot version (release or tag) that only the Maintainer advances, never re-execing from the branch it builds. Recovery is pinning back to the last good version.
 - **Releases:** a 0.x release carries only what Xaravel's adoption needs; v1 adds the rest (`releases.md`).
@@ -167,7 +168,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 **Operating limits**
 - **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
-- **Capacity:** at most 2 builder lanes on the M1.
+- **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
 
@@ -182,7 +183,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 - **Self-host:** Xarabot built the rest of its own 0.x (the `codex` and `pi` adapters, the TUI, claims and parallel lanes) with its own pinned runner before Xaravel adopts it.
 - **0.x:** in its adoption Epic (before Epic 9), Xaravel replaces `tools/orchestrator/` with a pinned Xarabot 0.x release.
-  - A coordinator and 2 builder lanes on the M1 build Phase 1 Epics in parallel as `edanisko-xarabot`, choosing units with `next`, with no unit built twice and no admin merge.
+  - A coordinator and 2 builder lanes on Xaravel's Xarabot host build Phase 1 Epics in parallel as `edanisko-xarabot`, choosing units with `next`, with no unit built twice and no admin merge.
   - edanisko approves the bot's Protected Path PRs directly.
   - Xarabot telemetry shows at least 1.4 Stories per hour, twice the baseline's 51 in 73 hours (`baseline-metrics.md`): merged Stories divided by wall-clock hours over one stated 7-day window of Xaravel work, excluding hours when every lane waits on the Maintainer (a checkpoint go included). All lanes and adapters count; Story size is not normalized.
 - **v1:** a new project runs `bun add` for Xarabot plus the join command, and its team builds in BMAD with lanes. Concretely: a second person creates their bot, joins on their own machine, and starts a `codex` or `pi` lane. The guard enforces paths and commands for that lane, and claims keep both people's lanes off each other's units. A project with no remote runs the same lanes in local-only mode.
