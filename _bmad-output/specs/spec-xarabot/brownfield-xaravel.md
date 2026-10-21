@@ -25,7 +25,7 @@
 - **Identities:**
   - The `xaravel-oracle` App signs Oracle fixtures.
   - The `xaravel-bot` App (ID 5386144) runs the promotion and quarantine bots.
-  - The agent identity was planned as a separate user account to match `docs/ops/identities.md` and `ruleset:identity`. Xarabot's per-person `<login>-xarabot` bot user is that plan, with a fixed name; `edanisko-xarabot` exists before Xarabot's bootstrap.
+  - The agent identity was planned as a separate user account to match `docs/ops/identities.md` and `ruleset:identity`. Xarabot's per-person bot replaces that plan with a GitHub App owned by each person; `edanisko-xarabot` exists before Xarabot's bootstrap. Xaravel's existing App pattern carries over: its ownership check already recognizes `xaravel-bot[bot]` (type `Bot`) as an author.
   - The `Agent pushes` ruleset redesign must not block the merge queue or `gh-pages`.
 - **Live settings:** GitHub settings, rulesets and secrets are written by the Maintainer, never by a lane.
 - **Process control:** kill by exact PID. `pkill -f` can match the `claude -p` command line, which contains the whole prompt.
@@ -37,5 +37,5 @@ A Xaravel course correction adds an Epic before Epic 9 that adopts Xarabot. Inpu
 - replace `tools/orchestrator/` with the pinned Xarabot package and its config;
 - add the Xarabot config and `.agents/skills` to `conformance/protected-paths`;
 - make `decisions/MAINT-2026-10-16-unattended-orchestrator.md` its Standing Authority file, covering Codex's review mode, lanes and parallel Epics;
-- register `edanisko-xarabot` under edanisko, and move `docs/ops/identities.md`, `ruleset:identity` and the `Agent pushes` ruleset redesign to it. The Maintainer does the live GitHub steps;
+- add `xaravel/framework` to `edanisko-xarabot`'s `xaravel` installation, register it under edanisko, and move `docs/ops/identities.md`, `ruleset:identity` and the `Agent pushes` ruleset redesign from a separate user account to the App. The Maintainer does the live GitHub steps;
 - end the MAINT amendments that allow `--admin` merges.

@@ -21,7 +21,10 @@
 - **Human Live Step:** a step only a human performs, such as changing live GitHub settings, secrets or rulesets. Lanes never attempt one (CAP-23).
 - **Actor registry:** the consuming-repo record of humans by GitHub login, their roles and tracks, and the bot each owns (CAP-17).
 - **Role and track:** how the Actor registry groups humans: a role sets a human's rights, a track the stream of work they belong to. The consuming repo defines both.
-- **Bot (`<login>-xarabot`):** the GitHub user account one human owns and is responsible for. All of that human's lanes commit, push and open PRs as it. It has no admin, bypass or approve rights.
+- **Bot (`<login>-xarabot`):** the GitHub App one human's account owns, acting as `<login>-xarabot[bot]`. All of that human's lanes commit, push and open PRs as it. It is installed once per consuming org with the org owner's approval, has no admin, bypass or approve rights, and works through hourly tokens the runner mints from its private key.
+- **`xarabot join`:** the package command that creates a human's bot App from a manifest, stores its private key for the runner, and installs it or requests the install.
 - **Owner:** the human a bot belongs to. Their review makes the bot's Protected Path PRs mergeable.
 - **STOP marker:** the file that makes a lane, or every lane on a host, exit after its current unit.
+- **Forge adapter:** the code that connects lanes to one forge for identity, PRs, CI, merges and claims: GitHub (0.x), local-only (v1).
+- **Local-only mode:** Xarabot on a repo with no remote, on one host; merges go to the local `main`, and approvals are signed with the owner's key.
 - **M1:** the Maintainer's Apple M1 Mac that runs lanes unattended.
