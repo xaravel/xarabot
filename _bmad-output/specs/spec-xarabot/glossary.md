@@ -5,14 +5,23 @@
 - **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
 - **Claim:** a lane's exclusive hold on a unit, made by compare-and-swap on a git ref, kept alive by heartbeat, expiring 30 minutes after the last heartbeat.
+- **Story manifest:** the per-Story record in the consuming repo that gives the Story's path globs (directly, or through a repo mapping such as Xaravel's `component`) and its dependencies. Claims and the guard use its globs. Its format is an architecture decision.
 - **`next`:** the command that returns the one unit a lane builds next.
 - **Adapter:** the code that runs one vendor's agent CLI for a unit and returns its JSON result.
 - **Checkpoint Epic:** an Epic after whose retrospective the Maintainer must say "go" before later Epics start (Xaravel: Epic 8).
 - **Retro gate:** the record of an Epic's retrospective verdict and its open action items (`retro-gates.yaml`).
 - **Blocking action item:** a retro action item tagged `blocking`. It holds back the next Epic; untagged items do not.
-- **Maintainer inbox:** the single list of everything waiting on the Maintainer.
+- **Inbox:** the single list of everything waiting on one human. Each owner has one; the Maintainer's also holds rulings, Escalations, retro items and Human Live Steps.
 - **Maintainer:** the human who owns the consuming repo's rulings, Protected Paths and releases.
 - **Protected Path:** a path in the consuming repo that changes only through a Maintainer-approved Infrastructure Story (Xaravel AD-16).
+- **Infrastructure Story:** a Story that changes Protected Paths, approved by the Maintainer before a lane builds it.
+- **Escalation:** a question an agent raises instead of deciding a contract matter. A human decision binds to its exact text by hash, and an open Escalation blocks its unit's merge (CAP-20).
+- **Lesson:** a cross-Epic lesson recorded from a retrospective (Xaravel: `lessons.md`), injected into later sessions (CAP-21).
+- **Standing Authority file:** the consuming-repo file that grants the lanes their authority; when it is absent or invalid, every lane stops (CAP-22). Xaravel's MAINT decision file is its Standing Authority file.
+- **Human Live Step:** a step only a human performs, such as changing live GitHub settings, secrets or rulesets. Lanes never attempt one (CAP-23).
+- **Actor registry:** the consuming-repo record of humans by GitHub login, their roles and tracks, and the bot each owns (CAP-17).
+- **Role and track:** how the Actor registry groups humans: a role sets a human's rights, a track the stream of work they belong to. The consuming repo defines both.
 - **Bot (`<login>-xarabot`):** the GitHub user account one human owns and is responsible for. All of that human's lanes commit, push and open PRs as it. It has no admin, bypass or approve rights.
-- **Owner:** the human a bot belongs to. Their review makes the bot's PRs mergeable, Protected Path PRs included.
+- **Owner:** the human a bot belongs to. Their review makes the bot's Protected Path PRs mergeable.
 - **STOP marker:** the file that makes a lane, or every lane on a host, exit after its current unit.
+- **M1:** the Maintainer's Apple M1 Mac that runs lanes unattended.

@@ -1,15 +1,15 @@
 # Agent adapters
 
-Every adapter runs one unit in a fresh session and returns the same JSON result. Each lane sets `agent`, `model` and `effort` in config.
+Every adapter runs one unit in a fresh session and returns the same JSON result. Each lane sets `agent`, `model` and `effort` in config; an unset `model` uses the adapter's default below.
 
-| Adapter | How it runs | Status |
-|---|---|---|
-| `claude` | `claude -p --model <model> --effort <effort> --permission-mode auto`, as Xaravel's `run.sh` does today (model `claude-opus-5-5`). | 0.x |
-| `codex` | `codex exec -m <model> --json`, with effort set through `-c` (the key is for architecture to verify), model `gpt-sol-6.1`, network turned on in its sandbox, and the skills exposed through `.agents/skills`. | 0.x |
-| `pi` | `pi -p --mode json --model <provider/id> --thinking <effort>`. The operator signs in to OpenRouter through pi and picks the model there, with a flash-tier model where the repo allows it. Runs inside Xarabot's generic sandbox wrapper. | 0.x |
-| `grok` | Only after lanes run as `<login>-xarabot` bot identities (CAP-13). | later |
+| Adapter | How it runs | Default model | Status |
+|---|---|---|---|
+| `claude` | `claude -p --model <model> --effort <effort> --permission-mode auto`, as Xaravel's `run.sh` does today. | `claude-opus-5-5` | 0.x |
+| `codex` | `codex exec -m <model> --json`, with effort set through `-c` (the key is for architecture to verify), network turned on in its sandbox, and the skills exposed through `.agents/skills`. | `gpt-sol-6.1` | 0.x |
+| `pi` | `pi -p --mode json --model <provider/id> --thinking <effort>`. The operator signs in to OpenRouter through pi. Runs inside Xarabot's generic sandbox wrapper. | the model picked at OpenRouter sign-in | 0.x |
+| `grok` | Only after lanes run as `<login>-xarabot` bot identities (CAP-13). | — | later |
 
-Which adapters, and which models, may run unattended is the consuming repo's policy (CAP-7). The adapter decides only how the coding agent runs. Every adapter's agent runs with no GitHub credentials; the runner commits, pushes and opens PRs as the owner's bot (CAP-18).
+Which adapters may run unattended is repo policy (CAP-7); every adapter's agent runs with no GitHub credentials (SPEC § Constraints).
 
 ## Model and effort
 
@@ -31,9 +31,14 @@ effort: high         # low | medium | high | xhigh | max
 
 ## Cross-vendor review (CAP-8)
 
-- Codex reviews Claude-built diffs, and Claude reviews Codex-built ones.
-- Xaravel's `bmad-build-auto` `customize.toml` already allows an external tool as a review layer; Xarabot uses that hook point instead of forking the skill.
+| Builder | Reviewer |
+|---|---|
+| `claude` | `codex` |
+| `codex` | `claude` |
+| `pi` | `claude` |
+
+- Xaravel's `bmad-build-auto` `customize.toml` already runs an external tool as a review layer (its Fidelity Review: Codex reviewing Claude-built Stories); Xarabot uses that hook point instead of forking the skill.
 
 ## Result
 
-The session does only the unit's work, then returns a JSON result that Xarabot validates; Xarabot then pushes, opens the PR, polls CI and merges (CAP-6). The schema is an architecture decision. Telemetry (CAP-11) needs at least the outcome and the review loopback count from it, plus the lane's agent, model and effort.
+The schema is an architecture decision. Telemetry (CAP-11) needs at least the outcome and the review loopback count from it, plus the lane's agent, model and effort.

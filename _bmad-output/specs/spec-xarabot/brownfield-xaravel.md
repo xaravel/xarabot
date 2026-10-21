@@ -1,4 +1,4 @@
-# Brownfield: Xaravel's loop today, and the cutover
+# Brownfield: Xaravel's loop today
 
 ## What exists (`xaravel/framework`, `tools/orchestrator/`)
 
@@ -6,7 +6,8 @@
 - **State:** `~/.xaravel-orchestrator/` holds `history`, `logs/`, `latest.log`, `outcome` (`progress`, `idle` or `stop`) and `STOP`.
 - `iteration.md`: the whole policy, in prose. It picks one unit in priority order: open PR, sprint planning, retro, retro action items, checkpoint, next Story, Escalation ruling, pause, idle. It also carries the CI-poll and merge procedure.
 - `status.sh` and `progress.sh`: host status, and the "Stories done, loose ETA" line. Status issue #10; every loop comment starts with 🤖.
-- **Quick wins in PR #216 (pending the Maintainer's merge):** retro items are tagged `blocking` / `waiting` / `deferred` in `retro-gates.yaml`, and the `Maintainer inbox` issue gets a daily digest.
+- **State (2026-10-20):** paused after Phase 0. Epic 8 and its retrospective are done, its checkpoint go is pending, and Epic 9 (the first Phase 1 Epic) is in backlog. The loop is stopped until Xaravel adopts Xarabot.
+- **PR #216 (merged):** the `Maintainer inbox` issue with a daily digest, and batch routing of Maintainer-only retro items. CAP-9 and that batch routing port it. Its `blocking` tag was trimmed out, because it pays off only with parallel lanes; CAP-10 is first built in Xarabot.
 
 ## Lessons the Xarabot must keep (each cost real time)
 
@@ -24,17 +25,17 @@
 - **Identities:**
   - The `xaravel-oracle` App signs Oracle fixtures.
   - The `xaravel-bot` App (ID 5386144) runs the promotion and quarantine bots.
-  - The agent identity was deferred to the Epic 8 checkpoint, planned as a separate user account to match `docs/ops/identities.md` and `ruleset:identity`. Xarabot's per-person `<login>-xarabot` bot user is that plan, with a fixed name.
+  - The agent identity was planned as a separate user account to match `docs/ops/identities.md` and `ruleset:identity`. Xarabot's per-person `<login>-xarabot` bot user is that plan, with a fixed name; `edanisko-xarabot` exists before Xarabot's bootstrap.
   - The `Agent pushes` ruleset redesign must not block the merge queue or `gh-pages`.
 - **Live settings:** GitHub settings, rulesets and secrets are written by the Maintainer, never by a lane.
 - **Process control:** kill by exact PID. `pkill -f` can match the `claude -p` command line, which contains the whole prompt.
 - **Exit lag:** a `claude -p` session can linger about 12 minutes after its final result before exiting.
 
-## Cutover (Xaravel side, at the Epic 8 checkpoint)
+## Adoption (planned and run in Xaravel)
 
-`bmad-correct-course` in Xaravel adds the Infrastructure Story "Adopt the external runner". It:
-- replaces `tools/orchestrator/` with the pinned Xarabot package and its config;
-- adds the Xarabot config and `.agents/skills` to `conformance/protected-paths`;
-- lands a new Maintainer decision that replaces `decisions/MAINT-2026-10-16-unattended-orchestrator.md` and covers Codex's review mode, lanes and parallel Epics;
-- creates the `edanisko-xarabot` bot user, registers it under edanisko, and moves `docs/ops/identities.md`, `ruleset:identity` and the `Agent pushes` ruleset redesign to it. The Maintainer does the live GitHub steps.
-- ends the MAINT amendments that allow `--admin` merges.
+A Xaravel course correction adds an Epic before Epic 9 that adopts Xarabot. Inputs it needs from here:
+- replace `tools/orchestrator/` with the pinned Xarabot package and its config;
+- add the Xarabot config and `.agents/skills` to `conformance/protected-paths`;
+- make `decisions/MAINT-2026-10-16-unattended-orchestrator.md` its Standing Authority file, covering Codex's review mode, lanes and parallel Epics;
+- register `edanisko-xarabot` under edanisko, and move `docs/ops/identities.md`, `ruleset:identity` and the `Agent pushes` ruleset redesign to it. The Maintainer does the live GitHub steps;
+- end the MAINT amendments that allow `--admin` merges.
