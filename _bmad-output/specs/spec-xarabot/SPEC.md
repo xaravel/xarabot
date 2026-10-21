@@ -77,17 +77,18 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **success:** One command on a laptop shows the live state of every lane on the M1 over ssh and refreshes on its own; the same command works locally on the host.
 - **CAP-13 · Bot identity (0.x)**
   - **intent:**
-    - Each human owns one bot user account, `<login>-xarabot` (for example `edanisko-xarabot`).
+    - Each human owns one bot: a GitHub App owned by their own account, `<login>-xarabot` (for example `edanisko-xarabot`), acting as `<login>-xarabot[bot]`. `xarabot join` creates it from a manifest and installs it once per consuming org, with that org owner's approval.
     - Every commit, push and PR their lanes make is made as that bot, never as the human. The owning human is responsible for the bot's work.
-    - The bot has no admin, bypass or approve rights.
+    - The bot has no admin, bypass or approve rights. The runner mints short-lived installation tokens from the App's private key; no long-lived token is stored.
     - A PR touching no Protected Path merges on its required checks and the CAP-8 review; a PR touching a Protected Path needs its owner's approving review. A repo's policy can require more.
   - **success:**
+    - `xarabot join` creates the owner's App with one confirm click and installs it with one more, or with an install request an org owner approves.
     - Every lane-made commit and PR is authored by the owner's bot.
     - The owner can approve and merge their bot's PR straight away, a Protected Path PR included.
     - The bot cannot approve any PR or merge past required checks or reviews, and Xarabot never issues an admin merge.
 - **CAP-14 · Team onboarding (v1)**
-  - **intent:** A team member joins by creating their `<login>-xarabot` bot, registering it under their name, and running one join command with setup docs; they then run lanes on their own machine against the same repo, with claims shared across machines.
-  - **success:** A second person on a second machine follows the docs, runs the join command, starts a lane, and neither person's lanes build a unit the other holds.
+  - **intent:** A team member joins by running `xarabot join`, which creates their `<login>-xarabot` App and installs it on the org or requests the install, and by registering it under their name with the setup docs; they then run lanes on their own machine against the same repo, with claims shared across machines.
+  - **success:** A second person on a second machine follows the docs, runs `xarabot join`, starts a lane, and neither person's lanes build a unit the other holds.
 - **CAP-15 · Deterministic stop (0.x)**
   - **intent:** An operator stops one lane or all lanes deterministically. Process control follows `brownfield-xaravel.md` § Lessons (Process control, Exit lag).
   - **success:** A STOP marker for a lane, or for the host, makes the affected lanes finish their current unit and exit, with no new claim taken.
@@ -95,7 +96,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:** A lane starts its next Story while its previous PR is still in CI or the merge queue.
   - **success:** With pipelining on, a lane claims its next unit before its previous PR merges, and no unit merges out of dependency order.
 - **CAP-17 · Actor registry (v1)**
-  - **intent:** The consuming repo keeps an Actor registry: humans by GitHub login, their roles and tracks, and the `<login>-xarabot` bot each one owns. CODEOWNERS, rulesets and guard policy are generated from it.
+  - **intent:** The consuming repo keeps an Actor registry: humans by GitHub login, their roles and tracks, and the `<login>-xarabot` App each one owns (its App ID). CODEOWNERS, rulesets and guard policy are generated from it.
   - **success:** Registering a person and their bot and merging gives them their role's rights everywhere; a bot not registered to a human is refused; a hand edit to a generated file fails a drift check.
 - **CAP-18 · Guard (sandbox 0.x; diff check and CI v1)**
   - **intent:** One fail-closed guard, the same for every adapter:
@@ -123,26 +124,30 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **CAP-23 · Human Live Steps (v1)**
   - **intent:** The consuming repo lists Human Live Steps; lanes never attempt them and route them to the Maintainer's inbox.
   - **success:** A unit that reaches a listed step is marked waiting, and the step appears in the inbox with no attempt logged.
+- **CAP-24 · Forge adapters (GitHub 0.x; local-only v1)**
+  - **intent:** Lanes, claims and `next` reach the forge only through a forge adapter: identity, PRs or their local equivalent, CI, merges and the claims ref. GitHub ships first. The local-only adapter runs a repo with no remote on one host: lanes merge into the local `main` after its checks, lane commits are signed with the owner's lane key, and a Protected Path change waits for a `xarabot approve` signed with the owner's own key.
+  - **success:** The same unit runs end to end on GitHub and on a local-only repo with no remote; in local-only mode a Protected Path change merges only after the owner's signed approval.
 
 ## Constraints
 
 **Stack**
 - **Toolchain:** Bun only: Bun 1.4.3, TypeScript 7 with `--strict`, oxlint. No Node, npm, pnpm, Jest, Vitest, ESLint or Prettier as tools.
 - **Models:** each adapter's default lane settings use a top model (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
+- **Forges:** GitHub (0.x) and local-only (v1), each behind one forge interface (CAP-24). GitLab and other forges come later.
 - **No platform assumptions:** Xarabot does not assume AWS, SSO, hardware signing keys, a Claude-only sandbox, a JavaScript repo or a particular repo layout; any of those is an optional repo-supplied integration.
 
 **Security and identity**
 - **Agents never touch GitHub (from 0.x):**
   - Coding agents run sandboxed with no GitHub credentials (CAP-18).
-  - Only the Xarabot runner holds the `<login>-xarabot` token and talks to GitHub: claims, pushes, PRs, CI polling and merges.
+  - Only the Xarabot runner holds the bot's private key, mints its tokens and talks to GitHub: claims, pushes, PRs, CI polling and merges. In local-only mode the same holds for the local `main` and the claims ref.
   - A session that needs to read GitHub, such as a retro reading PR history, gets a read-only token or data the runner prefetched.
-- **Identity:** lanes act only as their owner's bot (CAP-13): never a shared bot, an App or a human's own account.
+- **Identity:** lanes act only as their owner's bot (CAP-13): never a shared bot, an org-owned App, a bot user account or a human's own account.
 - **No co-author markers:** no `Co-Authored-By` trailers or similar non-authoritative markers. The bot account is the only marker of lane-made work.
 
 **Process and release**
 - **License and release:** open source as `xaravel/xarabot`, MIT license, published to npm as `@xaravel/xarabot` and installed with `bun add`. Consumers pin it exactly. Releases are cut only by the Maintainer, from CI.
 - **Xarabot builds itself:** it has its own repo, BMAD plan, epics and changelog.
-  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the M1, as `edanisko-xarabot` (created before bootstrap), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP and history.
+  - **Bootstrap:** a copy of Xaravel's `tools/orchestrator` runs against the Xarabot repo on the M1, as `edanisko-xarabot`, created before bootstrap by `bootstrap/join.ts` (which `xarabot join` later absorbs), with no admin merges, and builds only the first Epic: a single `claude` lane with `next`, plumbing in code, STOP and history.
   - **Self-host:** the moment that lane works, Xarabot's own runner replaces the copy, and every later Xarabot Story is built by Xarabot.
   - **Pinned runner:** the self-hosted runner runs a pinned Xarabot version (release or tag) that only the Maintainer advances, never re-execing from the branch it builds. Recovery is pinning back to the last good version.
 - **Releases:** a 0.x release carries only what Xaravel's adoption needs; v1 adds the rest (`releases.md`).
@@ -171,6 +176,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - Planning or running Xaravel's adoption: Xaravel's own course correction does it.
 - A hosted service: lanes run on the operators' own machines.
 - Vendoring, forking or re-implementing BMAD's skills.
+- GitLab and other forges before a later release.
 
 ## Success signal
 
@@ -179,17 +185,19 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - A coordinator and 2 builder lanes on the M1 build Phase 1 Epics in parallel as `edanisko-xarabot`, choosing units with `next`, with no unit built twice and no admin merge.
   - edanisko approves the bot's Protected Path PRs directly.
   - Xarabot telemetry shows at least 1.4 Stories per hour, twice the baseline's 51 in 73 hours (`baseline-metrics.md`): merged Stories divided by wall-clock hours over one stated 7-day window of Xaravel work, excluding hours when every lane waits on the Maintainer (a checkpoint go included). All lanes and adapters count; Story size is not normalized.
-- **v1:** a new project runs `bun add` for Xarabot plus the join command, and its team builds in BMAD with lanes. Concretely: a second person creates their bot, joins on their own machine, and starts a `codex` or `pi` lane. The guard enforces paths and commands for that lane, and claims keep both people's lanes off each other's units.
+- **v1:** a new project runs `bun add` for Xarabot plus the join command, and its team builds in BMAD with lanes. Concretely: a second person creates their bot, joins on their own machine, and starts a `codex` or `pi` lane. The guard enforces paths and commands for that lane, and claims keep both people's lanes off each other's units. A project with no remote runs the same lanes in local-only mode.
 
 ## Assumptions
 
 - **BMAD:** Xarabot drives the BMAD skills installed in the consuming repo (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`, `bmad-correct-course`). "Product management" in scope means driving those planning artifacts (sprint status, epics, retros, course corrections), not a separate tool.
-- **Bot seats:** GitHub's terms allow one free machine account per person, so one bot per human fits. On private organization repos each bot needs a seat.
+- **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
 - **For architecture to decide or verify:**
   - Claims live on a dedicated `xarabot/claims` branch, updated by fast-forward-only push as the compare-and-swap; a custom `refs/` namespace is used only if GitHub accepts and protects it.
   - The sandbox wrapper per OS and adapter: codex's own sandbox, Claude Code's own sandbox, and a generic wrapper for `pi` (Seatbelt on macOS, bubblewrap or landlock on Linux).
   - Codex's reasoning-effort key and values, and how `effort: max` maps onto them.
   - The JSON result schema and the Story manifest format.
+  - The bot App's minimum permissions (Contents, Pull requests, Checks, and what the merge queue needs), whether an App review could count toward required approvals (the guard refuses approvals either way), and where `xarabot join` stores the private key on macOS and Linux.
+  - The forge interface, and the local-only adapter's claims and checks on a single host.
   - The claim and gate mechanics the 2026-10-20 review raised (heartbeat interval and fencing, claim rule per outcome, takeover, coordinator uniqueness across machines, gate scope on the dependency graph, guard diff details, token-free install and verify): `_bmad-output/planning-artifacts/reviews/spec-xarabot-review-2026-10-20.json`.
 
 ## Open Questions
