@@ -29,8 +29,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:** Xarabot ships the runner (lanes, scheduled jobs, STOP marker, history), unit selection, claims, CI and merge plumbing, agent adapters, status reporting and prompt templates. A consuming repo adds it as a pinned dependency and supplies only its config, project-specific prompt sections, verification commands, policy files (Standing Authority, Actor registry, Human Live Steps) and Story manifests.
   - **success:** Xaravel runs every lane from a pinned Xarabot version, its tree holds no orchestration code beyond those supplied files, a Xarabot upgrade reaches it as a PR, and each Xarabot release has a changelog entry.
 - **CAP-2 · Deterministic `next` (0.x)**
-  - **intent:** A `next` command chooses the one unit a lane builds, in code, from Story manifests, sprint status, the dependency graph (`epics.md` dependencies, plus `package.json` workspace dependencies where the repo turns them on with an Epic-to-package map), open claims and the retro and checkpoint gates.
-  - **success:** Unit tests cover each input and each gate; a repo with no `package.json` gets a correct graph from `epics.md` alone; the agent's prompt names the unit ("Build Story X") and contains no selection rules.
+  - **intent:** A `next` command chooses the one unit a lane builds, in code, from Story manifests, sprint status, the dependency graph, open claims and the retro and checkpoint gates. The graph comes from the repo's Epic graph file (`.xarabot/epics.yaml`), where an Epic the file does not list depends on the next lower Epic number in `epics.md` and a checkpoint is never inferred, plus `package.json` workspace dependencies where the repo turns them on with an Epic-to-package map. It never comes from `epics.md` prose or a BMAD override.
+  - **success:** Unit tests cover each input and each gate; a repo with no graph file and no `package.json` runs its Epics serially in number order; a listed Epic runs in parallel exactly as its entry allows; the agent's prompt names the unit ("Build Story X") and contains no selection rules.
 - **CAP-3 · Claims (0.x)**
   - **intent:**
     - A lane's runner, never its coding agent, claims a unit, its bot identity and its manifest globs by compare-and-swap on one claims ref.
@@ -135,7 +135,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 **Stack**
 - **Toolchain:** Bun only: Bun 1.4.3, TypeScript 7 with `--strict`, oxlint. No Node, npm, pnpm, Jest, Vitest, ESLint or Prettier as tools.
 - **Models:** `claude` and `codex` default to a top model and `pi` lanes name theirs (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
-- **Planning shape:** 0.x reads the classic BMAD shape only: `epics.md`, `sprint-status.yaml` and Story manifests. The spec-folder shape (`stories.yaml`) waits until a consumer uses it.
+- **Planning shape:** 0.x reads the classic BMAD shape only: `epics.md`, `sprint-status.yaml` and Story manifests, plus the Epic graph file. The spec-folder shape (`stories.yaml`) waits until a consumer uses it.
 - **Forges:** GitHub (0.x) and local-only (v1), each behind one forge interface (CAP-24). GitLab and other forges come later.
 - **No platform assumptions:** Xarabot does not assume AWS, SSO, hardware signing keys, a Claude-only sandbox, a JavaScript repo or a particular repo layout; any of those is an optional repo-supplied integration.
 
@@ -160,7 +160,8 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **Consuming-repo rules bind Xarabot:**
   - Lanes never push to `main`.
   - Lanes never change `AGENTS.md` unless the Maintainer asks.
-  - Lanes change Protected Paths only through a Maintainer-approved Infrastructure Story.
+  - Lanes change Protected Paths only through a Maintainer-approved Infrastructure Story, or, for the Epic graph, a planning PR the Maintainer approves.
+  - A PR that changes the effective Epic graph (the graph file, the Epic headings in `epics.md`, or a manifest's Epic) merges only with the Maintainer's approval, never just its bot owner's.
   - Xarabot config and `.agents/skills` become Protected Paths in the consumer.
 - **Set by the consuming repo, never fixed in Xarabot:**
   - merge authority beyond CAP-13's default, and which humans may approve and merge;
@@ -199,4 +200,4 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 ## Open Questions
 
-None.
+- **Remaining BMAD overrides:** the spine still has a consuming repo carry two `bmad-customize` overrides: the retro `blocking` tag (AD-12, `bmad-retrospective`) and result writing from skills' `on_complete` hooks (AD-14). Move them into Xarabot-owned files, as with the Epic graph, or have Xarabot install them?
