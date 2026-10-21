@@ -2,7 +2,7 @@
 
 ## What exists (`xaravel/framework`, `tools/orchestrator/`)
 
-- `run.sh`: a launchd driver on the M1 (`com.xaravel.orchestrator.plist`). Each iteration resets a dedicated clone to `origin/main`, runs one fresh `claude -p` session on `iteration.md`, and re-execs itself from `origin/main`. It waits 1 minute after `progress`, 30 after `idle` and 15 after a failure. On a usage-limit hit it sleeps until 2 minutes after the reset (at most 8 h).
+- `run.sh`: a launchd driver on Xaravel's lane host (`com.xaravel.orchestrator.plist`). Each iteration resets a dedicated clone to `origin/main`, runs one fresh `claude -p` session on `iteration.md`, and re-execs itself from `origin/main`. It waits 1 minute after `progress`, 30 after `idle` and 15 after a failure. On a usage-limit hit it sleeps until 2 minutes after the reset (at most 8 h).
 - **State:** `~/.xaravel-orchestrator/` holds `history`, `logs/`, `latest.log`, `outcome` (`progress`, `idle` or `stop`) and `STOP`.
 - `iteration.md`: the whole policy, in prose. It picks one unit in priority order: open PR, sprint planning, retro, retro action items, checkpoint, next Story, Escalation ruling, pause, idle. It also carries the CI-poll and merge procedure.
 - `status.sh` and `progress.sh`: host status, and the "Stories done, loose ETA" line. Status issue #10; every loop comment starts with 🤖.
