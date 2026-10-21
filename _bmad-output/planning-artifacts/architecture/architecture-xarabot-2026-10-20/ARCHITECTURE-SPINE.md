@@ -146,9 +146,9 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-3, CAP-6, CAP-15.
 - **Prevents:** a lane that went quiet and lost its claim pushing or merging over the lane that took over.
 - **Rule:**
-  - A heartbeat runs every 5 minutes, for `claimed` and `merging` records alike.
+  - A heartbeat runs every 5 minutes, for `claimed` records and for `merging` records that a builder lane holds. `merging` records that `reconcile` holds have no heartbeat and can never be taken over (AD-7).
   - **A stale `claimed` record** (no heartbeat for 30 minutes) can be taken over by any lane: `generation` + 1, `attempts` + 1, and on the 3rd it becomes `parked` (blocked) instead.
-  - **A stale `merging` record:**
+  - **A stale `merging` record that a builder lane holds:**
     - If its PR merged, it becomes `merged`.
     - If its PR is still in the queue, any lane may take it over and keep watching it.
     - Otherwise it becomes `released`, with `attempts` + 1 and `pr` kept.
@@ -305,8 +305,11 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
 - **Rule:**
   - **The runner's own repository.** Each lane has a runner-private repository, `runner.git` in the lane state folder, which the sandbox can neither read nor write.
     - The runner never runs git against the agent clone's `.git`.
-    - Before each session it rebuilds the clone, `.git` included, from `runner.git` at `base_sha`.
+    - Before each session it rebuilds the clone, `.git` included, from `runner.git`.
+      - A first build session starts at `base_sha`.
+      - A loopback or CI-fix session starts at the current `head_sha`, with the review findings or CI log prefetched into its temp folder.
     - Afterwards it reads only the clone's working tree.
+  - **Acting on a PR this lane didn't build.** Before acting on it, the lane fetches the PR's branch head and `passed_sha` from the forge into its own `runner.git`. That covers takeover, `reconcile` enqueue, reviewer checkouts and the clean-merge recompute. A restart at the same generation re-reads the PR head the same way.
   - **The commit.** In `runner.git` the runner takes the working tree's changes against `base_sha`, applies them on top of `origin/main` as a three-way merge (a conflict follows AD-19), and makes one commit authored by `<login>-xarabot[bot]`. It records `base_sha` and `head_sha`.
   - **Wip** is kept as a `wip/<unit>` ref in `runner.git`, never in the clone.
   - **Agent text.** A pure sanitizer strips trailers, closing keywords and `@mentions` from `summary` and `body` before any commit message, PR text or comment uses them.
@@ -319,7 +322,8 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
 - **Prevents:** a review the builder reports about itself, and a merged diff that differs from the reviewed one.
 - **Rule:**
   - **Picking the reviewer.** The reviewer must come from a provider not in the record's `builder_providers[]`.
-    - The order of preference: `codex` for Anthropic-built diffs, `claude` for OpenAI-built ones, `claude` for any other.
+    - **A session's provider** is the vendor of the model it runs, never the adapter's name. `claude` is Anthropic and `codex` is OpenAI. A pi session's provider is the vendor named in its `<provider>/<id>` model; through OpenRouter, that is the vendor of the underlying model.
+    - **Which reviewer:** the first allowed adapter from (`claude`, `codex`) whose provider is not in the set.
     - If no allowed reviewer is left, the unit parks blocked.
     - pi lanes must set `model` explicitly.
     - If the model a session reports differs from its config, the attempt fails.
@@ -501,7 +505,8 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
   - **Who counts.** `go` and `approve` are accepted **only from the Maintainer** (set in config). `rebuild`, `release` and `dismiss` are accepted from the item's owner or the Maintainer.
   - **What each verb does to the record:**
     - `release` and `rebuild` reset `attempts`, `loopbacks` and `ci_fixes` to 0.
-    - `rebuild` also closes the PR (AD-9).
+    - `rebuild` also closes the PR (AD-9) and clears `builder_providers[]`, because the diff starts again from `main`.
+    - `release` keeps `builder_providers[]`, because the existing diff carries over. A unit parked because no reviewer is left therefore needs `rebuild`.
     - `dismiss` removes only the inbox item and leaves the ledger unchanged.
   - **Applying it.** The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **Local-only mode (v1)** uses `xarabot rule <verb> <unit-id>`.
