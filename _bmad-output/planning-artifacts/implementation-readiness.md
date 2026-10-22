@@ -1,117 +1,100 @@
 ---
-title: Implementation readiness, xarabot 0.x (re-gate)
-date: 2026-10-21
+title: Implementation readiness, xarabot 0.x (third gate)
+date: 2026-10-22
 gate: FAIL
-reviewed_at: ff2708a
-previous_gate: a338d2f (FAIL at 4024723; B1-B3 and C1-C13 fixed by 1738280 and ff2708a)
+override: Maintainer, 2026-10-22. sprint-status.yaml generated so Epic 1's bootstrap build can start; the blockers below must be fixed before the self-host switch.
+reviewed_at: 6e2cdbe
+previous_gates: a338d2f (FAIL at 4024723), 23e7f91 (FAIL at ff2708a); both fixed by correct course (proposals 2026-10-21 and 2026-10-22)
 inputs:
   - _bmad-output/specs/spec-xarabot/SPEC.md (and companions)
   - _bmad-output/planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md
   - _bmad-output/planning-artifacts/epics.md
   - .xarabot/epics.yaml
-next: bmad-correct-course
+next: bmad-correct-course (before the self-host switch)
 ---
 
-# Implementation readiness: xarabot 0.x (re-gate)
+# Implementation readiness: xarabot 0.x (third gate)
 
-**Verdict: FAIL.** The Epic 1 bootstrap can be built as recorded. From the self-host switch on, the runner stalls in three places: Epic 2 deadlocks on `depends_on` before `reconcile` exists, the write check refuses every retro diff, and no build can find its Story spec. `sprint-status.yaml` was not generated.
+**Verdict: FAIL, overridden by the Maintainer.** The Epic 1 bootstrap can be built as recorded. Two blockers stall the self-hosted runner from Epic 2 on:
 
-The correct course worked. Of the previous gate's findings, B1–B3, nearly all of C1–C13 and every Minor item are resolved in the current artifacts. Two items are partly open (below). A dry run of `sprint_plan.py generate` parses `epics.md` cleanly: 7 Epics, 62 Stories and 7 optional retros. `1.17a` and `5.1a` produce the keys `1-17a-…` and `5-1a-…`. The only warnings are the document title (line 14) and `## Epic List` (line 221). Once the gate passes, generation is one command.
+- a parked PR that is merged by hand never becomes `merged` before `reconcile` exists;
+- retro items routed to the Maintainer, or with no globs, can never close.
 
-Line references are to the files at commit `ff2708a`. Abbreviations: E = `epics.md`, S = `ARCHITECTURE-SPINE.md`.
+The Maintainer chose to generate `sprint-status.yaml` now and fix these before the switch.
+
+Every finding from the previous gate (N1–N3, C1–C11 and the Minor items) is resolved in substance. Each was traced through these walks:
+
+- Epic 2 at the switch with `2.5 depends_on [2.4]`;
+- a retro diff through the write check;
+- a `1-17a` build through the `story_spec_path` glob.
+
+`sprint_plan.py generate` parses `epics.md` to 7 Epics, 63 Stories and 7 optional retros.
+
+Line references are to the files at commit `6e2cdbe`. E = `epics.md`, S = `ARCHITECTURE-SPINE.md`.
 
 ## Blockers
 
-### N1. Epic 2 deadlocks on `depends_on` before `reconcile` exists
+### R1. A hand-merged parked PR never becomes `merged` before `reconcile` exists
 
-- The Story 1.20 runbook has the Maintainer write Epic 2's manifests "with `depends_on` where a Story builds on an earlier one" (E:1072).
-- `next` returns a Story only when every `depends_on` Story is `done` in `sprint-status.yaml` on `main` (E:495-497; S:232, S:321). A `merged` record does not count (E:492).
-- Only Story 2.5's `reconcile` writes `done` (E:1221; S:96). Until Story 2.5 merges and the coordinator lane runs, a merged Story stays `merged`, and Story 1.17a writes only that (E:946).
-- Example: Story 2.5 builds on Story 2.4's coordinator lane. A manifest with `2.5 depends_on [2.4]` means Story 2.5 is never returned, because Story 2.4 can only become `done` once Story 2.5 exists. With one builder, Epic 2 stops.
-- Also unrecorded: when the Maintainer advances `runner_version`, and tags it (E:1026), during Epic 2. Story 2.6 is the only mention (E:1262).
-- **Fix, either:**
-  - (recommended) a Story listed in `depends_on` is satisfied when it is `done`, **or** has a `merged` record. Either way the predecessor is on `main`, which is what `depends_on` protects. Change spine AD-10/AD-13 and Story 1.6.
-  - a runbook rule that Epic 2 manifests name no Story before 2.5 in `depends_on`. Builder limit 1 plus lowest-Story-first already orders them.
-- Also record the `runner_version` steps in the runbook.
+- Under the every-path approval rule, a builder PR parks for the Maintainer's approval, and the Maintainer queues it by hand while `reconcile` does not exist (E:282, E:988).
+- E:282 and E:988 say "a lane that later sees it merged writes `merged`" (AD-3 allows any lane to, S:112). No acceptance criterion builds that step:
+  - Story 1.16 inspects only the branch of the unit it just claimed (E:889);
+  - `next` never returns a `parked` record (E:507);
+  - only Story 2.5's `reconcile` writes `merged` for merged PRs (E:1221).
+- Trace: Story 2.4 parks, and the Maintainer merges it by hand. Its record stays `parked`, holding its globs, so `2.5 depends_on [2.4]` is never met (D14, E:513). Story 2.5 is never chosen, `reconcile` never exists, and Epic 2 stops. This reopens N1.
+- **Fix:** at lane start, after the snapshot, any lane writes `merged` for each `parked` record whose PR the snapshot shows merged. The edit is idempotent. Change Story 1.16 or 1.17a, and AR8/AD-7 if a row is needed.
 
-### N2. The write check refuses every retro unit
+### R2. Maintainer-routed and glob-less retro items can never close
 
-- Retro units hold only `sprint-status.yaml`, `retro-gates.yaml` and the Epic context path (S:314; E:1197).
-- Coordinator diffs may touch only the paths their unit holds (S:652; E:1199-1201).
-- Stock `bmad-retrospective` writes `{implementation_artifacts}/epic-<N>-retro-<date>.md` (`.claude/skills/bmad-retrospective/references/retro-document.md`), and Story 2.9 needs that file in the diff to validate the verdict (E:1374).
-- Effect: Epic 2's retro never lands, so Epic 3 never starts.
-- The same kind of gap: on a FAIL, a headless `bmad-sprint-planning` can write `{planning_artifacts}/implementation-readiness.md` (`.claude/skills/bmad-sprint-planning/references/readiness-gate.md`). That path is outside the status unit's paths.
-- **Fix:**
-  - add `retro_doc_glob` to the retro unit's held paths (spine AD-13, AD-30; Stories 2.4 and 2.9);
-  - either add the readiness findings path to the status unit, or tell the status unit's prompt not to write it.
-
-### N3. The Story spec path is not pinned
-
-- The runner expects the Story spec at `story_spec_path`, by default `implementation_artifacts/spec-<sprint_key>.md` (S:240; AR11 at E:144).
-- Story 1.16 cross-checks the result against that spec's `status` and `## Auto Run Result`, and treats a mismatch as an invalid result (E:876-878).
-- The write check lets a builder diff carry, outside its globs, only that one spec file (E:62, E:1148; S:650).
-- Story 1.13's prompt says only "Build Story 1.7" and runs stock `bmad-build-auto` (E:757). Outside folder+id dispatch, build-auto derives its own slug from the intent and leads it with the tracking id, e.g. `3-2-digest-delivery` (`.claude/skills/bmad-build-auto/step-01-clarify-and-route.md`, Route). So the slug need not equal `sprint_key`.
-- Effect: every self-hosted build fails the cross-check, or its spec file is refused. It uses up 3 attempts and parks.
-- **Fix, either:**
-  - the prompt names the exact spec path for build-auto to use (Story 1.13; spine AD-29);
-  - `story_spec_path` matches `spec-<epic>-<story>-*.md`, and the runner takes the single match (spine AD-10; Stories 1.2 and 1.16).
-
-## Partly open from the previous gate
-
-- **C10, Story 2.7 before 2.8.** E:1302 now states the gap, but the order is unchanged. Graph PRs merge under the every-path approval rule only, with no merge-result `resolveGraph` and no `approved_graph` binding until Story 2.8. The runbook does not tell the Maintainer to run `xarabot graph check` (E:423-425) on each graph PR in the meantime.
-- **C11, sandbox env.** Spine AD-17 passes through "the variable that points the CLI at its vendor home" (S:417). The allowlist in AR18 (E:151) and Story 1.11 (E:682) omits it, yet Stories 1.14 and 3.1 set `CLAUDE_CONFIG_DIR` and `CODEX_HOME` (E:791, E:1497).
+- Story 4.3 sets `route: maintainer` items to `waiting` (E:1828), which counts as open (S:297). Items with no globs stay `open` and can't be claimed (S:324; E:1449-1451).
+- The only status writer is `reconcile`, which marks an item `done` when its retro-item PR merges (E:1457-1459). Nothing writes `deferred`.
+- No ruling verb changes an item's status: `dismiss` removes only the inbox item (S:631-637; E:1938-1940). A Maintainer hand edit of `retro-gates.yaml` is not an allowed write, beyond the rejected-retro go (SPEC:175-178; S:100).
+- Trace: Epic 2's retro routes one item to the Maintainer. Once Story 4.1's distance gates are pinned, the item holds every Epic at distance 2 or more from Epic 2. That is Epic 4's remaining Stories, then Epics 5–7 for good.
+- **Decide:** how a Maintainer-routed or glob-less item closes or is deferred. For example, a ruling verb `/xarabot done <item-id>` or `/xarabot defer <item-id>`, applied by `reconcile`. Change AD-28, AD-12 (the writer of `deferred` and `done`), and Stories 4.3, 4.5 and 4.6.
 
 ## Concerns
 
-- **C1. Live tests cannot be switched on.**
-  - The convention is `bun test --live <suite>` (S:701; E:233, E:1056, E:1475 and peers).
-  - Bun 1.4.3 accepts `--live` silently and does not pass it into `Bun.argv`, so a test cannot tell it is live (checked 2026-10-21).
-  - No Story builds a live switch (Story 1.1, E:290-319).
-  - **Fix:** an environment variable (e.g. `XARABOT_LIVE=1`) in spine Conventions and Story 1.1, and update every verification Story's command.
-- **C2. The loopback cap pre-empts the CI-fix cap.**
-  - Every later agent change, CI fixes included, re-runs the review and counts as a loopback, at most 2 (S:399).
-  - CI fixes have their own cap of 2 (S:446), and Story 3.5 parks at `loopbacks ≥ 2` "whatever the review's verdict" (E:1644-1645).
-  - So `ci-fix-cap` can never fire, and two CI fixes park a unit whose checks pass.
-  - **Fix:** decide whether CI fixes count against the loopback cap (spine AD-16/AD-19, Story 3.5).
-- **C3. Where vendor credentials come from is not recorded.** The vendor home is "re-seeded" with a credential (S:411-412; E:685-687, E:1544). Nothing says where the runner reads the Claude OAuth token, the Codex auth or the OpenRouter key, including for a reviewer of another vendor. **Fix:** spine AD-17.
-- **C4. `retro-gates.yaml` has no field schema.**
-  - The spine names the file only (S:591). The fields for verdict, items, checkpoint go, a rejected retro's go and "awaiting go" appear nowhere, so Story 1.4 would invent them (E:411).
-  - Story 1.4's scope also omits the rejected-retro go that Story 1.6 reads (E:485-488).
-  - The Maintainer's hand-written go before Story 4.6 (S:100; E:1079) has no defined format.
-  - **Fix:** spine AD-12 and Story 1.4.
-- **C5. How a status unit compiles Epic context is not recorded.**
-  - No stock headless skill does it. `compile-epic-context.md` is internal to `bmad-build-auto`.
-  - S:312, S:634 and Story 2.7 (E:1285) leave it open.
-  - Story 1.6 also lacks the "context compiled before eligible" gate that S:323 implies.
-  - **Fix:** spine AD-13/AD-29 and Stories 1.6 and 2.7.
-- **C6. Maintainer writes beyond SPEC's "one exception" (Maintainer decision).**
-  - SPEC:175 makes the coordinator the only writer of `sprint-status.yaml` and `retro-gates.yaml`, with "the one exception" being the Maintainer's one-time `sprint-status.yaml` write at the self-host switch.
-  - The spine adds a second Maintainer write: a rejected retro's go recorded by hand in `retro-gates.yaml` until Story 4.6 (S:100; E:1079).
-  - Separately, the spine names the coordinator as sole writer of manifests and `epics.md` (S:101), yet the runbook has the Maintainer supply Epic 2's manifests (E:1072).
-  - **Decide:** widen SPEC:175, and the matching AD-3 rows, to the bootstrap-period Maintainer writes, or remove those writes from the plan. Per AGENTS.md this is the Maintainer's call. A SPEC change goes through `bmad-spec`.
-- **C7. Creating `sprint-status.yaml` before the switch.** AR4 and S:97 describe the Maintainer's switch-time write as the one that *creates* the file. If the Maintainer runs `bmad-sprint-planning` during the Epic 1 bootstrap, that switch-time write instead updates it with Epic 1 `done`. **Fix:** word AR4, S:97 and E:1072 so either order works.
-- **C8. Story size.** Story 1.16 (E:851-906) covers claim, branch adoption, session, result validation and cross-check, commit, push, PR, comments, denied actions, parking, budget, journal and the outcome file. It is unlikely to fit one 6-hour unit; split it. Story 2.7 (E:1266-1315) is borderline.
+- **R3. No git identity for the agent's own commit.**
+  - Stock `bmad-build-auto` commits inside the clone at the end of a run. If the working copy isn't clean it halts `blocked` ("finalization left repository dirty") (`.claude/skills/bmad-build-auto/step-04-review.md`, finalize steps 1–2).
+  - The session's `HOME` is fresh (S:436-437), and nothing records a git identity for that commit. If the commit fails, every build parks.
+  - **Fix:** the runner writes a clone-local identity when it rebuilds the clone (AD-15, Story 1.15). The runner's own commit still sets the real author.
+- **R4. A crashed lane has no recovery before Story 2.2.**
+  - A `claimed` record from a dead process is never returned (E:507). Story 1.16 always runs `next` (E:884), and stale takeover arrives in Story 2.2.
+  - `stop --now` releases a live lane's unit (E:1035-1039), but nothing says it works when the lane is already dead.
+  - **Fix:** Story 1.16 resumes the lane's own live claim before `next`, or `stop --now` releases a dead lane's claim. Either way, the Story 1.20 runbook names the recovery.
+- **R5. Story 4.4 is stale.** It still has runner code "mark C as awaiting a go in `retro-gates.yaml`" (E:1853). The 2026-10-22 schema has no such record (S:308; E:146), and S:104 names no writer for it. State what the checkpoint unit does now, and add an AD-7 row for a one-shot unit with nothing to commit.
+- **R6. A blocked status unit.**
+  - Readiness findings make the `planning` outcome `blocked` (S:655), but AD-7 has no `park.reason` for it (S:182), and nothing stops `planning:<slug>.<n+1>` re-running the same thing.
+  - Epic context compiling rides on the same unit, so one finding holds the next Epic's start (D19).
+  - **Fix:** a park reason, a rule against re-running the same finding, and how the Maintainer clears it.
+- **R7. Coordinator PRs under the every-path rule.**
+  - Each `reconcile:<n>` can open another PR while the last one is parked (E:1263-1273), and no rule says to reuse it.
+  - Nothing says whether `reconcile` PRs need approval during Epic 2.
+  - S:328's "approval-gated coordinator PRs (a Protected Path or a graph change)" does not cover status units that the every-path rule gates (E:1347).
+  - The runbook doesn't say which policy list "every path" goes in (Story 1.2 has two, E:336). In Protected Paths, Story 2.3 would refuse every builder diff (S:668).
+- **R8. Other stock `bmad-build-auto` behaviours nothing records.**
+  - A halt before routing writes `bmad-build-auto-result-*.md` (`workflow.md`, write-back). A genuine `blocked` result then has zero `story_spec_path` matches, so it counts as invalid and is retried (S:364; E:897-898).
+  - On wip resume, an existing non-draft spec makes it create a `-2` file (`step-01-clarify-and-route.md`, Route), giving two matches and an invalid result.
+  - Its context-validity check also requires that no planning file is newer (`step-01`, item 2). The spine's two-condition check (S:332) differs, so a rebuilt clone may recompile the context every session. The runner reverts it, which costs only time.
+- **R9. Gaps at the switch.**
+  - `retro-gates.yaml` is created by no bootstrap write, and fail-closed exempts only a missing `epics.yaml` (S:506).
+  - An Epic 2 `depends_on` naming an Epic 1 Story has no manifest to resolve against. Validation may call it unknown and stop every lane (E:425), and `next` can't map its id to a sprint key (E:510).
+  - Xarabot's own manifest directory, and whether the manifest is also the BMAD Story file, are undecided (S:233).
+- **R10. Smaller gaps in Stories and the spine.**
+  - Story 1.16a has no branch for a three-way conflict at commit time (E:858, E:934).
+  - AD-5 lists no ledger field for `approved_graph` (S:287) or the stored retro result (S:303).
+  - Nothing gates a retro on the Maintainer's live checks having run (E:233, E:1407).
+- **R11. Epic 2 runbook.**
+  - The `runner_version` advances that Story 2.9 (Epic 2's retro) and Story 2.7 (Epic 3's context) need are covered only by the generic rule (E:1113).
+  - "Queue by hand while `reconcile` does not exist" (E:282, E:988) doesn't fit the window between Stories 2.5 and 2.6, when `reconcile` exists but doesn't yet enqueue.
 
 ## Minor
 
-- FR4 and FR18 still say "worktree" (E:32, E:61); SPEC:44 and SPEC:104 say "full clone".
-- SPEC CAP-5 (SPEC:47) and FR5 (E:34) still say "all its Stories merged"; D1 means `done` in `sprint-status.yaml`.
-- AR37 (E:170) omits `graph` from the CLI list (S:787 has it).
-- AR28 (E:161) omits Escalation statuses from the `Snapshot` (S:599 and E:2319 have them).
-- AR24 (E:157) omits open Escalations from the digest sources (S:529 has them).
-- NFR20 (E:120) omits SPEC:175's self-host write exception.
-- AD-33 (S:687) checks only `issues: write`; Story 7.5 (E:2287) also checks the merge-queue permission.
-- `/xarabot go <epic>` (E:1858, E:1912) does not match the rulings grammar, which takes AR35 ids such as `checkpoint:<epic>` (E:1831).
-- The Escalation decision file is `<decisions-dir>/ESC-<id>.md` in AR21 (E:154) but `<id>.md` in the spine and Story 7.6 (S:484; E:2315).
-- `[ASSUMPTION: zod 4]` (S:591) is already settled by the Stack table (S:711).
-
-## Checked, no finding
-
-- Every 0.x capability traces into Story acceptance criteria. No Story lacks recorded intent.
-- `.xarabot/epics.yaml` matches the stated Epic dependencies (E:272).
-- All 62 `### Story N.M:` headings are well formed, with no duplicate ids.
-- The remaining spine `[ASSUMPTION]` tags (pi directory override S:414, proxy allowlist S:420) are spiked first, in Stories 3.2 and 1.12.
-- Within Epic 1 the only forward references are deliberate and fixture-backed: 1.12 → 1.14's host list, and 1.17a → Epic 2's `reconcile`.
+- Stories 3.1, 3.2 and 3.3 drop the `<vendor>/` folder from the credential path (E:1544, E:1596, E:1651; S:430).
+- SPEC's Write authority leaves out the Maintainer's interactive Epic 1 retro, which writes `sprint-status.yaml`; AD-3 includes it (S:101).
+- S:415 says "except `reconcile` PRs (below)", but that bullet is above (S:410).
+- The "coordinator missing" alert fires again on every new `main` SHA until the coordinator is installed (S:204, S:552).
+- Story size: 2.7 and 1.17 are the largest.
 
 ## Changes by artifact
 
@@ -119,9 +102,7 @@ For `bmad-correct-course`; each artifact changes through its own skill, per AGEN
 
 | Artifact | Changes |
 |---|---|
-| Spine (`bmad-architecture`) | AD-10/AD-13 `depends_on` satisfaction (N1); AD-13/AD-30 retro unit paths and status unit findings path (N2); AD-10/AD-29 spec path (N3); Conventions live switch (C1); AD-16/AD-19 caps (C2); AD-17 credential source (C3); AD-12 `retro-gates.yaml` schema (C4); AD-13/AD-29 Epic context compile (C5); AD-3 rows per the C6 decision; S:97 wording (C7); AD-33 (Minor); stale zod tag |
-| Spec (`bmad-spec`) | SPEC:175 per the C6 decision; CAP-5 wording |
-| Epics (`bmad-create-epics-and-stories`) | Story 1.6 (N1, C5); 1.20 runbook (N1 `runner_version` steps, C10 `graph check`, C7); 2.4, 2.9 (N2); 1.2, 1.13, 1.16 (N3); 1.1 and every verification Story (C1); 3.5 (C2); 1.4 (C4); 2.7 (C5); AR18 and 1.11 env (C11); split 1.16 (C8); the requirements-inventory wording in Minor |
+| Spine (`bmad-architecture`) | AD-7 rows (R1, R5, R6); AD-28 and AD-12 item close/defer (R2); AD-15 clone identity (R3); AD-13 and S:328 coordinator PRs under every-path (R7); AD-13 context check (R8); fail-closed for `retro-gates.yaml` (R9); AD-5 fields (R10); S:415 |
+| Spec (`bmad-spec`) | Write authority: the interactive Epic 1 retro write, if the Maintainer agrees |
+| Epics (`bmad-create-epics-and-stories`) | Stories 1.16/1.17a (R1, R4); 4.3, 4.5, 4.6 (R2); 1.15 (R3); 4.4 (R5); 2.7 (R6); 2.5, 2.6, 1.2, 1.20 runbook (R7, R9, R11); 1.13/1.16 result handling (R8); 1.16a (R10); 3.1–3.3 path |
 | `.xarabot/` | unchanged |
-
-After those land, re-run `bmad-sprint-planning`: the gate, then generation.
