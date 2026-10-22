@@ -39,14 +39,16 @@ Done once by the Maintainer. Xaravel's own loop keeps running on the same Mac un
 ### On the Xarabot host, as your admin account
 
 1. **Create a standard (not admin) user named `edanisko-xarabot`**, for example `sudo sysadminctl -addUser edanisko-xarabot -fullName "Xarabot bootstrap" -password -`. Allow it in System Settings → General → Sharing → Remote Login.
-2. **Lock your home:** `chmod 700 /Users/<you>`. Check that `/opt/homebrew` is world-readable (the default), so the new user can run Homebrew's `git`, `gh`, `jq` and `uv`.
+2. **Lock your home:** `chmod 700 /Users/<you>`. After that, the new user can run only shared tools: `/usr/bin/git` and `/usr/bin/jq`. Anything installed in your home, such as `~/.local/bin/gh`, `uv` or `claude`, is out of its reach, so step 4 gives it its own copies.
 3. **Authorize your ssh key** in `/Users/edanisko-xarabot/.ssh/authorized_keys`. This key logs you *in*. The user itself gets no ssh private key, no `gh` login and no GitHub keychain item.
 
 ### As `edanisko-xarabot` (ssh in)
 
-4. **Install its own tools**, because your home, and your `~/.local/bin/claude`, are now unreadable to it:
+4. **Install its own tools** in its `~/.local/bin` and `~/.bun/bin`, since it can't reach yours:
    - Bun 1.4.3: `curl -fsSL https://bun.sh/install | bash -s bun-v1.4.3`
    - Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`
+   - uv: `curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh`
+   - gh: unzip the latest `gh_<version>_macOS_arm64.zip` from https://github.com/cli/cli/releases and copy its `bin/gh` to `~/.local/bin/gh`. It stays logged out: the driver passes a bot token per command.
 5. **Store the Claude credential** where Xarabot's runner will read it (spine AD-17):
    - `mkdir -p ~/.config/xarabot/vendors/claude && chmod 700 ~/.config/xarabot ~/.config/xarabot/vendors ~/.config/xarabot/vendors/claude`
    - Run `claude setup-token` and save the printed token as `~/.config/xarabot/vendors/claude/oauth-token`, mode 600.
@@ -71,10 +73,10 @@ Done once by the Maintainer. Xaravel's own loop keeps running on the same Mac un
 
 ### Start it, as your admin account on the host
 
-11. Install and load the LaunchDaemon. It isn't a LaunchAgent: the bootstrap user never logs in at the screen, so it has no `gui/` launchd domain.
+11. Install and load the LaunchDaemon. It isn't a LaunchAgent: the bootstrap user never logs in at the screen, so it has no `gui/` launchd domain. Its home is mode 700, so reading the plist from its clone needs `sudo` too.
 
 ```sh
-sed "s|__USER__|edanisko-xarabot|g" /Users/edanisko-xarabot/repos/xarabot/bootstrap/loop/com.xarabot.bootstrap.plist \
+sudo sed "s|__USER__|edanisko-xarabot|g" /Users/edanisko-xarabot/repos/xarabot/bootstrap/loop/com.xarabot.bootstrap.plist \
   | sudo tee /Library/LaunchDaemons/com.xarabot.bootstrap.plist >/dev/null
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.xarabot.bootstrap.plist
 ```
