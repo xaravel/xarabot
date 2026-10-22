@@ -62,7 +62,10 @@ Done once by the Maintainer. Xaravel's own loop keeps running on the same Mac un
 
 ### On GitHub, as the Maintainer
 
-8. **Require your approval on `main`:** in the `Protect main` ruleset, add "Require a pull request before merging" with 1 approval, "Dismiss stale pull request approvals when new commits are pushed" and "Require approval of the most recent reviewable push". The loop checks this itself too.
+8. **Require your approval on `main`.** This is already set, on 2026-10-22, in the `Protect main` ruleset's pull-request rule: 1 approving review, stale approvals dismissed on push, and the most recent push must be approved.
+   - GitHub never lets an author approve their own PR, so the ruleset also lets repository admins bypass the review, through the PR only. You merge your own PRs by ticking the bypass box.
+   - The bot isn't an admin, so its PRs always wait for your approval.
+   - The driver checks your approval on the head commit itself too.
 9. **After Story 1.1 merges,** copy `docs/maintainer/ci-workflow.yml` into `.github/workflows/` in a Maintainer PR, and make it a required check on `main`. Lanes never write `.github/**`, and the App has no `workflows` permission.
 10. **Before Story 1.10,** add `issues: write` to the App (Story 1.10's precondition). Until then, the App can't write issues, so the loop reports on each PR, not on a status issue.
 
