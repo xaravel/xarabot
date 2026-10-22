@@ -1,6 +1,6 @@
 ---
 status: draft
-stepsCompleted: [1, 2]
+stepsCompleted: [1, 2, 3]
 inputDocuments:
   - _bmad-output/specs/spec-xarabot/SPEC.md
   - _bmad-output/specs/spec-xarabot/glossary.md
@@ -323,7 +323,7 @@ So that revoking authority or breaking config stops every lane before its next c
 
 **Given** `src/core/schemas/`
 **When** the Story is done
-**Then** it holds versioned zod schemas, with inferred types, for `.xarabot/config.yaml` (including `runner_version`, the Maintainer's login, the Standing Authority path, the manifest directory and path-key mapping, `story_spec_path`, both branch namespaces, the unit budget defaulting to 6 hours, the CI max wait defaulting to 60 minutes and repo-added proxy hosts), `.xarabot/policy.yaml` (adapters allowed unattended, the expected-checks list, the repo's Protected Paths and the paths that need the owner's approval), the Standing Authority frontmatter and `host.yaml` (AR21, AR22).
+**Then** it holds versioned zod schemas, with inferred types, for `.xarabot/config.yaml` (including `runner_version`, the Maintainer's login, the Standing Authority path, the manifest directory and path-key mapping, `story_spec_path`, both branch namespaces, the unit budget defaulting to 6 hours, the CI max wait defaulting to 60 minutes, repo-added proxy hosts, the lockfile regeneration command and the optional map from Epics to workspace packages), `.xarabot/policy.yaml` (adapters allowed unattended, the expected-checks list, the repo's Protected Paths and the paths that need the owner's approval), `.xarabot/human-live-steps.yaml`, the Standing Authority frontmatter and `host.yaml` (AR21, AR22).
 
 **Given** a snapshot of `main` as a tree listing plus file contents
 **When** the pure `loadRepoConfig` runs
@@ -747,7 +747,7 @@ So that a Story is built by Claude Code with the lane's model and effort and ret
 
 **Given** a model
 **When** `effortValues` runs
-**Then** it returns the efforts that model offers, and a lane whose `effort` is not among them refuses to start, with no silent drop or rounding.
+**Then** it returns the efforts that model offers, and the adapter's start check refuses a lane `effort` not among them, with no silent drop or rounding.
 
 **Given** CLI output
 **When** `parseUsage` runs
@@ -759,8 +759,8 @@ So that a Story is built by Claude Code with the lane's model and effort and ret
 **Then** it resumes once with `claude -p --resume <session>` and a prompt that asks only for the result.
 
 **Given** an installed `claude` older than 2.1.304
-**When** a lane starts
-**Then** it refuses to start.
+**When** the adapter's start check runs
+**Then** it refuses.
 
 **Given** the `Agent` contract suite
 **When** it runs with a stub CLI
@@ -961,7 +961,7 @@ So that a bad Story can never break the runner that would build its fix, and rec
 
 **Given** the refusal case table
 **When** a lane starts
-**Then** it refuses if its agent is not allowed unattended by policy, its effort is not in `effortValues` for its model, the App installation does not cover the repo, or the host would run more builders than `XARABOT_MAX_BUILDERS` across all repos.
+**Then** it refuses if its agent is not allowed unattended by policy, its adapter's start check fails (an effort not in `effortValues` for its model, or a CLI below the minimum tested version), the App installation does not cover the repo, or the host would run more builders than `XARABOT_MAX_BUILDERS` across all repos.
 
 **Given** `runner_version` changed on `main`
 **When** the lane next starts
@@ -1076,10 +1076,6 @@ So that builders cannot write coordinator-owned files, manifests, agent config o
 **When** the runner squashes
 **Then** it reverts that change first (AR14).
 
-**Given** a coordinator session's change
-**When** it touches a path its unit does not hold, a graph input from a unit that is not `planning`, anything under `.xarabot/**` other than `epics.yaml`, or both a graph input and a status file
-**Then** it is refused.
-
 **Given** any agent diff
 **When** it changes a retro verdict, a retro item or a checkpoint go in `retro-gates.yaml`
 **Then** it is refused.
@@ -1122,6 +1118,10 @@ So that two coordinators never run, and builders keep going and raise an alert w
 **Given** coordinator units
 **When** their globs are computed
 **Then** planning holds the graph inputs, both status files and the Epic context path; retro and checkpoint hold the status files and the Epic context path, never the graph inputs; `reconcile` holds none; and the overlap check applies to the coordinator as to builders.
+
+**Given** a coordinator session's change
+**When** it touches a path its unit does not hold, a graph input from a unit that is not `planning`, anything under `.xarabot/**` other than `epics.yaml`, or both a graph input and a status file
+**Then** the write check (Story 2.3) refuses it, and the case table gains a row per rule (AR31).
 
 ### Story 2.5: `reconcile` marks units done
 
@@ -1358,38 +1358,9 @@ So that I can lift the builder limit after Epic 3 with evidence that claims hold
 
 ## Epic 3: No diff merges without another vendor's review
 
-`codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges. Once this Epic merges, the Maintainer lifts the every-path approval rule and the 1-builder limit.
+`codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges. The adapters come first, so that when the reviewer choice (Story 3.3) reaches the pinned runner, a reviewer from another vendor exists; the Maintainer allows `codex` in this repo's policy before advancing `runner_version` past Story 3.3. Once this Epic merges, the Maintainer lifts the every-path approval rule and the 1-builder limit.
 
-### Story 3.1: Session vendors and the reviewer choice
-
-As the Maintainer,
-I want the runner to know the vendor of every model that changed a diff, and to pick a reviewer from another vendor,
-So that no diff is reviewed by the vendor that built it (FR8, AR17).
-
-**Acceptance Criteria:**
-
-**Given** a session's adapter and model
-**When** the pure vendor function runs
-**Then** `claude` is Anthropic, `codex` is OpenAI, and a `pi` session is the vendor named in its `<provider>/<id>` model; through OpenRouter, it is the vendor of the underlying model (`openrouter/anthropic/<id>` is Anthropic).
-
-**Given** a unit
-**When** any session changes its diff (first build, loopback, CI fix or conflict resolution)
-**Then** that session's vendor is added to the record's `builder_providers[]`.
-
-**Given** `builder_providers[]` and the repo's allowed adapters
-**When** the pure reviewer choice runs
-**Then** it returns the first allowed adapter of (`claude`, `codex`) whose vendor is not in the set, or none
-**And** the case table reproduces `agent-adapters.md` § Cross-vendor review: `claude` → `codex`, `codex` → `claude`, `pi` with an Anthropic model → `codex`, `pi` with any other vendor's model → `claude`.
-
-**Given** no allowed reviewer from another vendor
-**When** the unit is ready for review
-**Then** it becomes `parked`, blocked, with `park.inbox_owner` set to its owner.
-
-**Given** a lane
-**When** it starts
-**Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy (AR17, AR22).
-
-### Story 3.2: The `codex` adapter
+### Story 3.1: The `codex` adapter
 
 As an operator,
 I want a lane to run `codex` through the `Agent` port inside the sandbox,
@@ -1431,7 +1402,7 @@ So that Stories can be built by an OpenAI model with the same lane settings as `
 **When** they run for `codex`
 **Then** each passes, with live cases skipped without credentials.
 
-### Story 3.3: The `pi` adapter
+### Story 3.2: The `pi` adapter
 
 As an operator,
 I want a lane to run `pi` with any OpenRouter model through the `Agent` port,
@@ -1472,6 +1443,35 @@ So that Stories can be built by models from other vendors with the same lane set
 **Given** the `Agent` contract suite, the sandbox refusal suite and the write-check case table
 **When** they run for `pi`
 **Then** each passes, with live cases skipped without credentials.
+
+### Story 3.3: Session vendors and the reviewer choice
+
+As the Maintainer,
+I want the runner to know the vendor of every model that changed a diff, and to pick a reviewer from another vendor,
+So that no diff is reviewed by the vendor that built it (FR8, AR17).
+
+**Acceptance Criteria:**
+
+**Given** a session's adapter and model
+**When** the pure vendor function runs
+**Then** `claude` is Anthropic, `codex` is OpenAI, and a `pi` session is the vendor named in its `<provider>/<id>` model; through OpenRouter, it is the vendor of the underlying model (`openrouter/anthropic/<id>` is Anthropic).
+
+**Given** a unit
+**When** any session changes its diff (first build, loopback, CI fix or conflict resolution)
+**Then** that session's vendor is added to the record's `builder_providers[]`.
+
+**Given** `builder_providers[]` and the repo's allowed adapters
+**When** the pure reviewer choice runs
+**Then** it returns the first allowed adapter of (`claude`, `codex`) whose vendor is not in the set, or none
+**And** the case table reproduces `agent-adapters.md` § Cross-vendor review: `claude` → `codex`, `codex` → `claude`, `pi` with an Anthropic model → `codex`, `pi` with any other vendor's model → `claude`.
+
+**Given** no allowed reviewer from another vendor
+**When** the unit is ready for review
+**Then** it becomes `parked`, blocked, with `park.inbox_owner` set to its owner.
+
+**Given** a lane
+**When** it starts
+**Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy (AR17, AR22).
 
 ### Story 3.4: Review sessions
 
@@ -1590,7 +1590,60 @@ So that untagged follow-ups are worked alongside later Stories, while a `blockin
 **When** it runs
 **Then** an untagged open item from E does not gate an Epic one step from E but does gate one two steps away, and a `blocking` item gates every Epic depending on E, directly or through others.
 
-### Story 4.2: Checkpoints
+### Story 4.2: Owner inboxes and the daily digest
+
+As an owner,
+I want one inbox listing everything waiting on me, rewritten once a day,
+So that I rule on it in one sitting with no other per-item notices (FR9, AR24).
+
+**Acceptance Criteria:**
+
+**Given** an owner
+**When** the coordinator first needs their inbox
+**Then** it finds or creates one issue labelled `xarabot-inbox` and assigned to that owner; on a solo repo the Maintainer's inbox is the only one.
+
+**Given** the coordinator's daily run
+**When** `renderDigest` rewrites an owner's issue body from the ledger's `parked` records, PR states and `retro-gates.yaml`
+**Then** it lists their bot's PRs awaiting approval and their blocked units, each with its link, its age and the ruling verbs that apply.
+
+**Given** the Maintainer's inbox
+**When** the digest is rendered
+**Then** it also lists checkpoint gos waiting, Infrastructure Stories needing approval, Maintainer-routed retro items, graph-changing PRs awaiting approval, Story headings with no manifest, and units waiting on a Human Live Step (`blocked.kind`).
+
+**Given** the digest
+**When** nothing has changed since the last rewrite
+**Then** the body is not rewritten, and no other comment is posted.
+
+**Given** a condition that newly stops every lane
+**When** it occurs
+**Then** the alert from Story 1.10 notifies at once, and is the only notice outside the digest.
+
+**Given** the forge contract suite
+**When** it runs
+**Then** the fake and GitHub adapters pass the `renderDigest` cases
+**And** `docs/maintainer/self-host.md` adds the Human Live Step of pinning the Maintainer's inbox issue once by hand.
+
+### Story 4.3: Batch routing of Maintainer-only retro items
+
+As the Maintainer,
+I want retro items routed to me to land in my inbox in one batch, by runner code,
+So that no agent session is spent only to route items to me (FR9, AR14, AR24).
+
+**Acceptance Criteria:**
+
+**Given** a retro whose items include ones with `route` naming the Maintainer
+**When** `reconcile` writes `retro-gates.yaml`
+**Then** those items are set to `waiting` in the same runner-written PR, with no agent session.
+
+**Given** routed items
+**When** the next digest is rendered
+**Then** each appears once in the Maintainer's inbox with its id, text, Epic and age.
+
+**Given** routed items
+**When** `next(snapshot, 'coordinator')` reaches retro items
+**Then** they are never returned as `retro-item` units.
+
+### Story 4.4: Checkpoints
 
 As the Maintainer,
 I want a checkpoint Epic to hold only the Epics that depend on it until I say go,
@@ -1622,59 +1675,6 @@ So that independent Epics keep running while I review a checkpoint (FR5, AR12, A
 **Given** the case tables
 **When** they run
 **Then** dependents at distance 1 and 2, a sibling not depending on C, an in-flight Epic and a late-added checkpoint each have a case.
-
-### Story 4.3: Owner inboxes and the daily digest
-
-As an owner,
-I want one inbox listing everything waiting on me, rewritten once a day,
-So that I rule on it in one sitting with no other per-item notices (FR9, AR24).
-
-**Acceptance Criteria:**
-
-**Given** an owner
-**When** the coordinator first needs their inbox
-**Then** it finds or creates one issue labelled `xarabot-inbox` and assigned to that owner; on a solo repo the Maintainer's inbox is the only one.
-
-**Given** the coordinator's daily run
-**When** `renderDigest` rewrites an owner's issue body from the ledger's `parked` records, PR states and `retro-gates.yaml`
-**Then** it lists their bot's PRs awaiting approval and their blocked units, each with its link, its age and the ruling verbs that apply.
-
-**Given** the Maintainer's inbox
-**When** the digest is rendered
-**Then** it also lists checkpoint gos waiting, Infrastructure Stories needing approval, Maintainer-routed retro items, graph-changing PRs awaiting approval, Story headings with no manifest, units waiting on a Human Live Step (`blocked.kind`), and open Escalations where repo config points at an Escalation source.
-
-**Given** the digest
-**When** nothing has changed since the last rewrite
-**Then** the body is not rewritten, and no other comment is posted.
-
-**Given** a condition that newly stops every lane
-**When** it occurs
-**Then** the alert from Story 1.10 notifies at once, and is the only notice outside the digest.
-
-**Given** the forge contract suite
-**When** it runs
-**Then** the fake and GitHub adapters pass the `renderDigest` cases
-**And** `docs/maintainer/self-host.md` adds the Human Live Step of pinning the Maintainer's inbox issue once by hand.
-
-### Story 4.4: Batch routing of Maintainer-only retro items
-
-As the Maintainer,
-I want retro items routed to me to land in my inbox in one batch, by runner code,
-So that no agent session is spent only to route items to me (FR9, AR14, AR24).
-
-**Acceptance Criteria:**
-
-**Given** a retro whose items include ones with `route` naming the Maintainer
-**When** `reconcile` writes `retro-gates.yaml`
-**Then** those items are set to `waiting` in the same runner-written PR, with no agent session.
-
-**Given** routed items
-**When** the next digest is rendered
-**Then** each appears once in the Maintainer's inbox with its id, text, Epic and age.
-
-**Given** routed items
-**When** `next(snapshot, 'coordinator')` reaches retro items
-**Then** they are never returned as `retro-item` units.
 
 ### Story 4.5: Rulings: grammar, authority and cursor
 
@@ -2114,7 +2114,11 @@ So that the adoption needs only config and policy files on Xaravel's side (NFR17
 
 **Acceptance Criteria:**
 
-**Given** a repo config that names an Escalation source (Xaravel's `tools/escalations/`) and its format
+**Given** an optional Escalation source field added to the repo config schema, naming a directory (Xaravel's `tools/escalations/`) and its format
+**When** config is loaded
+**Then** the field validates, and its absence changes nothing.
+
+**Given** a repo config that names an Escalation source
 **When** the coordinator renders the Maintainer's digest
 **Then** open Escalations from that source are listed with their links and ages
 **And** a unit whose build result is `blocked` with kind Escalation parks with its globs released, per AR8.
@@ -2134,7 +2138,7 @@ As the Maintainer,
 I want proof on a throwaway consumer repo and a Linux host that 0.x works for a repo other than Xarabot's own,
 So that Xaravel's adoption starts from evidence (FR1, FR4).
 
-Precondition (Human Live Step): the Maintainer provides a Linux host for the lanes and a throwaway consumer repo with the App installed and the prerequisites set.
+Precondition (Human Live Step): the Maintainer provides a throwaway consumer repo with the App installed and the prerequisites set, and a Linux host: a fresh VM on the Proxmox system, outside its k8s cluster, with systemd, user namespaces allowed, `bwrap --version` at 0.13.1 or newer, and outbound access to GitHub and the vendor APIs. Not an OrbStack machine on the macOS host, which shares the Mac's files and would test the wrong boundary.
 
 **Acceptance Criteria:**
 
