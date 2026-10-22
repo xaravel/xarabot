@@ -1773,3 +1773,96 @@ So that a consuming repo can turn on parallel Epics with evidence (FR5, FR10).
 **Given** the scratch repo's inbox
 **When** the digest is rendered
 **Then** every waiting item appears once, with its link and age.
+
+## Epic 5: Each human runs lanes as their own bot
+
+`xarabot join` creates a person's `<login>-xarabot` App from a manifest and installs it, or requests the install, replacing `bootstrap/join.ts`. A lane whose installation does not cover its repo stops and names the repo to add. The owner's approval is what makes their bot's Protected Path PRs mergeable; the bot's own review never is.
+
+### Story 5.1: `xarabot join` creates the owner's App
+
+As a human joining a repo,
+I want one command that creates my own `<login>-xarabot` App with one confirm click and stores its key for the runner,
+So that my lanes can act as my bot with no long-lived token and no shared identity (FR13, NFR9, AR27).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot join --repo <owner/name>`
+**When** no App record exists for the caller's login
+**Then** it serves the App manifest on `127.0.0.1`, opens GitHub's manifest page, and on the callback (with a matching `state`) converts the code into the App
+**And** it writes `private-key.pem` (mode 600, in a folder of mode 700) and `app.json` with the App ID, slug and owner at `$XDG_CONFIG_HOME/xarabot/apps/<login>-xarabot/`, falling back to `~/.config`, and never prints the key.
+
+**Given** the pure manifest builder
+**When** it runs
+**Then** the manifest names `<login>-xarabot`, is public so other orgs can install it, has no webhook, and asks for exactly `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`, `actions: read`, `metadata: read` and the merge-queue permission recorded by Story 1.10
+**And** it never asks for `administration`, `workflows` or any bypass right, and a test pins the permission set.
+
+**Given** an App record already present
+**When** `xarabot join` runs again
+**Then** it skips creation
+**And** if the existing App lacks a permission in the manifest, it stops and names each permission to add in the App's settings (a Human Live Step), because GitHub does not let the API change it.
+
+**Given** JWT minting and installation tokens
+**When** `xarabot join` needs them
+**Then** it uses the GitHub adapter's code from Story 1.8; there is one implementation.
+
+**Given** `xarabot join` working
+**When** the Story is done
+**Then** `bootstrap/join.ts` is removed, and `docs/maintainer/self-host.md` points to `xarabot join` instead.
+
+### Story 5.2: Installing the App and checking its reach
+
+As a human joining a repo,
+I want `xarabot join` to install my App on the repo's org, or request the install, and to check that it reaches the repo,
+So that adopting Xarabot in a repo needs no further GitHub step, or tells me exactly which one (FR13, AR22).
+
+**Acceptance Criteria:**
+
+**Given** an App with no installation on the repo's org
+**When** `xarabot join` runs
+**Then** it opens the App's install page with "All repositories" as the default, and waits up to 15 minutes for the installation to appear
+**And** a caller who is not an org owner is told that GitHub sends an install request for an owner to approve, and a re-run picks up the approved installation.
+
+**Given** an installation
+**When** `xarabot join` verifies it
+**Then** it mints an installation token, lists the repositories it reaches, and prints the installation's scope, the bot login `<login>-xarabot[bot]` and its commit identity.
+
+**Given** a selected-repositories installation that does not cover the repo
+**When** `xarabot join` runs, or a lane starts for that repo
+**Then** it stops, naming the repo to add and where to add it.
+
+**Given** the waits in `xarabot join`
+**When** they run
+**Then** each is a killable sleep with a deadline, and no `timeout` binary is called (AR3).
+
+**Given** the CLI tests
+**When** they run against a fake GitHub
+**Then** the create, re-run, install, install-request and uncovered-repo paths each have a case.
+
+### Story 5.3: Owner approvals and bot rights verification
+
+As the Maintainer,
+I want proof that my bot cannot approve or force a merge, and that my own approval clears its Protected Path PRs at once,
+So that the bot is never more than its owner's hands (FR13, AR17, AR27).
+
+**Acceptance Criteria:**
+
+**Given** a test org with an App created by `xarabot join` and a Protected Path that requires the owner's review
+**When** the verification suite runs
+**Then** the bot opens a PR touching that path, and the PR is not mergeable until the owner approves it.
+
+**Given** that PR
+**When** an APPROVE review is submitted with the bot's own installation token
+**Then** the PR still is not mergeable on that review
+**And** the source has no code path that submits an approving review, which a test asserts against the `Forge` port and the GitHub adapter.
+
+**Given** the owner's approving review on the PR's head
+**When** `reconcile` next runs
+**Then** it enqueues the PR, and it merges straight away on its required checks and the cross-vendor review.
+
+**Given** the bot's token
+**When** the suite tries an admin merge or a bypass of required checks
+**Then** GitHub refuses it, and the adapter has no such code path.
+
+**Given** every lane-made commit and PR in the suite
+**When** it is inspected
+**Then** it is authored by `<login>-xarabot[bot]`.
