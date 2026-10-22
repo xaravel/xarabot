@@ -1,7 +1,7 @@
 # Glossary
 
 - **Unit:** one piece of work a lane takes: a Story, a retro, a retro action item, a planning step, or a checkpoint record.
-- **Lane:** one long-running worker on a host, with its own worktree, state folder, scheduled job, agent and model.
+- **Lane:** one long-running worker on a host, with its own full clone (never a linked worktree), state folder, scheduled job, agent and model.
 - **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
 - **Claim:** a lane's exclusive hold on a unit, made by compare-and-swap on a git ref, kept alive by heartbeat, expiring 30 minutes after the last heartbeat.
