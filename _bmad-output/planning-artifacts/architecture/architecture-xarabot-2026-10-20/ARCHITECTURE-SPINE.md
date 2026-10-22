@@ -365,7 +365,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
   - **Picking the reviewer.** The reviewer must come from a provider not in the record's `builder_providers[]`.
     - **A session's provider** is the vendor of the model it runs, never the adapter's name. `claude` is Anthropic and `codex` is OpenAI. A pi session's provider is the vendor named in its `<provider>/<id>` model; through OpenRouter, that is the vendor of the underlying model.
     - **Which reviewer:** the first allowed adapter from (`claude`, `codex`) whose provider is not in the set.
-    - If no allowed reviewer is left, the unit parks blocked.
+    - **Single vendor.** If the repo's policy allows no adapter whose provider is outside the set, a separate same-vendor session reviews instead, under every rule below. The reviewer is the first allowed of (`claude`, `codex`); with neither allowed, a `pi` session on the builder's model `[ASSUMPTION: spec § Assumptions, same-vendor reviewer]`.
     - pi lanes must set `model` explicitly.
     - If the model a session reports differs from its config, the attempt fails.
   - **The session.** The review runs over a fresh checkout of `head_sha` that the runner makes from `runner.git`, never in the builder's clone.
@@ -549,7 +549,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
   - **What each verb does to the record:**
     - `release` and `rebuild` reset `attempts`, `loopbacks` and `ci_fixes` to 0.
     - `rebuild` also closes the PR (AD-9) and clears `builder_providers[]`, because the diff starts again from `main`.
-    - `release` keeps `builder_providers[]`, because the existing diff carries over. A unit parked because no reviewer is left therefore needs `rebuild`.
+    - `release` keeps `builder_providers[]`, because the existing diff carries over.
     - `dismiss` removes only the inbox item and leaves the ledger unchanged.
   - **Applying it.** Rulings, the checkpoint go included, are applied by `reconcile`'s runner code, never by an agent session. The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **Local-only mode (v1)** uses `xarabot rule <verb> <unit-id>`.
