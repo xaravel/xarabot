@@ -194,7 +194,7 @@ None. There is no UX design contract. The only interface beyond the CLI is the r
 ### FR Coverage Map
 
 FR1: Epic 1 - pinned runner install from `runner_version`; Epic 7 - consumer exact-pin check, changelog, upgrade as a PR
-FR2: Epic 1 - builder `next`, `resolveGraph`, `xarabot graph check`, the "dependencies merged and retro done" gate; Epic 2 - coordinator unit order; Epic 4 - retro-item distance gates and checkpoints
+FR2: Epic 1 - builder `next`, `resolveGraph`, `xarabot graph check`, the "dependencies merged and retro done" gate; Epic 2 - coordinator unit order, the graph-change gate; Epic 4 - retro-item distance gates and checkpoints
 FR3: Epic 1 - ledger records and compare-and-swap for one lane; Epic 2 - heartbeat, takeover, fencing, glob overlap, across machines
 FR4: Epic 2 - coordinator and N builder lanes on a macOS host; Epic 7 - Linux hosts (systemd)
 FR5: Epic 4 - Epics in parallel by the graph, checkpoints hold only their dependents
@@ -240,8 +240,8 @@ The Maintainer installs a pinned Xarabot runner on the Xarabot host, and one `cl
 
 ### Epic 2: A coordinator lane and claims let builders run side by side
 Xarabot runs its own coordinator: `reconcile`, planning, retro and retro-item units, under a coordinator claim. Builder lanes share a host, or several hosts, without building a unit twice or colliding on globs, and no builder can write coordinator-owned files, manifests, agent config or policy.
-**FRs covered:** FR2 (coordinator order), FR3 (heartbeat, takeover, fencing, overlap), FR4 (macOS), FR18 (write check)
-**Notes:** the builder limit stays at 1 until Epic 3 merges. Ends with two lanes racing against the real `xarabot/claims` for one unit and for overlapping globs, exactly one winning, and a killed lane's unit becoming claimable 30 minutes after its last heartbeat.
+**FRs covered:** FR2 (coordinator order, graph-change gate), FR3 (heartbeat, takeover, fencing, overlap), FR4 (macOS), FR18 (write check)
+**Notes:** planning units change the effective graph, so the AD-11 graph-change gate (`xarabot:graph`, validation on the merge result, Maintainer approval bound to `approved_graph`) lands here. The builder limit stays at 1 until Epic 3 merges. Ends with two lanes racing against the real `xarabot/claims` for one unit and for overlapping globs, exactly one winning, and a killed lane's unit becoming claimable 30 minutes after its last heartbeat.
 
 ### Epic 3: No diff merges without another vendor's review
 `codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges.
@@ -251,7 +251,7 @@ Xarabot runs its own coordinator: `reconcile`, planning, retro and retro-item un
 ### Epic 4: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
 Epics start as soon as the graph allows, retro items and checkpoints hold exactly the Epics they should, and each owner rules on everything waiting on them from one daily inbox digest by comment command.
 **FRs covered:** FR2 (distance and checkpoint gates), FR5, FR9 (inbox, digest), FR10
-**Notes:** includes graph-change approval with `approved_graph` (AR12) and the rulings grammar (AR29). Ends with a graph fixture proving the distance and `blocking` gates, and a checkpoint holding only its dependents until `/xarabot go`.
+**Notes:** includes the checkpoint unit and the rulings grammar (AR29). Ends with a graph fixture proving the distance and `blocking` gates, and a checkpoint holding only its dependents until `/xarabot go`.
 
 ### Epic 5: Each human runs lanes as their own bot
 `xarabot join` creates a person's `<login>-xarabot` App from a manifest and installs it or requests the install, replacing `bootstrap/join.ts`. A lane whose installation does not cover its repo stops and names the repo to add.
@@ -996,3 +996,362 @@ So that I can switch from the bootstrap loop to Xarabot's own pinned runner with
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
 **Then** it lists every Maintainer step for the switch, each with the command or file content to apply: the CI workflow as a required check; the `xarabot/claims` ruleset; the merge queue on `main`; squash messages set to PR title + body; the App permissions, including AR38's finding and `issues: write`; this repo's `.xarabot/config.yaml` with `runner_version`; a `policy.yaml` that makes every path need the Maintainer's approval and allows only `claude` unattended; the Standing Authority file; Epic 2's Story manifests; `XARABOT_MAX_BUILDERS=1`; `xarabot lane install`; and stopping the bootstrap loop.
+
+## Epic 2: A coordinator lane and claims let builders run side by side
+
+Xarabot runs its own coordinator, under a coordinator claim: `reconcile`, planning, retro and retro-item units. Builder lanes share a host, or several hosts, without building a unit twice or colliding on globs, and no builder can write coordinator-owned files, manifests, agent config or policy. Planning units change the effective graph, so the graph-change gate lands here too. The builder limit stays at 1 until Epic 3 merges; Story 2.12 proves the race on the scratch repo.
+
+### Story 2.1: Heartbeat and fencing
+
+As an operator,
+I want a lane to keep its claim alive and to prove it still holds the claim before every outward action,
+So that a lane that went quiet can never push or merge over the lane that took its unit over (FR3, AR7, AR33).
+
+**Acceptance Criteria:**
+
+**Given** a lane holding a `claimed` record, or a builder lane holding a `merging` record
+**When** its unit runs, including during the agent session and the trailing wait
+**Then** it swaps `heartbeat_at` every 5 minutes.
+
+**Given** a lane about to push, change a PR, enqueue or merge
+**When** it acts
+**Then** it first makes a heartbeat swap that requires its own `owner`/`host`/`lane` and `generation`
+**And** if that swap fails, the lane abandons the unit: it kills its agent session by PID, pushes nothing and exits.
+
+**Given** `rate-limited` or `transient` forge errors during a heartbeat
+**When** the back-off would let the heartbeat lapse past 30 minutes
+**Then** the lane releases the unit instead (AR33).
+
+**Given** the lane tests against the fake forge
+**When** another lane takes the record at `generation` + 1 between two heartbeats
+**Then** the first lane's next fence fails, and no push, PR change or enqueue from it reaches the fake.
+
+### Story 2.2: Stale takeover
+
+As an operator,
+I want a unit whose lane died to become claimable again 30 minutes after its last heartbeat,
+So that a killed lane never holds its unit or its globs forever (FR3, AR7, AR10).
+
+**Acceptance Criteria:**
+
+**Given** a `claimed` record whose `heartbeat_at` is 30 minutes or more before the forge's `now`
+**When** `next` runs for a builder
+**Then** the Story is eligible, and claiming it sets `generation` + 1 and `attempts` + 1
+**And** on the 3rd such takeover the record becomes `parked`, blocked, instead.
+
+**Given** a stale `merging` record that a builder lane holds
+**When** a lane meets it
+**Then** a merged PR makes it `merged`; a PR still in the queue lets that lane take it over and keep watching it; otherwise it becomes `released` with `attempts` + 1 and `pr` kept.
+
+**Given** a taken-over unit with an open PR
+**When** the new holder claims it
+**Then** it adopts the PR with `head_sha` set to the PR's head, fetching the head into its own `runner.git` before acting (AR16).
+
+**Given** `parked` records
+**When** any amount of time passes
+**Then** they never expire.
+
+**Given** the case tables
+**When** they run
+**Then** each staleness boundary (29:59, 30:00), each `merging` outcome and the 3rd-takeover cap has a case, with time taken only from the snapshot's `now`.
+
+### Story 2.3: The 0.x write check
+
+As the Maintainer,
+I want the runner to refuse any agent diff that writes outside what its unit may touch,
+So that builders cannot write coordinator-owned files, manifests, agent config or policy, or widen their own authority, before v1's diff check exists (FR18, NFR20, AR31).
+
+**Acceptance Criteria:**
+
+**Given** a builder session's change, computed by the runner from git objects in `runner.git` (AR19)
+**When** it touches `sprint-status.yaml`, `retro-gates.yaml`, a manifest, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config at any depth or the repo's Protected Paths
+**Then** the squash is refused, the unit becomes `parked`, blocked, and the refusal is logged with the path and reason.
+
+**Given** the three exceptions
+**When** a builder diff touches the unit's own BMAD Story spec file, the `status:` line of its own Story file, or the repo's Protected Paths for an Infrastructure Story with a matching approval
+**Then** it is allowed
+**And** the Infrastructure exception never covers coordinator-owned files, manifests or `.xarabot/**`.
+
+**Given** a builder session that changed the Epic context file (`epic-<N>-context.md`)
+**When** the runner squashes
+**Then** it reverts that change first (AR14).
+
+**Given** a coordinator session's change
+**When** it touches a path its unit does not hold, a graph input from a unit that is not `planning`, anything under `.xarabot/**` other than `epics.yaml`, or both a graph input and a status file
+**Then** it is refused.
+
+**Given** any agent diff
+**When** it changes a retro verdict, a retro item or a checkpoint go in `retro-gates.yaml`
+**Then** it is refused.
+
+**Given** runner-written content, such as a `reconcile` PR
+**When** it is committed
+**Then** the write check does not apply.
+
+**Given** the write-check case table
+**When** it runs
+**Then** each refused path class and each exception has a case for the `claude` adapter, and the table is keyed so Epic 3 adds rows per adapter.
+
+### Story 2.4: The coordinator lane and its claim
+
+As the Maintainer,
+I want exactly one coordinator per repo, held as a claim,
+So that two coordinators never run, and builders keep going and raise an alert when the coordinator is gone (FR4, AR9, AR14).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot lane install --role coordinator`
+**When** the lane starts
+**Then** it claims `coordinator.json` as `<owner>/<host>/coordinator` and heartbeats it through its units and waits.
+
+**Given** a live coordinator claim
+**When** a coordinator with a different identity starts
+**Then** it refuses to start
+**And** the same identity re-claiming after a restart is not a takeover.
+
+**Given** an expired or missing coordinator claim
+**When** a builder lane runs
+**Then** it keeps building and posts the deduplicated alert.
+
+**Given** `next(snapshot, 'coordinator')`
+**When** it runs
+**Then** it returns units in AR14's order: `reconcile`, then an open coordinator PR, then planning, retro, retro items and checkpoint, or `idle` with a reason
+**And** it never returns a Story, and a builder never receives a coordinator unit
+**And** each position in the order has a case-table test.
+
+**Given** coordinator units
+**When** their globs are computed
+**Then** planning holds the graph inputs, both status files and the Epic context path; retro and checkpoint hold the status files and the Epic context path, never the graph inputs; `reconcile` holds none; and the overlap check applies to the coordinator as to builders.
+
+### Story 2.5: `reconcile` marks units done
+
+As the Maintainer,
+I want runner code, not an agent, to record what merged and mark units done on `main`,
+So that sprint status follows merges with no agent writing status, and merged ledger records are cleaned up (FR2, NFR20, AR4, AR10, AR14).
+
+**Acceptance Criteria:**
+
+**Given** a `reconcile:<n>` unit, with `n` one more than the last on the ledger
+**When** the coordinator runs it
+**Then** it runs no agent session.
+
+**Given** ledger units whose PRs merged
+**When** `reconcile` runs
+**Then** it writes their `merged` records, and marks each unit done on `main` per AR10's rule for its kind (a Story becomes `done` in `sprint-status.yaml`)
+**And** it opens a `reconcile` PR holding only runner-written content, which gets no agent review and no agent loopback.
+
+**Given** a `merged` record whose unit is done on `main`
+**When** `reconcile` runs
+**Then** it deletes the record; no other code deletes ledger records.
+
+**Given** a `reconcile` PR that conflicts or is ejected
+**When** the next `reconcile` runs
+**Then** it regenerates the PR on fresh `main`.
+
+**Given** a `reconcile` run with nothing to commit
+**When** it ends
+**Then** its record becomes `merged` with no PR, is deleted at once, and raises no inbox item.
+
+**Given** a `merging` record that `reconcile` holds
+**When** a later `reconcile` runs
+**Then** a merged PR makes it `merged`, a still-queued PR leaves it unchanged, and an ejected or dequeued PR makes it `parked` (held), with no attempt counted.
+
+### Story 2.6: `reconcile` enqueues approved PRs
+
+As the Maintainer,
+I want an approved, parked PR to merge without me queueing it by hand,
+So that my approving review is the only step a gated PR needs from me (FR13, AR8, AR17).
+
+**Acceptance Criteria:**
+
+**Given** a `parked` record awaiting its owner's approval
+**When** `reconcile` sees an approving review from the owner on the PR's current head
+**Then** it records `approved_sha`, takes the record at `generation` + 1, fences, writes `merging` and enqueues with the expected head.
+
+**Given** an approval on an older head
+**When** `reconcile` runs
+**Then** the PR is not enqueued.
+
+**Given** an approval-gated PR that the queue ejects or dequeues
+**When** this is seen
+**Then** the record becomes `parked`, holding only the paths its diff changes, with `approved_sha` cleared; it never returns to `claimed`.
+
+**Given** this Story merged and the runner version advanced
+**When** a gated PR is approved
+**Then** the Maintainer no longer queues it by hand, and `docs/maintainer/self-host.md` says so.
+
+### Story 2.7: Planning units
+
+As the Maintainer,
+I want the coordinator to keep sprint status, manifests and Epic context current through stock BMAD planning,
+So that Stories become eligible without me running sprint planning by hand (FR2, NFR5, AR14, AR30).
+
+**Acceptance Criteria:**
+
+**Given** a snapshot where `epics.md` has Epics or Stories missing from `sprint-status.yaml`, Story headings with no manifest, or an Epic about to become eligible with no current Epic context file
+**When** `next(snapshot, 'coordinator')` reaches planning
+**Then** it returns a `planning:<slug>.<n>` unit naming what is due.
+
+**Given** a planning unit
+**When** its prompt is built
+**Then** it runs stock `bmad-sprint-planning` told to run headless, plus the due manifests, Epic context and graph edits, with the `.xarabot/epics.yaml` schema stated in the package template (AR12)
+**And** its result is the `planning` kind.
+
+**Given** a planning diff
+**When** it is squashed
+**Then** the write check (Story 2.3) applies, so it touches only the planning paths, and never both a graph input and a status file.
+
+**Given** a recurring planning unit with nothing to commit
+**When** it ends
+**Then** its record becomes `merged` with no PR and is deleted at once.
+
+**Given** the coordinator
+**When** it has an open coordinator PR
+**Then** it takes no new planning unit until that PR merges or parks (AR14 order).
+
+### Story 2.8: The graph-change gate
+
+As the Maintainer,
+I want every change to the effective Epic graph to wait for my approval on exactly the graph it would produce,
+So that no planning PR, or any other PR, can quietly re-order, add or drop work (FR2, NFR18, AR12, AR17).
+
+**Acceptance Criteria:**
+
+**Given** a PR whose merge result, recomputed in `runner.git`, changes the resolved graph (edges including package edges, checkpoints, the Epic set and numbers, or any Epic's Story set), whatever files it touches
+**When** it is about to be enqueued
+**Then** its record takes the pseudo-glob `xarabot:graph`, and a second such PR waits.
+
+**Given** that merge result
+**When** `resolveGraph` and the full validation list run on it
+**Then** any failure parks the PR, blocked.
+
+**Given** a graph-changing PR
+**When** the runner handles it
+**Then** it posts the delta on the PR: changed edges and checkpoints, and the Epics each checkpoint without a go would hold.
+
+**Given** the Maintainer's approving review on the PR's head
+**When** the runner records it
+**Then** it stores `approved_graph`, the hash of the resolved graph of that head's merge result
+**And** at enqueue it recomputes the hash against current `main`; on a mismatch the approval is void and requested again
+**And** the bot owner's approval alone never counts.
+
+**Given** a PR that renumbers or removes an Epic or Story id that has a status beyond `backlog`, a `retro-gates.yaml` record, a ledger record or a PR on its branch
+**When** it is checked
+**Then** it parks, blocked.
+
+**Given** an Epic with a retro verdict
+**When** a PR adds a Story to it
+**Then** it parks, blocked; new work goes in a new Epic.
+
+**Given** the case tables
+**When** they run
+**Then** each kind of graph change and each refusal has a case.
+
+### Story 2.9: Retro units
+
+As the Maintainer,
+I want the coordinator to run each Epic's retrospective through stock BMAD and record a validated verdict,
+So that an Epic's dependents start only after a real retro, and retro items carry the tags gates need (FR10, AR13, AR15, AR30).
+
+**Acceptance Criteria:**
+
+**Given** an Epic whose Stories are all merged and done, with no retro verdict
+**When** `next(snapshot, 'coordinator')` reaches retro
+**Then** it returns `retro:<epic>`.
+
+**Given** a retro unit
+**When** its prompt is built
+**Then** it runs `bmad-retrospective -H <epic>`, then asks for each action item's `id`, `blocking`, `route` and `globs`, and the result is the `retro` kind.
+
+**Given** a retro result
+**When** the runner validates it before the squash
+**Then** it rejects a result whose items do not match one to one the `action_items` the diff appends to `sprint-status.yaml` (by stock BMAD id), or whose `verdict` differs from the retro document's frontmatter
+**And** a rejected result counts as a failed attempt.
+
+**Given** a valid retro result
+**When** the PR merges
+**Then** the runner stores the result in the unit's ledger record, and the next `reconcile` writes the verdict and items to `retro-gates.yaml` once, marking the retro done.
+
+**Given** an item's globs
+**When** they include graph inputs, status files or anything the write check refuses a builder
+**Then** the result is rejected.
+
+### Story 2.10: Retro-item units
+
+As the Maintainer,
+I want the coordinator to work open retro action items that have globs,
+So that retro follow-ups get done alongside later Stories without me routing each one (FR10, AR10, AR14).
+
+**Acceptance Criteria:**
+
+**Given** an open item in `retro-gates.yaml` with globs, not routed to the Maintainer
+**When** `next(snapshot, 'coordinator')` reaches retro items
+**Then** it returns `retro-item:<bmad-action-item-id>` on branch `<xarabot-namespace>retro-item-<id>`.
+
+**Given** an item with no globs
+**When** `next` runs
+**Then** it is never returned, and it is listed in the reasons.
+
+**Given** a retro-item unit
+**When** its prompt is built
+**Then** it runs no skill and names the item.
+
+**Given** a merged retro-item PR
+**When** the next `reconcile` runs
+**Then** it sets the item's status to `done` in `retro-gates.yaml`.
+
+**Given** an item routed to the Maintainer
+**When** `next` runs
+**Then** it is skipped; Epic 4 lists it in the inbox.
+
+### Story 2.11: Several builder lanes on one host
+
+As an operator,
+I want to install several builder lanes on one host, each with its own clone, state folder and launchd job,
+So that one host builds several Stories at once within its builder limit (FR4, NFR21, AR22, AR35).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot lane install --role builder` run for `builder-1` … `builder-N`
+**When** each is installed
+**Then** each gets its own state folder, `runner.git`, clone, vendor home and launchd job, and lane names are unique per host and repo.
+
+**Given** `XARABOT_MAX_BUILDERS`
+**When** a builder would start that makes the host's builder count, across all repos, exceed it
+**Then** that lane refuses to start.
+
+**Given** a host-wide `~/.xarabot/STOP`
+**When** it is written
+**Then** every lane on the host, coordinator included, finishes its current unit and takes no new claim.
+
+**Given** two builder lanes and a coordinator against the fake forge
+**When** they run concurrently
+**Then** no unit is built twice, and no builder diff writes `sprint-status.yaml` or `retro-gates.yaml`.
+
+### Story 2.12: Claims race verification
+
+As the Maintainer,
+I want proof against the real claims branch that lanes cannot both win a unit,
+So that I can lift the builder limit after Epic 3 with evidence that claims hold (FR3).
+
+**Acceptance Criteria:**
+
+**Given** the scratch repo and two lanes with different host UUIDs
+**When** both race to claim one unit
+**Then** exactly one wins.
+
+**Given** two Stories with overlapping globs
+**When** two lanes race for them
+**Then** exactly one is claimed, and the other lane gets the next eligible unit or `idle`.
+
+**Given** a lane killed by PID mid-unit
+**When** 30 minutes pass after its last heartbeat
+**Then** another lane takes the unit over at `generation` + 1, and the killed lane's late push (replayed by the test) is refused by its fence.
+
+**Given** the suite
+**When** it runs without live credentials
+**Then** the live cases are reported as skipped; the 30-minute case is marked long-running and runs only when asked.
+
+**Given** `docs/maintainer/self-host.md`
+**When** the Story is done
+**Then** it adds the Maintainer-run acceptance check for after Epic 3: a coordinator and 2 builders for 24 hours with no unit built twice and no builder write to the status files (FR4).
