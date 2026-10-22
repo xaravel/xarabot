@@ -1986,3 +1986,174 @@ So that I can trust the success-signal figure and the TUI during Xaravel's adopt
 **Given** the status and report commands
 **When** they run during a lane's unit
 **Then** the lane's ledger record, journal and outcome are unchanged by them.
+
+## Epic 7: Xarabot 0.x is ready for a consuming repo
+
+A consuming repo adds `@xaravel/xarabot` with `bun add`, pins it exactly, and runs lanes on macOS or Linux. Lanes check the consumer prerequisites at start, upgrades arrive as PRs, each release has a changelog entry, and Xarabot supports what Xaravel's adoption needs, without performing that adoption (NFR17).
+
+### Story 7.1: The consumer pin and package contents
+
+As a consuming repo's Maintainer,
+I want to add Xarabot as one exactly pinned dependency and supply only my own config, prompts, policy and manifests,
+So that my repo holds no orchestration code and my lanes always run the version I pinned (FR1, AR26).
+
+**Acceptance Criteria:**
+
+**Given** the published package
+**When** a consumer runs `bun add --exact @xaravel/xarabot@<version>`
+**Then** the package carries the runner, the CLI, the schemas and the package prompt templates, and nothing the consumer must copy into its tree.
+
+**Given** a consuming repo
+**When** a lane starts
+**Then** it refuses unless the repo's `@xaravel/xarabot` dependency is an exact version equal to `runner_version` in `.xarabot/config.yaml` on `main`, naming both values
+**And** Xarabot's own repo, which has no such dependency, uses `runner_version` alone.
+
+**Given** `docs/consumer-setup.md`
+**When** the Story is done
+**Then** it lists what a consumer supplies (`.xarabot/config.yaml`, `policy.yaml`, `prompts/`, `epics.yaml` when Epics run in parallel, the Standing Authority file, Story manifests, verification commands) and what it must never add (orchestration code, `_bmad/custom/` overrides), with a minimal example of each file validated by the schemas in a test.
+
+### Story 7.2: Changelog and upgrades as PRs
+
+As a consuming repo's Maintainer,
+I want each Xarabot release to have a changelog entry and to reach my repo as a PR I approve,
+So that I upgrade deliberately and can pin back (FR1, NFR11, NFR15).
+
+**Acceptance Criteria:**
+
+**Given** `CHANGELOG.md`
+**When** the package version changes
+**Then** a test fails unless `CHANGELOG.md` has an entry for that version.
+
+**Given** `xarabot upgrade <version>` run by the Maintainer in a consuming repo
+**When** it runs
+**Then** the runner, as the Maintainer's bot, opens a PR that changes the exact pin and `runner_version` together, and the PR parks for the Maintainer's approval because `.xarabot/**` is a Protected Path
+**And** the PR body carries that version's changelog entry.
+
+**Given** a version not published, or older than the current pin
+**When** `xarabot upgrade` runs
+**Then** it stops with the reason; pinning back to an older version needs `--downgrade`, so recovery is one deliberate command.
+
+**Given** that only the Maintainer releases, from CI
+**When** the Story is done
+**Then** `docs/maintainer/release-workflow.yml` holds a proposed publish workflow for the Maintainer to add to `.github/workflows/`; no code in the package publishes or handles publish credentials.
+
+### Story 7.3: The Linux sandbox
+
+As an operator on Linux,
+I want the same sandbox boundary as on macOS, built with `bwrap`,
+So that a Linux Xarabot host gives agents no GitHub credential or host either (FR18, NFR8, AR18).
+
+**Acceptance Criteria:**
+
+**Given** a Linux host with `bwrap` 0.13.1 or newer
+**When** the sandbox launches a session
+**Then** it uses `bwrap` with `--unshare-pid`, with the same read, write, environment and Unix-socket rules as the macOS profile (Story 1.11), and the proxy rules (Story 1.12).
+
+**Given** a Linux host where `bwrap` is missing, or user namespaces are blocked
+**When** a session is requested
+**Then** it is refused, naming the cause; the sandbox never falls back to running unsandboxed
+**And** `docs/consumer-setup.md` records that AppArmor packaging on Ubuntu 24.04+ is deferred and what the operator must allow.
+
+**Given** the sandbox refusal suite and the proxy suite
+**When** they run on Linux for each adapter
+**Then** each case passes; on macOS the Linux cases are reported as skipped.
+
+**Given** `claude` on Linux
+**When** its vendor home is seeded
+**Then** it holds only the Claude credential, by the means the adapter documents for Linux.
+
+### Story 7.4: Linux lanes under systemd
+
+As an operator on Linux,
+I want `xarabot lane install` to write systemd units with the same behaviour as launchd jobs,
+So that a Linux machine can be a Xarabot host (FR4, AR3, AR26, AR34).
+
+**Acceptance Criteria:**
+
+**Given** a Linux host
+**When** `xarabot lane install` runs
+**Then** it writes a systemd user unit per lane with a restart throttle, checked against a golden file, that starts one process per unit from the pinned runner path.
+
+**Given** a lane that fails to start 3 times in a row
+**When** systemd restarts it
+**Then** the lane writes its own `STOP` and posts an alert, as on macOS.
+
+**Given** waits, `wake`, `stop` and `stop --now`
+**When** they run on Linux
+**Then** they behave as Story 1.18 specifies, by exact PID with start-time checks read from `/proc`.
+
+### Story 7.5: Consumer prerequisite checks at lane start
+
+As a consuming repo's Maintainer,
+I want each lane to check the GitHub settings Xarabot relies on before it starts,
+So that a missing setting stops lanes with the step to fix instead of failing later in a merge (AR34).
+
+**Acceptance Criteria:**
+
+**Given** a lane start
+**When** the prerequisites are checked through the `Forge` port
+**Then** it verifies, where the API allows: a ruleset that blocks force-push and deletion of `xarabot/claims`, with no other ruleset matching it; the merge queue on `main`; squash messages set to PR title and body; Protected Paths requiring the owner's review, with stale approvals dismissed and approval of the most recent push required; and the App installed with `issues: write` and the merge-queue permission.
+
+**Given** a prerequisite verified missing
+**When** the lane starts
+**Then** it refuses to start and posts an alert naming the Human Live Step to perform.
+
+**Given** a prerequisite the App's permissions cannot read
+**When** the lane starts
+**Then** it starts, and the Maintainer's digest lists that prerequisite once as unverified.
+
+**Given** the case tables
+**When** they run against the fake forge
+**Then** each prerequisite, missing and unverifiable, has a case.
+
+### Story 7.6: Adoption inputs for Xaravel
+
+As Xaravel's Maintainer,
+I want Xarabot to read what Xaravel's adoption Epic will supply,
+So that the adoption needs only config and policy files on Xaravel's side (NFR17, AR43, AR45).
+
+**Acceptance Criteria:**
+
+**Given** a repo config that names an Escalation source (Xaravel's `tools/escalations/`) and its format
+**When** the coordinator renders the Maintainer's digest
+**Then** open Escalations from that source are listed with their links and ages
+**And** a unit whose build result is `blocked` with kind Escalation parks with its globs released, per AR8.
+
+**Given** the Standing Authority frontmatter schema
+**When** the Story is done
+**Then** `docs/adoption/xaravel.md` gives the frontmatter Xaravel's MAINT file must gain, validated by a test against the schema.
+
+**Given** `docs/adoption/xaravel.md`
+**When** the Story is done
+**Then** it lists, as inputs for Xaravel's own course correction: the `component` path-key mapping in config; the Standing Authority path; the Escalation source; the Protected Paths additions; an `.xarabot/epics.yaml` example carrying Epic 8's checkpoint (`8: {depends_on: [7], checkpoint: true}`); and the effect of Story headings with no manifest
+**And** each example file in it validates against the schemas in a test.
+
+### Story 7.7: Consumer readiness verification
+
+As the Maintainer,
+I want proof on a throwaway consumer repo and a Linux host that 0.x works for a repo other than Xarabot's own,
+So that Xaravel's adoption starts from evidence (FR1, FR4).
+
+Precondition (Human Live Step): the Maintainer provides a Linux host for the lanes and a throwaway consumer repo with the App installed and the prerequisites set.
+
+**Acceptance Criteria:**
+
+**Given** the throwaway consumer repo
+**When** it runs `bun add --exact @xaravel/xarabot@<version>` from a local package build and installs a lane
+**Then** the lane builds a Story end to end as the owner's bot.
+
+**Given** a pin that differs from `runner_version`
+**When** the lane starts
+**Then** it refuses to start, naming both values.
+
+**Given** a prerequisite removed on the consumer repo
+**When** the lane starts
+**Then** it refuses, naming the Human Live Step.
+
+**Given** the Linux host
+**When** a lane runs a unit there
+**Then** the unit completes inside `bwrap` under systemd, and the sandbox and proxy suites pass on that host.
+
+**Given** `xarabot upgrade`
+**When** it runs on the consumer repo for a newer local build
+**Then** it opens one PR changing the pin and `runner_version` together, parked for the Maintainer's approval.
