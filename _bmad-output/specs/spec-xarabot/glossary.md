@@ -2,7 +2,7 @@
 
 - **Unit:** one piece of work a lane takes: a Story, a retro, a retro action item, a planning step, or a checkpoint record.
 - **Lane:** one long-running worker on a host, with its own full clone (never a linked worktree), state folder, scheduled job, agent and model.
-- **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`.
+- **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`, apart from the Maintainer's bootstrap writes (SPEC § Operating limits).
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
 - **Claim:** a lane's exclusive hold on a unit, made by compare-and-swap on a git ref, kept alive by heartbeat, expiring 30 minutes after the last heartbeat.
 - **Story manifest:** the per-Story record in the consuming repo that gives the Story's path globs (directly, or through a repo mapping such as Xaravel's `component`) and its dependencies. Claims and the guard use its globs. Its format is spine AD-10.

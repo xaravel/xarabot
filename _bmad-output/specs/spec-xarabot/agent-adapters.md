@@ -6,10 +6,11 @@ Every adapter runs one unit in a fresh session and returns the same JSON result.
 |---|---|---|---|
 | `claude` | `claude -p --model <model> --effort <effort> --permission-mode auto`, as Xaravel's `run.sh` does today. | `claude-opus-5-5` | 0.x |
 | `codex` | `codex exec -m <model> --json -c model_reasoning_effort=<effort>`, with the skills exposed through `.agents/skills`. | `gpt-6.1-sol` | 0.x |
-| `pi` | `pi -p --mode json --model <provider/id> --thinking <effort>`. The operator signs in to OpenRouter through pi. | none: the lane must set `model`, or it refuses to start | 0.x |
+| `pi` | `pi -p --mode json --model <provider/id> --thinking <effort>`. The operator stores an OpenRouter key once (Credentials, below). | none: the lane must set `model`, or it refuses to start | 0.x |
 | `grok` | Only after lanes run as `<login>-xarabot` bot identities (CAP-13). | — | later |
 
 - **One sandbox:** every adapter's agent runs inside Xarabot's own sandbox, with the agent's own sandbox turned off inside it, no GitHub credentials and no GitHub host (SPEC § Constraints; spine AD-17).
+- **Credentials:** the operator writes each vendor's credential once, in one mode-600 file per vendor under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (falling back to `~/.config`), next to the App key. Before each session the lane process reads it and seeds the lane's vendor home, or the credential variable: for `claude`, the token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`; for `codex`, its auth file or API key; for `pi`, the OpenRouter key. Each adapter Story confirms the exact form. A lane whose adapter or reviewer has a missing or unreadable credential refuses to start (spine AD-17).
 - **Unattended:** which adapters may run unattended is repo policy (CAP-7).
 - **CLI versions:** each adapter has a minimum tested CLI version, not a pin: claude 2.1.304, codex-cli 0.163.0, pi 1.3.0.
 

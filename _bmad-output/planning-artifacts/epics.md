@@ -29,9 +29,9 @@ FR2 [0.x] (CAP-2, Deterministic `next`): A `next` command chooses, in code, the 
 
 FR3 [0.x] (CAP-3, Claims): A lane's runner, never its coding agent, claims a unit, its bot identity and its manifest globs by compare-and-swap on one claims ref. A unit whose globs overlap an open claim is refused; a Story without globs is never claimed. A claim lives by heartbeat, is released on merge or block, and expires 30 minutes after its last heartbeat. Success: when two lanes race for one unit, or for two units with overlapping globs, exactly one wins; a killed lane's unit becomes claimable 30 minutes after its last heartbeat; both hold across machines.
 
-FR4 [0.x] (CAP-4, Parallel lanes): One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only). Each builder has its own worktree, state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`). Success: on Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
+FR4 [0.x] (CAP-4, Parallel lanes): One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only). Each builder has its own full clone (never a linked worktree), state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`). Success: on Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
 
-FR5 [0.x] (CAP-5, Parallel Epics): Epics run at the same time, ordered by the dependency graph instead of strictly in sequence. An Epic starts once every Epic it depends on has all its Stories merged and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go. Success: in Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once; while a checkpoint go is pending, Epics depending on the checkpoint Epic take no new Stories, and Epics not depending on it keep running.
+FR5 [0.x] (CAP-5, Parallel Epics): Epics run at the same time, ordered by the dependency graph instead of strictly in sequence. An Epic starts once every Epic it depends on has all its Stories `done` and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go. Success: in Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once; while a checkpoint go is pending, Epics depending on the checkpoint Epic take no new Stories, and Epics not depending on it keep running.
 
 FR6 [0.x] (CAP-6, Plumbing in code): CI polling, the merge queue, mergeability checks, conflict resolution in the status YAML files, status comments, the progress line and sleeping through usage limits run in Xarabot code. The agent session only does the unit's work and returns a JSON result. The lessons in `brownfield-xaravel.md` § Lessons (CI polling, Conflicts, Merges) bind this code. Success: the agent prompt carries no CI, merge or status instructions; every session's output validates against the result schema; a usage-limit hit makes the lane sleep until the reset instead of failing.
 
@@ -58,8 +58,8 @@ FR16 [after v1, optional] (CAP-16, Pipelining): A lane starts its next Story whi
 FR17 [v1] (CAP-17, Actor registry): The consuming repo keeps an Actor registry: humans by GitHub login, their roles and tracks, and the `<login>-xarabot` App each one owns (its App ID). CODEOWNERS, rulesets and guard policy are generated from it. Success: registering a person and their bot and merging gives them their role's rights everywhere; a bot not registered to a human is refused; a hand edit to a generated file fails a drift check.
 
 FR18 [sandbox and write check 0.x; diff check and CI v1] (CAP-18, Guard): One fail-closed guard, the same for every adapter.
-- Sandbox (0.x): the coding agent runs with only its unit's worktree writable, with no GitHub credentials and no GitHub host.
-- Write check (0.x): before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`) or Protected Paths. There are only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's own BMAD Story spec file, and the `status:` line of its own Story file.
+- Sandbox (0.x): the coding agent runs with only its unit's clone writable, with no GitHub credentials and no GitHub host.
+- Write check (0.x): before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`) or Protected Paths. There are only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's own BMAD Story spec file (the single file matching `story_spec_path`), and the `status:` line of its own Story file.
 - Diff check (v1): extends the write check to refuse files outside the claim's globs and dependency files the repo has not allowed.
 - CI (v1): CI re-checks the same rules.
 - Hooks: per-agent write-time hooks, where an agent has them, give earlier feedback but are never the boundary.
@@ -117,7 +117,7 @@ NFR18 (Consuming-repo rules bind Xarabot): lanes never push to `main`; lanes nev
 
 NFR19 (Set by the consuming repo, never fixed in Xarabot): merge authority beyond FR13's default and which humans may approve and merge; the lane branch namespace; which adapters may run unattended; roles, tracks, Protected Paths, the dependency-command list and Human Live Steps.
 
-NFR20 (Write authority): the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (FR18) enforces it on builder diffs.
+NFR20 (Write authority): the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (FR18) enforces it on builder diffs. The only exceptions are the Maintainer's bootstrap writes in Xarabot's own repo, each in a Maintainer PR: at the self-host switch, a `bmad-sprint-planning` run that creates or updates `sprint-status.yaml` so Epic 1's Stories are `done`, plus Epic 2's Story manifests and Epic 2's context file; and, until the rulings Story (4.6) merges, a rejected retro's go in `retro-gates.yaml`.
 
 NFR21 (Capacity): a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
@@ -134,40 +134,40 @@ Requirements from the architecture spine (AR*n* cites the spine's AD):
 - AR1 (Paradigm, layers): functional core, imperative shell, ports and adapters. Layers and allowed imports: `src/core/` (core only); `src/ports/` (core); `src/adapters/forge/*` and `src/adapters/agent/*` (ports, core); `src/sandbox/` (ports, core); `src/lane/` (everything above); `src/cli/` (lane and everything it may import). Ports: `Forge` (`snapshot()` with ledger tip, `main` SHA, PR states and server `now`; `ledgerSwap(oldSha, edit)` returning `ok` or `conflict`; `pushBranch(lease)`; PR open/update/close; `comment(pr, body)` for 🤖 status comments; `postReview`; `checks`; `enqueue(expectedHead)`; `dequeue`; inbox `renderDigest`, `alert`, `readRulings(cursor)`; `prefetch(kind)`; no approve operation), `Agent` (`launchSpec`, `parseUsage`, `effortValues`), `Sandbox` (`run(LaunchSpec, profile)`, the only agent spawner), `LaneStore` (PIDs, journal, outcome, STOP). The compare-and-swap retry loop lives in `src/lane/`; adapters do one attempt per call.
 - AR2 (AD-1): `src/core/` never calls `fetch`, `Bun.spawn`, the filesystem, `Date.now()` or `process.env`; only adapters and `src/sandbox/` touch the forge, agents, the OS or the clock; adapters never import each other.
 - AR3 (AD-2): one process per unit, started by the lane's launchd or systemd job, which runs at most one unit, waits, then exits. PID in `lane.pid`; heartbeats continue through the trailing wait; every wait is a child `sleep` with its PID in `wait.pid` (1 min after progress, 30 after idle, 15 after a failure, and usage-limit sleeps); `xarabot wake <lane>` kills exactly that PID after checking it. Every forge, git or HTTP call has an `AbortSignal` deadline; git runs with `GIT_TERMINAL_PROMPT=0`. Unit wall-clock budget is config (default 6 h); overrun stops heartbeating and releases as a failed attempt. Code never calls `pkill` or a `timeout` binary.
-- AR4 (AD-3): every piece of state has one home and one writer, per the spine's AD-3 table (sprint status: coordinator, with one exception: the Maintainer's one-time write at the self-host switch that creates `sprint-status.yaml` with Epic 1's Stories `done`; `retro-gates.yaml`: `reconcile` runner code only; ledger records by state; forge objects: the runner; the `status:` line of the unit's own Story file: the agent session; journal, PIDs, outcome: the lane process; `STOP`: the operator). Any other write is a defect.
+- AR4 (AD-3): every piece of state has one home and one writer, per the spine's AD-3 table (sprint status: coordinator; `retro-gates.yaml`: `reconcile` runner code only; Story manifests and `epics.md`: graph planning units; Epic context at `epic_context_path` on `main`: the coordinator's status planning unit; ledger records by state; forge objects: the runner; the `status:` line of the unit's own Story file: the agent session; journal, PIDs, outcome: the lane process; `STOP`: the operator). The only other writes are the Maintainer's bootstrap writes in Xarabot's own repo, each in a Maintainer PR: at the self-host switch, a `bmad-sprint-planning` run that creates or updates `sprint-status.yaml` so Epic 1's Stories are `done`, Epic 2's Story manifests and Epic 2's context file; and, until the rulings Story (4.6) merges, a rejected retro's go in `retro-gates.yaml`. Any other write is a defect.
 - AR5 (AD-4): the ledger is the branch `xarabot/claims`, holding `units/<unit-file-id>.json` and `coordinator.json`. Every write fetches the tip and applies a pure edit that re-checks every precondition (state, owner, generation, glob overlap against `claimed`, `merging` and held `parked` records) against that tip; the swap is fast-forward-only (`PATCH git/refs` with `force: false`; `git update-ref <ref> <new> <old>` locally). On conflict, re-fetch and retry with jittered back-off; on a failed precondition, run `next` again. Ledger commits carry `[skip ci]`. Snapshot order: ledger, then `main`, then each ledger unit's PR state; the ledger wins over `main`.
 - AR6 (AD-5): ledger records are a versioned state machine with the fields `schema_version`, `unit`, `state`, `owner`, `host`, `lane`, `generation`, `globs`, `heartbeat_at`, `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`, `approved_sha`, `builder_providers[]`, `park` {`kind` (`awaiting-approval` | `needs-approval` | `blocked`), `reason` (a `blocked.kind`, or a runner cause: `review-cap` | `ci-fix-cap` | `ci-timeout` | `write-check` | `no-op` | `attempts-cap` | `unclaimable` | `graph-invalid`), `inbox_owner`, `globs_held`}, `attempts`, `loopbacks`, `ci_fixes`, `approval` {`by`, `manifest_sha`}. States `claimed`, `merging`, `parked`, `released`, `merged`; the Structural Seed state diagram is normative. Only `merged` records are deleted (by the coordinator); `generation` only goes up; `attempts` survives release. `now` is the forge server's time from `Forge.snapshot()` (host clock only in local-only mode and for sleep lengths). An unknown or newer `schema_version` stops the lane before `next`, with an alert. `host` is a UUID written to `host.yaml` by `xarabot lane install`.
 - AR7 (AD-6): heartbeat every 5 minutes for `claimed` records and builder-held `merging` records. A stale `claimed` record (30 min) may be taken over at `generation` + 1, `attempts` + 1, parking on the 3rd. A stale builder-held `merging` record: merged PR → `merged`; still queued → any lane may take it over; otherwise → `released` with `attempts` + 1 and `pr` kept. `parked` never expires. CAS retry loops give up after 10 tries or the call's deadline. Before each push, PR change, enqueue or merge, a fencing heartbeat swap requires the lane's own `owner/host/lane` and `generation`, or the unit is abandoned. Pushes use `--force-with-lease` against `head_sha`; enqueue and merge pass the expected head SHA.
 - AR8 (AD-7): each outcome's ledger effect per the spine's AD-7 table, including: `merging` written before enqueue; awaiting approval → `parked` holding only the diff's paths; blocked kinds → `parked` with globs released and an inbox item; crash, missing or invalid result, timeout or budget overrun → `released` with `attempts` + 1, `parked` at ≥ 3; recurring units with nothing to commit → `merged` with no PR, deleted at once; an ejected or dequeued approval-gated PR → `parked`, `approved_sha` cleared; Infrastructure Story without approval → `parked` (`needs-approval`); `stop --now` or STOP during a usage-limit sleep → `released` without counting an attempt. Every move out of `merging` other than to `merged` dequeues first; every cap is tested with `>=`. Coordinator-held `merging` records are checked by later `reconcile` runs, never by heartbeat.
 - AR9 (AD-8): the coordinator role is a claim in `coordinator.json`, heartbeated through its units and waits; the same `<owner>/<host>/coordinator` identity re-claims without a takeover; a different identity refuses to start while it is live; if expired or missing, builders continue and post the alert.
 - AR10 (AD-9): one branch and one PR per unit. Branches: `<story-namespace><story-id>` (Xarabot: `story/9.3`) and `<xarabot-namespace><kind>-<id>` (default `xarabot/retro-item-9.12`), both namespaces set by repo config. `story`, `retro`, `retro-item` and `checkpoint` are one-shot; `planning:<slug>.<n>` and `reconcile:<n>` recur with a run number. Every claim inspects the unit's branch and all its PRs (merged → `merged`; open → adopt, `head_sha` from the PR; closed or none → start from `origin/main`). A `rebuild` ruling closes the open PR and clears `reviewed_sha`/`passed_sha`. "Done on `main`" per kind as in AD-9. Wip is snapshotted as `wip/<unit>` in `runner.git` before any reset, never pushed; a restart resumes wip only at the same claim generation. Cross-owner takeover (v1) closes the old PR and opens a new one under the new bot.
-- AR11 (AD-10): the Story manifest is one file per Story in a repo-configured directory (Xaravel: `stories/<id>.md`); config says whether it doubles as the BMAD Story file. Required frontmatter `story_id`, `epic`, `sprint_key`, `title`; paths as `globs` or a repo-mapped key (Xaravel: `component`); optional `depends_on` (a list of Story ids, each in the same Epic or an Epic it depends on, transitively; the Story is eligible only once each listed Story is `done` in `sprint-status.yaml`; planning units write it where a Story builds on an earlier one), `infrastructure: true`; repo-only fields and `status` ignored. Glob normalization: strip `./`; reject `!`, `..` and absolute paths; compare by case-folded character prefix; globs overlap unless their literal prefixes are disjoint. Resolved globs are stored at claim time. A Story whose globs resolve to nothing is unclaimable and goes to the inbox. Outside its globs a Story's diff may carry only its own BMAD Story spec file (`story_spec_path`, default `implementation_artifacts/spec-<sprint_key>.md`) and the `status:` line of its own Story file. Infrastructure Stories are claimable only with a ledger approval whose `manifest_sha` matches.
-- AR12 (AD-11): one pure `resolveGraph(snapshot)` in `src/core` builds the effective graph from `.xarabot/epics.yaml`, the Epic and Story headings in `epics.md`, each manifest's `epic` and the package edges, from one `main` SHA; gates and `next` read only its output. Strict versioned schema (`version`; `epics` map; keys `^[1-9][0-9]*$` converted to numbers; `depends_on` a list of positive integers; `checkpoint` only literal `true`; duplicate keys detected from the raw text; multi-document or null `epics` invalid). Default: an unlisted Epic, or one without `depends_on`, depends on the next lower Epic number in `epics.md`; no file means serial; checkpoints never inferred. The `epics.md` grammar is stock output: Epic = level-2 `## Epic <int>:` outside fenced code (lines under `## Epic List` ignored); Story = level-3 `### Story <int>.<int>[a-z]?:` under its Epic. An Epic's Stories are exactly the manifests naming it; a heading with no manifest is unclaimable, listed in the Maintainer's inbox, and keeps its Epic from being done; an Epic with no Stories is never done. An Epic listed in config's `bootstrapped_epics` (a Maintainer-approved list of Epic numbers, default `[]`; Xarabot's own repo sets `[1]` at the self-host switch) reads as all Stories done and retro done, is exempt from that rule, and its Story headings are not reported as unclaimable. Absence of the file is decided only from the tree listing; other read errors fail closed. Validation (invalid file, unknown Epic, cycle, manifest mismatch, a manifest `depends_on` naming a Story outside its own Epic and the Epics it depends on, a checkpoint wait the graph doesn't mark) stops every lane with an alert. Graph-changing PRs: validated on the merge result before enqueue, hold the pseudo-glob `xarabot:graph`, need the Maintainer's approval with `approved_graph` hash re-checked at enqueue, and get the delta posted on the PR. Epic numbers and Story ids are fixed once used; only a checkpoint with a recorded go may be retired. The same validator ships as `xarabot graph check`.
-- AR13 (AD-12): gates on the graph, measuring distance along dependency edges from Epic E: Epic D starts only when every Epic it depends on has all its Stories `done` in `sprint-status.yaml` on `main` and its retro done (an Epic in `bootstrapped_epics` counts as both); a `blocking` item holds every Epic at distance ≥ 1, any other open item (`open`, `in-progress`, `waiting`) holds distance ≥ 2; a retro verdict `rejected` holds every Epic at distance ≥ 1, like a `blocking` item, and puts a course-correction item in the Maintainer's inbox until the Maintainer's `/xarabot go retro:<N>` (`accepted` and `accepted-with-open-items` release as before); a checkpoint holds all transitive dependents until the go, while in-flight Epics finish held Stories. Retro results carry each item's stock BMAD action-item id (`epic-<N>-retro-item-<seq>-<slug>`), `blocking`, `route` and `globs`; the runner validates them one to one against the `action_items` the diff appends and the verdict against the `verdict` field of the stock retro document's frontmatter (`{implementation_artifacts}/epic-<N>-retro-<date>.md`), stores the result in the ledger record, and `reconcile` writes `retro-gates.yaml` once. Graph changes take effect at the next claim.
-- AR14 (AD-13): `next(snapshot, laneRole)` returns a unit or `idle` with a reason. Every unit kind holds globs (planning comes in two kinds: a status unit, which runs `bmad-sprint-planning` and compiles Epic context, holds the status files and the Epic context path and is not approval-gated; a graph unit holds the graph inputs and `xarabot:graph`, is approval-gated and never touches the status files; retro and checkpoint: status files and Epic context, never graph inputs; retro items: their `globs` from `retro-gates.yaml`, never graph inputs, status files or write-check paths, unclaimable without globs; `reconcile`: none; a parked approval-gated PR: only its diff's paths); the overlap check applies to every role. Builders take only eligible Stories that are not `done` in `sprint-status.yaml` on `main`, whose record is absent, `released` or stale, and whose manifest `depends_on` Stories are all `done` there, lowest Epic number first, then lowest Story number. The coordinator compiles each Epic's `epic-<N>-context.md` in a planning status unit before its Stories become eligible; the runner reverts builder changes to it. Coordinator order: `reconcile` (apply rulings; enqueue approved held PRs; write `merged`; mark done; batch-route Maintainer-only retro items; rewrite each changed inbox digest and post the daily digest mention, AR24), open coordinator PR, planning (a due graph unit before a status unit), retro, retro items, checkpoint. Approval-gated coordinator PRs never touch the status files; after a graph unit merges, `reconcile` writes its status entries.
-- AR15 (AD-14): every session writes JSON to `XARABOT_RESULT` (in the sandbox temp folder, outside the clone) as the prompt's last step, never from a skill hook. Union keyed by `kind`: `build` (`outcome` `done`/`blocked`/`no-op`, `blocked` {`kind` `escalation`/`human-live-step`/`intent-gap`/`verification`/`other`, `text`, `step_id`}, `summary`, `body`, `verification[]`); `review` (`reviewed_sha`, `verdict` `pass`/`changes-requested`, `findings[]` {`severity` `high`/`medium`/`low`, `blocking` a separate boolean, `file`, `text`}); `retro` (`verdict` `accepted`/`accepted-with-open-items`/`rejected`, `items[]` {`id`, `text`, `route` `lane`/`maintainer`, `blocking`, `globs`}); `planning` (`outcome` `done`/`nothing-due`/`blocked`, `summary`); all carry `denied_actions[]`. A missing result gets one resume asking only for the result (`claude -p --resume`, confirmed in Story 1.14; codex and pi confirmed in their adapter Stories); builds also cross-check the Story spec's `status` and `## Auto Run Result`. Still missing or invalid → failed attempt. Agent, model, effort, tokens, cost, timings, diff, files touched and authorship are never taken from the agent.
+- AR11 (AD-10): the Story manifest is one file per Story in a repo-configured directory (Xaravel: `stories/<id>.md`); config says whether it doubles as the BMAD Story file. Required frontmatter `story_id`, `epic`, `sprint_key`, `title`; paths as `globs` or a repo-mapped key (Xaravel: `component`); optional `depends_on` (a list of Story ids, each in the same Epic or an Epic it depends on, transitively; the Story is eligible only once each listed Story is `done` in `sprint-status.yaml` on `main` or has a `merged` ledger record, either way on `main`; planning units write it where a Story builds on an earlier one), `infrastructure: true`; repo-only fields and `status` ignored. Glob normalization: strip `./`; reject `!`, `..` and absolute paths; compare by case-folded character prefix; globs overlap unless their literal prefixes are disjoint. Resolved globs are stored at claim time. A Story whose globs resolve to nothing is unclaimable and goes to the inbox. Outside its globs a Story's diff may carry only its own BMAD Story spec file and the `status:` line of its own Story file. `story_spec_path` is a glob pattern, default `_bmad-output/implementation-artifacts/spec-<epic>-<story>-*.md` (Story 1.7: `spec-1-7-*.md`; Story 1.17a: `spec-1-17a-*.md`); exactly one match is the Story's spec file, and zero or several matches make the result invalid. Infrastructure Stories are claimable only with a ledger approval whose `manifest_sha` matches.
+- AR12 (AD-11): one pure `resolveGraph(snapshot)` in `src/core` builds the effective graph from `.xarabot/epics.yaml`, the Epic and Story headings in `epics.md`, each manifest's `epic` and the package edges, from one `main` SHA; gates and `next` read only its output. Strict versioned schema (`version`; `epics` map; keys `^[1-9][0-9]*$` converted to numbers; `depends_on` a list of positive integers; `checkpoint` only literal `true`; duplicate keys detected from the raw text; multi-document or null `epics` invalid). Default: an unlisted Epic, or one without `depends_on`, depends on the next lower Epic number in `epics.md`; no file means serial; checkpoints never inferred. The `epics.md` grammar is stock output: Epic = level-2 `## Epic <int>:` outside fenced code (lines under `## Epic List` ignored); Story = level-3 `### Story <int>.<int>[a-z]?:` under its Epic. An Epic's Stories are exactly the manifests naming it; a heading with no manifest is unclaimable, listed in the Maintainer's inbox, and keeps its Epic from being done; an Epic with no Stories is never done. An Epic listed in config's `bootstrapped_epics` (a Maintainer-approved list of Epic numbers, default `[]`; Xarabot's own repo sets `[1]` at the self-host switch) reads as all Stories done and retro done, is exempt from that rule, and its Story headings are not reported as unclaimable. Absence of the file is decided only from the tree listing; other read errors fail closed. Validation (invalid file, unknown Epic, cycle, manifest mismatch, a manifest `depends_on` naming a Story outside its own Epic and the Epics it depends on) stops every lane with an alert. Graph-changing PRs: validated on the merge result before enqueue, hold the pseudo-glob `xarabot:graph`, need the Maintainer's approval with `approved_graph` hash re-checked at enqueue, and get the delta posted on the PR. Epic numbers and Story ids are fixed once used; only a checkpoint with a recorded go may be retired. The same validator ships as `xarabot graph check`.
+- AR13 (AD-12): gates on the graph, measuring distance along dependency edges from Epic E: Epic D starts only when every Epic it depends on has all its Stories `done` in `sprint-status.yaml` on `main` and its retro done (an Epic in `bootstrapped_epics` counts as both); a `blocking` item holds every Epic at distance ≥ 1, any other open item (`open`, `in-progress`, `waiting`) holds distance ≥ 2; a retro verdict `rejected` holds every Epic at distance ≥ 1, like a `blocking` item, and puts a course-correction item in the Maintainer's inbox until the Maintainer's `/xarabot go retro:<N>` (`accepted` and `accepted-with-open-items` release as before); a checkpoint holds all transitive dependents until the go, while in-flight Epics finish held Stories. Retro results carry each item's stock BMAD action-item id (`epic-<N>-retro-item-<seq>-<slug>`), `blocking`, `route` and `globs`; the runner validates them one to one against the `action_items` the diff appends and the verdict against the `verdict` field of the stock retro document's frontmatter (`{implementation_artifacts}/epic-<N>-retro-<date>.md`), stores the result in the ledger record, and `reconcile` writes `retro-gates.yaml` once. `retro-gates.yaml` has `schema_version: 1` and an `epics` map keyed by Epic number; each Epic has a `retro` record that `reconcile` writes once (`verdict`, `unit` `retro:<N>`, `recorded_at`, and for a `rejected` verdict a `go` {`by`, `at`, `ruling`}, absent until the go; a go the Maintainer writes by hand before Story 4.6 has `ruling: maintainer-pr`), `items` (`id` `epic-<N>-retro-item-<seq>-<slug>`, `text`, `route`, `blocking`, `globs`, `status` `open`/`in-progress`/`waiting`/`deferred`/`done`) and a `checkpoint` record holding the checkpoint's `go` {`by`, `at`, `ruling`}, which `reconcile` writes when the go is recorded and which stays when the checkpoint is retired; a checkpoint Epic with no `checkpoint` record is awaiting its go. Graph changes take effect at the next claim.
+- AR14 (AD-13): `next(snapshot, laneRole)` returns a unit or `idle` with a reason. Every unit kind holds globs (planning comes in two kinds: a status unit, which runs `bmad-sprint-planning` and compiles Epic context, holds the status files and the Epic context path and is not approval-gated; a graph unit holds the graph inputs and `xarabot:graph`, is approval-gated and never touches the status files; retro: status files, Epic context and the retro document path (`retro_doc_glob`, AR21), so the stock `epic-<N>-retro-<date>.md` can land; checkpoint: status files and Epic context; neither touches graph inputs; retro items: their `globs` from `retro-gates.yaml`, never graph inputs, status files or write-check paths, unclaimable without globs; `reconcile`: none; a parked approval-gated PR: only its diff's paths); the overlap check applies to every role. Builders take only eligible Stories that are not `done` in `sprint-status.yaml` on `main`, whose record is absent, `released` or stale, and whose manifest `depends_on` Stories are each `done` there or have a `merged` ledger record, lowest Epic number first, then lowest Story number. An Epic's Stories are eligible only once its Epic context file (`epic_context_path`) exists on `main` and is valid: non-empty and starting with `# Epic <N> Context:`, the stock check in `bmad-build-auto` step-01; an Epic in `bootstrapped_epics` is exempt. A status planning unit compiles it by following the installed stock `bmad-build-auto` skill's `compile-epic-context.md` with the Epic number, the epics path, the planning artifacts directory and the output path; the Maintainer compiles Epic 2's at the self-host switch (AR4). The runner reverts builder changes to it. Coordinator order: `reconcile` (apply rulings; enqueue approved held PRs; write `merged`; mark done; batch-route Maintainer-only retro items; rewrite each changed inbox digest and post the daily digest mention, AR24), open coordinator PR, planning (a due graph unit before a status unit), retro, retro items, checkpoint. Approval-gated coordinator PRs never touch the status files; after a graph unit merges, `reconcile` writes its status entries.
+- AR15 (AD-14): every session writes JSON to `XARABOT_RESULT` (in the sandbox temp folder, outside the clone) as the prompt's last step, never from a skill hook. Union keyed by `kind`: `build` (`outcome` `done`/`blocked`/`no-op`, `blocked` {`kind` `escalation`/`human-live-step`/`intent-gap`/`verification`/`other`, `text`, `step_id`}, `summary`, `body`, `verification[]`); `review` (`reviewed_sha`, `verdict` `pass`/`changes-requested`, `findings[]` {`severity` `high`/`medium`/`low`, `blocking` a separate boolean, `file`, `text`}); `retro` (`verdict` `accepted`/`accepted-with-open-items`/`rejected`, `items[]` {`id`, `text`, `route` `lane`/`maintainer`, `blocking`, `globs`}); `planning` (`outcome` `done`/`nothing-due`/`blocked`, `summary`); all carry `denied_actions[]`. A missing result gets one resume asking only for the result (`claude -p --resume`, confirmed in Story 1.14; codex and pi confirmed in their adapter Stories); builds also cross-check the `status` and `## Auto Run Result` of the Story's spec file, the single match of `story_spec_path` (AR11). Still missing or invalid → failed attempt. Agent, model, effort, tokens, cost, timings, diff, files touched and authorship are never taken from the agent.
 - AR16 (AD-15): each lane has a runner-private `runner.git` in its state folder that the sandbox can neither read nor write. The runner never runs git against the agent clone's `.git`; it rebuilds the clone, `.git` included, from `runner.git` before every session (first build at `base_sha`; loopback or CI fix at `head_sha` with findings or CI log prefetched), then reads only the working tree. Before acting on a PR this lane didn't build, it fetches the PR head and `passed_sha` into `runner.git`. The commit: working-tree changes against `base_sha`, three-way merged onto `origin/main`, one commit authored by `<login>-xarabot[bot]`, recording `base_sha` and `head_sha`. A pure sanitizer strips trailers, closing keywords and `@mentions` from agent `summary`/`body` before any forge text. Only the runner pushes, opens PRs, comments, enqueues and merges; never an admin merge or GitHub auto-merge.
-- AR17 (AD-16): the reviewer must come from a provider not in `builder_providers[]`: the first allowed adapter of (`claude`, `codex`) whose provider is outside the set (provider = the model's vendor; pi's from its `<provider>/<id>`); if the policy allows none, a separate same-vendor session reviews under the same rules (the first allowed of `claude`, `codex`, else `pi` on the builder's model; decided by the Maintainer 2026-10-21, with pi as a reviewer revisited for v1); a session whose reported model differs from config fails. The review runs on a fresh `runner.git` checkout of `head_sha` with agent config paths restored from `main`, hooks off and a freshly seeded vendor home; the runner records `reviewed_sha` and posts the review naming it. No blocking findings → `passed_sha`. Enqueue only if the head equals `passed_sha` or its tree equals the merge of `passed_sha` with the head's `main` parent, recomputed by the enqueuing lane. Owner-gated PRs need `approved_sha` = head; graph-changing PRs need the Maintainer's approval on the head and a matching `approved_graph`. `reconcile` PRs get no agent review. Any later agent change re-runs the review, each re-run a loopback, at most 2. A lane refuses to start if its reviewer adapter isn't allowed.
-- AR18 (AD-17): only `src/sandbox/` spawns agent and reviewer processes; a lint rule bans `Bun.spawn` under `src/adapters/agent/`. macOS: `sandbox-exec` with a generated profile, re-tested on each macOS major; Linux: `bwrap` with `--unshare-pid`; each agent's own sandbox off inside it. A per-lane vendor home under the state folder is re-seeded before every session with only that vendor's credential (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory; on macOS `claude` gets `CLAUDE_CODE_OAUTH_TOKEN`); the operator's `~/.claude`, `~/.codex`, `~/.pi` are inaccessible. Reads denied by default except system paths, the resolved real paths of the agent CLI, `bun`, `uv`, `git` and the uv-managed Python install (computed at session start), the lane clone, vendor home and temp folder; the session's `HOME` is a fresh directory inside the temp folder; `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot`, `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials`, `~/.netrc` always denied. Writes allowed to the full clone (never a linked worktree), vendor home and temp folder; `runner.git` never accessible. Env allowlist only: `PATH` (rebuilt from allowed directories), `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TERM`, the vendor credential variable, `XARABOT_RESULT`, `XARABOT_SANDBOXED`, the proxy variables and `UV_CACHE_DIR` (in the temp folder); git credential helper reset; Unix sockets denied. Network only through Xarabot's Bun proxy to vendor API hosts, `pypi.org`, `files.pythonhosted.org` and repo-added hosts; a GitHub host is never allowed. Fail closed if the sandbox can't be set up.
+- AR17 (AD-16): the reviewer must come from a provider not in `builder_providers[]`: the first allowed adapter of (`claude`, `codex`) whose provider is outside the set (provider = the model's vendor; pi's from its `<provider>/<id>`); if the policy allows none, a separate same-vendor session reviews under the same rules (the first allowed of `claude`, `codex`, else `pi` on the builder's model; decided by the Maintainer 2026-10-21, with pi as a reviewer revisited for v1); a session whose reported model differs from config fails. The review runs on a fresh `runner.git` checkout of `head_sha` with agent config paths restored from `main`, hooks off and a freshly seeded vendor home; the runner records `reviewed_sha` and posts the review naming it. No blocking findings → `passed_sha`. Enqueue only if the head equals `passed_sha` or its tree equals the merge of `passed_sha` with the head's `main` parent, recomputed by the enqueuing lane. Owner-gated PRs need `approved_sha` = head; graph-changing PRs need the Maintainer's approval on the head and a matching `approved_graph`. `reconcile` PRs get no agent review. Any later agent change re-runs the review. A review-driven fix session counts as a loopback (`loopbacks`, at most 2); a CI-fix session, or an agent session resolving a merge conflict, counts as a CI fix (`ci_fixes`, at most 2, AR20) and never as a loopback. Past either cap the unit parks blocked (`review-cap` or `ci-fix-cap`). A lane refuses to start if its reviewer adapter isn't allowed.
+- AR18 (AD-17): only `src/sandbox/` spawns agent and reviewer processes; a lint rule bans `Bun.spawn` under `src/adapters/agent/`. macOS: `sandbox-exec` with a generated profile, re-tested on each macOS major; Linux: `bwrap` with `--unshare-pid`; each agent's own sandbox off inside it. A per-lane vendor home under the state folder is re-seeded before every session with only that vendor's credential (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory; on macOS `claude` gets `CLAUDE_CODE_OAUTH_TOKEN`); the operator's `~/.claude`, `~/.codex`, `~/.pi` are inaccessible. Vendor credentials live in one mode-600 file per vendor under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (fallback `~/.config`), next to the App key, written once by the operator; each adapter Story confirms the exact form (`claude`: the token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`; `codex`: its auth file or API key, Story 3.1; `pi`: the OpenRouter key, Story 3.2). The lane process reads the file and seeds the vendor home or the credential variable before each session, builder or reviewer. A missing or unreadable credential for the lane's adapter or its reviewer makes the lane refuse to start, and a session whose credential can't be read is refused. Reads denied by default except system paths, the resolved real paths of the agent CLI, `bun`, `uv`, `git` and the uv-managed Python install (computed at session start), the lane clone, vendor home and temp folder; the session's `HOME` is a fresh directory inside the temp folder; `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot`, `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials`, `~/.netrc` always denied. Writes allowed to the full clone (never a linked worktree), vendor home and temp folder; `runner.git` never accessible. Env allowlist only: `PATH` (rebuilt from allowed directories), `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TERM`, the vendor credential variable, the variable that points the CLI at its vendor home, `XARABOT_RESULT`, `XARABOT_SANDBOXED`, the proxy variables and `UV_CACHE_DIR` (in the temp folder); git credential helper reset; Unix sockets denied. Network only through Xarabot's Bun proxy to vendor API hosts, `pypi.org`, `files.pythonhosted.org` and repo-added hosts; a GitHub host is never allowed. Fail closed if the sandbox can't be set up.
 - AR19 (AD-18): repo commands the runner needs (e.g. lockfile regeneration) run inside the sandbox with no token. The runner's own git runs only against `runner.git` with `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `credential.helper=` reset before its own helper, `core.hooksPath=/dev/null`, no fsmonitor/filters/external diff/textconv/signing program, `GIT_NO_REPLACE_OBJECTS=1`, `protocol.file.allow=never`, no submodule recursion. Write-check and review diffs are computed from git objects under those settings. The token reaches git only through a credential helper over stdin, scoped to the forge URL; never in env, argv, a file or a log.
-- AR20 (AD-19, adopted Lessons): poll CI by hand every 30 s backing off to 5 min, never `gh pr checks --watch`; stop at the first failure not on `policy.yaml`'s expected-checks list; an empty reply means pending; CI max wait default 60 min, then park blocked. An unexpected failure starts a CI-fix builder session, at most 2 per unit, journaled as `ci_fixes` and re-reviewed. Merge `origin/main` into a conflicting PR before polling; status YAML conflicts keep `main`'s lines and re-apply the PR's entries; lockfiles regenerated in the sandbox; other conflicts go to a builder session, counted as an attempt. Squash through the merge queue, never `--delete-branch`; an ejection merges `main`, re-polls and re-enqueues, counted toward `attempts`.
-- AR21 (AD-20): config in three layers: package (defaults, schemas, prompt template); repo (`.xarabot/config.yaml`, `policy.yaml`, `human-live-steps.yaml`, `epics.yaml`, `prompts/`, plus the Standing Authority file at the configured path), read only from freshly fetched `origin/main`; host (`host.yaml`, `XARABOT_HOST`, `XARABOT_MAX_BUILDERS`). All YAML with versioned schemas. The Standing Authority is valid when it exists on `main` and its YAML frontmatter validates: `schema_version: 1`; `granted_by` (a GitHub login equal to config's Maintainer login); `granted_at` (ISO 8601 date); `repo` (`owner/name`, equal to this repo); optional `expires` (ISO 8601 date; a past date makes it invalid); the body is free prose. `.xarabot/config.yaml` also holds the planning paths, with defaults: `epics_path` (`_bmad-output/planning-artifacts/epics.md`), `sprint_status_path` (`_bmad-output/implementation-artifacts/sprint-status.yaml`), `retro_gates_path` (`_bmad-output/implementation-artifacts/retro-gates.yaml`), `retro_doc_glob` (`_bmad-output/implementation-artifacts/epic-<N>-retro-*.md`) and `epic_context_path` (`_bmad-output/implementation-artifacts/epic-<N>-context.md`); `bootstrapped_epics` (default `[]`, AR12); `digest_time` (default `08:00` UTC, AR24); and an optional Escalation source read with Xaravel's rule (source: Xaravel `tools/escalations/escalations.ts`): Escalation files `ESC-<story-id>-<n>.md` or `ESC-bot-<n>.md` in a configured directory, and decision files `<decisions-dir>/ESC-<id>.md` carrying `decision: approved | rejected` and `escalation_sha256`, the lowercase hex SHA-256 of the Escalation file's text with CRLF normalised to LF. An Escalation is open when its decision is missing, invalid or stale; a Story with an open Escalation is not claimed or enqueued, parks blocked (`park.reason: escalation`) and appears in the Maintainer's digest (Story 7.6). Missing, invalid or unfetchable config, policy or Standing Authority stops the lane (an absent `epics.yaml` alone means serial). Re-checked from fresh `main`: the Standing Authority before every claim, push, enqueue and merge; adapter and reviewer allowances before every session launch and enqueue. Consumer Protected Paths: `.xarabot/**`, the Standing Authority file, `.github/**`, and agent config at any depth (`**/.agents/**`, `**/.claude/**`, `**/.codex/**`, `**/.pi/**`, `**/.mcp.json`, `**/AGENTS.md`, `**/CLAUDE.md`).
+- AR20 (AD-19, adopted Lessons): poll CI by hand every 30 s backing off to 5 min, never `gh pr checks --watch`; stop at the first failure not on `policy.yaml`'s expected-checks list; an empty reply means pending; CI max wait default 60 min, then park blocked. An unexpected failure starts a CI-fix builder session, at most 2 per unit, journaled as `ci_fixes` and re-reviewed. Merge `origin/main` into a conflicting PR before polling; status YAML conflicts keep `main`'s lines and re-apply the PR's entries; lockfiles regenerated in the sandbox; other conflicts go to a builder session, counted as a CI fix (`ci_fixes`, sharing the cap of 2 with CI fixes), never as an attempt or a loopback, and re-reviewed (AR17); past the cap the unit parks blocked (`ci-fix-cap`). Squash through the merge queue, never `--delete-branch`; an ejection merges `main`, re-polls and re-enqueues, counted toward `attempts`.
+- AR21 (AD-20): config in three layers: package (defaults, schemas, prompt template); repo (`.xarabot/config.yaml`, `policy.yaml`, `human-live-steps.yaml`, `epics.yaml`, `prompts/`, plus the Standing Authority file at the configured path), read only from freshly fetched `origin/main`; host (`host.yaml`, `XARABOT_HOST`, `XARABOT_MAX_BUILDERS`). All YAML with versioned schemas. The Standing Authority is valid when it exists on `main` and its YAML frontmatter validates: `schema_version: 1`; `granted_by` (a GitHub login equal to config's Maintainer login); `granted_at` (ISO 8601 date); `repo` (`owner/name`, equal to this repo); optional `expires` (ISO 8601 date; a past date makes it invalid); the body is free prose. `.xarabot/config.yaml` also holds the planning paths, with defaults: `epics_path` (`_bmad-output/planning-artifacts/epics.md`), `sprint_status_path` (`_bmad-output/implementation-artifacts/sprint-status.yaml`), `retro_gates_path` (`_bmad-output/implementation-artifacts/retro-gates.yaml`), `retro_doc_glob` (`_bmad-output/implementation-artifacts/epic-<N>-retro-*.md`) and `epic_context_path` (`_bmad-output/implementation-artifacts/epic-<N>-context.md`); `bootstrapped_epics` (default `[]`, AR12); `digest_time` (default `08:00` UTC, AR24); and an optional Escalation source read with Xaravel's rule (source: Xaravel `tools/escalations/escalations.ts`): Escalation files `ESC-<story-id>-<n>.md` or `ESC-bot-<n>.md` in a configured directory, and decision files in `<decisions-dir>` with the same file name as their Escalation file (e.g. `decisions/ESC-9.3-1.md`), carrying `decision: approved | rejected` and `escalation_sha256`, the lowercase hex SHA-256 of the Escalation file's text with CRLF normalised to LF. An Escalation is open when its decision is missing, invalid or stale; a Story with an open Escalation is not claimed or enqueued, parks blocked (`park.reason: escalation`) and appears in the Maintainer's digest (Story 7.6). Missing, invalid or unfetchable config, policy or Standing Authority stops the lane (an absent `epics.yaml` alone means serial). Re-checked from fresh `main`: the Standing Authority before every claim, push, enqueue and merge; adapter and reviewer allowances before every session launch and enqueue. Consumer Protected Paths: `.xarabot/**`, the Standing Authority file, `.github/**`, and agent config at any depth (`**/.agents/**`, `**/.claude/**`, `**/.codex/**`, `**/.pi/**`, `**/.mcp.json`, `**/AGENTS.md`, `**/CLAUDE.md`).
 - AR22 (AD-21): lanes are host config: each lane in `host.yaml` has `repo`, `role`, `owner`, `agent`, `model`, `effort`; state under `~/.xarabot/repos/<owner>__<name>/lanes/<lane>/`. Unset `model` → adapter default; unset `effort` → `high`. A lane refuses to start if its agent isn't allowed unattended, its effort isn't offered for its model, the reviewer adapter isn't allowed, the App installation doesn't cover the repo, or the host would exceed `XARABOT_MAX_BUILDERS` across all repos.
 - AR23 (AD-22): `~/.xarabot/STOP` stops the host and a lane's `STOP` stops that lane, checked at process start, before `next` and before each claim; a STOP ends a usage-limit sleep. `stop --now`: write the lane's `STOP`, kill by recorded PID in the order `lane.pid`, `agent.pid`, `wait.pid` after checking each PID's start time and command, then apply AD-7. An agent session has 3 hours; a session alive 5 minutes after its result file appears is killed. Usage limits: sleep until reset + 2 min, or 15 min if unparseable, never over 8 h; wakeable; heartbeat continues; the unit budget still applies.
-- AR24 (AD-23): one `xarabot-inbox`-labelled issue per owner, assigned to them; only the Maintainer's is pinned, by hand. Each `reconcile` run rewrites an owner's issue body from `parked` records, PR states and `retro-gates.yaml` when its content changed, routing Maintainer-only retro items in batch. GitHub sends no notification for a body edit, so once a day, at config `digest_time` (default `08:00` UTC), `reconcile` posts one @mention comment per inbox linking the body, keeping the last post time in `coordinator.json`; that is FR9's one daily digest. Any lane may post a single @mention alert for a condition that newly stops every lane, deduplicated by (condition, `main` SHA), allowed even while failing closed. The App gains `issues: write`.
+- AR24 (AD-23): one `xarabot-inbox`-labelled issue per owner, assigned to them; only the Maintainer's is pinned, by hand. Each `reconcile` run rewrites an owner's issue body from `parked` records, PR states, `retro-gates.yaml` and open Escalations (AR21) when its content changed, routing Maintainer-only retro items in batch. GitHub sends no notification for a body edit, so once a day, at config `digest_time` (default `08:00` UTC), `reconcile` posts one @mention comment per inbox linking the body, keeping the last post time in `coordinator.json`; that is FR9's one daily digest. Any lane may post a single @mention alert for a condition that newly stops every lane, deduplicated by (condition, `main` SHA), allowed even while failing closed. The App gains `issues: write`.
 - AR25 (AD-24): each lane appends to `journal.jsonl` one record per unit (AD-14 facts plus `outcome`, `loopbacks`, `ci_fixes`) and one per idle or waiting span with its reason (`waiting-on-maintainer`, `usage-limit`, `idle`); subscription cost labelled an estimate. `xarabot report` computes Stories per hour excluding all-lanes-`waiting-on-maintainer` hours. `xarabot status --json --watch` is the only status interface; the TUI draws it locally or over `ssh $XARABOT_HOST`. Logs kept 30 days; journals forever.
 - AR26 (AD-25): a lane runs `~/.xarabot/runner/<version>/`, the version from `runner_version` in `.xarabot/config.yaml` on `origin/main`. A consumer's exact `@xaravel/xarabot` pin must equal `runner_version` or the lane refuses to start; Xarabot's own repo uses `runner_version` alone. Only the Maintainer advances it. `xarabot lane install` installs that version and writes the launchd plist or systemd unit, with a restart throttle, to run a fixed launcher, `~/.xarabot/bin/xarabot-lane <repo> <lane>`, which runs the version named in the lane's `runner` file (in the lane state folder) and sets `XARABOT_SANDBOXED` only for agent sessions, never for itself. A lane that sees a different `runner_version` on `main` installs that version at `~/.xarabot/runner/<version>/`, rewrites `runner` and exits without claiming; the next start runs it. Pinning back works the same way, and nothing re-execs mid-unit.
-- AR27 (AD-26, adopted from `bootstrap/join.ts`): the App key lives at `$XDG_CONFIG_HOME/xarabot/apps/<login>-xarabot/private-key.pem` (fallback `~/.config`), mode 600, with `app.json` recording App ID and slug. Installation tokens are minted on demand, last 1 hour, memory only. The App has no admin, bypass or approve rights and no `workflows: write`; a diff touching `.github/workflows/**` is a write-check refusal. The App asks for exactly `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`, `actions: read`, `metadata: read` (granted to every App) and the merge-queue permission AR38 records. One table maps each GitHub operation to the permission it needs (Story 5.1a): git pushes go through the credential helper and are covered by `contents: write`; `join`'s manifest-conversion and App-JWT calls need no installation permission; branch-protection reads need `administration: read`, which the App never has, so those checks report "unverified" and the lane continues with a warning.
-- AR28 (AD-27): every runtime-validated shape has one zod schema in `src/core/schemas/` with its TS type inferred (config, policy, Standing Authority, manifests, ledger records, results, `retro-gates.yaml`, rulings, prefetched GitHub data, journal, status, `Snapshot`). The `Snapshot`'s named fields: `now`; ledger tip and records; `main` SHA; config, policy, Standing Authority; manifests and the resolved graph; `sprint-status.yaml` and `retro-gates.yaml`; PR state of every ledger unit; lane identity and role. YAML via `Bun.YAML`, globs via `Bun.Glob`. Each port has one contract suite in `test/contracts/` that every adapter passes, including many lanes racing on the ledger and every forge error kind.
+- AR27 (AD-26, adopted from `bootstrap/join.ts`): the App key lives at `$XDG_CONFIG_HOME/xarabot/apps/<login>-xarabot/private-key.pem` (fallback `~/.config`), mode 600, with `app.json` recording App ID and slug; vendor credentials sit next to it under `vendors/<vendor>/` (AR18). Installation tokens are minted on demand, last 1 hour, memory only. The App has no admin, bypass or approve rights and no `workflows: write`; a diff touching `.github/workflows/**` is a write-check refusal. The App asks for exactly `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`, `actions: read`, `metadata: read` (granted to every App) and the merge-queue permission AR38 records. One table maps each GitHub operation to the permission it needs (Story 5.1a): git pushes go through the credential helper and are covered by `contents: write`; `join`'s manifest-conversion and App-JWT calls need no installation permission; branch-protection reads need `administration: read`, which the App never has, so those checks report "unverified" and the lane continues with a warning.
+- AR28 (AD-27): every runtime-validated shape has one zod schema in `src/core/schemas/` with its TS type inferred (config, policy, Standing Authority, manifests, ledger records, results, `retro-gates.yaml`, rulings, prefetched GitHub data, journal, status, `Snapshot`). The `Snapshot`'s named fields: `now`; ledger tip and records; `main` SHA; config, policy, Standing Authority; manifests and the resolved graph; `sprint-status.yaml` and `retro-gates.yaml`; the Escalation statuses, when config names an Escalation source (AR21); each Epic's context file at `epic_context_path`, for the context gate (AR14); PR state of every ledger unit; lane identity and role. YAML via `Bun.YAML`, globs via `Bun.Glob`. Each port has one contract suite in `test/contracts/` that every adapter passes, including many lanes racing on the ledger and every forge error kind.
 - AR29 (AD-28): rulings are comment commands on the inbox issue: `/xarabot <verb> <unit-id>` with `go` (a checkpoint, or a rejected retro as `go retro:<N>`), `approve`, `block`, `unblock` (Maintainer only) and `rebuild`, `release`, `dismiss` (item owner or Maintainer). `release` and `rebuild` reset `attempts`, `loopbacks`, `ci_fixes`; `rebuild` also closes the PR and clears `builder_providers[]`; `release` keeps them; `dismiss` removes only the inbox item. `reconcile`'s runner code applies rulings (the checkpoint go included), never an agent, reading new comments from a cursor in `coordinator.json` and replying with a 🤖 acknowledgement. Local-only mode (v1) uses `xarabot rule <verb> <unit-id>`.
-- AR30 (AD-29): `core/prompt` builds every prompt purely from the package template, the repo's `prompts/` sections, the unit id, the Human Live Steps list, the result path and (v1) Lessons, all from fetched `origin/main`. The prompt names the unit; a test asserts it has no selection, CI, merge or status instruction. It runs the stock skill for the unit (`story` first build: `bmad-build-auto`; loopback or CI fix: none, apply prefetched findings or log; `retro`: `bmad-retrospective -H <epic>` then the item fields; `planning`: a status unit runs `bmad-sprint-planning` headless and compiles Epic context, and a graph unit makes the manifest, `epics.md` and `.xarabot/epics.yaml` edits; `retro-item`: none, the prompt names it), then writes the result as its last step. Never run by a lane: `bmad-create-epics-and-stories`, `bmad-correct-course`. The clone is on the unit's branch before the session. Adapters pass their CLI's attribution-off setting (e.g. `claude --settings {"attribution": false}`).
-- AR31 (AD-30): the 0.x write check refuses builder diffs touching coordinator-owned files (`epics.md` included), manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config at any depth or the repo's Protected Paths, with only three exceptions (an approved Infrastructure Story's Protected Paths, never coordinator files, manifests or `.xarabot/**`; the unit's own BMAD Story spec file; the `status:` line of its own Story file). Coordinator diffs may touch only the paths their unit holds; only a planning graph unit may touch a graph input, and under `.xarabot/**` only `epics.yaml`; a diff touching both a graph input and a status file is refused. Any agent diff changing a retro verdict, item or checkpoint go is refused. Only the session's own change is checked, never runner-written content. A refusal parks blocked and is logged.
+- AR30 (AD-29): `core/prompt` builds every prompt purely from the package template, the repo's `prompts/` sections, the unit id, the Human Live Steps list, the result path and (v1) Lessons, all from fetched `origin/main`. The prompt names the unit; a test asserts it has no selection, CI, merge or status instruction. It runs the stock skill for the unit (`story` first build: `bmad-build-auto`, the prompt naming the Story by its id and `sprint_key`, e.g. "Build Story 1.7 (`1-7-forge-port-fake-forge-and-contract-suite`)", so build-auto's spec slug leads with the id (AR11); loopback or CI fix: none, apply prefetched findings or log; `retro`: `bmad-retrospective -H <epic>` then the item fields; `planning`: a status unit runs `bmad-sprint-planning` headless, returns any readiness findings in its `planning` result (`outcome: blocked`, the findings in `summary`) and never saves a findings file, and compiles Epic context by following the installed stock `bmad-build-auto` skill's `compile-epic-context.md` with the Epic number, the epics path, the planning artifacts directory and the output path (AR14), and a graph unit makes the manifest, `epics.md` and `.xarabot/epics.yaml` edits; `retro-item`: none, the prompt names it), then writes the result as its last step. Never run by a lane: `bmad-create-epics-and-stories`, `bmad-correct-course`. The clone is on the unit's branch before the session. Adapters pass their CLI's attribution-off setting (e.g. `claude --settings {"attribution": false}`).
+- AR31 (AD-30): the 0.x write check refuses builder diffs touching coordinator-owned files (`epics.md` included), manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config at any depth or the repo's Protected Paths, with only three exceptions (an approved Infrastructure Story's Protected Paths, never coordinator files, manifests or `.xarabot/**`; the unit's own BMAD Story spec file, the single match of `story_spec_path` (AR11); the `status:` line of its own Story file). Coordinator diffs may touch only the paths their unit holds; only a planning graph unit may touch a graph input, and under `.xarabot/**` only `epics.yaml`; a diff touching both a graph input and a status file is refused. Any agent diff changing a retro verdict, item or checkpoint go is refused. Only the session's own change is checked, never runner-written content. A refusal parks blocked and is logged.
 - AR32 (AD-31): the bootstrap loop copy runs under a dedicated macOS user holding only the bot key, the Claude credential and its own clone (no `gh` login, ssh key or GitHub keychain item); the Maintainer's home is mode 700; the loop mints installation tokens each iteration. Self-hosting happens only once AD-17's sandbox runs in the first Epic.
 - AR33 (AD-32): `Forge` error kinds: `conflict`, `not-fast-forward`, `auth`, `forbidden`, `rate-limited` (with `retry_after`), `not-found`, `uninstalled`, `transient`. `rate-limited` and `transient` back off within the call's deadline, and a heartbeat that would lapse releases the unit; `auth`, `forbidden` and `uninstalled` stop the lane with an alert.
-- AR34 (AD-33): launchd and systemd restarts are throttled; 3 failed starts in a row write the lane's own `STOP` and post an alert. Consumer prerequisites, Human Live Steps checked at lane start where the API allows: the `xarabot/claims` ruleset (no force-push or deletion; no other ruleset matching it); the merge queue on `main`; squash messages set to PR title + body; Protected Paths requiring the owner's review with stale approvals dismissed and most-recent-push approval required; the App installed with `issues: write`.
+- AR34 (AD-33): launchd and systemd restarts are throttled; 3 failed starts in a row write the lane's own `STOP` and post an alert. Consumer prerequisites, Human Live Steps checked at lane start where the API allows: the `xarabot/claims` ruleset (no force-push or deletion; no other ruleset matching it); the merge queue on `main`; squash messages set to PR title + body; Protected Paths requiring the owner's review with stale approvals dismissed and most-recent-push approval required; the App installed with `issues: write` and the merge-queue permission (AR38).
 - AR35 (Consistency Conventions): integer Epic keys; `story_id` matches `^\d+\.\d+[a-z]?$`, sorted numerically by part then suffix. Unit ids `story:<story_id>`, `retro:<epic>`, `retro-item:<bmad-action-item-id>`, `checkpoint:<epic>`, `planning:<slug>.<n>`, `reconcile:<n>`; ledger file names replace `:` with `__`. Lane identity `<owner>/<host-uuid>/<lane>`, lanes `coordinator` and `builder-1` … `builder-N`. kebab-case files, `camelCase` functions, `PascalCase` types, one port per file in `src/ports/`. `src/core/` returns `{ ok: true, value } | { ok: false, error: { kind, message } }` and never throws; the shell catches at the unit boundary. ISO 8601 UTC timestamps. Logs at `logs/<unit-file-id>-<start>.log`. Forge text only by the runner after sanitizing; status comments start with 🤖. Tests with `bun test`: core tests are case tables with no mocks, each gate and each `next` input has its own test, adapters go through contract suites. Lint and types with `bun --bun oxlint` and `bun --bun tsc`, never through Node.
 - AR36 (Stack): Bun 1.4.3 (runtime, tests, packages, `Bun.YAML`, `Bun.Glob`); TypeScript 7.0.2; oxlint 1.89.0; zod 4.6.7; adapter CLI minimum tested versions claude 2.1.304, codex-cli 0.163.0, pi 1.3.0 (minimums, not pins); bubblewrap 0.13.1 on Linux.
-- AR37 (Structural Seed): the host layout (`~/.xarabot/STOP`, `bin/xarabot-lane` (the fixed launcher, AR26), `runner/<version>/`, `repos/<owner>__<name>/lanes/<lane>/` with `clone/`, `runner.git/`, `vendor/`, `runner` (the version the launcher runs), `journal.jsonl`, `lane.pid`, `agent.pid`, `wait.pid`, `outcome`, `STOP`, `logs/`; `$XDG_CONFIG_HOME/xarabot/` with `host.yaml` and `apps/<login>-xarabot/`) and the source tree (`src/core/` with `schemas/`, `src/ports/`, `src/adapters/forge/github/`, `src/adapters/agent/{claude,codex,pi}/`, `src/sandbox/`, `src/lane/`, `src/cli/` with `join`, `lane install`, `wake`, `stop`, `rule`, `status`, `tui`, `report`, `upgrade`; `test/contracts/`; `bootstrap/`).
+- AR37 (Structural Seed): the host layout (`~/.xarabot/STOP`, `bin/xarabot-lane` (the fixed launcher, AR26), `runner/<version>/`, `repos/<owner>__<name>/lanes/<lane>/` with `clone/`, `runner.git/`, `vendor/`, `runner` (the version the launcher runs), `journal.jsonl`, `lane.pid`, `agent.pid`, `wait.pid`, `outcome`, `STOP`, `logs/`; `$XDG_CONFIG_HOME/xarabot/` with `host.yaml`, `apps/<login>-xarabot/` and `vendors/<vendor>/`) and the source tree (`src/core/` with `schemas/`, `src/ports/`, `src/adapters/forge/github/`, `src/adapters/agent/{claude,codex,pi}/`, `src/sandbox/`, `src/lane/`, `src/cli/` with `join`, `lane install`, `wake`, `stop`, `rule`, `status`, `tui`, `report`, `upgrade`, `graph`; `test/contracts/`; `bootstrap/`).
 
 Open items and spikes the spine assigns to specific Stories:
 
@@ -227,10 +227,10 @@ FR24: Epic 1 - the `Forge` port and GitHub adapter with its contract suite; loca
 - **Bootstrap.** Epic 1 is built by the bootstrap copy of Xaravel's loop (NFR13), which picks work from `epics.md` prose; its Stories are strictly serial and each stands alone. Every later Epic is built by Xarabot's own pinned runner (NFR14).
 
 **Test strategy (applies to every Epic).**
-- Story 1.1 sets up `bun test`, `bun --bun oxlint` and `bun --bun tsc`, the import-boundary lint, the `Bun.spawn` ban under `src/adapters/agent/` and the `test/contracts/` skeleton. The CI workflow that runs them as a required check on `main` is a Maintainer step (`.github/**` is never a lane's to write).
+- Story 1.1 sets up `bun test` with its live switch (`XARABOT_LIVE=1`), `bun --bun oxlint` and `bun --bun tsc`, the import-boundary lint, the `Bun.spawn` ban under `src/adapters/agent/` and the `test/contracts/` skeleton. The CI workflow that runs them as a required check on `main` is a Maintainer step (`.github/**` is never a lane's to write).
 - An in-memory fake `Forge` passes the same contract suite as the GitHub adapter, so lane, claims and plumbing code is tested without GitHub, including many lanes racing on the ledger (AR28).
 - Every Story names its tests in its acceptance criteria: core Stories their case tables (no mocks), adapter Stories the contract suite they pass, sandbox Stories a refusal test per adapter, security-sensitive Stories their negative tests.
-- Every Epic ends with a verification Story that proves its success criteria end to end on the real repo. The Story writes its live command (`bun test --live <suite>`) and expected result into `docs/maintainer/self-host.md`, and the Maintainer runs it on the Xarabot host, outside the sandbox, with the credentials it needs (Story 3.6: every vendor's), before that Epic's retro. Inside a sandboxed session, live cases report skipped.
+- Every Epic ends with a verification Story that proves its success criteria end to end on the real repo. The Story writes its live command (`XARABOT_LIVE=1 bun test <suite>`) and expected result into `docs/maintainer/self-host.md`, and the Maintainer runs it on the Xarabot host, outside the sandbox, with the credentials it needs (Story 3.6: every vendor's), before that Epic's retro. Live cases run only when `XARABOT_LIVE=1` is set and otherwise report skipped, as they do inside a sandboxed session.
 - Sandbox suites (Stories 1.11 and 1.12, the sandbox re-runs in Stories 3.1 and 3.2, and Story 7.3) detect that they already run inside the Xarabot sandbox (`XARABOT_SANDBOXED=1`, set by the launcher) and skip their nested cases, reporting them skipped; the Maintainer runs those live too.
 - Live acceptance runs that do not fit a unit's 6-hour budget are Maintainer-run checks, not Stories: FR4's 24-hour run of a coordinator and 2 builders (after Epic 3 lifts the 1-builder limit) and NFR22's throughput, measured in Xaravel.
 
@@ -308,6 +308,11 @@ So that every later Story lands in the right layer and is checked the same way l
 **When** it references `Bun.spawn`
 **Then** the check fails (AR18).
 
+**Given** the test harness
+**When** `bun test` runs without `XARABOT_LIVE=1` in the environment
+**Then** every live case reports skipped, never passed
+**And** with `XARABOT_LIVE=1` set, the live cases run, proven by a test (Bun 1.4.3 accepts `bun test --live` silently and never passes it to `Bun.argv`, so the switch is the variable).
+
 **Given** the layer directories of AR37
 **When** the Story is done
 **Then** `src/core/schemas/`, `src/ports/`, `src/adapters/forge/github/`, `src/adapters/agent/claude/`, `src/sandbox/`, `src/lane/`, `src/cli/` and `test/contracts/` exist
@@ -328,7 +333,7 @@ So that revoking authority or breaking config stops every lane before its next c
 
 **Given** `src/core/schemas/`
 **When** the Story is done
-**Then** it holds versioned zod schemas, with inferred types, for `.xarabot/config.yaml` (including `runner_version`, the Maintainer's login, the Standing Authority path, the planning paths with their defaults (`epics_path`, `sprint_status_path`, `retro_gates_path`, `retro_doc_glob`, `epic_context_path`, AR21), `bootstrapped_epics` (a list of Epic numbers, default `[]`), `digest_time` (default `08:00` UTC), the manifest directory and path-key mapping, `story_spec_path`, both branch namespaces, the unit budget defaulting to 6 hours, the CI max wait defaulting to 60 minutes, repo-added proxy hosts, the lockfile regeneration command and the optional map from Epics to workspace packages), `.xarabot/policy.yaml` (adapters allowed unattended, the expected-checks list, the repo's Protected Paths and the paths that need the owner's approval), `.xarabot/human-live-steps.yaml`, the Standing Authority frontmatter (`schema_version: 1`, `granted_by`, `granted_at`, `repo`, optional `expires`; the body is free prose) and `host.yaml` (AR21, AR22).
+**Then** it holds versioned zod schemas, with inferred types, for `.xarabot/config.yaml` (including `runner_version`, the Maintainer's login, the Standing Authority path, the planning paths with their defaults (`epics_path`, `sprint_status_path`, `retro_gates_path`, `retro_doc_glob`, `epic_context_path`, AR21), `bootstrapped_epics` (a list of Epic numbers, default `[]`), `digest_time` (default `08:00` UTC), the manifest directory and path-key mapping, `story_spec_path` (a glob pattern, default `_bmad-output/implementation-artifacts/spec-<epic>-<story>-*.md`, AR11), both branch namespaces, the unit budget defaulting to 6 hours, the CI max wait defaulting to 60 minutes, repo-added proxy hosts, the lockfile regeneration command and the optional map from Epics to workspace packages), `.xarabot/policy.yaml` (adapters allowed unattended, the expected-checks list, the repo's Protected Paths and the paths that need the owner's approval), `.xarabot/human-live-steps.yaml`, the Standing Authority frontmatter (`schema_version: 1`, `granted_by`, `granted_at`, `repo`, optional `expires`; the body is free prose) and `host.yaml` (AR21, AR22).
 
 **Given** a snapshot of `main` as a tree listing plus file contents
 **When** the pure `loadRepoConfig` runs
@@ -351,6 +356,10 @@ So that revoking authority or breaking config stops every lane before its next c
 **Given** a host layer
 **When** it sets a value that belongs to the repo layer
 **Then** loading refuses it; repo policy comes only from `main`.
+
+**Given** the default `story_spec_path`
+**When** it is expanded for the Stories `1.7` and `1.17a`
+**Then** it gives `_bmad-output/implementation-artifacts/spec-1-7-*.md` and `_bmad-output/implementation-artifacts/spec-1-17a-*.md`.
 
 ### Story 1.3: Story manifests and the `epics.md` grammar
 
@@ -380,7 +389,7 @@ So that claims, the guard and the graph all see the same Stories and globs (AR11
 **Then** an Epic is a level-2 `## Epic <int>:` heading outside fenced code; level-3 Epic lines under `## Epic List` and any heading inside fenced code are ignored
 **And** a Story is a level-3 `### Story <int>.<int>[a-z]?:` heading under its Epic, and its id keeps the letter (`2.6a`)
 **And** a Story heading whose Epic number differs from the Epic it sits under is an error
-**And** a fixture copy of this repo's own `epics.md` parses to Epics 1–7 and their Stories, the lettered `1.17a` and `5.1a` included.
+**And** a fixture copy of this repo's own `epics.md` parses to Epics 1–7 and their Stories, the lettered `1.16a`, `1.17a` and `5.1a` included.
 
 **Given** Story ids
 **When** they are sorted
@@ -408,11 +417,12 @@ So that I can check a graph change from an interactive planning session before m
 **When** `package.json` workspace dependencies link two mapped packages
 **Then** the matching Epic edge is added; with no map, no package edges are added.
 
-**Given** a `retro-gates.yaml` schema for Epic verdicts, action items (stock BMAD ids, `blocking`, `route`, `globs`, status) and checkpoint go records
+**Given** the `retro-gates.yaml` schema of AR13: `schema_version: 1`; per Epic, a `retro` record (`verdict`, `unit`, `recorded_at`, and for a `rejected` verdict a `go` {`by`, `at`, `ruling`} that is absent until the go), `items` (stock BMAD `id`, `text`, `route`, `blocking`, `globs`, and `status` `open`, `in-progress`, `waiting`, `deferred` or `done`) and a `checkpoint` record holding a checkpoint's `go` {`by`, `at`, `ruling`}, present only once the go is recorded
 **When** `retro-gates.yaml` is read
-**Then** it validates against that schema.
+**Then** it validates against that schema
+**And** a case-table test reads a rejected retro's go, both from a ruling and as the Maintainer writes it by hand before Story 4.6 (`ruling: maintainer-pr`), since Story 1.6 reads it.
 
-**Given** the validation case table: an invalid file; an entry or `depends_on` naming an Epic with no heading; a cycle; a manifest with no heading or a mismatched `epic`; a manifest `depends_on` naming an unknown Story, or a Story outside its own Epic and the Epics that Epic depends on, transitively; `bootstrapped_epics` naming an Epic with no heading; `retro-gates.yaml` marking an Epic as awaiting a checkpoint go that the graph doesn't mark
+**Given** the validation case table: an invalid file; an entry or `depends_on` naming an Epic with no heading; a cycle; a manifest with no heading or a mismatched `epic`; a manifest `depends_on` naming an unknown Story, or a Story outside its own Epic and the Epics that Epic depends on, transitively; `bootstrapped_epics` naming an Epic with no heading
 **When** the pure `resolveGraph(snapshot)` runs on each
 **Then** each returns a validation failure naming the problem.
 
@@ -482,6 +492,11 @@ So that unit selection is code with a test for each input instead of prompt pros
 **When** `next` runs
 **Then** that Epic counts as all Stories done and retro done, even with no Stories, and its Story headings are not listed as unclaimable.
 
+**Given** an Epic whose context file at `epic_context_path` is missing on `main`, empty, or does not start with `# Epic <N> Context:`
+**When** `next` runs
+**Then** none of its Stories is returned, and the idle reason names the Epic waiting on its context
+**And** an Epic listed in `bootstrapped_epics` is exempt (AR14).
+
 **Given** an Epic E whose retro verdict in `retro-gates.yaml` is `rejected`
 **When** `next` runs before the Maintainer's `/xarabot go retro:<N>` for E is recorded
 **Then** no Story of any Epic at distance ≥ 1 from E is returned, and the idle reason names E's rejected retro
@@ -492,9 +507,10 @@ So that unit selection is code with a test for each input instead of prompt pros
 **Then** a Story whose record is absent or `released` is eligible unless it is `done` in `sprint-status.yaml` on `main`, and `claimed`, `merging`, `parked` and `merged` are not (stale takeover is Epic 2)
 **And** a `done` Story whose `merged` record was deleted is never returned again.
 
-**Given** a Story whose manifest `depends_on` lists a Story not `done` in `sprint-status.yaml` on `main`
+**Given** a Story whose manifest `depends_on` lists a Story that is neither `done` in `sprint-status.yaml` on `main` nor has a `merged` ledger record
 **When** `next` runs
-**Then** it is not returned, and its reason names the Story it waits on.
+**Then** it is not returned, and its reason names the Story it waits on
+**And** a listed Story with a `merged` record satisfies `depends_on` before `reconcile` marks it `done`, since either way it is on `main` (AR11).
 
 **Given** an eligible Story whose globs overlap a `claimed`, `merging` or held `parked` record
 **When** `next` runs
@@ -679,12 +695,14 @@ So that no agent reaches a GitHub credential, another lane's secrets or the runn
 
 **Given** a launching environment that holds `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK` and other variables
 **When** the session starts
-**Then** only `PATH` (rebuilt from allowed directories), `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TERM`, the vendor credential variable, `XARABOT_RESULT`, `XARABOT_SANDBOXED`, the proxy variables and `UV_CACHE_DIR` (in the temp folder) pass through, and the git credential helper is reset
+**Then** only `PATH` (rebuilt from allowed directories), `HOME`, `TMPDIR`, `LANG`, `LC_*`, `TERM`, the vendor credential variable, the variable that points the CLI at its vendor home, `XARABOT_RESULT`, `XARABOT_SANDBOXED`, the proxy variables and `UV_CACHE_DIR` (in the temp folder) pass through, and the git credential helper is reset
 **And** `HOME` is a fresh directory inside the temp folder, and `XARABOT_SANDBOXED` is `1`.
 
-**Given** a lane vendor home
+**Given** a lane vendor home and the operator's mode-600 credential file for that vendor under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (falling back to `~/.config`)
 **When** a session starts
-**Then** it is re-seeded to hold only that vendor's credential.
+**Then** the lane process reads that file and re-seeds the vendor home, or sets the credential variable, to hold only that vendor's credential
+**And** the session itself cannot read the file (the `$XDG_CONFIG_HOME/xarabot` read test covers it)
+**And** a missing or unreadable credential file refuses the session, with an error naming the file.
 
 **Given** a clone that is a linked worktree (its `.git` is a file)
 **When** a session is requested
@@ -754,7 +772,7 @@ So that prompts carry no selection, CI, merge or status instructions, and sessio
 
 **Given** the package template, the repo's `.xarabot/prompts/` sections, the unit id, the Human Live Steps list and the result path, all from a `main` snapshot
 **When** the pure `core/prompt` runs for a `story` first build
-**Then** the prompt names the unit ("Build Story 1.7") and runs stock `bmad-build-auto` for it
+**Then** the prompt names the unit by its Story id and `sprint_key` ("Build Story 1.7 (`1-7-forge-port-fake-forge-and-contract-suite`)"), so build-auto's spec slug leads with the id and its spec file matches `story_spec_path` (AR11), and runs stock `bmad-build-auto` for it
 **And** its last step writes the result to `$XARABOT_RESULT` in the `build` schema.
 
 **Given** a `story` loopback or CI fix
@@ -788,9 +806,10 @@ So that a Story is built by Claude Code with the lane's model and effort and ret
 
 **Given** lane settings
 **When** `launchSpec` runs
-**Then** it returns `claude -p --model <model> --effort <effort> --permission-mode auto` with the `--output-format` the spike chose, the attribution-off setting (`--settings {"attribution": false}`), claude's own sandbox turned off (AR18), `CLAUDE_CONFIG_DIR` set to the lane's vendor home, `CLAUDE_CODE_OAUTH_TOKEN` on macOS, `XARABOT_RESULT`, and the clone as working directory
+**Then** it returns `claude -p --model <model> --effort <effort> --permission-mode auto` with the `--output-format` the spike chose, the attribution-off setting (`--settings {"attribution": false}`), claude's own sandbox turned off (AR18), `CLAUDE_CONFIG_DIR` set to the lane's vendor home, `CLAUDE_CODE_OAUTH_TOKEN` on macOS (the token from `claude setup-token`, read from the operator's credential file under `$XDG_CONFIG_HOME/xarabot/vendors/claude/`, AR18), `XARABOT_RESULT`, and the clone as working directory
 **And** an unset `model` is `claude-opus-5-5` and an unset `effort` is `high`
-**And** the adapter supplies `claude`'s vendor API hosts to the proxy (Story 1.12).
+**And** the adapter supplies `claude`'s vendor API hosts to the proxy (Story 1.12)
+**And** the Story confirms the name and form of `claude`'s credential file under `$XDG_CONFIG_HOME/xarabot/vendors/claude/` and records it for Story 1.20's runbook.
 
 **Given** a model
 **When** `effortValues` runs
@@ -848,11 +867,11 @@ So that nothing an agent plants in git runs as the runner, and no co-author trai
 **When** agent `summary` and `body` text passes through it
 **Then** git trailers (including `Co-Authored-By` and `Signed-off-by`), closing keywords with issue references (`closes #12`, `fixes <url>`) and `@mentions` are stripped, and other text is unchanged.
 
-### Story 1.16: The lane process: one unit from claim to PR
+### Story 1.16: The lane process: one unit from claim to result
 
 As an operator,
-I want one lane process to take one unit from claim to an open PR,
-So that a Story is built unattended in the sandbox and leaves a bot-authored PR, a journal record and a ledger state that says what happened (FR3, FR6, FR11, FR22, AR3, AR8, AR10, AR25).
+I want one lane process to take one unit from claim to a validated result,
+So that a Story is built unattended in the sandbox and leaves a journal record and a ledger state that says what happened (FR3, FR6, FR11, FR22, AR3, AR8, AR10, AR15, AR25).
 
 **Acceptance Criteria:**
 
@@ -875,15 +894,12 @@ So that a Story is built unattended in the sandbox and leaves a bot-authored PR,
 
 **Given** a `build` result
 **When** the runner validates it
-**Then** it cross-checks the result's `outcome` against the Story spec's `status` and `## Auto Run Result` (AR15), and a mismatch counts as an invalid result.
+**Then** it finds the Story's spec file as the single file in the clone's working tree matching `story_spec_path` (AR11), and cross-checks the result's `outcome` against that file's `status` and `## Auto Run Result` (AR15)
+**And** zero or several matches, or a mismatch, count as an invalid result.
 
-**Given** a `done` build result
+**Given** a valid `done` build result
 **When** the runner handles it
-**Then** it commits (Story 1.15), re-checks the Standing Authority, pushes with a lease, opens the PR with the sanitized summary and body, records `pr` and `head_sha`, and posts a status comment starting with 🤖 through `Forge.comment` (Story 1.9).
-
-**Given** a result whose `denied_actions[]` is not empty
-**When** the runner handles it
-**Then** each action is recorded in the unit's journal record and listed in the PR's 🤖 status comment (AR44).
+**Then** it passes the unit to the PR step (Story 1.16a).
 
 **Given** a `blocked` or `no-op` result
 **When** the runner handles it
@@ -905,6 +921,30 @@ So that a Story is built unattended in the sandbox and leaves a bot-authored PR,
 **When** they run against the fake forge and a stub agent
 **Then** each outcome above has a case.
 
+### Story 1.16a: Opening the PR
+
+As an operator,
+I want the lane to turn a `done` build result into a bot-authored PR in code,
+So that only the runner commits, pushes and writes forge text, and a revoked Standing Authority stops the push (FR6, FR13, FR22, NFR10, AR7, AR16, AR21, AR44).
+
+**Acceptance Criteria:**
+
+**Given** a `done` build result that passed validation (Story 1.16)
+**When** the runner handles it
+**Then** it commits (Story 1.15), re-checks the Standing Authority from freshly fetched `main`, pushes with a lease, opens the PR with the sanitized summary and body, records `pr` and `head_sha`, and posts a status comment starting with 🤖 through `Forge.comment` (Story 1.9).
+
+**Given** a Standing Authority that is absent or invalid on fresh `main`
+**When** the lane is about to push
+**Then** it stops before the push, with no push and no PR (AR21).
+
+**Given** a result whose `denied_actions[]` is not empty
+**When** the runner handles it
+**Then** each action is recorded in the unit's journal record and listed in the PR's 🤖 status comment (AR44).
+
+**Given** the lane tests
+**When** they run against the fake forge and a stub agent
+**Then** the commit, the push with its lease, the PR, the status comment, the Standing Authority re-check and the denied-actions listing each have a case.
+
 ### Story 1.17: CI polling, CI fixes and conflicts
 
 As an operator,
@@ -923,12 +963,12 @@ So that the agent never polls CI, and Xaravel's CI and conflict lessons hold (FR
 **Then** it merges `origin/main` into the PR in `runner.git` before polling
 **And** conflicts in `sprint-status.yaml` and `retro-gates.yaml` keep `main`'s lines and re-apply the PR's own entries
 **And** a lockfile conflict is regenerated with the configured command inside the sandbox, with no token
-**And** any other conflict goes to a builder session that counts as an attempt.
+**And** any other conflict goes to a builder session that counts as a CI fix (`ci_fixes` + 1), never as an attempt or a loopback.
 
 **Given** an unexpected CI failure
 **When** the lane handles it
 **Then** it prefetches the CI log, runs a CI-fix session at `head_sha` and records `ci_fixes` + 1
-**And** once `ci_fixes` ≥ 2 and CI still fails, the unit parks blocked.
+**And** once `ci_fixes` ≥ 2 and CI still fails, or another conflict needs a session, the unit parks blocked (`ci-fix-cap`).
 
 **Given** the suite
 **When** it runs
@@ -1034,7 +1074,7 @@ So that a bad Story can never break the runner that would build its fix, and rec
 
 **Given** the refusal case table
 **When** a lane starts
-**Then** it refuses if its agent is not allowed unattended by policy, its adapter's start check fails (an effort not in `effortValues` for its model, or a CLI below the minimum tested version), the App installation does not cover the repo, or the host would run more builders than `XARABOT_MAX_BUILDERS` across all repos.
+**Then** it refuses if its agent is not allowed unattended by policy, its adapter's start check fails (an effort not in `effortValues` for its model, or a CLI below the minimum tested version), its vendor's credential file under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` is missing or unreadable (AR18), the App installation does not cover the repo, or the host would run more builders than `XARABOT_MAX_BUILDERS` across all repos.
 
 **Given** a lane that sees a different `runner_version` on `main`
 **When** it starts
@@ -1053,7 +1093,7 @@ So that I can switch from the bootstrap loop to Xarabot's own pinned runner with
 **When** the canary suite in `test/e2e/` runs
 **Then** a real lane, with a stub agent CLI inside the real sandbox, claims a Story, commits as the bot, opens the PR, passes CI, enqueues and records `merged`
 **And** the commit is authored by `<login>-xarabot[bot]` with no trailers.
-**And** `docs/maintainer/self-host.md` holds the canary's live command (`bun test --live <suite>`) and expected result, which the Maintainer runs on the Xarabot host, outside the sandbox, before Epic 1's retro; inside a sandboxed session the live cases report skipped.
+**And** `docs/maintainer/self-host.md` holds the canary's live command (`XARABOT_LIVE=1 bun test <suite>`) and expected result, which the Maintainer runs on the Xarabot host, outside the sandbox, before Epic 1's retro; inside a sandboxed session the live cases report skipped.
 
 **Given** the canary
 **When** a `STOP` is written during the lane's trailing wait
@@ -1069,7 +1109,8 @@ So that I can switch from the bootstrap loop to Xarabot's own pinned runner with
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it lists every Maintainer step for the switch, each with the command or file content to apply: the CI workflow as a required check; the `xarabot/claims` ruleset; the merge queue on `main`; squash messages set to PR title + body; the App permissions, including AR38's finding (`issues: write` is a Story 1.10 precondition); this repo's `.xarabot/config.yaml` with `runner_version` and `bootstrapped_epics: [1]`; a `policy.yaml` that makes every path need the Maintainer's approval and allows only `claude` unattended; the Standing Authority file; running `bmad-sprint-planning` once to create `sprint-status.yaml` with Epic 1's Stories `done` (a one-time Maintainer write, the exception AR4 records); running Epic 1's retro interactively; Epic 2's Story manifests, with `depends_on` where a Story builds on an earlier one; `XARABOT_MAX_BUILDERS=1`; `xarabot lane install`; and stopping the bootstrap loop
+**Then** it lists every Maintainer step for the switch, each with the command or file content to apply: the CI workflow as a required check; the `xarabot/claims` ruleset; the merge queue on `main`; squash messages set to PR title + body; the App permissions, including AR38's finding (`issues: write` is a Story 1.10 precondition); storing the Claude credential, the token from `claude setup-token`, in its mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/claude/` on the Xarabot host, in the form Story 1.14 recorded (AR18); this repo's `.xarabot/config.yaml` with `runner_version` and `bootstrapped_epics: [1]`; a `policy.yaml` that makes every path need the Maintainer's approval and allows only `claude` unattended; the Standing Authority file; the Maintainer's bootstrap writes, each in a Maintainer PR (AR4): running `bmad-sprint-planning` once so that `sprint-status.yaml` has Epic 1's Stories `done`, whether the run creates the file or updates it, Epic 2's Story manifests, with `depends_on` where a Story builds on an earlier one, and Epic 2's context file at `epic_context_path`, compiled by following the installed stock `bmad-build-auto` skill's `compile-epic-context.md` with the Epic number, the epics path, the planning artifacts directory and the output path, and checked to be non-empty and to start with `# Epic 2 Context:`; running Epic 1's retro interactively; `XARABOT_MAX_BUILDERS=1`; `xarabot lane install`; and stopping the bootstrap loop
+**And** it lists the Maintainer's steps while Epic 2 is built: a lane runs only the pinned `runner_version` (Story 1.19), so after a Story whose code the lanes need has merged, the Maintainer tags that `main` commit in `xaravel/xarabot` and advances `runner_version` to the tag in a Maintainer PR, added to the merge queue by hand, and each lane installs it at its next start; the coordinator lane is installed only once `runner_version` includes Stories 2.4 and 2.5; until Story 2.8 merges, the Maintainer runs `xarabot graph check` on each graph PR before approving it; and until Story 4.6 merges, the Maintainer records a rejected retro's go by hand in `retro-gates.yaml` (`ruling: maintainer-pr`, AR13), in a Maintainer PR
 **And** it lists the live commands and expected results of the sandbox suites' nested cases (Stories 1.11 and 1.12), for the Maintainer to run on the host.
 
 ## Epic 2: A coordinator lane and claims let builders run side by side
@@ -1145,7 +1186,7 @@ So that builders cannot write coordinator-owned files, manifests, agent config o
 **Then** the squash is refused, the unit becomes `parked`, blocked (`park.reason: write-check`), and the refusal is logged with the path and reason.
 
 **Given** the three exceptions
-**When** a builder diff touches the unit's own BMAD Story spec file, the `status:` line of its own Story file, or the repo's Protected Paths for an Infrastructure Story with a matching approval
+**When** a builder diff touches the unit's own BMAD Story spec file (the single file matching `story_spec_path`, by default `_bmad-output/implementation-artifacts/spec-<epic>-<story>-*.md`), the `status:` line of its own Story file, or the repo's Protected Paths for an Infrastructure Story with a matching approval
 **Then** it is allowed
 **And** the Infrastructure exception never covers coordinator-owned files, manifests or `.xarabot/**`.
 
@@ -1194,7 +1235,7 @@ So that two coordinators never run, and builders keep going and raise an alert w
 
 **Given** coordinator units
 **When** their globs are computed
-**Then** a graph planning unit holds the graph inputs and the pseudo-glob `xarabot:graph`; a status planning unit holds both status files and the Epic context path, never the graph inputs; retro and checkpoint hold the status files and the Epic context path, never the graph inputs; `reconcile` holds none; and the overlap check applies to the coordinator as to builders.
+**Then** a graph planning unit holds the graph inputs and the pseudo-glob `xarabot:graph`; a status planning unit holds both status files and the Epic context path, never the graph inputs; a retro unit holds the status files, the Epic context path and the retro document path (`retro_doc_glob`), never the graph inputs; a checkpoint unit holds the status files and the Epic context path, never the graph inputs; `reconcile` holds none; and the overlap check applies to the coordinator as to builders.
 
 **Given** a coordinator session's change
 **When** it touches a path its unit does not hold, a graph input from a unit that is not a graph planning unit, anything under `.xarabot/**` other than `epics.yaml`, or both a graph input and a status file
@@ -1202,7 +1243,8 @@ So that two coordinators never run, and builders keep going and raise an alert w
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it adds the Maintainer step of installing the coordinator lane with `xarabot lane install --role coordinator`, which Epic 2's retro, and so Epic 3, waits on.
+**Then** it adds the Maintainer steps, in order: once Stories 2.4 and 2.5 have merged, tag a `main` commit that includes both and advance `runner_version` to that tag in a Maintainer PR (Story 1.19); then install the coordinator lane with `xarabot lane install --role coordinator`, which Epic 2's retro, and so Epic 3, waits on
+**And** it says the coordinator lane is never installed while `runner_version` lacks Stories 2.4 and 2.5.
 
 ### Story 2.5: `reconcile` marks units done
 
@@ -1218,7 +1260,7 @@ So that sprint status follows merges with no agent writing status, and merged le
 
 **Given** ledger units whose PRs merged
 **When** `reconcile` runs
-**Then** it writes their `merged` records, and marks each unit done on `main` per AR10's rule for its kind (a Story becomes `done` in `sprint-status.yaml`, which is where `next` and the gates read that it is done, since its record is later deleted)
+**Then** it writes their `merged` records, and marks each unit done on `main` per AR10's rule for its kind (a Story becomes `done` in `sprint-status.yaml`, which is where `next` and the gates read that it is done, since its record is later deleted; until then its `merged` record already meets a `depends_on` that names it, Story 1.6)
 **And** for a merged graph planning unit, it writes that unit's status entries to `sprint-status.yaml` (the Epics and Stories it added), so a graph unit never writes a status file itself
 **And** it opens a `reconcile` PR holding only runner-written content, which gets no agent review and no agent loopback.
 
@@ -1271,7 +1313,7 @@ So that Stories become eligible without me running sprint planning by hand (FR2,
 
 **Acceptance Criteria:**
 
-**Given** a snapshot where `epics.md` has Epics or Stories missing from `sprint-status.yaml`, or an Epic about to become eligible with no current Epic context file
+**Given** a snapshot where `epics.md` has Epics or Stories missing from `sprint-status.yaml`, or an Epic not listed in `bootstrapped_epics` whose Stories wait only on its Epic context file (`epic_context_path`), missing or invalid on `main` (Story 1.6)
 **When** `next(snapshot, 'coordinator')` reaches planning
 **Then** it returns a status planning unit, `planning:<slug>.<n>`, naming what is due.
 
@@ -1282,7 +1324,9 @@ So that Stories become eligible without me running sprint planning by hand (FR2,
 
 **Given** a status planning unit
 **When** its prompt is built
-**Then** it runs stock `bmad-sprint-planning` told to run headless, plus the due Epic context, and never touches a graph input.
+**Then** it runs stock `bmad-sprint-planning` told to run headless, and never touches a graph input
+**And** for each due Epic context it follows the installed stock `bmad-build-auto` skill's `compile-epic-context.md` with the Epic number, the epics path, the planning artifacts directory and the output path (`epic_context_path`)
+**And** it tells the session to return any readiness findings in the `planning` result (`outcome: blocked`, the findings in `summary`) and never to save a findings file, so the unit holds no findings path.
 
 **Given** a graph planning unit
 **When** its prompt is built
@@ -1312,7 +1356,7 @@ So that Stories become eligible without me running sprint planning by hand (FR2,
 
 **Given** the coordinator case table from Story 2.4
 **When** it runs
-**Then** it gains the planning position's cases: a status unit due, a graph unit due, both due with the graph unit first, and a Story heading with no manifest in an Epic listed in `bootstrapped_epics`, which makes nothing due.
+**Then** it gains the planning position's cases: a status unit due, a status unit due only for an Epic waiting on its context file, a graph unit due, both due with the graph unit first, and a Story heading with no manifest, or no Epic context file, in an Epic listed in `bootstrapped_epics`, which makes nothing due.
 
 ### Story 2.8: The graph-change gate
 
@@ -1472,7 +1516,7 @@ So that I can lift the builder limit after Epic 3 with evidence that claims hold
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records this suite's live command (`bun test --live <suite>`, the 30-minute case included) and its expected result, which the Maintainer runs on the host, outside the sandbox, before Epic 2's retro
+**Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`, the 30-minute case included) and its expected result, which the Maintainer runs on the host, outside the sandbox, before Epic 2's retro
 **And** it adds the Maintainer-run acceptance check for after Epic 3: a coordinator and 2 builders for 24 hours with no unit built twice and no builder write to the status files (FR4).
 
 ## Epic 3: Every diff is reviewed before it merges, by another vendor where allowed
@@ -1496,6 +1540,11 @@ So that Stories can be built by an OpenAI model with the same lane settings as `
 **When** `launchSpec` runs
 **Then** it returns `codex exec -m <model> --json -c model_reasoning_effort=<effort>` with the CLI's own sandbox turned off inside Xarabot's, its attribution-off setting, `CODEX_HOME` set to the lane's vendor home, `XARABOT_RESULT`, the clone as working directory and the skills exposed through `.agents/skills`
 **And** an unset `model` is `gpt-6.1-sol` and an unset `effort` is `high`.
+
+**Given** the operator's `codex` credential, its auth file or API key, written once to a mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/` (falling back to `~/.config`)
+**When** a `codex` session, builder or reviewer, is about to launch
+**Then** the lane process reads that file and seeds the lane's vendor home with it, in the form this Story confirms `codex exec` accepts
+**And** a lane whose adapter or reviewer is `codex` refuses to start while that file is missing or unreadable (AR18).
 
 **Given** a model
 **When** `effortValues` runs
@@ -1541,8 +1590,13 @@ So that Stories can be built by models from other vendors with the same lane set
 
 **Given** lane settings
 **When** `launchSpec` runs
-**Then** it returns `pi -p --mode json --model <provider/id> --thinking <effort>` with pi's own sandbox turned off inside Xarabot's, its attribution-off setting, and pi's agent directory pointed at the lane's vendor home, which holds the operator's OpenRouter sign-in, plus `XARABOT_RESULT` and the clone as working directory
+**Then** it returns `pi -p --mode json --model <provider/id> --thinking <effort>` with pi's own sandbox turned off inside Xarabot's, its attribution-off setting, and pi's agent directory pointed at the lane's vendor home, plus `XARABOT_RESULT` and the clone as working directory
 **And** an unset `effort` is `high`.
+
+**Given** the operator's OpenRouter key, written once to a mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/` (falling back to `~/.config`)
+**When** a `pi` session, builder or reviewer, is about to launch
+**Then** the lane process reads that file and seeds the lane's vendor home with it, in the form this Story confirms pi reads
+**And** a lane whose adapter or reviewer is `pi` refuses to start while that file is missing or unreadable (AR18).
 
 **Given** a model
 **When** `effortValues` runs
@@ -1594,7 +1648,7 @@ So that no diff is reviewed by the vendor that built it unless the repo has only
 
 **Given** a lane
 **When** it starts
-**Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy (AR17, AR22).
+**Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy, or if the reviewer's credential file under `$XDG_CONFIG_HOME/xarabot/vendors/` is missing or unreadable (AR17, AR18, AR22).
 
 ### Story 3.4: Review sessions
 
@@ -1606,7 +1660,7 @@ So that a review result describes the diff that will merge and cannot be steered
 
 **Given** a unit ready for review
 **When** the runner starts the review session
-**Then** it makes a fresh checkout of `head_sha` from `runner.git`, never the builder's clone, restores the agent config paths from `main`, turns hooks off, seeds a fresh vendor home for the reviewer, and launches it through the sandbox.
+**Then** it makes a fresh checkout of `head_sha` from `runner.git`, never the builder's clone, restores the agent config paths from `main`, turns hooks off, seeds a fresh vendor home for the reviewer from that vendor's credential file (AR18), and launches it through the sandbox.
 
 **Given** the review prompt
 **When** `core/prompt` builds it
@@ -1641,8 +1695,9 @@ So that every merged diff is one another vendor reviewed, and disagreements stop
 
 **Given** any later agent change to the diff (a loopback, a CI fix or a conflict resolution)
 **When** it is committed
-**Then** the review re-runs and `loopbacks` + 1
-**And** once `loopbacks` ≥ 2, the unit becomes `parked`, blocked (`park.reason: review-cap`), whatever the review's verdict, with `park.inbox_owner` set to its owner.
+**Then** the review re-runs
+**And** a review-driven fix session counts as a loopback (`loopbacks` + 1); a CI-fix session, or an agent session resolving a merge conflict, counts as a CI fix (`ci_fixes` + 1, Story 1.17) and never as a loopback
+**And** once `loopbacks` ≥ 2, the unit becomes `parked`, blocked (`park.reason: review-cap`), whatever the review's verdict, with `park.inbox_owner` set to its owner; past the `ci_fixes` cap it becomes `parked`, blocked (`park.reason: ci-fix-cap`), as Story 1.17 says.
 
 **Given** coordinator PRs
 **When** they are enqueued
@@ -1654,7 +1709,7 @@ So that every merged diff is one another vendor reviewed, and disagreements stop
 
 **Given** the case tables
 **When** they run against the fake forge
-**Then** head equal to `passed_sha`, head with only a clean `main` merge on top, head with a later agent change, the loopback cap and a revoked allowance each have a case.
+**Then** head equal to `passed_sha`, head with only a clean `main` merge on top, head with a later agent change, the loopback cap, a CI fix and a conflict resolution that each re-run the review and count toward `ci_fixes`, not `loopbacks`, and a revoked allowance each have a case.
 
 ### Story 3.6: Cross-vendor verification
 
@@ -1682,7 +1737,7 @@ So that I can lift the every-path approval rule and the 1-builder limit with evi
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records this suite's live command (`bun test --live <suite>`) and the expected result of each case above, and the nested sandbox cases of Stories 3.1 and 3.2; the Maintainer runs them on the host, outside the sandbox, with every vendor's credential at once (a lane's vendor home holds only one), before Epic 3's retro
+**Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each case above, and the nested sandbox cases of Stories 3.1 and 3.2; the Maintainer runs them on the host, outside the sandbox, with every vendor's credential at once (a lane's vendor home holds only one), before Epic 3's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed
 **And** it lists the switch after this Epic: drop the every-path approval rule from this repo's `policy.yaml`, allow the adapters to be used unattended, raise `XARABOT_MAX_BUILDERS`, and run the 24-hour acceptance check.
 
@@ -1855,7 +1910,7 @@ So that a ruling clears what it names and nothing else (FR5, FR9, FR10, FR13, AR
 
 **Acceptance Criteria:**
 
-**Given** `/xarabot go <checkpoint-epic>`
+**Given** `/xarabot go checkpoint:<epic>`
 **When** `reconcile` applies it
 **Then** the go is recorded in `retro-gates.yaml` by runner code, and the Epic's dependents become eligible at the next claim.
 
@@ -1909,7 +1964,7 @@ So that a consuming repo can turn on parallel Epics with evidence (FR5, FR10).
 **Then** the Epics depending on `contracts` take no new Stories until `/xarabot go retro:<N>` for `contracts` is recorded, and take Stories after it.
 
 **Given** the scratch repo with a checkpoint pending
-**When** the Maintainer comments `/xarabot go <epic>` on the inbox issue
+**When** the Maintainer comments `/xarabot go checkpoint:<epic>` on the inbox issue
 **Then** the next `reconcile` records the go and acknowledges it, and the dependents' Stories are claimed afterwards.
 
 **Given** retro items on the fixture
@@ -1922,7 +1977,7 @@ So that a consuming repo can turn on parallel Epics with evidence (FR5, FR10).
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records this suite's live command (`bun test --live <suite>`) and the expected result of each scratch-repo case above, which the Maintainer runs on the host, outside the sandbox, before Epic 4's retro
+**Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each scratch-repo case above, which the Maintainer runs on the host, outside the sandbox, before Epic 4's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
 
 ## Epic 5: Each human runs lanes as their own bot
@@ -2049,7 +2104,7 @@ Precondition (Human Live Step): the Maintainer provides a test org with an App c
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records this suite's live command (`bun test --live <suite>`) and the expected result of each case above, which the Maintainer runs on the host, outside the sandbox, against the test org, before Epic 5's retro
+**Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each case above, which the Maintainer runs on the host, outside the sandbox, against the test org, before Epic 5's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
 
 ## Epic 6: Operators can see and measure every lane
@@ -2174,7 +2229,7 @@ So that I can trust the success-signal figure and the TUI during Xaravel's adopt
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records the live checks, each with its command (`bun test --live <suite>`, and `xarabot tui` on a laptop with `XARABOT_HOST` set) and expected result, which the Maintainer runs on the host and the laptop, outside the sandbox, before Epic 6's retro
+**Then** it records the live checks, each with its command (`XARABOT_LIVE=1 bun test <suite>`, and `xarabot tui` on a laptop with `XARABOT_HOST` set) and expected result, which the Maintainer runs on the host and the laptop, outside the sandbox, before Epic 6's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
 
 ## Epic 7: Xarabot 0.x is ready for a consuming repo
@@ -2252,7 +2307,7 @@ So that a Linux Xarabot host gives agents no GitHub credential or host either (F
 
 **Given** `claude` on Linux
 **When** its vendor home is seeded
-**Then** it holds only the Claude credential, by the means the adapter documents for Linux.
+**Then** it holds only the Claude credential, which the lane process reads from the operator's `claude` credential file under `$XDG_CONFIG_HOME/xarabot/vendors/` and passes by the means the adapter documents for Linux (AR18).
 
 ### Story 7.4: Linux lanes under systemd
 
@@ -2312,7 +2367,7 @@ So that the adoption needs only config and policy files on Xaravel's side (NFR17
 
 **Given** a configured Escalation source
 **When** the pure Escalation reader runs, with Xaravel's rule from `tools/escalations/escalations.ts`
-**Then** it reads Escalation files named `ESC-<story-id>-<n>.md` or `ESC-bot-<n>.md` from the Escalation directory, and for each the decision file `<decisions-dir>/<id>.md` with the same file name, carrying `decision: approved | rejected` and `escalation_sha256`
+**Then** it reads Escalation files named `ESC-<story-id>-<n>.md` or `ESC-bot-<n>.md` from the Escalation directory, and for each the decision file in the decisions directory with the same file name as its Escalation file (e.g. `decisions/ESC-9.3-1.md`), carrying `decision: approved | rejected` and `escalation_sha256`
 **And** an Escalation is open when its decision file is missing, invalid, or stale: its `escalation_sha256` is not the lowercase hex SHA-256 of the Escalation file's text with CRLF normalised to LF
 **And** the case table has a case for each of these, for a valid decision, and for an Escalation file with CRLF line endings.
 
@@ -2371,5 +2426,5 @@ Precondition (Human Live Step): the Maintainer provides a throwaway consumer rep
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
-**Then** it records this suite's live command (`bun test --live <suite>`) and the expected result of each case above, and the nested Linux sandbox cases of Story 7.3; the Maintainer runs them on the macOS host and on the Linux host, outside the sandbox, with the credentials they need, before Epic 7's retro
+**Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each case above, and the nested Linux sandbox cases of Story 7.3; the Maintainer runs them on the macOS host and on the Linux host, outside the sandbox, with the credentials they need, before Epic 7's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
