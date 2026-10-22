@@ -1,10 +1,11 @@
 ---
 title: Sprint Change Proposal, xarabot 0.x readiness fixes
 date: 2026-10-21
-status: proposed
+status: approved
 trigger: _bmad-output/planning-artifacts/implementation-readiness.md
 mode: hybrid (new decisions one at a time; mechanical edits in batch)
 scope: moderate
+approved: 2026-10-21 (Maintainer; all eight drafting choices accepted)
 edits: 154 (spine 42, spec 6, epics 106)
 ---
 
