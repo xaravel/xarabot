@@ -1,6 +1,6 @@
 ---
-status: draft
-stepsCompleted: [1, 2, 3]
+status: final
+stepsCompleted: [1, 2, 3, 4]
 inputDocuments:
   - _bmad-output/specs/spec-xarabot/SPEC.md
   - _bmad-output/specs/spec-xarabot/glossary.md

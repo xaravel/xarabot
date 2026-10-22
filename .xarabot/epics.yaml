@@ -1,0 +1,9 @@
+# Epic graph (spine AD-11). An Epic not listed here, or listed without
+# depends_on, depends on the next lower Epic number in epics.md.
+# Unlisted here, so serial: 1 -> 2 -> 3 -> 4 -> 5.
+version: 1
+epics:
+  6:
+    depends_on: [4]
+  7:
+    depends_on: [5, 6]
