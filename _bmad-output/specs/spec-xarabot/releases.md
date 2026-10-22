@@ -8,7 +8,7 @@
 
 Placement notes (Maintainer decisions, 2026-10-20 unless dated):
 - **CAP-7 and CAP-12** are in 0.x: all three adapters and the TUI ship before Xaravel adopts Xarabot.
-- **CAP-8** is in 0.x because `codex` and `pi` lanes ship there and must not merge without a review from another vendor.
+- **CAP-8** is in 0.x because `codex` and `pi` lanes ship there and must not merge without a review from another vendor when the repo allows one; a single-vendor repo gets a same-vendor review instead (2026-10-21).
 - **CAP-18's sandbox** is in 0.x because without it a lane's agent inherits the host's GitHub login. It is built in Xarabot's first Epic, under the bootstrap, because self-hosting waits for it (2026-10-21).
 - **CAP-18's write check** is in 0.x so builders cannot write coordinator-owned files, manifests or agent config, or widen their own policy, before v1's diff check exists (2026-10-21).
 - **CAP-13's App creation** is in 0.x because the bootstrap runs as `edanisko-xarabot`; `bootstrap/join.ts` covers it until `xarabot join` exists.

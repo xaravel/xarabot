@@ -37,7 +37,7 @@ FR6 [0.x] (CAP-6, Plumbing in code): CI polling, the merge queue, mergeability c
 
 FR7 [0.x] (CAP-7, Agent adapters): Each lane runs its coding agent through an adapter: `claude`, `codex` or `pi`. Every adapter takes the same three lane settings: `agent`, `model` and `effort`. `effort` is one scale for all adapters (`low`, `medium`, `high`, `xhigh`, `max`), and each adapter maps it onto its CLI's own setting. `claude` and `codex` default to a top model (`claude-opus-5-5`, `gpt-6.1-sol`); a `pi` lane sets its model explicitly. Lane config can change model and effort. The consuming repo's policy says which adapters may run unattended. Success: the same unit runs to a valid JSON result through each adapter; a `claude` or `codex` lane with no `model` runs its adapter's default top model; a `pi` lane with no `model` refuses to start; switching agent, model or effort is a config change only; each adapter maps `effort` per `agent-adapters.md` § Model and effort, and a value an adapter cannot honor stops the lane at start instead of being dropped silently; a lane whose adapter the repo's policy does not allow unattended refuses to start unattended.
 
-FR8 [0.x] (CAP-8, Cross-vendor review): Before a diff merges, the runner has it reviewed by an agent whose model comes from a vendor other than every model that built it. Vendor means the model's vendor, never the adapter's: Codex reviews Anthropic-built diffs, and Claude reviews the rest. The review binds to the commit it reviewed; any later agent change, such as a CI fix or a conflict resolution, re-runs it. Its findings are blocking review loopbacks. BMAD's own review hook may run for earlier feedback but never counts as this review. Success: every builder PR carries a review, naming the commit it reviewed, from a model vendor outside its builders'; no PR merges with blocking findings unresolved or with a diff other than the reviewed one; after 2 loopbacks, or when no allowed reviewer from another vendor is left, the unit does not merge and is listed in its owner's inbox.
+FR8 [0.x] (CAP-8, Cross-vendor review): Before a diff merges, the runner has it reviewed by an agent whose model comes from a vendor other than every model that built it, whenever the repo's policy allows an adapter from such a vendor. Vendor means the model's vendor, never the adapter's: Codex reviews Anthropic-built diffs, and Claude reviews the rest. When the policy allows no adapter from another vendor, as for a user with only a Claude or only a Codex subscription, a separate same-vendor review session reviews the diff instead, under the same rules. The review binds to the commit it reviewed; any later agent change, such as a CI fix or a conflict resolution, re-runs it. Its findings are blocking review loopbacks. BMAD's own review hook may run for earlier feedback but never counts as this review. Success: every builder PR carries a review naming the commit it reviewed, from a model vendor outside its builders' when the repo allows one, otherwise from a separate same-vendor session; no PR merges with blocking findings unresolved or with a diff other than the reviewed one; a repo that allows a single vendor merges its PRs on their required checks after the same-vendor review; after 2 loopbacks, the unit does not merge and is listed in its owner's inbox.
 
 FR9 [0.x] (CAP-9, Inboxes): Each owner sees everything waiting on them in one inbox and rules on it in one sitting a day: their bot's PRs awaiting approval and their blocked units. The Maintainer's inbox also holds rulings, Escalations, waiting retro items and Human Live Steps. On a solo repo the two are one list. Success: one daily digest per inbox lists every waiting item with its link and age; an item that newly stops all lanes notifies at once; no other per-item waiting notices are sent.
 
@@ -147,7 +147,7 @@ Requirements from the architecture spine (AR*n* cites the spine's AD):
 - AR14 (AD-13): `next(snapshot, laneRole)` returns a unit or `idle` with a reason. Every unit kind holds globs (planning: graph inputs, status files and the Epic context path, plus `xarabot:graph` when it changes a graph input; retro and checkpoint: status files and Epic context, never graph inputs; retro items: their `globs` from `retro-gates.yaml`, never graph inputs, status files or write-check paths, unclaimable without globs; `reconcile`: none; a parked approval-gated PR: only its diff's paths); the overlap check applies to every role. Builders take only eligible Stories whose record is absent, `released` or stale, lowest Epic number first, then lowest Story number. The coordinator compiles each Epic's `epic-<N>-context.md` in planning before its Stories become eligible; the runner reverts builder changes to it. Coordinator order: `reconcile` (apply rulings; enqueue approved held PRs; write `merged`; mark done; batch-route Maintainer-only retro items), open coordinator PR, planning, retro, retro items, checkpoint. Approval-gated coordinator PRs never touch the status files.
 - AR15 (AD-14): every session writes JSON to `XARABOT_RESULT` (in the sandbox temp folder, outside the clone) as the prompt's last step, never from a skill hook. Union keyed by `kind`: `build` (`outcome` `done`/`blocked`/`no-op`, `blocked` {`kind`, `text`, `step_id`}, `summary`, `body`, `verification[]`); `review` (`reviewed_sha`, `verdict`, `findings[]` {`severity`, `blocking`, `file`, `text`}); `retro` (`verdict`, `items[]` {`id`, `text`, `route`, `blocking`, `globs`}); `planning` (`outcome`, `summary`); all carry `denied_actions[]`. A missing result gets one resume asking only for the result (`claude -p --resume`; codex and pi confirmed in their adapter Stories); builds also cross-check the Story spec's `status` and `## Auto Run Result`. Still missing or invalid → failed attempt. Agent, model, effort, tokens, cost, timings, diff, files touched and authorship are never taken from the agent.
 - AR16 (AD-15): each lane has a runner-private `runner.git` in its state folder that the sandbox can neither read nor write. The runner never runs git against the agent clone's `.git`; it rebuilds the clone, `.git` included, from `runner.git` before every session (first build at `base_sha`; loopback or CI fix at `head_sha` with findings or CI log prefetched), then reads only the working tree. Before acting on a PR this lane didn't build, it fetches the PR head and `passed_sha` into `runner.git`. The commit: working-tree changes against `base_sha`, three-way merged onto `origin/main`, one commit authored by `<login>-xarabot[bot]`, recording `base_sha` and `head_sha`. A pure sanitizer strips trailers, closing keywords and `@mentions` from agent `summary`/`body` before any forge text. Only the runner pushes, opens PRs, comments, enqueues and merges; never an admin merge or GitHub auto-merge.
-- AR17 (AD-16): the reviewer must come from a provider not in `builder_providers[]`: the first allowed adapter of (`claude`, `codex`) whose provider is outside the set (provider = the model's vendor; pi's from its `<provider>/<id>`); none left → park blocked; a session whose reported model differs from config fails. The review runs on a fresh `runner.git` checkout of `head_sha` with agent config paths restored from `main`, hooks off and a freshly seeded vendor home; the runner records `reviewed_sha` and posts the review naming it. No blocking findings → `passed_sha`. Enqueue only if the head equals `passed_sha` or its tree equals the merge of `passed_sha` with the head's `main` parent, recomputed by the enqueuing lane. Owner-gated PRs need `approved_sha` = head; graph-changing PRs need the Maintainer's approval on the head and a matching `approved_graph`. `reconcile` PRs get no agent review. Any later agent change re-runs the review, each re-run a loopback, at most 2. A lane refuses to start if its reviewer adapter isn't allowed.
+- AR17 (AD-16): the reviewer must come from a provider not in `builder_providers[]`: the first allowed adapter of (`claude`, `codex`) whose provider is outside the set (provider = the model's vendor; pi's from its `<provider>/<id>`); if the policy allows none, a separate same-vendor session reviews under the same rules (the first allowed of `claude`, `codex`, else `pi` on the builder's model, a spec assumption); a session whose reported model differs from config fails. The review runs on a fresh `runner.git` checkout of `head_sha` with agent config paths restored from `main`, hooks off and a freshly seeded vendor home; the runner records `reviewed_sha` and posts the review naming it. No blocking findings → `passed_sha`. Enqueue only if the head equals `passed_sha` or its tree equals the merge of `passed_sha` with the head's `main` parent, recomputed by the enqueuing lane. Owner-gated PRs need `approved_sha` = head; graph-changing PRs need the Maintainer's approval on the head and a matching `approved_graph`. `reconcile` PRs get no agent review. Any later agent change re-runs the review, each re-run a loopback, at most 2. A lane refuses to start if its reviewer adapter isn't allowed.
 - AR18 (AD-17): only `src/sandbox/` spawns agent and reviewer processes; a lint rule bans `Bun.spawn` under `src/adapters/agent/`. macOS: `sandbox-exec` with a generated profile, re-tested on each macOS major; Linux: `bwrap` with `--unshare-pid`; each agent's own sandbox off inside it. A per-lane vendor home under the state folder is re-seeded before every session with only that vendor's credential (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory; on macOS `claude` gets `CLAUDE_CODE_OAUTH_TOKEN`); the operator's `~/.claude`, `~/.codex`, `~/.pi` are inaccessible. Reads denied by default except system paths, the lane clone, vendor home and temp folder; `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot`, `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials`, `~/.netrc` always denied. Writes allowed to the full clone (never a linked worktree), vendor home and temp folder; `runner.git` never accessible. Env allowlist only; git credential helper reset; Unix sockets denied. Network only through Xarabot's Bun proxy to vendor API hosts, `pypi.org`, `files.pythonhosted.org` and repo-added hosts; a GitHub host is never allowed. Fail closed if the sandbox can't be set up.
 - AR19 (AD-18): repo commands the runner needs (e.g. lockfile regeneration) run inside the sandbox with no token. The runner's own git runs only against `runner.git` with `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `credential.helper=` reset before its own helper, `core.hooksPath=/dev/null`, no fsmonitor/filters/external diff/textconv/signing program, `GIT_NO_REPLACE_OBJECTS=1`, `protocol.file.allow=never`, no submodule recursion. Write-check and review diffs are computed from git objects under those settings. The token reaches git only through a credential helper over stdin, scoped to the forge URL; never in env, argv, a file or a log.
 - AR20 (AD-19, adopted Lessons): poll CI by hand every 30 s backing off to 5 min, never `gh pr checks --watch`; stop at the first failure not on `policy.yaml`'s expected-checks list; an empty reply means pending; CI max wait default 60 min, then park blocked. An unexpected failure starts a CI-fix builder session, at most 2 per unit, journaled as `ci_fixes` and re-reviewed. Merge `origin/main` into a conflicting PR before polling; status YAML conflicts keep `main`'s lines and re-apply the PR's entries; lockfiles regenerated in the sandbox; other conflicts go to a builder session, counted as an attempt. Squash through the merge queue, never `--delete-branch`; an ejection merges `main`, re-polls and re-enqueues, counted toward `attempts`.
@@ -243,7 +243,7 @@ Xarabot runs its own coordinator: `reconcile`, planning, retro and retro-item un
 **FRs covered:** FR2 (coordinator order, graph-change gate), FR3 (heartbeat, takeover, fencing, overlap), FR4 (macOS), FR18 (write check)
 **Notes:** planning units change the effective graph, so the AD-11 graph-change gate (`xarabot:graph`, validation on the merge result, Maintainer approval bound to `approved_graph`) lands here. The builder limit stays at 1 until Epic 3 merges. Ends with two lanes racing against the real `xarabot/claims` for one unit and for overlapping globs, exactly one winning, and a killed lane's unit becoming claimable 30 minutes after its last heartbeat.
 
-### Epic 3: No diff merges without another vendor's review
+### Epic 3: Every diff is reviewed before it merges, by another vendor where allowed
 `codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges.
 **FRs covered:** FR7 (`codex`, `pi`, effort mapping, unattended policy), FR8
 **Notes:** spikes AR41 (pi's directory override) and AR42 (subagents, outcome mapping, resume per CLI). After it merges, the Maintainer lifts the every-path approval rule and the 1-builder limit. Ends with the same unit run to a valid result through each adapter, and a review re-run after a later agent change.
@@ -1356,9 +1356,9 @@ So that I can lift the builder limit after Epic 3 with evidence that claims hold
 **When** the Story is done
 **Then** it adds the Maintainer-run acceptance check for after Epic 3: a coordinator and 2 builders for 24 hours with no unit built twice and no builder write to the status files (FR4).
 
-## Epic 3: No diff merges without another vendor's review
+## Epic 3: Every diff is reviewed before it merges, by another vendor where allowed
 
-`codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges. The adapters come first, so that when the reviewer choice (Story 3.3) reaches the pinned runner, a reviewer from another vendor exists; the Maintainer allows `codex` in this repo's policy before advancing `runner_version` past Story 3.3. Once this Epic merges, the Maintainer lifts the every-path approval rule and the 1-builder limit.
+`codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed before it merges, bound to the reviewed SHA: by a model from another vendor when the repo's policy allows one, otherwise by a separate same-vendor session, so a user with a single LLM subscription still merges. The adapters come first so that the cross-vendor path can be proven once Story 3.3 lands; allowing `codex` in this repo's policy turns it on. Once this Epic merges, the Maintainer lifts the every-path approval rule and the 1-builder limit.
 
 ### Story 3.1: The `codex` adapter
 
@@ -1447,8 +1447,8 @@ So that Stories can be built by models from other vendors with the same lane set
 ### Story 3.3: Session vendors and the reviewer choice
 
 As the Maintainer,
-I want the runner to know the vendor of every model that changed a diff, and to pick a reviewer from another vendor,
-So that no diff is reviewed by the vendor that built it (FR8, AR17).
+I want the runner to know the vendor of every model that changed a diff, and to pick a reviewer from another vendor when the repo allows one,
+So that no diff is reviewed by the vendor that built it unless the repo has only that vendor (FR8, AR17).
 
 **Acceptance Criteria:**
 
@@ -1462,12 +1462,13 @@ So that no diff is reviewed by the vendor that built it (FR8, AR17).
 
 **Given** `builder_providers[]` and the repo's allowed adapters
 **When** the pure reviewer choice runs
-**Then** it returns the first allowed adapter of (`claude`, `codex`) whose vendor is not in the set, or none
+**Then** it returns the first allowed adapter of (`claude`, `codex`) whose vendor is not in the set, marked cross-vendor
 **And** the case table reproduces `agent-adapters.md` § Cross-vendor review: `claude` → `codex`, `codex` → `claude`, `pi` with an Anthropic model → `codex`, `pi` with any other vendor's model → `claude`.
 
-**Given** no allowed reviewer from another vendor
-**When** the unit is ready for review
-**Then** it becomes `parked`, blocked, with `park.inbox_owner` set to its owner.
+**Given** a policy that allows no adapter from another vendor
+**When** the pure reviewer choice runs
+**Then** it returns a same-vendor reviewer, marked same-vendor: the first allowed of (`claude`, `codex`), or with neither allowed a `pi` session on the builder's model
+**And** the case table has rows for a `claude`-only, a `codex`-only and a `pi`-only policy, and the unit never parks for lack of a reviewer.
 
 **Given** a lane
 **When** it starts
@@ -1492,7 +1493,7 @@ So that a review result describes the diff that will merge and cannot be steered
 
 **Given** a review result
 **When** the runner handles it
-**Then** it records `reviewed_sha` itself, ignoring any SHA the agent reports, and posts the review on the PR through `Forge.postReview`, naming that SHA and listing the findings, as a comment review with no approval
+**Then** it records `reviewed_sha` itself, ignoring any SHA the agent reports, and posts the review on the PR through `Forge.postReview`, naming that SHA, saying whether it is cross-vendor or same-vendor and listing the findings, as a comment review with no approval
 **And** a result with no blocking findings sets `passed_sha` to the reviewed SHA; one with blocking findings never does.
 
 **Given** `Forge.postReview`
@@ -1555,7 +1556,7 @@ So that I can lift the every-path approval rule and the 1-builder limit with evi
 
 **Given** a policy that allows only `claude`
 **When** a `claude`-built unit is ready for review
-**Then** it parks, blocked, because no reviewer from another vendor is allowed.
+**Then** a separate `claude` session reviews it on a fresh checkout, the posted review names the reviewed SHA and says it is same-vendor, and the PR merges on its required checks.
 
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
@@ -1735,8 +1736,7 @@ So that a ruling clears what it names and nothing else (FR5, FR9, FR10, FR13, AR
 
 **Given** `/xarabot rebuild <unit>`
 **When** `reconcile` applies it
-**Then** it closes the unit's open PR, clears `reviewed_sha`, `passed_sha` and `builder_providers[]`, sets the counters to 0, and the record becomes `released`
-**And** a unit parked because no reviewer was left becomes buildable again.
+**Then** it closes the unit's open PR, clears `reviewed_sha`, `passed_sha` and `builder_providers[]`, sets the counters to 0, and the record becomes `released`.
 
 **Given** `/xarabot dismiss <unit>`
 **When** `reconcile` applies it

@@ -41,7 +41,8 @@ The runner picks the reviewer: the first allowed adapter of `claude`, `codex` wh
 | `pi` with an Anthropic model | `codex` |
 | `pi` with any other vendor's model | `claude` |
 
-- If no allowed reviewer from another vendor is left, the unit parks blocked. A session whose reported model differs from its config fails the attempt.
+- **Single vendor:** if the repo's policy allows no adapter from another vendor (a user with only a Claude or only a Codex subscription), a separate session from the same vendor reviews instead, under the same rules: fresh checkout, bound to the reviewed SHA, blocking findings as loopbacks. The reviewer is the first allowed adapter of `claude`, `codex`; with neither allowed, a `pi` session on the builder's model (an assumption, SPEC § Assumptions). The PR then merges on its required checks.
+- A session whose reported model differs from its config fails the attempt.
 - Xaravel's `bmad-build-auto` Fidelity Review (Codex reviewing Claude-built Stories) may still run for earlier feedback; it never counts as the gate (spine AD-16).
 
 ## Result
