@@ -1796,6 +1796,15 @@ So that my lanes can act as my bot with no long-lived token and no shared identi
 **Then** the manifest names `<login>-xarabot`, is public so other orgs can install it, has no webhook, and asks for exactly `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`, `actions: read`, `metadata: read` and the merge-queue permission recorded by Story 1.10
 **And** it never asks for `administration`, `workflows` or any bypass right, and a test pins the permission set.
 
+**Given** the GitHub adapter
+**When** it calls GitHub
+**Then** every REST and GraphQL operation goes through one request function that takes an entry from a single table in the adapter, naming the operation and the App permission it needs, and no other code in the adapter calls `fetch`.
+
+**Given** that table and the manifest
+**When** the permission test runs
+**Then** it fails if any operation needs a permission the manifest does not ask for, or at a lower level than the operation needs
+**And** it fails if the manifest asks for a permission no operation needs, so the set stays exactly what Xarabot uses.
+
 **Given** an App record already present
 **When** `xarabot join` runs again
 **Then** it skips creation
