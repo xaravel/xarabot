@@ -1,0 +1,120 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 10-22-2026 00:43
+last_updated: 10-22-2026 00:43
+project: xarabot
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-package-scaffold-and-test-harness: backlog
+  1-2-config-policy-and-standing-authority-failing-closed: backlog
+  1-3-story-manifests-and-the-epics-md-grammar: backlog
+  1-4-resolvegraph-and-xarabot-graph-check: backlog
+  1-5-ledger-records-and-pure-ledger-edits: backlog
+  1-6-next-for-a-builder-lane: backlog
+  1-7-forge-port-fake-forge-and-contract-suite: backlog
+  1-8-github-adapter-tokens-snapshot-and-ledger-swap: backlog
+  1-9-github-adapter-pushes-and-prs: backlog
+  1-10-github-adapter-checks-merge-queue-and-alerts: backlog
+  1-11-macos-sandbox-profile-launcher-and-vendor-home: backlog
+  1-12-sandbox-network-proxy: backlog
+  1-13-result-schemas-and-prompt-assembly: backlog
+  1-14-the-claude-adapter: backlog
+  1-15-runner-git-clone-rebuild-bot-commit-and-sanitizer: backlog
+  1-16-the-lane-process-one-unit-from-claim-to-result: backlog
+  1-16a-opening-the-pr: backlog
+  1-17-ci-polling-ci-fixes-and-conflicts: backlog
+  1-17a-approval-gate-and-merge-queue: backlog
+  1-18-waits-stop-wake-stop-now-and-usage-limits: backlog
+  1-19-xarabot-lane-install-and-the-pinned-runner: backlog
+  1-20-canary-and-self-host-runbook: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-heartbeat-and-fencing: backlog
+  2-2-stale-takeover: backlog
+  2-3-the-0-x-write-check: backlog
+  2-4-the-coordinator-lane-and-its-claim: backlog
+  2-5-reconcile-marks-units-done: backlog
+  2-6-reconcile-enqueues-approved-prs: backlog
+  2-7-planning-units: backlog
+  2-8-the-graph-change-gate: backlog
+  2-9-retro-units: backlog
+  2-10-retro-item-units: backlog
+  2-11-several-builder-lanes-on-one-host: backlog
+  2-12-claims-race-verification: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-the-codex-adapter: backlog
+  3-2-the-pi-adapter: backlog
+  3-3-session-vendors-and-the-reviewer-choice: backlog
+  3-4-review-sessions: backlog
+  3-5-the-review-gate-and-loopbacks: backlog
+  3-6-cross-vendor-verification: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-retro-item-distance-gates: backlog
+  4-2-owner-inboxes-and-the-daily-digest: backlog
+  4-3-batch-routing-of-maintainer-only-retro-items: backlog
+  4-4-checkpoints: backlog
+  4-5-rulings-grammar-authority-and-cursor: backlog
+  4-6-rulings-what-each-verb-does: backlog
+  4-7-parallel-epics-and-gates-verification: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-xarabot-join-creates-the-owner-s-app: backlog
+  5-1a-the-github-adapter-s-permission-table: backlog
+  5-2-installing-the-app-and-checking-its-reach: backlog
+  5-3-owner-approvals-and-bot-rights-verification: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-xarabot-status-json: backlog
+  6-2-watching-status-locally-and-over-ssh: backlog
+  6-3-the-tui: backlog
+  6-4-xarabot-report-and-log-retention: backlog
+  6-5-status-and-report-verification: backlog
+  epic-6-retrospective: optional
+
+  epic-7: backlog
+  7-1-the-consumer-pin-and-package-contents: backlog
+  7-2-changelog-and-upgrades-as-prs: backlog
+  7-3-the-linux-sandbox: backlog
+  7-4-linux-lanes-under-systemd: backlog
+  7-5-consumer-prerequisite-checks-at-lane-start: backlog
+  7-6-adoption-inputs-for-xaravel: backlog
+  7-7-consumer-readiness-verification: backlog
+  epic-7-retrospective: optional
