@@ -1866,3 +1866,123 @@ So that the bot is never more than its owner's hands (FR13, AR17, AR27).
 **Given** every lane-made commit and PR in the suite
 **When** it is inspected
 **Then** it is authored by `<login>-xarabot[bot]`.
+
+## Epic 6: Operators can see and measure every lane
+
+`xarabot status --json --watch` reports every lane's unit, claim, CI and merge state and the inbox; the TUI draws it locally or over `ssh $XARABOT_HOST`; `xarabot report` compares agents and models and computes Stories per hour. All of it reads; none of it decides (AR25).
+
+### Story 6.1: `xarabot status --json`
+
+As an operator,
+I want one command that reports the state of every lane on a host as JSON,
+So that the TUI, scripts and dashboards all read the same status (FR12, AR25, AR28).
+
+**Acceptance Criteria:**
+
+**Given** a host with lanes for one or more repos
+**When** `xarabot status --json` runs
+**Then** it prints one document, valid against the status schema in `src/core/schemas/`, with each lane's identity, role, agent, model and effort; its state (running a unit, waiting with its reason, idle, stopped by STOP); its unit and claim (`generation`, heartbeat age); and its PR, CI and merge-queue state.
+
+**Given** each repo on the host
+**When** status is built
+**Then** it includes the inbox summary per owner (item count and oldest age) and a progress line: Stories done of Stories planned, with a loose ETA from the recent merge rate.
+
+**Given** the lane state folders and one `Forge.snapshot()` per repo
+**When** status is built
+**Then** it is read-only: a test asserts that no ledger swap, push, PR change, enqueue, comment or file write happens.
+
+**Given** a forge that cannot be reached
+**When** status runs
+**Then** it still reports the local lane state and marks the forge fields unavailable with the error kind.
+
+### Story 6.2: Watching status, locally and over ssh
+
+As an operator,
+I want `xarabot status --json --watch` to keep reporting as things change, on the host or from my laptop,
+So that I can follow lanes live without logging in to the Xarabot host (FR12, AR25).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot status --json --watch`
+**When** it runs
+**Then** it prints a new status document as one JSON line whenever lane state changes, and at least every 30 seconds otherwise, with forge reads rate-limited to stay within API limits.
+
+**Given** a watch over `ssh $XARABOT_HOST xarabot status --json --watch`
+**When** the ssh session ends or the process receives SIGINT or SIGTERM
+**Then** the watch exits at once, leaving no child process.
+
+**Given** `XARABOT_HOST` set on a laptop
+**When** `xarabot status --json --watch --host` runs
+**Then** it runs the same command over ssh on that host and relays its lines unchanged.
+
+### Story 6.3: The TUI
+
+As an operator,
+I want a read-only terminal view of every lane and the inbox that refreshes itself,
+So that I see at a glance what each lane is doing and what is waiting on me (FR12, AR25).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot tui`
+**When** it runs on the host
+**Then** it draws the status stream from `xarabot status --json --watch`: one row per lane with its unit, claim, CI and merge state, and the inbox summary below.
+
+**Given** `xarabot tui` on a laptop with `XARABOT_HOST` set
+**When** it runs
+**Then** it draws the same view from the stream over `ssh $XARABOT_HOST`, and refreshes on its own.
+
+**Given** the TUI
+**When** it runs
+**Then** it has no key or command that acts on lanes, claims or PRs; it only reads the stream, and quits on `q` or Ctrl-C.
+
+**Given** the TUI
+**When** it is built
+**Then** it draws with plain ANSI output and adds no runtime dependency, and its rendering is tested against golden frames from fixture status lines.
+
+### Story 6.4: `xarabot report` and log retention
+
+As the Maintainer,
+I want a report that compares agents and models and computes the Stories-per-hour figure,
+So that I can compare lanes and measure the 0.x success signal from Xarabot's own journals (FR11, NFR22, AR25).
+
+**Acceptance Criteria:**
+
+**Given** `xarabot report --from <time> --to <time>`
+**When** it runs over the host's lane journals
+**Then** it shows, per agent and model: units done, median unit time, first-pass review rate (units whose first review passed), CI-fix count and cost, with subscription cost labelled an estimate.
+
+**Given** the same period
+**When** the report computes Stories per hour
+**Then** it divides merged Stories by wall-clock hours, leaving out hours when every lane's journal span is `waiting-on-maintainer`, and counts all lanes and adapters with no Story-size normalization.
+
+**Given** `xarabot report --json`
+**When** it runs
+**Then** it prints the same figures as a schema-valid document a consuming repo's dashboard can read.
+
+**Given** lane logs and journals
+**When** a lane process runs
+**Then** logs older than 30 days are deleted, and journals are never deleted.
+
+**Given** the report's case tables
+**When** they run on fixture journals
+**Then** each figure, an all-lanes-waiting span and a span where only some lanes wait each have a case.
+
+### Story 6.5: Status and report verification
+
+As the Maintainer,
+I want proof that the report's numbers and the live view are right,
+So that I can trust the success-signal figure and the TUI during Xaravel's adoption (FR11, FR12).
+
+**Acceptance Criteria:**
+
+**Given** a fixture journal for a stated 7-day window with a hand-computed Stories-per-hour figure
+**When** `xarabot report` runs over it
+**Then** it reproduces that figure exactly.
+
+**Given** the Xarabot host with lanes running
+**When** the operator runs `xarabot tui` on a laptop with `XARABOT_HOST` set
+**Then** it shows the live state of every lane and refreshes on its own, and the same command works locally on the host.
+
+**Given** the status and report commands
+**When** they run during a lane's unit
+**Then** the lane's ledger record, journal and outcome are unchanged by them.
