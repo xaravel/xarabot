@@ -44,7 +44,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **intent:** One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own full clone (never a linked worktree), state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`).
   - **success:** On Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
 - **CAP-5 · Parallel Epics (0.x)**
-  - **intent:** Epics run at the same time, ordered by the dependency graph instead of strictly in sequence: an Epic starts once every Epic it depends on has all its Stories merged and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go.
+  - **intent:** Epics run at the same time, ordered by the dependency graph instead of strictly in sequence: an Epic starts once every Epic it depends on has all its Stories `done` in sprint status and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go.
   - **success:** In Xaravel Phase 1, after `runtime` and then `contracts`, Stories from the `macroable`, `conditionable` and `json-schema` Epics are in flight at once. While a checkpoint go is pending, Epics depending on the checkpoint Epic take no new Stories, and Epics not depending on it keep running.
 - **CAP-6 · Plumbing in code (0.x)**
   - **intent:** CI polling, the merge queue, mergeability checks, conflict resolution in the status YAML files, status comments, the progress line and sleeping through usage limits run in Xarabot code; the agent session only does the unit's work and returns a JSON result. The lessons in `brownfield-xaravel.md` § Lessons (CI polling, Conflicts, Merges) bind this code.
@@ -172,7 +172,10 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - roles, tracks, Protected Paths, dependency-command list and Human Live Steps.
 
 **Operating limits**
-- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs. The one exception is the Maintainer's one-time write at Xarabot's self-host switch, which creates `sprint-status.yaml` with the bootstrapped Epic's Stories done.
+- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs. Besides the coordinator, the Maintainer makes these bootstrap writes, all in Xarabot's own repo and each in a Maintainer PR:
+  - at the self-host switch, running `bmad-sprint-planning` so that `sprint-status.yaml` has the bootstrapped Epic's Stories `done`, creating the file or updating it;
+  - at the switch, Epic 2's Story manifests and Epic 2's Epic context file;
+  - until the rulings Story merges, the go for a rejected retro, in `retro-gates.yaml`.
 - **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
@@ -200,12 +203,12 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
 - **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised and the Maintainer's decisions of 2026-10-21:
   - the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), with the ledger's `park` values (AD-5, AD-7);
-  - the Story manifest and its `depends_on` (AD-10);
+  - the Story manifest and its `depends_on`, met when each listed Story is `done` on `main` or has a `merged` ledger record (AD-10);
   - the Epic graph and gates: a Story is done when `sprint-status.yaml` on `main` says so, bootstrapped Epics count as done, and a rejected retro holds its dependents until the Maintainer's go (AD-11, AD-12, AD-28);
-  - status and graph planning units, and the coordinator's order (AD-13);
+  - status and graph planning units, the Epic context file an Epic's Stories wait for, and the coordinator's order (AD-13);
   - the result schema and its values (AD-14);
   - the same-vendor reviewer (AD-16);
-  - one sandbox for every adapter (AD-17);
+  - one sandbox for every adapter, and the vendor credential files it seeds sessions from (AD-17);
   - the Standing Authority frontmatter, the config paths and the 0.x Escalation source (AD-20);
   - effort mapping (AD-21);
   - the daily digest (AD-23);
