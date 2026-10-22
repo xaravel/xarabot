@@ -1355,3 +1355,208 @@ So that I can lift the builder limit after Epic 3 with evidence that claims hold
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
 **Then** it adds the Maintainer-run acceptance check for after Epic 3: a coordinator and 2 builders for 24 hours with no unit built twice and no builder write to the status files (FR4).
+
+## Epic 3: No diff merges without another vendor's review
+
+`codex` and `pi` lanes run beside `claude` with the same `agent`, `model` and `effort` settings, and the runner has every diff reviewed by a model from another vendor, bound to the reviewed SHA, before it merges. Once this Epic merges, the Maintainer lifts the every-path approval rule and the 1-builder limit.
+
+### Story 3.1: Session vendors and the reviewer choice
+
+As the Maintainer,
+I want the runner to know the vendor of every model that changed a diff, and to pick a reviewer from another vendor,
+So that no diff is reviewed by the vendor that built it (FR8, AR17).
+
+**Acceptance Criteria:**
+
+**Given** a session's adapter and model
+**When** the pure vendor function runs
+**Then** `claude` is Anthropic, `codex` is OpenAI, and a `pi` session is the vendor named in its `<provider>/<id>` model; through OpenRouter, it is the vendor of the underlying model (`openrouter/anthropic/<id>` is Anthropic).
+
+**Given** a unit
+**When** any session changes its diff (first build, loopback, CI fix or conflict resolution)
+**Then** that session's vendor is added to the record's `builder_providers[]`.
+
+**Given** `builder_providers[]` and the repo's allowed adapters
+**When** the pure reviewer choice runs
+**Then** it returns the first allowed adapter of (`claude`, `codex`) whose vendor is not in the set, or none
+**And** the case table reproduces `agent-adapters.md` § Cross-vendor review: `claude` → `codex`, `codex` → `claude`, `pi` with an Anthropic model → `codex`, `pi` with any other vendor's model → `claude`.
+
+**Given** no allowed reviewer from another vendor
+**When** the unit is ready for review
+**Then** it becomes `parked`, blocked, with `park.inbox_owner` set to its owner.
+
+**Given** a lane
+**When** it starts
+**Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy (AR17, AR22).
+
+### Story 3.2: The `codex` adapter
+
+As an operator,
+I want a lane to run `codex` through the `Agent` port inside the sandbox,
+So that Stories can be built by an OpenAI model with the same lane settings as `claude` (FR7, AR18, AR22, AR42).
+
+**Acceptance Criteria:**
+
+**Given** the AR42 spike
+**When** the Story starts
+**Then** it first establishes, with the real CLI, whether `codex exec` gives `bmad-build-auto` the subagents it requires, how `bmad-build-auto`'s outcomes (a `ready-for-dev` halt; it never yields `no-op`) map onto the `build` result, and how a `codex exec` session is resumed
+**And** if `codex exec` cannot run `bmad-build-auto` as required, the Story stops and raises it to the Maintainer instead of working around it.
+
+**Given** lane settings
+**When** `launchSpec` runs
+**Then** it returns `codex exec -m <model> --json -c model_reasoning_effort=<effort>` with the CLI's own sandbox turned off inside Xarabot's, its attribution-off setting, `CODEX_HOME` set to the lane's vendor home, `XARABOT_RESULT`, the clone as working directory and the skills exposed through `.agents/skills`
+**And** an unset `model` is `gpt-6.1-sol` and an unset `effort` is `high`.
+
+**Given** a model
+**When** `effortValues` runs
+**Then** it returns the efforts that model offers, and an effort it does not offer stops the lane at start.
+
+**Given** the `--json` output
+**When** `parseUsage` runs
+**Then** it returns tokens, cost, the reported model and a usage-limit hit with its reset time, and a reported model that differs from config fails the attempt.
+
+**Given** a session that ends with no result file
+**When** the adapter handles it
+**Then** it resumes once in the way the spike established, asking only for the result.
+
+**Given** the proxy allowlist for `codex` sessions
+**When** a session runs
+**Then** only OpenAI's API hosts, the Python package hosts and repo-added hosts are reachable.
+
+**Given** an installed `codex` older than 0.163.0
+**When** a lane starts
+**Then** it refuses to start.
+
+**Given** the `Agent` contract suite, the sandbox refusal suite and the write-check case table
+**When** they run for `codex`
+**Then** each passes, with live cases skipped without credentials.
+
+### Story 3.3: The `pi` adapter
+
+As an operator,
+I want a lane to run `pi` with any OpenRouter model through the `Agent` port,
+So that Stories can be built by models from other vendors with the same lane settings (FR7, AR18, AR22, AR41, AR42).
+
+**Acceptance Criteria:**
+
+**Given** the AR41 and AR42 spikes
+**When** the Story starts
+**Then** it first confirms pi's agent-directory override, whether pi gives `bmad-build-auto` the subagents it requires, how its outcomes map onto the `build` result, and how a pi session is resumed
+**And** if pi has no directory override, or cannot run `bmad-build-auto` as required, the Story stops and raises it to the Maintainer.
+
+**Given** a `pi` lane with no `model`
+**When** it starts
+**Then** it refuses to start.
+
+**Given** lane settings
+**When** `launchSpec` runs
+**Then** it returns `pi -p --mode json --model <provider/id> --thinking <effort>` with pi's agent directory pointed at the lane's vendor home, which holds the operator's OpenRouter sign-in, plus `XARABOT_RESULT` and the clone as working directory
+**And** an unset `effort` is `high`.
+
+**Given** a model
+**When** `effortValues` runs
+**Then** it returns the values among `low` … `max` that pi offers for that model, and an effort it does not offer stops the lane at start.
+
+**Given** pi's JSON output
+**When** `parseUsage` runs
+**Then** it returns tokens, cost, the reported model and a usage-limit hit with its reset time, and a reported model that differs from config fails the attempt.
+
+**Given** the proxy allowlist for `pi` sessions
+**When** a session runs
+**Then** only OpenRouter's API hosts, the Python package hosts and repo-added hosts are reachable.
+
+**Given** an installed `pi` older than 1.3.0
+**When** a lane starts
+**Then** it refuses to start.
+
+**Given** the `Agent` contract suite, the sandbox refusal suite and the write-check case table
+**When** they run for `pi`
+**Then** each passes, with live cases skipped without credentials.
+
+### Story 3.4: Review sessions
+
+As the Maintainer,
+I want each review to run on a clean checkout of the exact head, with nothing the builder wrote able to configure the reviewer,
+So that a review result describes the diff that will merge and cannot be steered by the builder (FR8, AR15, AR17).
+
+**Acceptance Criteria:**
+
+**Given** a unit ready for review
+**When** the runner starts the review session
+**Then** it makes a fresh checkout of `head_sha` from `runner.git`, never the builder's clone, restores the agent config paths from `main`, turns hooks off, seeds a fresh vendor home for the reviewer, and launches it through the sandbox.
+
+**Given** the review prompt
+**When** `core/prompt` builds it
+**Then** it comes from the package review template, names the unit and the Story spec, and ends by writing a `review` result to `$XARABOT_RESULT`
+**And** the prompt test asserts it has no selection, CI, merge or status instruction.
+
+**Given** a review result
+**When** the runner handles it
+**Then** it records `reviewed_sha` itself, ignoring any SHA the agent reports, and posts the review on the PR through `Forge.postReview`, naming that SHA and listing the findings, as a comment review with no approval
+**And** a result with no blocking findings sets `passed_sha` to the reviewed SHA; one with blocking findings never does.
+
+**Given** `Forge.postReview`
+**When** the forge contract suite runs
+**Then** the fake and GitHub adapters pass it.
+
+### Story 3.5: The review gate and loopbacks
+
+As the Maintainer,
+I want no PR to enter the merge queue unless its head is the reviewed and passed diff,
+So that every merged diff is one another vendor reviewed, and disagreements stop after 2 loopbacks (FR8, AR17, AR20, AR21).
+
+**Acceptance Criteria:**
+
+**Given** a PR about to be enqueued
+**When** the enqueuing lane checks it
+**Then** it enqueues only if the head equals `passed_sha`, or the head's tree equals the merge of `passed_sha` with the head's `main` parent, a merge the lane recomputes itself in `runner.git` without trusting the record or the commit's author.
+
+**Given** a review with blocking findings
+**When** the runner handles it
+**Then** it prefetches the findings into the temp folder, runs a loopback session at `head_sha` and reviews again
+**And** a lane that takes the unit over picks up the loopback, not the enqueue.
+
+**Given** any later agent change to the diff (a loopback, a CI fix or a conflict resolution)
+**When** it is committed
+**Then** the review re-runs and `loopbacks` + 1
+**And** once `loopbacks` ≥ 2 and blocking findings remain, the unit becomes `parked`, blocked, with `park.inbox_owner` set to its owner.
+
+**Given** coordinator PRs
+**When** they are enqueued
+**Then** the same gate applies, except `reconcile` PRs, which carry only runner-written content.
+
+**Given** a lane
+**When** it is about to launch any session or enqueue
+**Then** it re-checks the adapter and reviewer allowances from freshly fetched `main`, and refuses if either is no longer allowed.
+
+**Given** the case tables
+**When** they run against the fake forge
+**Then** head equal to `passed_sha`, head with only a clean `main` merge on top, head with a later agent change, the loopback cap and a revoked allowance each have a case.
+
+### Story 3.6: Cross-vendor verification
+
+As the Maintainer,
+I want proof that the same unit builds through each adapter and that the review gate holds on the real repo,
+So that I can lift the every-path approval rule and the 1-builder limit with evidence (FR7, FR8).
+
+**Acceptance Criteria:**
+
+**Given** the scratch repo and live credentials for each vendor
+**When** the verification suite runs
+**Then** the same unit runs to a valid `build` result through `claude`, `codex` and `pi`.
+
+**Given** a `claude`-built PR on the scratch repo
+**When** it reaches review
+**Then** a `codex` review is posted naming the reviewed SHA, and the PR merges only at that SHA or a clean `main` merge on top of it.
+
+**Given** a later agent change after a passed review
+**When** the lane continues
+**Then** the review re-runs before the PR can be enqueued.
+
+**Given** a policy that allows only `claude`
+**When** a `claude`-built unit is ready for review
+**Then** it parks, blocked, because no reviewer from another vendor is allowed.
+
+**Given** `docs/maintainer/self-host.md`
+**When** the Story is done
+**Then** it lists the switch after this Epic: drop the every-path approval rule from this repo's `policy.yaml`, allow the adapters to be used unattended, raise `XARABOT_MAX_BUILDERS`, and run the 24-hour acceptance check.
