@@ -2,7 +2,7 @@
 title: 'Story 1.1: Package scaffold and test harness'
 type: 'feature'
 created: '2026-10-22'
-status: 'blocked'
+status: 'in-review'
 baseline_revision: '1f0802eb758a7c0a41c59f9967960fbb024076e5'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -92,6 +92,8 @@ deferred: []
 - Given the repo, when the toolchain test runs, then `package.json` pins match AR36 exactly and no forbidden dependency, lockfile or config exists.
 
 ## Spec Change Log
+
+- 2026-10-22, Maintainer: approved the `oxlint` and `tsc` package.json scripts, which run each tool's launcher through Bun. Bun 1.4.3 does not stand in for `node` when it runs a `#!/usr/bin/env node` launcher: `bun --bun oxlint`, `bun --bun tsc` and `bun --bun run oxlint` all exit 127 without them, checked on the host outside any sandbox. Resume at review.
 
 ## Review Triage Log
 
