@@ -46,12 +46,22 @@ export function locate(path: string): Location | undefined {
   return { layer, unit: dirParts.join("/") };
 }
 
+/** Keywords after which a `/` starts a regex literal rather than a division. */
+const REGEX_AFTER_KEYWORD = /(?:^|[^\w$.])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)\s*$/;
+
+/** True when a `/` following `before` (comments already blanked) starts a regex literal. */
+function regexMayStart(before: string): boolean {
+  const trimmed = before.trimEnd();
+  if (trimmed === "") return true;
+  if ("(,=:[!&|?{};+-*%<>~^".includes(trimmed[trimmed.length - 1] as string)) return true;
+  return REGEX_AFTER_KEYWORD.test(trimmed);
+}
+
 /**
  * Splits source into two views: `code` with comments blanked (string contents
- * kept, for import specifiers) and `bare` with comments and string contents
- * blanked (for purity checks). Lengths and line breaks are preserved.
- * Regex literals are not recognised; a regex containing a quote or `//` may
- * confuse the scan.
+ * kept, for import specifiers) and `bare` with comments, string contents and
+ * regex literal bodies blanked (for purity checks). Lengths and line breaks
+ * are preserved. A `/` counts as a regex literal from the token before it.
  */
 export function strip(source: string): { readonly code: string; readonly bare: string } {
   let code = "";
@@ -110,6 +120,27 @@ export function strip(source: string): { readonly code: string; readonly bare: s
         const b = blank(source[i] as string);
         code += b;
         bare += b;
+      }
+      continue;
+    }
+    if (c === "/" && regexMayStart(code)) {
+      // A regex literal: keep it in `code`, blank its body in `bare`.
+      code += c;
+      bare += c;
+      i += 1;
+      let inClass = false;
+      while (i < n && source[i] !== "\n" && (inClass || source[i] !== "/")) {
+        if (source[i] === "\\" && i + 1 < n && source[i + 1] !== "\n") {
+          code += source[i] + (source[i + 1] as string);
+          bare += "  ";
+          i += 2;
+          continue;
+        }
+        if (source[i] === "[") inClass = true;
+        if (source[i] === "]") inClass = false;
+        code += source[i];
+        bare += " ";
+        i += 1;
       }
       continue;
     }
@@ -185,16 +216,22 @@ const CORE_BANS: readonly { readonly pattern: RegExp; readonly what: string }[] 
   { pattern: /\bBun\s*\.\s*spawnSync\b/, what: "Bun.spawnSync" },
   { pattern: /\bBun\s*\.\s*file\b/, what: "Bun.file" },
   { pattern: /\bBun\s*\.\s*write\b/, what: "Bun.write" },
+  { pattern: /\bBun\s*\.\s*\$/, what: "Bun.$" },
   { pattern: /\bDate\s*\.\s*now\b/, what: "Date.now()" },
   { pattern: /\bnew\s+Date\b\s*(?:\(\s*\)|(?![\s(]))/, what: "new Date()" },
   { pattern: /\bprocess\s*\.\s*env\b/, what: "process.env" },
   { pattern: /\bBun\s*\.\s*env\b/, what: "Bun.env" },
+  { pattern: /\bimport\s*\.\s*meta\s*\.\s*env\b/, what: "import.meta.env" },
 ];
 
 const AGENT_SPAWN_BANS: readonly { readonly pattern: RegExp; readonly what: string }[] = [
   { pattern: /\bBun\s*\.\s*spawn\b/, what: "Bun.spawn" },
   { pattern: /\bBun\s*\.\s*spawnSync\b/, what: "Bun.spawnSync" },
+  { pattern: /\bBun\s*\.\s*\$/, what: "Bun.$" },
 ];
+
+/** A named import of a spawning export from the `bun` module, matched on the `code` view. */
+const BUN_SPAWN_IMPORT = /\bimport\s*\{[^}]*(?:\bspawn\b|\bspawnSync\b|\$)[^}]*\}\s*from\s*["']bun["']/;
 
 function isRelative(specifier: string): boolean {
   return specifier === "." || specifier === ".." || specifier.startsWith("./") || specifier.startsWith("../");
@@ -259,6 +296,9 @@ export function checkSource(path: string, source: string): Violation[] {
         violations.push({ path: filePath, rule: "spawn", detail: `agent adapters may not use ${ban.what}` });
       }
     }
+    if (BUN_SPAWN_IMPORT.test(code)) {
+      violations.push({ path: filePath, rule: "spawn", detail: 'agent adapters may not import spawn or $ from "bun"' });
+    }
     if (/\bchild_process\b/.test(code)) {
       violations.push({ path: filePath, rule: "spawn", detail: "agent adapters may not use child_process" });
     }
@@ -269,11 +309,12 @@ export function checkSource(path: string, source: string): Violation[] {
 
 const SOURCE_GLOB = new Bun.Glob("src/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
 
-/** Checks every source file under `<root>/src`. */
+/** Checks every source file under `<root>/src`; throws if there are none, so a wrong root cannot pass. */
 export async function checkTree(root: string): Promise<Violation[]> {
   const violations: Violation[] = [];
   const paths: string[] = [];
   for await (const rel of SOURCE_GLOB.scan({ cwd: root, dot: true })) paths.push(rel.split("\\").join("/"));
+  if (paths.length === 0) throw new Error(`no source files under ${posix.join(root, "src")}`);
   paths.sort();
   for (const rel of paths) {
     const source = await Bun.file(posix.join(root, rel)).text();

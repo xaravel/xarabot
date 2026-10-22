@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import pkg from "../../package.json" with { type: "json" };
 
-const MAIN = new URL("../../src/cli/main.ts", import.meta.url).pathname;
+const MAIN = join(import.meta.dir, "..", "..", "src", "cli", "main.ts");
 
 function run(args: readonly string[]): { code: number; stdout: string; stderr: string } {
-  const proc = Bun.spawnSync([process.execPath, MAIN, ...args], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawnSync([process.execPath, MAIN, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
   return { code: proc.exitCode ?? -1, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
 

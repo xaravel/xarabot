@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ALLOWED, checkSource, checkTree, type Layer, type Violation } from "./support/boundaries.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = join(import.meta.dir, "..");
 
 const LAYERS: readonly Layer[] = ["core", "ports", "adapters", "sandbox", "lane", "cli"];
 
@@ -22,14 +25,51 @@ function specifier(from: Layer, to: Layer): string {
   return `${up}${target}`;
 }
 
+/** The AR1 table written out independently of `ALLOWED`, so a drift in either shows. */
+const AR1_TABLE: Readonly<Record<Layer, readonly Layer[]>> = {
+  core: ["core"],
+  ports: ["ports", "core"],
+  adapters: ["adapters", "ports", "core"],
+  sandbox: ["sandbox", "ports", "core"],
+  lane: ["lane", "sandbox", "adapters", "ports", "core"],
+  cli: ["cli", "lane", "sandbox", "adapters", "ports", "core"],
+};
+
 describe("the whole src/ tree", () => {
   test("has no violations", async () => {
     expect(await checkTree(ROOT)).toEqual([]);
   });
+
+  test("checkTree reads files on disk and reports their violations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xarabot-tree-"));
+    try {
+      mkdirSync(join(dir, "src", "core"), { recursive: true });
+      writeFileSync(join(dir, "src", "core", "clean.ts"), "export const a = 1;\n");
+      writeFileSync(join(dir, "src", "core", "bad.ts"), "export const t = Date.now();\n");
+      expect(await checkTree(dir)).toEqual([
+        { path: "src/core/bad.ts", rule: "purity", detail: "core may not use Date.now()" },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("checkTree refuses a root with no source files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xarabot-empty-"));
+    try {
+      await expect(checkTree(dir)).rejects.toThrow("no source files");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("layer table: every direction", () => {
-  const cases = LAYERS.flatMap((from) => LAYERS.map((to) => ({ from, to, allowed: ALLOWED[from].includes(to) })));
+  test("ALLOWED matches the AR1 table", () => {
+    expect(ALLOWED).toEqual(AR1_TABLE);
+  });
+
+  const cases = LAYERS.flatMap((from) => LAYERS.map((to) => ({ from, to, allowed: AR1_TABLE[from].includes(to) })));
 
   test("the table has 16 forbidden directions and 20 allowed ones", () => {
     expect(cases.filter((c) => !c.allowed)).toHaveLength(16);
@@ -96,6 +136,11 @@ describe("I/O matrix", () => {
     ['await Bun.write("x", "y");', "core may not use Bun.write"],
     ["const home = process.env.HOME;", "core may not use process.env"],
     ["const home = Bun.env.HOME;", "core may not use Bun.env"],
+    ["const home = import.meta.env.HOME;", "core may not use import.meta.env"],
+    ["await Bun.$`ls`;", "core may not use Bun.$"],
+    ["const re = /`/; const t = Date.now();", "core may not use Date.now()"],
+    ['const re = /"/; const t = Date.now();', "core may not use Date.now()"],
+    ["const re = /a\\/\\//; const t = Date.now();", "core may not use Date.now()"],
     ["const d = new Date();", "core may not use new Date()"],
     ["const d = new Date;", "core may not use new Date()"],
     ['import { readFileSync } from "node:fs";', "core may not import node:fs"],
@@ -138,6 +183,8 @@ describe("I/O matrix", () => {
     "const d = new Date(record.at);",
     "const t = date.now; const f = client.fetch; const g = { fetchAll: 1 };",
     "const label = `a ${`b ${c}`} d`;",
+    "const re = /Date.now|fetch\\(/;",
+    "const half = total / 2; const r = (a) / b / c;",
   ])("pure core is clean: %j", (source) => {
     expect(checkSource("src/core/x.ts", source)).toEqual([]);
   });
@@ -147,6 +194,9 @@ describe("I/O matrix", () => {
     ['Bun.spawnSync(["claude"]);', "agent adapters may not use Bun.spawnSync"],
     ['import { spawn } from "node:child_process";', "agent adapters may not use child_process"],
     ['const cp = require("child_process");', "agent adapters may not use child_process"],
+    ["await Bun.$`claude -p`;", "agent adapters may not use Bun.$"],
+    ['import { spawn } from "bun";', 'agent adapters may not import spawn or $ from "bun"'],
+    ['import { $ } from "bun";', 'agent adapters may not import spawn or $ from "bun"'],
   ])("agent spawn: %s", (source, detail) => {
     expect(checkSource("src/adapters/agent/claude/x.ts", source)).toEqual([
       { path: "src/adapters/agent/claude/x.ts", rule: "spawn", detail },

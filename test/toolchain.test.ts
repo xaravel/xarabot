@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = join(import.meta.dir, "..");
 
 type Manifest = {
   name: string;
@@ -65,6 +66,7 @@ const FORBIDDEN_DEPS = [
   /^jest$/,
   /^@jest\//,
   /^ts-jest$/,
+  /^@types\/jest$/,
   /^vitest$/,
   /^@vitest\//,
   /^eslint$/,
@@ -118,6 +120,16 @@ const FORBIDDEN_FILES = [
   "prettier.config.mjs",
 ];
 
+/** Name shapes for configs the exact list may miss, such as `eslint.config.mts` or `.prettierrc.toml`. */
+const FORBIDDEN_FILE_PATTERNS = [/^(?:jest|vitest|eslint|prettier)\.(?:config|workspace)\./, /^\.(?:eslintrc|prettierrc)(?:\..+)?$/];
+
+/** Folders the forbidden-file scan skips: installed packages, git data, and read-only tooling. */
+const SKIPPED_DIRS = new Set(["node_modules", ".git", "bootstrap", "_bmad", "_bmad-output", ".claude", ".agents"]);
+
+function isForbiddenFile(name: string): boolean {
+  return FORBIDDEN_FILES.includes(name) || FORBIDDEN_FILE_PATTERNS.some((re) => re.test(name));
+}
+
 describe("no forbidden tooling", () => {
   test("no forbidden dependency", () => {
     const names = [
@@ -136,8 +148,13 @@ describe("no forbidden tooling", () => {
   });
 
   test("bun.lock is the only lockfile and no forbidden config exists", () => {
-    expect(existsSync(`${ROOT}bun.lock`)).toBe(true);
-    const present = readdirSync(ROOT).filter((f) => FORBIDDEN_FILES.includes(f));
+    expect(existsSync(join(ROOT, "bun.lock"))).toBe(true);
+    const present: string[] = [];
+    for (const rel of new Bun.Glob("**/*").scanSync({ cwd: ROOT, dot: true })) {
+      const parts = rel.split("/");
+      if (SKIPPED_DIRS.has(parts[0] as string)) continue;
+      if (isForbiddenFile(parts[parts.length - 1] as string)) present.push(rel);
+    }
     expect(present).toEqual([]);
   });
 });

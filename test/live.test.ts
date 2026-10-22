@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = join(import.meta.dir, "..");
 const FIXTURE = "./test/fixtures/live-sample.fixture.ts";
 
 function runFixture(live: boolean): { code: number; output: string } {
@@ -9,7 +10,13 @@ function runFixture(live: boolean): { code: number; output: string } {
     if (v !== undefined && k !== "XARABOT_LIVE") env[k] = v;
   }
   if (live) env.XARABOT_LIVE = "1";
-  const proc = Bun.spawnSync([process.execPath, "test", FIXTURE], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawnSync([process.execPath, "test", FIXTURE], {
+    cwd: ROOT,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 30_000,
+  });
   return { code: proc.exitCode ?? -1, output: proc.stdout.toString() + proc.stderr.toString() };
 }
 
