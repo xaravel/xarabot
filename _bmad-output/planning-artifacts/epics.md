@@ -1560,3 +1560,216 @@ So that I can lift the every-path approval rule and the 1-builder limit with evi
 **Given** `docs/maintainer/self-host.md`
 **When** the Story is done
 **Then** it lists the switch after this Epic: drop the every-path approval rule from this repo's `policy.yaml`, allow the adapters to be used unattended, raise `XARABOT_MAX_BUILDERS`, and run the 24-hour acceptance check.
+
+## Epic 4: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
+
+Epics start as soon as the graph allows, retro items and checkpoints hold exactly the Epics they should, and each owner rules on everything waiting on them from one daily inbox digest, by comment command.
+
+### Story 4.1: Retro-item distance gates
+
+As the Maintainer,
+I want an open retro item to hold back only the Epics it should,
+So that untagged follow-ups are worked alongside later Stories, while a `blocking` item stops its Epic's dependents (FR10, AR13).
+
+**Acceptance Criteria:**
+
+**Given** the resolved graph and Epic E's retro items in `retro-gates.yaml`
+**When** the pure gate computes distance along dependency edges from E
+**Then** a `blocking` item holds every Epic at distance 1 or more, and any other open item holds every Epic at distance 2 or more
+**And** items with status `open`, `in-progress` or `waiting` count as open, and `deferred` and `done` do not.
+
+**Given** `next` for a builder
+**When** an Epic is held by a retro item
+**Then** it takes no new Stories from that Epic, and the idle reason names the item.
+
+**Given** a graph change or a tag change
+**When** a Story was already claimed
+**Then** it finishes; the change takes effect at the next claim.
+
+**Given** the FR10 case table
+**When** it runs
+**Then** an untagged open item from E does not gate an Epic one step from E but does gate one two steps away, and a `blocking` item gates every Epic depending on E, directly or through others.
+
+### Story 4.2: Checkpoints
+
+As the Maintainer,
+I want a checkpoint Epic to hold only the Epics that depend on it until I say go,
+So that independent Epics keep running while I review a checkpoint (FR5, AR12, AR13).
+
+**Acceptance Criteria:**
+
+**Given** a checkpoint Epic C with its retro done and no go recorded
+**When** `next` runs
+**Then** every Epic depending on C, directly or through others, takes no new Stories, and Epics not depending on C keep running
+**And** Epics already in flight finish the Stories they hold and take no new ones.
+
+**Given** C's retro done
+**When** `next(snapshot, 'coordinator')` reaches checkpoint
+**Then** it returns `checkpoint:<C>`, which runs no agent session: runner code marks C as awaiting a go in `retro-gates.yaml` in a runner-written PR, and the go appears in the Maintainer's inbox.
+
+**Given** a checkpoint added after C's retro
+**When** the next claim happens
+**Then** C's dependents are held from that claim until the go.
+
+**Given** a go recorded
+**When** `next` runs
+**Then** C's dependents become eligible, and the `checkpoint` unit counts as done.
+
+**Given** a PR that removes `checkpoint: true` from C
+**When** C has no recorded go
+**Then** the graph-change gate parks it, blocked; with a go recorded it may be retired, and the go record stays.
+
+**Given** the case tables
+**When** they run
+**Then** dependents at distance 1 and 2, a sibling not depending on C, an in-flight Epic and a late-added checkpoint each have a case.
+
+### Story 4.3: Owner inboxes and the daily digest
+
+As an owner,
+I want one inbox listing everything waiting on me, rewritten once a day,
+So that I rule on it in one sitting with no other per-item notices (FR9, AR24).
+
+**Acceptance Criteria:**
+
+**Given** an owner
+**When** the coordinator first needs their inbox
+**Then** it finds or creates one issue labelled `xarabot-inbox` and assigned to that owner; on a solo repo the Maintainer's inbox is the only one.
+
+**Given** the coordinator's daily run
+**When** `renderDigest` rewrites an owner's issue body from the ledger's `parked` records, PR states and `retro-gates.yaml`
+**Then** it lists their bot's PRs awaiting approval and their blocked units, each with its link, its age and the ruling verbs that apply.
+
+**Given** the Maintainer's inbox
+**When** the digest is rendered
+**Then** it also lists checkpoint gos waiting, Infrastructure Stories needing approval, Maintainer-routed retro items, graph-changing PRs awaiting approval, Story headings with no manifest, units waiting on a Human Live Step (`blocked.kind`), and open Escalations where repo config points at an Escalation source.
+
+**Given** the digest
+**When** nothing has changed since the last rewrite
+**Then** the body is not rewritten, and no other comment is posted.
+
+**Given** a condition that newly stops every lane
+**When** it occurs
+**Then** the alert from Story 1.10 notifies at once, and is the only notice outside the digest.
+
+**Given** the forge contract suite
+**When** it runs
+**Then** the fake and GitHub adapters pass the `renderDigest` cases
+**And** `docs/maintainer/self-host.md` adds the Human Live Step of pinning the Maintainer's inbox issue once by hand.
+
+### Story 4.4: Batch routing of Maintainer-only retro items
+
+As the Maintainer,
+I want retro items routed to me to land in my inbox in one batch, by runner code,
+So that no agent session is spent only to route items to me (FR9, AR14, AR24).
+
+**Acceptance Criteria:**
+
+**Given** a retro whose items include ones with `route` naming the Maintainer
+**When** `reconcile` writes `retro-gates.yaml`
+**Then** those items are set to `waiting` in the same runner-written PR, with no agent session.
+
+**Given** routed items
+**When** the next digest is rendered
+**Then** each appears once in the Maintainer's inbox with its id, text, Epic and age.
+
+**Given** routed items
+**When** `next(snapshot, 'coordinator')` reaches retro items
+**Then** they are never returned as `retro-item` units.
+
+### Story 4.5: Rulings: grammar, authority and cursor
+
+As the Maintainer,
+I want to rule by commenting `/xarabot <verb> <unit-id>` on an inbox issue, and to have only authorized rulings count,
+So that parked units, checkpoints and approvals have one way to clear, and nobody else can clear them (FR9, AR29).
+
+**Acceptance Criteria:**
+
+**Given** comments on inbox issues
+**When** `reconcile` runs
+**Then** it reads new comments through `Forge.readRulings(cursor)`, from the cursor kept in `coordinator.json`, and advances the cursor in the same ledger swap that applies the rulings.
+
+**Given** the pure ruling parser
+**When** it reads a comment
+**Then** it accepts only `/xarabot <verb> <unit-id>` with a verb of `go`, `approve`, `block`, `unblock`, `rebuild`, `release` or `dismiss` and a unit id in AR35 form, and ignores any other text.
+
+**Given** the author of a ruling
+**When** its authority is checked
+**Then** `go`, `approve`, `block` and `unblock` count only from the Maintainer named in config, and `rebuild`, `release` and `dismiss` count from the item's owner or the Maintainer.
+
+**Given** a ruling that is malformed, unauthorized, or names a unit the verb doesn't apply to
+**When** `reconcile` handles it
+**Then** nothing changes, and it replies with a 🤖 comment giving the reason.
+
+**Given** a valid ruling
+**When** it is applied
+**Then** `reconcile` replies with a 🤖 acknowledgement naming the verb and unit.
+
+**Given** the case tables
+**When** they run
+**Then** each verb, each author class and each malformed form has a case.
+
+### Story 4.6: Rulings: what each verb does
+
+As the Maintainer,
+I want each ruling to make exactly its defined change to the ledger or `retro-gates.yaml`,
+So that a ruling clears what it names and nothing else (FR5, FR9, FR10, FR13, AR29).
+
+**Acceptance Criteria:**
+
+**Given** `/xarabot go <checkpoint-epic>`
+**When** `reconcile` applies it
+**Then** the go is recorded in `retro-gates.yaml` by runner code, and the Epic's dependents become eligible at the next claim.
+
+**Given** `/xarabot approve story:<id>` for a parked Infrastructure Story
+**When** `reconcile` applies it
+**Then** the ledger records `approval` with the Maintainer's login and the current `manifest_sha`, and the record becomes `released`
+**And** a later change to the manifest voids the approval.
+
+**Given** `/xarabot block` or `unblock` on a retro item
+**When** `reconcile` applies it
+**Then** the item's `blocking` tag in `retro-gates.yaml` changes, and the gates follow at the next claim.
+
+**Given** `/xarabot release <unit>`
+**When** `reconcile` applies it
+**Then** the record becomes `released` with `attempts`, `loopbacks` and `ci_fixes` set to 0 and `builder_providers[]` kept.
+
+**Given** `/xarabot rebuild <unit>`
+**When** `reconcile` applies it
+**Then** it closes the unit's open PR, clears `reviewed_sha`, `passed_sha` and `builder_providers[]`, sets the counters to 0, and the record becomes `released`
+**And** a unit parked because no reviewer was left becomes buildable again.
+
+**Given** `/xarabot dismiss <unit>`
+**When** `reconcile` applies it
+**Then** only the inbox item goes; the ledger is unchanged.
+
+**Given** any ruling
+**When** it is applied
+**Then** no agent session runs, and the write check still refuses any agent diff that changes a verdict, an item or a go (Story 2.3).
+
+### Story 4.7: Parallel Epics and gates verification
+
+As the Maintainer,
+I want proof that Epics run in parallel exactly as the graph allows and that the gates hold,
+So that a consuming repo can turn on parallel Epics with evidence (FR5, FR10).
+
+**Acceptance Criteria:**
+
+**Given** a graph fixture shaped like Xaravel Phase 1 (`runtime`, then `contracts`, then `macroable`, `conditionable` and `json-schema` each depending on `contracts`)
+**When** `runtime` and then `contracts` are done with their retros
+**Then** `next` hands builders Stories from all three later Epics at once.
+
+**Given** the same fixture with `contracts` as a checkpoint and its go pending
+**When** builders run
+**Then** the dependent Epics take no new Stories, and an Epic not depending on `contracts` keeps running.
+
+**Given** the scratch repo with a checkpoint pending
+**When** the Maintainer comments `/xarabot go <epic>` on the inbox issue
+**Then** the next `reconcile` records the go and acknowledges it, and the dependents' Stories are claimed afterwards.
+
+**Given** retro items on the fixture
+**When** the gates run
+**Then** the FR10 cases hold end to end through `next`.
+
+**Given** the scratch repo's inbox
+**When** the digest is rendered
+**Then** every waiting item appears once, with its link and age.
