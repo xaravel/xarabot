@@ -1,0 +1,26 @@
+{
+  "name": "@xaravel/xarabot",
+  "version": "0.0.0",
+  "description": "Runs BMAD projects unattended.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "xarabot": "src/cli/main.ts"
+  },
+  "scripts": {
+    "oxlint": "bun ./node_modules/oxlint/bin/oxlint",
+    "tsc": "bun ./node_modules/typescript/bin/tsc"
+  },
+  "packageManager": "bun@1.4.3",
+  "engines": {
+    "bun": "1.4.3"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "oxlint": "1.89.0",
+    "typescript": "7.0.2"
+  }
+}
