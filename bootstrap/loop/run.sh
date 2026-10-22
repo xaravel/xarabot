@@ -73,7 +73,7 @@ limit_wait() {
 # Run one Claude session on a prompt in the clone. The session has no GitHub token.
 session() {
   (cd "$CLONE" && claude -p "$1" --model "$MODEL" --permission-mode auto --add-dir "$STATE" \
-      --output-format stream-json --verbose --settings "$SETTINGS") >>"$log" 2>&1
+      --output-format stream-json --verbose --settings "$SETTINGS") </dev/null >>"$log" 2>&1
 }
 
 # After a session with no valid result: sleep through a usage limit, or count a failed attempt.
