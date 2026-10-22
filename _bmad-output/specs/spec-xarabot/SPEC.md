@@ -41,7 +41,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
     - A killed lane's unit becomes claimable 30 minutes after its last heartbeat.
     - Both hold across machines.
 - **CAP-4 · Parallel lanes (0.x)**
-  - **intent:** One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own worktree, state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`).
+  - **intent:** One Xarabot host, a macOS or Linux computer set in config (`XARABOT_HOST`), runs a coordinator lane (retros, retro action items, planning) and N builder lanes (Stories only), each builder with its own full clone (never a linked worktree), state folder and scheduled job (launchd or systemd). The host's builder limit is config (`XARABOT_MAX_BUILDERS`).
   - **success:** On Xaravel's Xarabot host, the coordinator and 2 builder lanes run for 24 hours with no unit built twice and no write to `sprint-status.yaml` or `retro-gates.yaml` from a builder.
 - **CAP-5 · Parallel Epics (0.x)**
   - **intent:** Epics run at the same time, ordered by the dependency graph instead of strictly in sequence: an Epic starts once every Epic it depends on has all its Stories merged and its retro done. A checkpoint Epic holds only the Epics that depend on it, directly or through others, until the Maintainer's go.
@@ -101,7 +101,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **success:** Registering a person and their bot and merging gives them their role's rights everywhere; a bot not registered to a human is refused; a hand edit to a generated file fails a drift check.
 - **CAP-18 · Guard (sandbox and write check 0.x; diff check and CI v1)**
   - **intent:** One fail-closed guard, the same for every adapter:
-    - **Sandbox (0.x):** the coding agent runs with only its unit's worktree writable, and with no GitHub credentials and no GitHub host (§ Constraints, "Agents never touch GitHub").
+    - **Sandbox (0.x):** the coding agent runs with only its unit's clone writable, and with no GitHub credentials and no GitHub host (§ Constraints, "Agents never touch GitHub").
     - **Write check (0.x):** before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`) or Protected Paths. Only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's own BMAD Story spec file, and the `status:` line of its own Story file.
     - **Diff check (v1):** extends the write check to refuse files outside the claim's globs and dependency files the repo has not allowed.
     - **CI (v1):** CI re-checks the same rules.
@@ -172,7 +172,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - roles, tracks, Protected Paths, dependency-command list and Human Live Steps.
 
 **Operating limits**
-- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs.
+- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs. The one exception is the Maintainer's one-time write at Xarabot's self-host switch, which creates `sprint-status.yaml` with the bootstrapped Epic's Stories done.
 - **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
@@ -196,10 +196,29 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 ## Assumptions
 
 - **BMAD:** Xarabot drives the stock BMAD skills installed in the consuming repo that run headless (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`). "Product management" in scope means driving those planning artifacts (sprint status, retros) and routing course corrections to the Maintainer, not a separate tool.
-- **Same-vendor reviewer:** when the repo allows no adapter from another vendor, the reviewer is the first allowed adapter of `claude`, `codex`; with neither allowed (a pi-only repo), a `pi` session on the builder's model. Not yet confirmed by the Maintainer.
+- **Same-vendor reviewer:** when the repo allows no adapter from another vendor, the reviewer is the first allowed adapter of `claude`, `codex`; with neither allowed (a pi-only repo), a `pi` session on the builder's model. Confirmed by the Maintainer (2026-10-21); pi as a reviewer is revisited for v1.
 - **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
-- **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised: the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), the Story manifest (AD-10), the Epic graph and gates (AD-11, AD-12), the result schema (AD-14), one sandbox for every adapter (AD-17), effort mapping (AD-21), keys and App rights (AD-26), the forge port's contract suite and error kinds (AD-27, AD-32) and the write check (AD-30).
-- **Still open in the spine:** the App permission the merge queue needs (verified live before the merge-plumbing Story), which `PATCH git/refs` response means "retry the swap", and the local-only adapter (v1).
+- **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised and the Maintainer's decisions of 2026-10-21:
+  - the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), with the ledger's `park` values (AD-5, AD-7);
+  - the Story manifest and its `depends_on` (AD-10);
+  - the Epic graph and gates: a Story is done when `sprint-status.yaml` on `main` says so, bootstrapped Epics count as done, and a rejected retro holds its dependents until the Maintainer's go (AD-11, AD-12, AD-28);
+  - status and graph planning units, and the coordinator's order (AD-13);
+  - the result schema and its values (AD-14);
+  - the same-vendor reviewer (AD-16);
+  - one sandbox for every adapter (AD-17);
+  - the Standing Authority frontmatter, the config paths and the 0.x Escalation source (AD-20);
+  - effort mapping (AD-21);
+  - the daily digest (AD-23);
+  - the pinned runner's launcher, its version switch and upgrade PRs (AD-25);
+  - keys, App rights and the App permission table (AD-26);
+  - the forge port's contract suite and error kinds (AD-27, AD-32);
+  - the write check (AD-30).
+- **Still open in the spine:**
+  - the App permission the merge queue needs (verified live before the merge-plumbing Story);
+  - which `PATCH git/refs` response means "retry the swap" (409 or 422);
+  - the adapter spikes: for `claude`, `codex` and `pi`, how `bmad-build-auto`'s outcomes map onto the `build` result and how session resume works; for `claude`, the output format that yields usage; for `codex` and `pi`, whether `bmad-build-auto` gets its subagents;
+  - AD-17's two assumptions, spiked in their Stories: pi's vendor-home override and the proxy's hostname allowlist.
+  The local-only adapter (v1) is Deferred in the spine, not open.
 
 ## Open Questions
 

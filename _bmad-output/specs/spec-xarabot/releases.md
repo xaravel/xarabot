@@ -14,4 +14,4 @@ Placement notes (Maintainer decisions, 2026-10-20 unless dated):
 - **CAP-13's App creation** is in 0.x because the bootstrap runs as `edanisko-xarabot`; `bootstrap/join.ts` covers it until `xarabot join` exists.
 - **CAP-11** is in 0.x because the 0.x success signal is measured from its telemetry.
 - **CAP-22** is in 0.x because Xaravel's loop already stops when its MAINT file is missing, and adoption must keep that.
-- **CAP-20 in Xaravel:** Xaravel already has hash-bound escalations (`tools/escalations/`). Under 0.x Xarabot reads them through config; v1 makes the mechanism Xarabot-owned.
+- **CAP-20 in Xaravel:** Xaravel already has hash-bound escalations (`tools/escalations/`). Under 0.x Xarabot reads them through config with Xaravel's rule, and a Story with an open Escalation is neither claimed nor enqueued (2026-10-21); v1 makes the mechanism Xarabot-owned.
