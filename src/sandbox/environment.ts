@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { err, ok, type Result } from "../core/result.ts";
-import { ENV_NAME } from "../ports/sandbox.ts";
+import { ENV_NAME, type Vendor } from "../ports/sandbox.ts";
 
 /**
  * The session's environment and the host paths it must never see. Both
@@ -14,11 +14,20 @@ export const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 export const PROXY_VARS: readonly string[] = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
 
+/**
+ * The variable that points a vendor's CLI at its own temp folder, set to
+ * `<tempDir>/cli-tmp`. Claude Code ignores `TMPDIR` and otherwise writes to
+ * `/tmp/claude-<uid>`, which the profile denies, so it fails to start with
+ * `EPERM`. Named here per vendor, never by the launch spec.
+ */
+export const VENDOR_TMP_ENV: Readonly<Partial<Record<Vendor, string>>> = { claude: "CLAUDE_CODE_TMPDIR" };
+
 /** Names a spec may not use for its own variables: the ones the sandbox sets or forbids. */
 export function isReservedEnvName(name: string): boolean {
   return (
     ["PATH", "HOME", "TMPDIR", "LANG", "TERM", "UV_CACHE_DIR", "SSH_AUTH_SOCK"].includes(name) ||
     PROXY_VARS.includes(name) ||
+    Object.values(VENDOR_TMP_ENV).includes(name) ||
     name.startsWith("LC_") ||
     name.startsWith("XARABOT_") ||
     name.startsWith("GH_") ||
@@ -27,11 +36,16 @@ export function isReservedEnvName(name: string): boolean {
 }
 
 /** The folders the sandbox rebuilds inside the temp folder each session. */
-export function sessionDirs(tempDir: string): { readonly bin: string; readonly home: string; readonly uvCache: string } {
-  return { bin: join(tempDir, "bin"), home: join(tempDir, "home"), uvCache: join(tempDir, "uv-cache") };
+export function sessionDirs(tempDir: string): { readonly bin: string; readonly home: string; readonly uvCache: string; readonly cliTmp: string } {
+  return { bin: join(tempDir, "bin"), home: join(tempDir, "home"), uvCache: join(tempDir, "uv-cache"), cliTmp: join(tempDir, "cli-tmp") };
 }
 
+/** The names of the folders `sessionDirs` lists, relative to the temp folder. */
+export const SESSION_DIR_NAMES: readonly string[] = ["bin", "home", "uv-cache", "cli-tmp"];
+
 export type SessionEnvParts = {
+  /** Picks the CLI's own temp-folder variable, if the vendor has one (`VENDOR_TMP_ENV`). */
+  readonly vendor: Vendor;
   readonly tempDir: string;
   readonly vendorHome: string;
   readonly vendorHomeEnv: string;
@@ -70,6 +84,8 @@ export function buildSessionEnv(launching: LaunchingEnv, parts: SessionEnvParts)
   env["XARABOT_SANDBOXED"] = "1";
   if (parts.proxyUrl !== undefined) for (const name of PROXY_VARS) env[name] = parts.proxyUrl;
   env["UV_CACHE_DIR"] = dirs.uvCache;
+  const tmpEnv = VENDOR_TMP_ENV[parts.vendor];
+  if (tmpEnv !== undefined) env[tmpEnv] = dirs.cliTmp;
   return ok(env);
 }
 

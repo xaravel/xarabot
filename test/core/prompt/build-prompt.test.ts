@@ -64,9 +64,12 @@ describe("first build", () => {
   });
   test("result section maps build-auto's halt", () => {
     const r = resultSection(p);
-    for (const kind of ["intent-gap", "verification", "human-live-step", "escalation", "other", "no-op", "blocked.step_id"]) {
+    for (const kind of ["intent-gap", "verification", "human-live-step", "escalation", "other", "ready-for-dev", "blocked.step_id"]) {
       expect(r).toContain(`\`${kind}\``);
     }
+  });
+  test("result section forbids no-op (AR42: build-auto never yields it)", () => {
+    expect(resultSection(p)).toContain("`bmad-build-auto` has no `no-op` outcome, so never report `no-op` after it.");
   });
   test("a Story id with a suffix", () => {
     const q = build({ unit: { kind: "story", id: "1.17a", sprint_key: "1-17a-approval-gate" } });
@@ -91,6 +94,7 @@ describe("loopback and CI fix", () => {
       expect(p.endsWith(r)).toBe(true);
       expect(r).toContain("`$XARABOT_RESULT`");
       expect(r).toContain(`\`${RESULT}\``);
+      expect(r).toContain("`no-op`");
     });
   }
 });

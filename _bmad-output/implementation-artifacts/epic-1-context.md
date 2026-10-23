@@ -99,7 +99,8 @@ The Maintainer installs a pinned Xarabot runner on the Xarabot host (macOS), and
 - **Sandbox (macOS):**
   - `sandbox-exec` with a generated profile.
   - Reads are denied by default. The only writes allowed are to the clone, the vendor home and the temp folder.
-  - The environment is an allowlist, and `HOME` is a fresh directory.
+  - The environment is an allowlist, and `HOME` is a fresh directory inside the temp folder.
+  - The allowlist includes the variable that points the CLI at its own temp folder, always set inside the session's temp folder. For `claude` this is `CLAUDE_CODE_TMPDIR`: Claude Code ignores `TMPDIR` and otherwise writes to `/tmp/claude-<uid>`, which the profile denies, so it fails to start with `EPERM`. The variable is named per adapter (no general vendor-variables field on the launch spec).
   - The vendor home is re-seeded before every session. `claude` gets `CLAUDE_CODE_OAUTH_TOKEN` from a mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/claude/`.
   - Network goes only through Xarabot's Bun proxy, allowing vendor API hosts and PyPI. A GitHub host is never allowed.
   - Setup fails closed.

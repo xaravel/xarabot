@@ -1,7 +1,7 @@
 import { accessSync, constants as fsConstants, lstatSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { isReservedEnvName, buildSessionEnv, deniedPaths, sessionDirs, type DeniedPaths, type LaunchingEnv } from "./environment.ts";
+import { isReservedEnvName, buildSessionEnv, deniedPaths, SESSION_DIR_NAMES, sessionDirs, type DeniedPaths, type LaunchingEnv } from "./environment.ts";
 import { buildAllowlist } from "../core/network/hosts.ts";
 import { renderProfile } from "./profile.ts";
 import { startProxy, type Proxy, type ProxyOpts } from "./proxy.ts";
@@ -111,7 +111,7 @@ function validateProfile(profile: SandboxProfile): Refused | null {
   if (rel === "" || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
     return refused(`sandbox: resultPath ${profile.resultPath} is not inside tempDir ${profile.tempDir}`);
   }
-  for (const rebuilt of ["bin", "home", "uv-cache"]) {
+  for (const rebuilt of SESSION_DIR_NAMES) {
     if (rel === rebuilt || rel.startsWith(`${rebuilt}/`)) {
       return refused(`sandbox: resultPath ${profile.resultPath} lies inside the rebuilt ${rebuilt} folder`);
     }
@@ -293,7 +293,13 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     });
     if (!rendered.ok) return refused(`sandbox: the profile fails to generate: ${rendered.error.message}`);
 
-    const seeded = seedVendorHome({ launching, vendor: spec.vendor, credential: spec.credential, vendorHome: roots.vendorHome });
+    const seeded = seedVendorHome({
+      launching,
+      vendor: spec.vendor,
+      credential: spec.credential,
+      vendorHome: roots.vendorHome,
+      keep: spec.resume === true,
+    });
     if (!seeded.ok) return seeded;
 
     const dirs = sessionDirs(roots.tempDir);
@@ -301,10 +307,12 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     try {
       removeTree(dirs.bin);
       removeTree(dirs.home);
+      removeTree(dirs.cliTmp);
       removeTree(resultPath);
       if (lstatOrNull(dirs.uvCache)?.isDirectory() === false) removeTree(dirs.uvCache);
       mkdirSync(dirs.bin, { mode: 0o700 });
       mkdirSync(dirs.home, { mode: 0o700 });
+      mkdirSync(dirs.cliTmp, { mode: 0o700 });
       mkdirSync(dirs.uvCache, { recursive: true, mode: 0o700 });
       for (const t of [tools.agent, ...tools.helpers]) symlinkSync(t.path, join(dirs.bin, t.name));
       writeFileSync(join(dirs.home, ".gitconfig"), SESSION_GITCONFIG, { mode: 0o600 });
@@ -319,6 +327,7 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     }
 
     const env = buildSessionEnv(launching, {
+      vendor: spec.vendor,
       tempDir: roots.tempDir,
       vendorHome: roots.vendorHome,
       vendorHomeEnv: spec.vendorHomeEnv,

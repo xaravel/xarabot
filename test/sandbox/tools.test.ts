@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realpathLoose, within } from "../../src/sandbox/macos.ts";
-import { resolveTools, uvPythonDir, which } from "../../src/sandbox/tools.ts";
+import { cliVersion, resolveTools, uvPythonDir, which } from "../../src/sandbox/tools.ts";
 
 const dirs: string[] = [];
 
@@ -90,6 +90,31 @@ describe("resolveTools", () => {
     expect(r.value.dirs).toContain(execPath);
     // /usr/bin/git is the xcrun shim on macOS only; elsewhere it is the real git.
     if (process.platform === "darwin") expect(git?.path).not.toBe("/usr/bin/git");
+  });
+});
+
+describe("cliVersion", () => {
+  test("runs the CLI found on PATH with --version", async () => {
+    const d = tempDir();
+    writeFileSync(join(d, "fakecli"), '#!/bin/sh\n[ "$1" = --version ] && echo "2.1.309 (Claude Code)"\n');
+    chmodSync(join(d, "fakecli"), 0o755);
+    expect(await cliVersion("fakecli", { PATH: d, HOME: d })).toEqual({ ok: true, value: "2.1.309 (Claude Code)" });
+  });
+
+  test("refuses a CLI not on PATH", async () => {
+    const r = await cliVersion("xarabot-no-cli", { PATH: "/nonexistent" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toContain("xarabot-no-cli");
+  });
+
+  test("refuses a CLI that fails or prints nothing", async () => {
+    const d = tempDir();
+    writeFileSync(join(d, "quiet"), "#!/bin/sh\nexit 0\n");
+    writeFileSync(join(d, "failing"), "#!/bin/sh\necho 1.0.0; exit 3\n");
+    chmodSync(join(d, "quiet"), 0o755);
+    chmodSync(join(d, "failing"), 0o755);
+    expect((await cliVersion("quiet", { PATH: d })).ok).toBe(false);
+    expect((await cliVersion("failing", { PATH: d })).ok).toBe(false);
   });
 });
 

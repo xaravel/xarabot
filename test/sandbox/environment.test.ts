@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { buildSessionEnv, configDir, deniedPaths, isReservedEnvName, type SessionEnvParts } from "../../src/sandbox/environment.ts";
+import { buildSessionEnv, configDir, deniedPaths, isReservedEnvName, sessionDirs, type SessionEnvParts } from "../../src/sandbox/environment.ts";
 
 const PARTS: SessionEnvParts = {
+  vendor: "claude",
   tempDir: "/l/tmp",
   vendorHome: "/l/vendor",
   vendorHomeEnv: "CLAUDE_CONFIG_DIR",
@@ -44,13 +45,26 @@ describe("buildSessionEnv", () => {
       XARABOT_RESULT: "/l/tmp/result.json",
       XARABOT_SANDBOXED: "1",
       UV_CACHE_DIR: "/l/tmp/uv-cache",
+      CLAUDE_CODE_TMPDIR: "/l/tmp/cli-tmp",
     });
+  });
+
+  test("CLAUDE_CODE_TMPDIR is set for claude only, inside the temp folder", () => {
+    expect(build()["CLAUDE_CODE_TMPDIR"]).toBe(sessionDirs("/l/tmp").cliTmp);
+    for (const vendor of ["codex", "pi"] as const) {
+      expect(build(LAUNCHING, { ...PARTS, vendor, vendorHomeEnv: "CODEX_HOME" })["CLAUDE_CODE_TMPDIR"]).toBeUndefined();
+    }
+  });
+
+  test("a launching CLAUDE_CODE_TMPDIR never passes through", () => {
+    expect(build({ ...LAUNCHING, CLAUDE_CODE_TMPDIR: "/tmp" }, { ...PARTS, vendor: "codex", vendorHomeEnv: "CODEX_HOME" })["CLAUDE_CODE_TMPDIR"]).toBeUndefined();
+    expect(build({ ...LAUNCHING, CLAUDE_CODE_TMPDIR: "/tmp" })["CLAUDE_CODE_TMPDIR"]).toBe("/l/tmp/cli-tmp");
   });
 
   test("LANG, LC_* and TERM are left out when the launching env lacks them", () => {
     const env = build({ HOME: "/Users/u" });
     expect(Object.keys(env).sort()).toEqual(
-      ["PATH", "HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "XARABOT_RESULT", "XARABOT_SANDBOXED", "UV_CACHE_DIR"].sort(),
+      ["PATH", "HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "XARABOT_RESULT", "XARABOT_SANDBOXED", "UV_CACHE_DIR", "CLAUDE_CODE_TMPDIR"].sort(),
     );
   });
 
@@ -74,6 +88,8 @@ describe("buildSessionEnv", () => {
     ["an invalid vendor home name", { ...PARTS, vendorHomeEnv: "claude-dir" }],
     ["a reserved vendor home name", { ...PARTS, vendorHomeEnv: "HOME" }],
     ["a GH_ credential name", { ...PARTS, credential: { name: "GH_TOKEN", value: "x" } }],
+    ["a CLAUDE_CODE_TMPDIR credential name", { ...PARTS, credential: { name: "CLAUDE_CODE_TMPDIR", value: "x" } }],
+    ["a CLAUDE_CODE_TMPDIR vendor home name", { ...PARTS, vendorHomeEnv: "CLAUDE_CODE_TMPDIR" }],
     ["a GITHUB_ credential name", { ...PARTS, credential: { name: "GITHUB_TOKEN", value: "x" } }],
     ["a credential named like the vendor home", { ...PARTS, credential: { name: "CLAUDE_CONFIG_DIR", value: "x" } }],
   ])("refuses %s", (_name, parts) => {
@@ -82,7 +98,7 @@ describe("buildSessionEnv", () => {
 });
 
 describe("isReservedEnvName", () => {
-  test.each(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy"])(
+  test.each(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy", "CLAUDE_CODE_TMPDIR"])(
     "%s is reserved",
     (name) => expect(isReservedEnvName(name)).toBe(true),
   );
