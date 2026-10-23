@@ -1,4 +1,4 @@
-import type { LedgerCommit, LedgerEdit, LedgerEditErrorKind } from "../core/ledger/edits.ts";
+import type { LedgerCommit, LedgerEdit, LedgerEditErrorKind, LedgerFiles } from "../core/ledger/edits.ts";
 import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
 
 /**
@@ -7,6 +7,11 @@ import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
  * files and swaps. A conflict backs off with full jitter and retries;
  * `rate-limited` waits `retry_after` and `transient` jitters, both counting
  * as tries. It gives up after `maxTries` tries or when the signal aborts.
+ *
+ * A swap can land and still report `transient` (a lost acknowledgement).
+ * After a `transient` swap the next try compares tips: a re-fetched tip that
+ * moved, and whose files equal the old files with the attempted commit
+ * applied, is that swap, so the loop returns `ok` without writing again.
  */
 
 export const CAS_MAX_TRIES = 10;
@@ -69,6 +74,22 @@ export const defaultSleep: Sleep = (ms, signal) =>
 
 const RETRIED: readonly ForgeError["kind"][] = ["conflict", "rate-limited", "transient"];
 
+/** The files of `files` with `commit` applied. */
+function applyCommit(files: LedgerFiles, commit: LedgerCommit): Record<string, string> {
+  const out: Record<string, string> = { ...files };
+  for (const path of commit.deletes) delete out[path];
+  for (const [path, text] of Object.entries(commit.writes)) out[path] = text;
+  return out;
+}
+
+function sameFiles(a: LedgerFiles, b: LedgerFiles): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => Object.hasOwn(b, k) && a[k] === b[k]);
+}
+
+/** A swap that reported `transient` and may have landed. */
+type Unacked = { readonly oldTip: GitSha; readonly expected: LedgerFiles; readonly commit: LedgerCommit };
+
 export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOutcome> {
   const { forge, edit, signal } = params;
   const sleep = params.sleep ?? defaultSleep;
@@ -83,6 +104,8 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
     error: { kind: "deadline", message: `ledger swap: deadline passed after ${tries} tries`, tries },
   });
 
+  let unacked: Unacked | null = null;
+
   for (let tries = 1; ; tries += 1) {
     if (signal.aborted) return deadline(tries - 1);
 
@@ -92,6 +115,11 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
       failure = snap.error;
     } else {
       const tip = snap.value.ledger.tip;
+      if (unacked !== null) {
+        const landed = tip !== unacked.oldTip && sameFiles(snap.value.ledger.files, unacked.expected);
+        if (landed) return { ok: true, value: { tip, commit: unacked.commit, tries } };
+        unacked = null;
+      }
       const applied = edit(snap.value.ledger.files);
       if (!applied.ok) {
         return {
@@ -104,6 +132,7 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
       const swapped = await forge.ledgerSwap(tip, commit, { signal });
       if (swapped.ok) return { ok: true, value: { tip: swapped.value.tip, commit, tries } };
       failure = swapped.error;
+      if (failure.kind === "transient") unacked = { oldTip: tip, expected: applyCommit(snap.value.ledger.files, commit), commit };
     }
 
     if (!RETRIED.includes(failure.kind)) {

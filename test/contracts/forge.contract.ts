@@ -58,6 +58,10 @@ export type ForgeHarness = {
   /** The controls every fixture from `make` carries; cases needing others skip. */
   readonly controls: readonly ForgeControlName[];
   readonly make: () => MaybePromise<ForgeFixture>;
+  /** `false` skips every case (a live harness without its environment); default `true`. */
+  readonly enabled?: boolean;
+  /** The operations the forge implements; cases calling others skip. Default all. */
+  readonly operations?: readonly ForgeOperation[];
 };
 
 const live = (): CallOpts => ({ signal: new AbortController().signal });
@@ -85,10 +89,16 @@ function blobSha(text: string): string {
 }
 
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** The operations `openOn` calls. */
+const OPEN_PR: readonly ForgeOperation[] = ["pushBranch", "openPr"];
+/** The operations a ledger case calls. */
+const LEDGER: readonly ForgeOperation[] = ["snapshot", "ledgerSwap"];
 const MISSING_PR = 999_999;
 
 export function forgeContract(harness: ForgeHarness): void {
   const has = new Set(harness.controls);
+  const offers = new Set<ForgeOperation>(harness.operations ?? FORGE_OPERATIONS);
+  const enabled = harness.enabled ?? true;
 
   /** Pushes a fresh commit to `branch` and opens a PR on it. */
   async function openOn(fx: ForgeFixture, branch: string): Promise<ForgePr> {
@@ -98,11 +108,20 @@ export function forgeContract(harness: ForgeHarness): void {
   }
 
   runContract<ForgeFixture>("Forge", [{ name: harness.name, make: harness.make }], (make) => {
-    /** One case: skipped unless the harness offers every control in `controls`. */
-    function scenario(name: string, controls: readonly ForgeControlName[], body: (fx: ForgeFixture) => Promise<void>): void {
-      const missing = controls.filter((c) => !has.has(c));
-      const label = missing.length === 0 ? name : `${name} (needs ${missing.join(", ")})`;
-      test.skipIf(missing.length > 0)(label, async () => {
+    /**
+     * One case: skipped unless the harness is enabled and offers every
+     * operation in `uses` and every control in `controls`.
+     */
+    function scenario(
+      name: string,
+      uses: readonly ForgeOperation[],
+      controls: readonly ForgeControlName[],
+      body: (fx: ForgeFixture) => Promise<void>,
+    ): void {
+      const missing = [...uses.filter((op) => !offers.has(op)), ...controls.filter((c) => !has.has(c))];
+      const reason = !enabled ? "harness disabled" : missing.length > 0 ? `needs ${missing.join(", ")}` : "";
+      const label = reason === "" ? name : `${name} (${reason})`;
+      test.skipIf(reason !== "")(label, async () => {
         const fx = await make();
         try {
           await body(fx);
@@ -112,7 +131,7 @@ export function forgeContract(harness: ForgeHarness): void {
       });
     }
 
-    scenario("offers exactly the port's operations and no approve or merge", [], async (fx) => {
+    scenario("offers exactly the port's operations and no approve or merge", [], [], async (fx) => {
       for (const op of FORGE_OPERATIONS) expect(typeof fx.forge[op]).toBe("function");
       const extra = fx.forge as unknown as Record<string, unknown>;
       for (const banned of ["approve", "approvePr", "merge", "mergePr", "adminMerge", "autoMerge", "deleteBranch"]) {
@@ -122,7 +141,7 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ snapshot
 
-    scenario("snapshot returns 40-hex SHAs and a ledger shaped for assembleSnapshot", [], async (fx) => {
+    scenario("snapshot returns 40-hex SHAs and a ledger shaped for assembleSnapshot", ["snapshot"], [], async (fx) => {
       const s = value(await fx.forge.snapshot(live()));
       expect(s.ledger.tip).toMatch(SHA);
       expect(s.main.sha).toMatch(SHA);
@@ -131,18 +150,18 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(s.main.files).toEqual({});
     });
 
-    scenario("snapshot reads ledger, then main, then prs", ["trace"], async (fx) => {
+    scenario("snapshot reads ledger, then main, then prs", ["snapshot"], ["trace"], async (fx) => {
       value(await fx.forge.snapshot(live()));
       const trace = await need(fx, "trace")();
       expect(trace.filter((t) => ["ledger", "main", "prs"].includes(t))).toEqual(["ledger", "main", "prs"]);
     });
 
-    scenario("snapshot now is the forge's server time", ["setNow"], async (fx) => {
+    scenario("snapshot now is the forge's server time", ["snapshot"], ["setNow"], async (fx) => {
       await need(fx, "setNow")("2026-10-22T10:00:00Z");
       expect(value(await fx.forge.snapshot(live())).now).toBe("2026-10-22T10:00:00Z");
     });
 
-    scenario("snapshot lists main, blob SHAs and reads only the accepted paths", ["setMain"], async (fx) => {
+    scenario("snapshot lists main, blob SHAs and reads only the accepted paths", ["snapshot"], ["setMain"], async (fx) => {
       const sha = await need(fx, "setMain")({ "a.md": "hello\n", "dir/b.txt": "ünïcode", "c.md": "" });
       const s = value(await fx.forge.snapshot({ ...live(), read: (p) => p.endsWith(".md") }));
       expect(s.main.sha).toBe(sha);
@@ -155,7 +174,7 @@ export function forgeContract(harness: ForgeHarness): void {
       });
     });
 
-    scenario("snapshot reports PR state for each unit record with a pr", ["makeCommit"], async (fx) => {
+    scenario("snapshot reports PR state for each unit record with a pr", [...OPEN_PR, "snapshot", "ledgerSwap"], ["makeCommit"], async (fx) => {
       const pr = await openOn(fx, "story/1.5");
       const tip = value(await fx.forge.snapshot(live())).ledger.tip;
       const withPr = rec({ pr: pr.number, pr_owner: "alice", head_sha: pr.head_sha });
@@ -175,7 +194,11 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(s.prs).toEqual({ "story:1.5": { number: pr.number, state: "open", head_sha: pr.head_sha } });
     });
 
-    scenario("snapshot reports merged and closed PR states", ["makeCommit", "mergeQueueHead"], async (fx) => {
+    scenario(
+      "snapshot reports merged and closed PR states",
+      [...OPEN_PR, "enqueue", "closePr", "snapshot", "ledgerSwap"],
+      ["makeCommit", "mergeQueueHead"],
+      async (fx) => {
       const merged = await openOn(fx, "story/1.8");
       value(await fx.forge.enqueue(merged.number, merged.head_sha, live()));
       expect((await need(fx, "mergeQueueHead")())?.number).toBe(merged.number);
@@ -199,11 +222,12 @@ export function forgeContract(harness: ForgeHarness): void {
         "story:1.8": { number: merged.number, state: "merged", head_sha: merged.head_sha },
         "story:1.9": { number: closed.number, state: "closed", head_sha: closed.head_sha },
       });
-    });
+      },
+    );
 
     // ------------------------------------------------------------ ledgerSwap
 
-    scenario("a swap applies writes and deletes in one new commit", [], async (fx) => {
+    scenario("a swap applies writes and deletes in one new commit", LEDGER, [], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger;
       const t1 = value(await fx.forge.ledgerSwap(t0.tip, { message: "one [skip ci]", writes: { "units/a.json": "{}", "units/b.json": "{}" }, deletes: [] }, live()));
       expect(t1.tip).toMatch(SHA);
@@ -216,7 +240,7 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(s.files).toEqual({ ...t0.files, "units/b.json": "{}", "units/c.json": "{\"c\":1}" });
     });
 
-    scenario("a stale swap conflicts and leaves the tip alone", [], async (fx) => {
+    scenario("a stale swap conflicts and leaves the tip alone", LEDGER, [], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger.tip;
       const t1 = value(await fx.forge.ledgerSwap(t0, { message: "m", writes: { "units/x.json": "1" }, deletes: [] }, live())).tip;
       const stale = await fx.forge.ledgerSwap(t0, { message: "m", writes: { "units/y.json": "2" }, deletes: [] }, live());
@@ -226,7 +250,7 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(s.files["units/y.json"]).toBeUndefined();
     });
 
-    scenario("of 8 racing swaps from one tip exactly one wins", [], async (fx) => {
+    scenario("of 8 racing swaps from one tip exactly one wins", LEDGER, [], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger;
       const results = await Promise.all(
         Array.from({ length: 8 }, (_, i) =>
@@ -242,7 +266,7 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(s.files).toEqual({ ...t0.files, [`units/r${winner}.json`]: String(winner) });
     });
 
-    scenario("a foreign ledger commit makes a swap from the old tip conflict", ["writeForeignLedger"], async (fx) => {
+    scenario("a foreign ledger commit makes a swap from the old tip conflict", LEDGER, ["writeForeignLedger"], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger.tip;
       const t1 = await need(fx, "writeForeignLedger")({ message: "bob [skip ci]", writes: { "units/bob.json": "{}" }, deletes: [] });
       expect(kind(await fx.forge.ledgerSwap(t0, { message: "m", writes: {}, deletes: [] }, live()))).toBe("conflict");
@@ -251,7 +275,8 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ deadline
 
-    scenario("every operation with an aborted signal returns transient", [], async (fx) => {
+    // Calls only the operations the harness offers (the GitHub adapter's stubs are checked in its own tests).
+    scenario("every operation with an aborted signal returns transient", [], [], async (fx) => {
       const f = fx.forge;
       const sha = "a".repeat(40);
       const calls: Readonly<Record<ForgeOperation, () => Promise<ForgeResult<unknown>>>> = {
@@ -269,15 +294,22 @@ export function forgeContract(harness: ForgeHarness): void {
         alert: () => f.alert("c", sha, aborted()),
         prefetch: () => f.prefetch({ kind: "ci-log", sha, dir: join(tmpdir(), "xarabot-never") }, aborted()),
       };
-      for (const op of FORGE_OPERATIONS) expect([op, kind(await calls[op]())]).toEqual([op, "transient"]);
+      for (const op of FORGE_OPERATIONS.filter((o) => offers.has(o))) expect([op, kind(await calls[op]())]).toEqual([op, "transient"]);
     });
 
-    scenario("an aborted call changes nothing", ["makeCommit"], async (fx) => {
+    scenario("an aborted swap changes nothing", LEDGER, [], async (fx) => {
       const f = fx.forge;
       const t0 = value(await f.snapshot(live())).ledger.tip;
       expect(kind(await f.ledgerSwap(t0, { message: "m", writes: { "units/z.json": "1" }, deletes: [] }, aborted()))).toBe("transient");
       expect(value(await f.snapshot(live())).ledger.tip).toBe(t0);
+    });
 
+    scenario(
+      "aborted push, PR and alert calls change nothing",
+      ["pushBranch", "openPr", "listPrsByBranch", "updatePr", "closePr", "alert"],
+      ["makeCommit"],
+      async (fx) => {
+      const f = fx.forge;
       const sha = await need(fx, "makeCommit")();
       expect(kind(await f.pushBranch({ branch: "story/8.1", expected_sha: null, sha }, aborted()))).toBe("transient");
       value(await f.pushBranch({ branch: "story/8.1", expected_sha: null, sha }, live()));
@@ -291,9 +323,10 @@ export function forgeContract(harness: ForgeHarness): void {
 
       expect(kind(await f.alert("cond", sha, aborted()))).toBe("transient");
       expect(value(await f.alert("cond", sha, live()))).toEqual({ posted: true });
-    });
+      },
+    );
 
-    scenario("a signal aborting mid-call returns transient and changes nothing", [], async (fx) => {
+    scenario("a signal aborting mid-call returns transient and changes nothing", LEDGER, [], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger.tip;
       const ac = new AbortController();
       const pending = fx.forge.ledgerSwap(t0, { message: "m", writes: { "units/z.json": "1" }, deletes: [] }, { signal: ac.signal });
@@ -302,17 +335,22 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(value(await fx.forge.snapshot(live())).ledger.tip).toBe(t0);
     });
 
-    scenario("aborted comment and enqueue leave no comment and no queue entry", ["makeCommit", "comments", "queue"], async (fx) => {
+    scenario(
+      "aborted comment and enqueue leave no comment and no queue entry",
+      [...OPEN_PR, "comment", "enqueue"],
+      ["makeCommit", "comments", "queue"],
+      async (fx) => {
       const pr = await openOn(fx, "story/8.2");
       expect(kind(await fx.forge.comment(pr.number, "x", aborted()))).toBe("transient");
       expect(await need(fx, "comments")(pr.number)).toEqual([]);
       expect(kind(await fx.forge.enqueue(pr.number, pr.head_sha, aborted()))).toBe("transient");
       expect(await need(fx, "queue")()).toEqual([]);
-    });
+      },
+    );
 
     // ------------------------------------------------------------ errors
 
-    scenario("an injected error of each kind comes back as that kind, once", ["injectError"], async (fx) => {
+    scenario("an injected error of each kind comes back as that kind, once", ["checks"], ["injectError"], async (fx) => {
       const inject = need(fx, "injectError");
       for (const k of FORGE_ERROR_KINDS) {
         const error: ForgeError = k === "rate-limited" ? { kind: k, message: "slow down", retry_after: 7 } : { kind: k, message: `injected ${k}` };
@@ -323,7 +361,7 @@ export function forgeContract(harness: ForgeHarness): void {
       }
     });
 
-    scenario("an injected swap error changes nothing", ["injectError"], async (fx) => {
+    scenario("an injected swap error changes nothing", LEDGER, ["injectError"], async (fx) => {
       const t0 = value(await fx.forge.snapshot(live())).ledger.tip;
       await need(fx, "injectError")("ledgerSwap", { kind: "auth", message: "bad token" });
       expect(kind(await fx.forge.ledgerSwap(t0, { message: "m", writes: { "units/a.json": "1" }, deletes: [] }, live()))).toBe("auth");
@@ -332,7 +370,7 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ pushBranch
 
-    scenario("a push lease creates, conflicts on a wrong head, and moves on the right one", ["makeCommit"], async (fx) => {
+    scenario("a push lease creates, conflicts on a wrong head, and moves on the right one", ["pushBranch"], ["makeCommit"], async (fx) => {
       const mk = need(fx, "makeCommit");
       const [a, b, c] = [await mk(), await mk(), await mk()];
       expect(value(await fx.forge.pushBranch({ branch: "story/2.1", expected_sha: null, sha: a }, live()))).toEqual({ sha: a });
@@ -344,11 +382,11 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ PRs
 
-    scenario("opening a PR on a missing branch is not-found", [], async (fx) => {
+    scenario("opening a PR on a missing branch is not-found", ["openPr"], [], async (fx) => {
       expect(kind(await fx.forge.openPr({ branch: "story/404", base: "main", title: "t", body: "b" }, live()))).toBe("not-found");
     });
 
-    scenario("a PR opens on the branch head; a second open PR conflicts", ["makeCommit"], async (fx) => {
+    scenario("a PR opens on the branch head; a second open PR conflicts", OPEN_PR, ["makeCommit"], async (fx) => {
       const sha = await need(fx, "makeCommit")();
       value(await fx.forge.pushBranch({ branch: "story/3.1", expected_sha: null, sha }, live()));
       const pr = value(await fx.forge.openPr({ branch: "story/3.1", base: "main", title: "T", body: "B" }, live()));
@@ -356,7 +394,7 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.openPr({ branch: "story/3.1", base: "main", title: "T2", body: "B2" }, live()))).toBe("conflict");
     });
 
-    scenario("a push moves an open PR's head", ["makeCommit"], async (fx) => {
+    scenario("a push moves an open PR's head", [...OPEN_PR, "listPrsByBranch"], ["makeCommit"], async (fx) => {
       const pr = await openOn(fx, "story/3.2");
       const next = await need(fx, "makeCommit")();
       value(await fx.forge.pushBranch({ branch: "story/3.2", expected_sha: pr.head_sha, sha: next }, live()));
@@ -364,7 +402,7 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(listed?.head_sha).toBe(next);
     });
 
-    scenario("update and close change a PR; missing PRs are not-found", ["makeCommit"], async (fx) => {
+    scenario("update and close change a PR; missing PRs are not-found", [...OPEN_PR, "updatePr", "closePr"], ["makeCommit"], async (fx) => {
       const pr = await openOn(fx, "story/3.3");
       expect(value(await fx.forge.updatePr(pr.number, { title: "new" }, live()))).toEqual({ ...pr, title: "new" });
       expect(value(await fx.forge.updatePr(pr.number, { body: "nb" }, live()))).toEqual({ ...pr, title: "new", body: "nb" });
@@ -373,7 +411,11 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.closePr(MISSING_PR, live()))).toBe("not-found");
     });
 
-    scenario("listPrsByBranch returns every PR on the branch in any state, ascending", ["makeCommit"], async (fx) => {
+    scenario(
+      "listPrsByBranch returns every PR on the branch in any state, ascending",
+      [...OPEN_PR, "closePr", "listPrsByBranch"],
+      ["makeCommit"],
+      async (fx) => {
       const first = await openOn(fx, "story/3.4");
       value(await fx.forge.closePr(first.number, live()));
       const second = value(await fx.forge.openPr({ branch: "story/3.4", base: "main", title: "again", body: "b" }, live()));
@@ -385,9 +427,14 @@ export function forgeContract(harness: ForgeHarness): void {
       ]);
       expect(second.number).toBeGreaterThan(first.number);
       expect(value(await fx.forge.listPrsByBranch("story/none", live()))).toEqual([]);
-    });
+      },
+    );
 
-    scenario("updating or closing a merged PR conflicts", ["makeCommit", "mergeQueueHead"], async (fx) => {
+    scenario(
+      "updating or closing a merged PR conflicts",
+      [...OPEN_PR, "enqueue", "updatePr", "closePr", "listPrsByBranch"],
+      ["makeCommit", "mergeQueueHead"],
+      async (fx) => {
       const pr = await openOn(fx, "story/3.6");
       value(await fx.forge.enqueue(pr.number, pr.head_sha, live()));
       expect((await need(fx, "mergeQueueHead")())?.number).toBe(pr.number);
@@ -395,11 +442,12 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.closePr(pr.number, live()))).toBe("conflict");
       const [listed] = value(await fx.forge.listPrsByBranch("story/3.6", live()));
       expect(listed?.state).toBe("merged");
-    });
+      },
+    );
 
     // ------------------------------------------------------------ comment
 
-    scenario("a comment posts its body verbatim; a missing PR is not-found", ["makeCommit", "comments"], async (fx) => {
+    scenario("a comment posts its body verbatim; a missing PR is not-found", [...OPEN_PR, "comment"], ["makeCommit", "comments"], async (fx) => {
       const pr = await openOn(fx, "story/4.1");
       const posted = value(await fx.forge.comment(pr.number, "🤖 hi", live()));
       expect(typeof posted.id).toBe("string");
@@ -409,7 +457,7 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ checks
 
-    scenario("checks are empty while pending and report what CI set", ["setChecks"], async (fx) => {
+    scenario("checks are empty while pending and report what CI set", ["checks"], ["setChecks"], async (fx) => {
       const sha = "c".repeat(40);
       expect(value(await fx.forge.checks(sha, live()))).toEqual({ checks: [] });
       const list: ForgeCheck[] = [
@@ -422,14 +470,18 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ queue
 
-    scenario("enqueue with a wrong head conflicts", ["makeCommit"], async (fx) => {
+    scenario("enqueue with a wrong head conflicts", [...OPEN_PR, "enqueue"], ["makeCommit"], async (fx) => {
       const pr = await openOn(fx, "story/5.1");
       const wrong = await need(fx, "makeCommit")();
       expect(kind(await fx.forge.enqueue(pr.number, wrong, live()))).toBe("conflict");
       expect(kind(await fx.forge.enqueue(MISSING_PR, wrong, live()))).toBe("not-found");
     });
 
-    scenario("enqueue and dequeue are idempotent and only queue open PRs at the expected head", ["makeCommit", "queue"], async (fx) => {
+    scenario(
+      "enqueue and dequeue are idempotent and only queue open PRs at the expected head",
+      [...OPEN_PR, "enqueue", "dequeue", "closePr"],
+      ["makeCommit", "queue"],
+      async (fx) => {
       const pr = await openOn(fx, "story/5.2");
       const queue = need(fx, "queue");
       expect(kind(await fx.forge.enqueue(pr.number, "f".repeat(40), live()))).toBe("conflict");
@@ -443,11 +495,12 @@ export function forgeContract(harness: ForgeHarness): void {
       value(await fx.forge.closePr(pr.number, live()));
       expect(kind(await fx.forge.enqueue(pr.number, pr.head_sha, live()))).toBe("conflict");
       expect(await queue()).toEqual([]);
-    });
+      },
+    );
 
     // ------------------------------------------------------------ alert
 
-    scenario("an alert posts once per condition and main SHA", [], async (fx) => {
+    scenario("an alert posts once per condition and main SHA", ["alert"], [], async (fx) => {
       const [a, b] = ["a".repeat(40), "b".repeat(40)];
       expect(value(await fx.forge.alert("forge-auth", a, live()))).toEqual({ posted: true });
       expect(value(await fx.forge.alert("forge-auth", a, live()))).toEqual({ posted: false });
@@ -457,7 +510,7 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ prefetch
 
-    scenario("prefetch writes one log file per failing check, at absolute paths", ["setChecks", "setCiLog"], async (fx) => {
+    scenario("prefetch writes one log file per failing check, at absolute paths", ["prefetch"], ["setChecks", "setCiLog"], async (fx) => {
       const sha = "d".repeat(40);
       await need(fx, "setChecks")(sha, [
         { name: "test", status: "completed", conclusion: "failure" },
@@ -481,7 +534,7 @@ export function forgeContract(harness: ForgeHarness): void {
       }
     });
 
-    scenario("prefetch with no failing checks writes nothing", [], async (fx) => {
+    scenario("prefetch with no failing checks writes nothing", ["prefetch"], [], async (fx) => {
       const dir = mkdtempSync(join(tmpdir(), "xarabot-prefetch-"));
       try {
         expect(value(await fx.forge.prefetch({ kind: "ci-log", sha: "e".repeat(40), dir }, live()))).toEqual({ files: [] });
