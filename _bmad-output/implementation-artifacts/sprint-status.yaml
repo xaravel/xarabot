@@ -44,7 +44,7 @@ development_status:
   1-6-next-for-a-builder-lane: done
   1-7-forge-port-fake-forge-and-contract-suite: done
   1-8-github-adapter-tokens-snapshot-and-ledger-swap: done
-  1-9-github-adapter-pushes-and-prs: backlog
+  1-9-github-adapter-pushes-and-prs: done
   1-10-github-adapter-checks-merge-queue-and-alerts: backlog
   1-11-macos-sandbox-profile-launcher-and-vendor-home: backlog
   1-12-sandbox-network-proxy: backlog
