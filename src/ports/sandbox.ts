@@ -39,6 +39,12 @@ export type LaunchSpec = {
    * hosts and the repo's `proxy_hosts`. Never a GitHub host or an IP literal.
    */
   readonly apiHosts: readonly string[];
+  /**
+   * A resume of the session that last ran in this vendor home: its contents
+   * (the transcript) are kept instead of emptied. The credential is still
+   * re-read and re-checked, and in `homeFile` mode rewritten. Default `false`.
+   */
+  readonly resume?: boolean;
 };
 
 /** Where the session may write, and what it must never see. All absolute paths. */

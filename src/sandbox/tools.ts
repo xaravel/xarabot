@@ -86,6 +86,20 @@ async function probe(argv: readonly string[], launching: LaunchingEnv): Promise<
   }
 }
 
+/**
+ * The agent CLI's `--version` output, for an adapter's start check: `cmd` is
+ * resolved on the launching `PATH` like the session's own CLI, and run with
+ * the probe's minimal environment. Refused when it is not found or prints
+ * nothing.
+ */
+export async function cliVersion(cmd: string, launching: LaunchingEnv): Promise<Result<string, "refused">> {
+  const path = which(cmd, launching["PATH"]);
+  if (path === null) return err("refused", `agent CLI ${JSON.stringify(cmd)} not found on PATH`);
+  const out = await probe([path, "--version"], launching);
+  if (out === null) return err("refused", `agent CLI ${path}: --version failed or printed nothing`);
+  return ok(out);
+}
+
 function real(path: string): string | null {
   try {
     return realpathSync(path);

@@ -49,7 +49,7 @@ development_status:
   1-11-macos-sandbox-profile-launcher-and-vendor-home: done
   1-12-sandbox-network-proxy: done
   1-13-result-schemas-and-prompt-assembly: done
-  1-14-the-claude-adapter: backlog
+  1-14-the-claude-adapter: done
   1-15-runner-git-clone-rebuild-bot-commit-and-sanitizer: backlog
   1-16-the-lane-process-one-unit-from-claim-to-result: backlog
   1-16a-opening-the-pr: backlog

@@ -99,6 +99,8 @@ export type SeedParams = {
   readonly vendor: Vendor;
   readonly credential: LaunchCredential;
   readonly vendorHome: string;
+  /** Keep the vendor home's contents (a resume of the same session); default `false`. */
+  readonly keep?: boolean;
 };
 
 /** The env-mode credential variable, when there is one. */
@@ -108,7 +110,8 @@ export type Seeded = { readonly env?: { readonly name: string; readonly value: s
  * Reads and checks the credential, then empties the vendor home. In
  * `homeFile` mode it writes the credential to `<vendorHome>/<homeFile>` with
  * mode 600; in `env` mode the home stays empty and the trimmed credential is
- * returned for the variable.
+ * returned for the variable. With `keep`, the home is not emptied (a resume
+ * needs the session's transcript); a `homeFile` is still rewritten.
  */
 export function seedVendorHome(params: SeedParams): Result<Seeded, "refused"> {
   const path = credentialPath(params.launching, params.vendor, params.credential.file);
@@ -119,9 +122,16 @@ export function seedVendorHome(params: SeedParams): Result<Seeded, "refused"> {
   const text = readCredential(path.value);
   if (!text.ok) return text;
   try {
-    emptyDir(params.vendorHome);
+    if (params.keep === true) {
+      mkdirSync(params.vendorHome, { recursive: true, mode: 0o700 });
+      unlockTree(params.vendorHome);
+    } else {
+      emptyDir(params.vendorHome);
+    }
     if ("homeFile" in params.credential) {
       const target = join(params.vendorHome, params.credential.homeFile);
+      // On a resume the session may have left anything at this name: replace it.
+      if (params.keep === true) removeTree(target);
       // Create it 600 from the start; chmod again in case the umask cleared more.
       closeSync(openSync(target, "wx", CREDENTIAL_MODE));
       chmodSync(target, CREDENTIAL_MODE);

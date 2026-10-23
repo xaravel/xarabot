@@ -431,6 +431,7 @@ describe("environment", () => {
       XARABOT_RESULT: join(tmp, "result.json"),
       XARABOT_SANDBOXED: "1",
       UV_CACHE_DIR: `${tmp}/uv-cache`,
+      CLAUDE_CODE_TMPDIR: `${tmp}/cli-tmp`,
       HTTPS_PROXY: proxy,
       HTTP_PROXY: proxy,
       https_proxy: proxy,
@@ -502,6 +503,13 @@ describe("session folders", () => {
     });
   }
 
+  sandboxTest("tmp/cli-tmp is rebuilt empty each session and is writable", async () => {
+    mkdirSync(join(lane, "tmp", "cli-tmp", "claude-501"), { recursive: true });
+    writeFileSync(join(lane, "tmp", "cli-tmp", "stale"), "x");
+    const r = await sh('ls -A "$CLAUDE_CODE_TMPDIR"; mkdir "$CLAUDE_CODE_TMPDIR/claude-1" && echo ok > "$CLAUDE_CODE_TMPDIR/claude-1/f" && cat "$CLAUDE_CODE_TMPDIR/claude-1/f"');
+    expect(r.stdout).toBe("ok\n");
+  });
+
   sandboxTest("a file at tmp/uv-cache is replaced by a folder", async () => {
     const cache = join(lane, "tmp", "uv-cache");
     rmSync(cache, { recursive: true, force: true });
@@ -524,6 +532,19 @@ describe("credentials", () => {
       spec: { credential: { file: "oauth-token", homeFile: ".credentials.json" } },
     });
     expect(r.stdout).toBe(".credentials.json\n600\nunset");
+  });
+
+  sandboxTest("a resume keeps the vendor home's contents and still passes the credential", async () => {
+    await sh('mkdir -p "$CLAUDE_CONFIG_DIR/projects" && echo t > "$CLAUDE_CONFIG_DIR/projects/s.jsonl"');
+    const r = await sh('cat "$CLAUDE_CONFIG_DIR/projects/s.jsonl"; printf %s "$CLAUDE_CODE_OAUTH_TOKEN"', { spec: { resume: true } });
+    expect(r.stdout).toBe(`t\n${TOKEN}`);
+    const fresh = await sh('ls -A "$CLAUDE_CONFIG_DIR"');
+    expect(fresh.stdout).toBe("");
+  });
+
+  sandboxTest("a resume with a bad credential still refuses", async () => {
+    writeCred(TOKEN, 0o644, "bad-token");
+    await refusedWith(["true"], { spec: { resume: true, credential: { file: "bad-token", env: "CLAUDE_CODE_OAUTH_TOKEN" } } }, credFile("bad-token"));
   });
 
   for (const [name, content, mode] of [
@@ -582,6 +603,7 @@ describe("refusals", () => {
     ["a result inside tmp/bin", () => ({ resultPath: join(lane, "tmp", "bin", "r.json") }), "rebuilt bin"],
     ["a result inside tmp/home", () => ({ resultPath: join(lane, "tmp", "home", "r.json") }), "rebuilt home"],
     ["a result equal to tmp/uv-cache", () => ({ resultPath: join(lane, "tmp", "uv-cache") }), "rebuilt uv-cache"],
+    ["a result inside tmp/cli-tmp", () => ({ resultPath: join(lane, "tmp", "cli-tmp", "r.json") }), "rebuilt cli-tmp"],
     ["a vendor home inside the clone", () => ({ vendorHome: join(lane, "clone", "vendor") }), "overlaps vendorHome"],
     ["a result outside the temp folder", () => ({ resultPath: join(lane, "result.json") }), "not inside tempDir"],
     ["a relative clone", () => ({ clone: "clone" }), "not an absolute path"],
@@ -599,6 +621,10 @@ describe("refusals", () => {
 
   sandboxTest("a credential variable named GH_TOKEN", async () => {
     await refusedWith(["true"], { spec: { credential: { file: "oauth-token", env: "GH_TOKEN" } } }, "reserved");
+  });
+
+  sandboxTest("a credential variable named CLAUDE_CODE_TMPDIR", async () => {
+    await refusedWith(["true"], { spec: { credential: { file: "oauth-token", env: "CLAUDE_CODE_TMPDIR" } } }, "reserved");
   });
 });
 

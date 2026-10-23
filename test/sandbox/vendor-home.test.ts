@@ -119,6 +119,33 @@ describe("seedVendorHome", () => {
     expect(readdirSync(s.vendorHome)).toEqual(["keep"]);
   });
 
+  test("keep (a resume): env mode leaves the home's contents and still returns the credential", () => {
+    const s = setup();
+    mkdirSync(join(s.vendorHome, "projects"), { recursive: true });
+    writeFileSync(join(s.vendorHome, "projects", "session.jsonl"), "{}");
+    const r = seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", env: "T" }, vendorHome: s.vendorHome, keep: true });
+    expect(r).toEqual({ ok: true, value: { env: { name: "T", value: "tok-123" } } });
+    expect(readdirSync(s.vendorHome)).toEqual(["projects"]);
+  });
+
+  test("keep (a resume): homeFile mode rewrites the credential file and keeps the rest", () => {
+    const s = setup();
+    mkdirSync(s.vendorHome);
+    writeFileSync(join(s.vendorHome, "transcript"), "t");
+    writeFileSync(join(s.vendorHome, ".credentials.json"), "tampered", { mode: 0o644 });
+    const r = seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile: ".credentials.json" }, vendorHome: s.vendorHome, keep: true });
+    expect(r).toEqual({ ok: true, value: {} });
+    expect(readdirSync(s.vendorHome).sort()).toEqual([".credentials.json", "transcript"]);
+    const target = join(s.vendorHome, ".credentials.json");
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    expect(readFileSync(target, "utf8")).toBe("tok-123\n");
+  });
+
+  test("keep (a resume): a bad credential still refuses", () => {
+    const s = setup("tok", 0o644);
+    expect(seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", env: "T" }, vendorHome: s.vendorHome, keep: true }).ok).toBe(false);
+  });
+
   test.each(["", "..", "a/b"])("refuses the home file name %j", (homeFile) => {
     const s = setup();
     expect(seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile }, vendorHome: s.vendorHome }).ok).toBe(false);
