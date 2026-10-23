@@ -38,7 +38,7 @@ development_status:
   epic-1: backlog
   1-1-package-scaffold-and-test-harness: done
   1-2-config-policy-and-standing-authority-failing-closed: done
-  1-3-story-manifests-and-the-epics-md-grammar: backlog
+  1-3-story-manifests-and-the-epics-md-grammar: done
   1-4-resolvegraph-and-xarabot-graph-check: backlog
   1-5-ledger-records-and-pure-ledger-edits: backlog
   1-6-next-for-a-builder-lane: backlog
