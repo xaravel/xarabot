@@ -69,7 +69,7 @@ Done once by the Maintainer. Xaravel's own loop keeps running on the same Mac un
    - The bot isn't an admin, so its PRs always wait for your approval.
    - The driver checks your approval on the head commit itself too.
 9. **After Story 1.1 merges,** copy `docs/maintainer/ci-workflow.yml` into `.github/workflows/` in a Maintainer PR, and make it a required check on `main`. Lanes never write `.github/**`, and the App has no `workflows` permission.
-10. **Before Story 1.10,** add `issues: write` to the App (Story 1.10's precondition). Until then, the App can't write issues, so the loop reports on each PR, not on a status issue.
+10. **`issues: write` on the App** is Story 1.10's precondition. The App already has it (checked 2026-10-23). The loop still reports on each PR rather than on a status issue.
 
 ### Start it, as your admin account on the host
 
