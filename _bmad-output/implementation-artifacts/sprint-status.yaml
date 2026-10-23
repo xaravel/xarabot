@@ -46,7 +46,7 @@ development_status:
   1-8-github-adapter-tokens-snapshot-and-ledger-swap: done
   1-9-github-adapter-pushes-and-prs: done
   1-10-github-adapter-checks-merge-queue-and-alerts: done
-  1-11-macos-sandbox-profile-launcher-and-vendor-home: backlog
+  1-11-macos-sandbox-profile-launcher-and-vendor-home: done
   1-12-sandbox-network-proxy: backlog
   1-13-result-schemas-and-prompt-assembly: backlog
   1-14-the-claude-adapter: backlog
