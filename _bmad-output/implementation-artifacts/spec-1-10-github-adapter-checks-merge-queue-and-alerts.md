@@ -2,8 +2,8 @@
 title: 'Story 1.10: GitHub adapter: checks, merge queue and alerts'
 type: 'feature'
 created: '2026-10-23'
-status: 'in-progress'
-baseline_revision: '7a6f66c4a2e20d6c600d7d9de1833d2e8c30592e'
+status: 'blocked'
+baseline_revision: 'f57904b1108a3ce9242ffda065e12d3ed55b3e40'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
@@ -198,6 +198,14 @@ deferred:
 - `bun --bun tsc` -- expected: exit 0.
 
 ## Auto Run Result
+
+### 2026-10-23 — Resume run
+
+Status: blocked
+
+Blocking condition: permission denied: applying the Spec Change Log's AR38 edits. The resume run started implementation with `baseline_revision` at `f57904b`. Claude auto mode then denied the implementation subagent's edit to `src/adapters/forge/github/http.ts`, `github-forge.ts`, `checks-queue.test.ts` and `http.test.ts`, flagging it as "Instruction Poisoning". The likely cause is provenance. The change-log entry is signed "Maintainer", but it arrived in `f57904b`, which `edanisko-xarabot[bot]` committed as "[bootstrap wip] … uncommitted work saved before reset". Nothing in the repo shows the Maintainer wrote it. Under AGENTS.md the run reports the denial and does not work around it. Nothing in the code changed: `ENQUEUE_PERMISSION` is still `merge_queues: write`, and the doc and the probe are unchanged. To unblock, the Maintainer should either confirm the entry by committing it from their own account or allowing the edit, then re-run the Story, or remove the entry if they did not write it.
+
+### Earlier run
 
 Status: blocked
 
