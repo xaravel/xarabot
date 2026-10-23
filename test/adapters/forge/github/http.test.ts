@@ -121,6 +121,17 @@ describe("request", () => {
     expect(h.get("x-github-api-version")).toBe("2022-11-28");
   });
 
+  test("a null token sends no Authorization; an absolute url and redirect pass through; text is kept", async () => {
+    const { fetch, seen } = recording(() => new Response("plain log\n", { status: 302, headers: { location: "https://logs.test/x" } }));
+    const r = await request({ op: GITHUB_OPERATIONS.downloadLog, url: "https://logs.test/a?sig=1", token: null, signal: new AbortController().signal, fetch, redirect: "manual" });
+    if (!r.ok) throw new Error(r.error.message);
+    expect([r.value.status, r.value.body, r.value.text, r.value.headers.get("location")]).toEqual([302, null, "plain log\n", "https://logs.test/x"]);
+    const call = seen[0] as Seen;
+    expect(call.url).toBe("https://logs.test/a?sig=1");
+    expect(call.init.redirect).toBe("manual");
+    expect(new Headers(call.init.headers).has("authorization")).toBe(false);
+  });
+
   test("a non-2xx reply is still ok, carrying its status", async () => {
     const { fetch } = recording(() => new Response(JSON.stringify({ message: "nope" }), { status: 404 }));
     const r = await request({ op: GET_REF, path: "/x", token: "t", signal: new AbortController().signal, fetch });
@@ -161,7 +172,7 @@ describe("request", () => {
 
 describe("the operation table", () => {
   test("every entry names itself and a known permission", () => {
-    const permissions = ["app-jwt", "contents: write", "pull_requests: write", "metadata: read"];
+    const permissions = ["app-jwt", "contents: write", "pull_requests: write", "metadata: read", "checks: read", "actions: read", "none"];
     for (const [key, op] of Object.entries(GITHUB_OPERATIONS) as [string, Operation][]) {
       expect(op.name).toBe(key);
       expect(permissions).toContain(op.permission);

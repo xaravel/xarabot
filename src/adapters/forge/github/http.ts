@@ -17,7 +17,17 @@ export const API_VERSION = "2022-11-28";
 export const SWAP_CONFLICT_STATUS = 422;
 
 /** The credential an operation needs: the App JWT, or one installation-token permission. */
-export type Permission = "app-jwt" | "contents: write" | "pull_requests: write" | "metadata: read";
+export type Permission =
+  | "app-jwt"
+  | "contents: write"
+  | "pull_requests: write"
+  | "metadata: read"
+  | "checks: read"
+  | "actions: read"
+  /** No credential at all: a signed download URL. */
+  | "none";
+
+export type Redirect = "follow" | "manual" | "error";
 
 export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
@@ -42,6 +52,13 @@ export const GITHUB_OPERATIONS = {
   createRef: { name: "createRef", method: "POST", permission: "contents: write", conflictOn: 422 },
   updateRef: { name: "updateRef", method: "PATCH", permission: "contents: write", conflictOn: SWAP_CONFLICT_STATUS },
   getPull: { name: "getPull", method: "GET", permission: "pull_requests: write" },
+  listPulls: { name: "listPulls", method: "GET", permission: "pull_requests: write" },
+  createPull: { name: "createPull", method: "POST", permission: "pull_requests: write" },
+  updatePull: { name: "updatePull", method: "PATCH", permission: "pull_requests: write" },
+  createComment: { name: "createComment", method: "POST", permission: "pull_requests: write" },
+  listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read" },
+  getJobLogs: { name: "getJobLogs", method: "GET", permission: "actions: read" },
+  downloadLog: { name: "downloadLog", method: "GET", permission: "none" },
 } as const satisfies Readonly<Record<string, Operation>>;
 
 /** The injectable `fetch`: the subset of the global one the adapter uses. */
@@ -51,6 +68,8 @@ export type HttpReply = {
   readonly status: number;
   /** The parsed JSON body; `null` when the body is empty or not JSON. */
   readonly body: unknown;
+  /** The raw body text. */
+  readonly text: string;
   /** The `Date` header, or `null`. */
   readonly date: string | null;
   readonly headers: Headers;
@@ -58,16 +77,27 @@ export type HttpReply = {
 
 export type RequestParams = {
   readonly op: Operation;
-  /** The path below the API URL, starting with `/`. */
-  readonly path: string;
-  /** The bearer credential: the App JWT or an installation token. */
-  readonly token: string;
+  /** The bearer credential: the App JWT or an installation token; `null` sends no `Authorization`. */
+  readonly token: string | null;
   readonly signal: AbortSignal;
   readonly fetch?: FetchLike;
   readonly apiUrl?: string;
   /** A JSON body. */
   readonly body?: unknown;
-};
+  /** `manual` returns a redirect as is instead of following it. */
+  readonly redirect?: Redirect;
+} & (
+  | {
+      /** The path below the API URL, starting with `/`. */
+      readonly path: string;
+      readonly url?: undefined;
+    }
+  | {
+      /** An absolute URL, used instead of the API URL and a path. */
+      readonly url: string;
+      readonly path?: undefined;
+    }
+);
 
 function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -83,18 +113,20 @@ export async function request(params: RequestParams): Promise<ForgeResult<HttpRe
   const fetch = params.fetch ?? globalThis.fetch;
   if (signal.aborted) return deadlinePassed(op.name);
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${params.token}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": API_VERSION,
     "User-Agent": "xarabot",
   };
+  if (params.token !== null) headers["Authorization"] = `Bearer ${params.token}`;
   const init: RequestInit = { method: op.method, headers, signal };
+  if (params.redirect !== undefined) init.redirect = params.redirect;
   if (params.body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(params.body);
   }
   try {
-    const response = await fetch(`${params.apiUrl ?? DEFAULT_API_URL}${params.path}`, init);
+    const url = params.url ?? `${params.apiUrl ?? DEFAULT_API_URL}${params.path}`;
+    const response = await fetch(url, init);
     const text = await response.text();
     let body: unknown = null;
     if (text !== "") {
@@ -104,7 +136,7 @@ export async function request(params: RequestParams): Promise<ForgeResult<HttpRe
         body = null;
       }
     }
-    return forgeOk({ status: response.status, body, date: response.headers.get("date"), headers: response.headers });
+    return forgeOk({ status: response.status, body, text, date: response.headers.get("date"), headers: response.headers });
   } catch (e) {
     if (signal.aborted) return deadlinePassed(op.name);
     return forgeErr("transient", `${op.name}: network error: ${describe(e)}`);

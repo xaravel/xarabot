@@ -308,16 +308,13 @@ describe("every operation", () => {
     expect(gh.control.log()).toEqual([]);
   });
 
-  test("the unimplemented operations are forbidden, naming their Story, and make no request", async () => {
+  test("the Story 1.10 stubs are forbidden, naming their Story, and make no request", async () => {
     const { gh, forge } = setup();
     const c = calls(forge, new AbortController().signal);
-    const story19 = ["pushBranch", "openPr", "updatePr", "closePr", "listPrsByBranch", "comment"];
-    for (const op of FORGE_OPERATIONS.filter((o) => o !== "snapshot" && o !== "ledgerSwap")) {
+    const story110: readonly ForgeOperation[] = ["checks", "enqueue", "dequeue", "alert"];
+    for (const op of story110) {
       const r = await c[op]();
-      expect(r.ok ? "ok" : r.error).toEqual({
-        kind: "forbidden",
-        message: `${op}: not implemented until Story ${story19.includes(op) ? "1.9" : "1.10"}`,
-      });
+      expect(r.ok ? "ok" : r.error).toEqual({ kind: "forbidden", message: `${op}: not implemented until Story 1.10` });
     }
     expect(gh.control.log()).toEqual([]);
   });
