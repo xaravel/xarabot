@@ -7,6 +7,8 @@ Read `AGENTS.md` first and obey it. The rules in the loop's build prompt hold he
 - Edit tracked files in place.
 - Under `_bmad-output/` change only `_bmad-output/implementation-artifacts/`, and never touch `AGENTS.md`, `.github/`, `_bmad/`, `.claude/skills/`, `.agents/skills/` or `bootstrap/`.
 - Toolchain: Bun 1.4.3, TypeScript 7 and oxlint only.
+- Never try to run a command outside Claude Code's own sandbox; the escape is turned off.
+- Put scratch files under `$TMPDIR`, never at a fixed path under `/tmp`, which other users on this host share.
 
 ## Steps
 

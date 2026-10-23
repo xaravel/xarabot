@@ -23,7 +23,9 @@ MODEL="${XARABOT_BOOTSTRAP_MODEL:-claude-opus-5-5}"
 STATUS="_bmad-output/implementation-artifacts/sprint-status.yaml"
 EPICS="_bmad-output/planning-artifacts/epics.md"
 MARK="Opened by the Xarabot bootstrap loop."
-SETTINGS='{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}'
+# allowUnsandboxedCommands: false makes Claude Code ignore the dangerouslyDisableSandbox escape,
+# so a session can't step outside its own sandbox (Story 1.1's first build blocked on that).
+SETTINGS='{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"sandbox":{"allowUnsandboxedCommands":false}}'
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$STATE/logs" "$STATE/blocked" "$STATE/once"
 chmod 700 "$STATE"

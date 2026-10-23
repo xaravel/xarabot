@@ -12,6 +12,8 @@ Read `AGENTS.md` first and obey it. When a skill or step offers a choice, take t
 - Commit messages are `<story-id>: <summary>`, plain, with no `Co-Authored-By`, "Generated with" or similar trailer. The bot that authors the commits is the only marker of loop-made work.
 - Toolchain: Bun 1.4.3, TypeScript 7 strict and oxlint only. Never Node, npm, pnpm, Jest, Vitest, ESLint or Prettier.
 - Stop a process only by its exact PID, never with `pkill -f`. macOS has no `timeout`.
+- Never try to run a command outside Claude Code's own sandbox; the escape is turned off for these sessions. If a command fails inside it, report the failure, and finish `blocked` if the Story can't be done without it.
+- Put scratch files under `$TMPDIR`, which is private to this user, never at a fixed path under `/tmp`. `/tmp` is shared with the host's other users, so a fixed name can collide with, or read, someone else's file.
 
 ## Steps
 
