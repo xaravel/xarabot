@@ -2,7 +2,7 @@
 title: 'Story 1.10: GitHub adapter: checks, merge queue and alerts'
 type: 'feature'
 created: '2026-10-23'
-status: 'blocked'
+status: 'in-progress'
 baseline_revision: '7a6f66c4a2e20d6c600d7d9de1833d2e8c30592e'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -137,6 +137,8 @@ deferred:
 - Given the repo, when `bun install`, `bun test`, `bun --bun oxlint` and `bun --bun tsc` run, then each exits 0.
 
 ## Spec Change Log
+
+- 2026-10-23, Maintainer: AR38 settled live on `xaravel/xarabot-scratch`. The App holds `contents: write` and `pull_requests: write` and no merge-queue permission, and `enqueuePullRequest` was authorized twice: the AR38 probe got `conflict` (UNPROCESSABLE, mergeability not yet computed), and a direct call on an open probe PR got UNPROCESSABLE (required status check `check` is expected). Neither was FORBIDDEN, so `merge_queues: write` is not needed. Set `ENQUEUE_PERMISSION` to `contents: write` (not isolated from `pull_requests: write`, which the App also holds and needs), drop the `merge_queues: write` row from `docs/maintainer/app-permissions.md`, and rewrite its AR38 section as verified with these results. Also fix two probe defects found in the live run: the AR38 live test needs an explicit timeout (it hit Bun's 5-second default and left its scratch PR open), and its `[skip ci]` commits never get a required check, so in a repo that requires one the probe can reach only `conflict`; say so in the doc. Resume at implementation, then review.
 
 ## Review Triage Log
 
