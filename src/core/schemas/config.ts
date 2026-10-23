@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refuseHost } from "../network/hosts.ts";
 import { GitHubLogin, NonEmpty, RepoPath, SchemaVersion } from "./common.ts";
 
 /** Package-layer defaults for every optional `.xarabot/config.yaml` field that has one. */
@@ -41,10 +42,14 @@ export const BranchesSchema = z.strictObject({
   xarabot: NonEmpty.default(CONFIG_DEFAULTS.branches.xarabot),
 });
 
-/** A hostname for the sandbox proxy allowlist. */
-const Hostname = z
-  .string()
-  .regex(/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/, "must be a hostname");
+/**
+ * A hostname for the sandbox proxy allowlist: never a GitHub host, an IP
+ * literal or `localhost` (`buildAllowlist` refuses the same).
+ */
+const Hostname = z.string().superRefine((host, ctx) => {
+  const why = refuseHost(host);
+  if (why !== null) ctx.addIssue({ code: "custom", message: why });
+});
 
 /** `.xarabot/config.yaml` (AR21). */
 export const ConfigSchema = z.strictObject({

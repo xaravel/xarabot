@@ -4,8 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { LaunchSpec, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { createMacSandbox, type MacSandboxOpts } from "../../src/sandbox/macos.ts";
-import { which } from "../../src/sandbox/tools.ts";
-import { canSandbox, sandboxTest } from "../support/sandbox.ts";
+import { uvPythonDir, which } from "../../src/sandbox/tools.ts";
+import { canSandbox, liveSandboxTest, sandboxTest } from "../support/sandbox.ts";
 
 /**
  * Real sessions in a fake home laid out like the Structural Seed:
@@ -95,7 +95,7 @@ afterAll(() => {
 const ENV_CRED: LaunchSpec["credential"] = { file: "oauth-token", env: "CLAUDE_CODE_OAUTH_TOKEN" };
 
 function spec(argv: readonly string[], patch: Partial<LaunchSpec> = {}): LaunchSpec {
-  return { argv, vendor: "claude", vendorHomeEnv: "CLAUDE_CONFIG_DIR", credential: ENV_CRED, ...patch };
+  return { argv, vendor: "claude", vendorHomeEnv: "CLAUDE_CONFIG_DIR", credential: ENV_CRED, apiHosts: [], ...patch };
 }
 
 type Outcome = { readonly run: SandboxRun; readonly spawned: number[] };
@@ -264,6 +264,150 @@ describe("network", () => {
   });
 });
 
+/** This process's listening TCP sockets, from lsof. */
+function listening(): string[] {
+  const r = Bun.spawnSync(["/usr/sbin/lsof", "-nP", "-a", "-p", String(process.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"]);
+  return r.stdout
+    .toString()
+    .split("\n")
+    .filter((l) => l.startsWith("n"))
+    .sort();
+}
+
+async function refusesConnections(port: number): Promise<boolean> {
+  try {
+    const s = await Bun.connect({ hostname: "127.0.0.1", port, socket: { data: () => {} } });
+    s.end();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+describe("network proxy", () => {
+  const FIXTURE_HOST = "api.vendor.test";
+
+  sandboxTest("a tunnel through $HTTPS_PROXY reaches an allowed host; the port refuses connections after run", async () => {
+    const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req) => new Response(`fixture-ok ${new URL(req.url).hostname}\n`) });
+    try {
+      const p = fixture.port as number;
+      const r = await sh(
+        [
+          `curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://${FIXTURE_HOST}:${p}/`,
+          `curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://mirror.example:${p}/`,
+          `curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://github.com:${p}/ >/dev/null 2>&1; echo github=$?`,
+          `curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://unlisted.example:${p}/ >/dev/null 2>&1; echo unlisted=$?`,
+          'printf %s "$HTTPS_PROXY"',
+        ].join("; "),
+        {
+          spec: { apiHosts: [FIXTURE_HOST] },
+          profile: { repoHosts: ["mirror.example"] },
+          sandbox: { proxy: { ports: [p], dial: () => "127.0.0.1" } },
+        },
+      );
+      const lines = r.stdout.split("\n");
+      expect(lines.slice(0, 4)).toEqual([`fixture-ok ${FIXTURE_HOST}`, "fixture-ok mirror.example", "github=56", "unlisted=56"]);
+      const url = lines[4] as string;
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(await refusesConnections(Number(url.slice(url.lastIndexOf(":") + 1)))).toBe(true);
+    } finally {
+      fixture.stop(true);
+    }
+  });
+
+  sandboxTest("TCP to another host-local port and HTTPS to a GitHub IP with --noproxy both fail", async () => {
+    let accepted = 0;
+    const other = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open: () => void (accepted += 1), data: () => {} } });
+    try {
+      // The host itself can connect, so a failure below is the sandbox's doing.
+      expect(await refusesConnections(other.port)).toBe(false);
+      accepted = 0;
+      const r = await sh(
+        `curl -sS --max-time 5 telnet://127.0.0.1:${other.port} </dev/null; echo local=$?; curl -sSk --max-time 10 --noproxy '*' https://140.82.112.3/ >/dev/null; echo github=$?`,
+      );
+      expect(r.stdout).toBe("local=7\ngithub=7\n");
+      expect(accepted).toBe(0);
+    } finally {
+      other.stop(true);
+    }
+  });
+
+  sandboxTest("DNS does not resolve inside the session", async () => {
+    const r = await sh("curl -sS --max-time 10 --noproxy '*' https://pypi.org/ >/dev/null 2>&1; echo rc=$?");
+    expect(r.stdout).toBe("rc=6\n");
+  });
+
+  for (const [name, patch] of [
+    ["a GitHub API host", { spec: { apiHosts: ["api.github.com"] } }],
+    ["a GitHub repo host", { profile: { repoHosts: ["objects.githubusercontent.com"] } }],
+    ["an IP literal", { profile: { repoHosts: ["140.82.112.3"] } }],
+    ["localhost", { spec: { apiHosts: ["localhost"] } }],
+  ] as const) {
+    sandboxTest(`an allowlist with ${name} refuses, spawning nothing and leaving no proxy listening`, async () => {
+      const before = listening();
+      await refusedWith(["true"], patch, "proxy allowlist");
+      expect(listening()).toEqual(before);
+    });
+  }
+
+  sandboxTest("a refusal after the proxy started leaves no proxy listening", async () => {
+    const before = listening();
+    const clone = join(lane, 'quo"te2', "clone");
+    mkdirSync(join(clone, ".git"), { recursive: true });
+    await refusedWith(["true"], { profile: { clone } }, "profile fails to generate");
+    writeCred(null, 0o600, "absent-token");
+    await refusedWith(["true"], { spec: { credential: { file: "absent-token", env: "CLAUDE_CODE_OAUTH_TOKEN" } } }, "absent-token");
+    expect(listening()).toEqual(before);
+  });
+
+  sandboxTest("a spawn failure stops the proxy", async () => {
+    const before = listening();
+    // A sandbox-exec that is executable but cannot be spawned (no interpreter).
+    const broken = join(home, "broken-sandbox-exec");
+    writeFileSync(broken, "#!/nonexistent/interpreter\n");
+    chmodSync(broken, 0o755);
+    // posix_spawn fails with ENOENT, after the proxy has started.
+    await refusedWith(["true"], { sandbox: { sandboxExec: broken } }, "sandbox: cannot start the session");
+    expect(listening()).toEqual(before);
+  });
+
+  sandboxTest("the session's HOME links the uv Python folder at uv's default path", async () => {
+    const pythons = join(home, "uv-pythons");
+    mkdirSync(pythons, { recursive: true });
+    writeFileSync(join(pythons, "marker"), "py\n");
+    const saved = launching;
+    launching = { ...launching, UV_PYTHON_INSTALL_DIR: pythons };
+    try {
+      const r = await sh('cat "$HOME/.local/share/uv/python/marker"; env | grep -c "^UV_PYTHON" || true');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("py\n0\n");
+    } finally {
+      launching = saved;
+    }
+  });
+
+  liveSandboxTest(
+    "uv installs ruamel.yaml from PyPI through the proxy",
+    async () => {
+      // The fake launching HOME has no uv-managed Pythons, so the launching env
+      // names the host's; the session finds them through its HOME link alone.
+      const dir = uvPythonDir(process.env);
+      if (dir === null || !existsSync(dir)) throw new Error("no uv-managed Python on this host: run `uv python install 3.12` once");
+      const pythons = realpathSync(dir);
+      const saved = launching;
+      launching = { ...launching, UV_PYTHON_INSTALL_DIR: pythons };
+      try {
+        const r = await sh(`uv run --no-cache --python '>=3.11' --with ruamel.yaml python -c 'import ruamel.yaml'`);
+        if (r.exitCode !== 0) throw new Error(`uv failed (${r.exitCode}):\n${r.stderr}`);
+        expect(r.exitCode).toBe(0);
+      } finally {
+        launching = saved;
+      }
+    },
+    120_000,
+  );
+});
+
 describe("environment", () => {
   sandboxTest("env prints exactly the allowlist", async () => {
     const r = (await ran(["env"])).run;
@@ -274,6 +418,8 @@ describe("environment", () => {
         .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
     );
     const tmp = join(lane, "tmp");
+    const proxy = env["HTTPS_PROXY"] ?? "";
+    expect(proxy).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     expect(env).toEqual({
       PATH: `${tmp}/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
       HOME: `${tmp}/home`,
@@ -285,6 +431,10 @@ describe("environment", () => {
       XARABOT_RESULT: join(tmp, "result.json"),
       XARABOT_SANDBOXED: "1",
       UV_CACHE_DIR: `${tmp}/uv-cache`,
+      HTTPS_PROXY: proxy,
+      HTTP_PROXY: proxy,
+      https_proxy: proxy,
+      http_proxy: proxy,
     });
   });
 

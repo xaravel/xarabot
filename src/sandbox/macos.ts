@@ -1,9 +1,11 @@
 import { accessSync, constants as fsConstants, lstatSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { isReservedEnvName, buildSessionEnv, deniedPaths, sessionDirs, type LaunchingEnv } from "./environment.ts";
+import { isReservedEnvName, buildSessionEnv, deniedPaths, sessionDirs, type DeniedPaths, type LaunchingEnv } from "./environment.ts";
+import { buildAllowlist } from "../core/network/hosts.ts";
 import { renderProfile } from "./profile.ts";
-import { resolveTools } from "./tools.ts";
+import { startProxy, type Proxy, type ProxyOpts } from "./proxy.ts";
+import { resolveTools, type ResolvedTools } from "./tools.ts";
 import { isPlainFileName, removeTree, seedVendorHome } from "./vendor-home.ts";
 import {
   ENV_NAME,
@@ -21,9 +23,11 @@ import {
 /**
  * The macOS `Sandbox` (AR18, AD-17): runs the agent through
  * `sandbox-exec -p <profile>` with a generated deny-by-default profile, an
- * allowlisted environment, a fresh `HOME` and a re-seeded vendor home. Every
- * check fails closed and refuses the session; nothing runs unsandboxed and
- * the profile never touches the disk.
+ * allowlisted environment, a fresh `HOME` and a re-seeded vendor home. Its
+ * only network is a per-session CONNECT proxy on `127.0.0.1`, which allows
+ * the vendor's API hosts, the package hosts and the repo's `proxy_hosts`, and
+ * never a GitHub host. Every check fails closed and refuses the session;
+ * nothing runs unsandboxed and the profile never touches the disk.
  */
 
 export const DEFAULT_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -43,6 +47,8 @@ export type MacSandboxOpts = {
   readonly platform?: string;
   /** Epoch ms; default `Date.now`. */
   readonly now?: () => number;
+  /** Passed through to `startProxy`; for tests. */
+  readonly proxy?: Pick<ProxyOpts, "ports" | "dial">;
 };
 
 type Refused = { readonly ok: false; readonly error: { readonly kind: "refused"; readonly message: string } };
@@ -110,7 +116,6 @@ function validateProfile(profile: SandboxProfile): Refused | null {
       return refused(`sandbox: resultPath ${profile.resultPath} lies inside the rebuilt ${rebuilt} folder`);
     }
   }
-  if (profile.proxyUrl !== undefined && /[\0\n]/.test(profile.proxyUrl)) return refused("sandbox: proxyUrl contains a control character");
   return null;
 }
 
@@ -251,12 +256,40 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     const bad = checkRoots(roots, confinement());
     if (bad !== null) return bad;
 
+    const allow = buildAllowlist(spec.apiHosts, profile.repoHosts ?? []);
+    if (!allow.ok) return refused(`sandbox: ${allow.error.message}`);
+    const proxy = startProxy({ allow: allow.value, ...opts.proxy });
+    if (!proxy.ok) return refused(`sandbox: the proxy fails to start: ${proxy.error.message}`);
+    try {
+      return await session(spec, profile, signal, hooks, { tools: tools.value, denied: denied.value, roots, forbidden, proxy: proxy.value, launching });
+    } finally {
+      proxy.value.stop();
+    }
+  }
+
+  async function session(
+    spec: LaunchSpec,
+    profile: SandboxProfile,
+    signal: AbortSignal,
+    hooks: SandboxHooks | undefined,
+    ctx: {
+      readonly tools: ResolvedTools;
+      readonly denied: DeniedPaths;
+      readonly roots: Roots;
+      readonly forbidden: () => { what: string; path: string }[];
+      readonly proxy: Proxy;
+      readonly launching: LaunchingEnv;
+    },
+  ): Promise<SandboxResult<SandboxRun>> {
+    const { tools, denied, roots, forbidden, proxy, launching } = ctx;
+    const cmd = spec.argv[0] as string;
     const rendered = renderProfile({
-      toolFiles: [tools.value.agent.path, ...tools.value.helpers.map((t) => t.path)],
-      toolDirs: tools.value.dirs,
-      xarabotHome: realpathLoose(denied.value.xarabotHome),
+      toolFiles: [tools.agent.path, ...tools.helpers.map((t) => t.path)],
+      toolDirs: tools.dirs,
+      xarabotHome: realpathLoose(denied.xarabotHome),
       writable: [roots.clone, roots.vendorHome, roots.tempDir],
       denied: forbidden().map((f) => f.path),
+      proxyPort: proxy.port,
     });
     if (!rendered.ok) return refused(`sandbox: the profile fails to generate: ${rendered.error.message}`);
 
@@ -273,8 +306,14 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
       mkdirSync(dirs.bin, { mode: 0o700 });
       mkdirSync(dirs.home, { mode: 0o700 });
       mkdirSync(dirs.uvCache, { recursive: true, mode: 0o700 });
-      for (const t of [tools.value.agent, ...tools.value.helpers]) symlinkSync(t.path, join(dirs.bin, t.name));
+      for (const t of [tools.agent, ...tools.helpers]) symlinkSync(t.path, join(dirs.bin, t.name));
       writeFileSync(join(dirs.home, ".gitconfig"), SESSION_GITCONFIG, { mode: 0o600 });
+      if (tools.uvPython !== null) {
+        // uv finds its managed Pythons under the fresh HOME, with no extra variable.
+        const link = join(dirs.home, ".local", "share", "uv", "python");
+        mkdirSync(dirname(link), { recursive: true, mode: 0o700 });
+        symlinkSync(tools.uvPython, link);
+      }
     } catch (e) {
       return refused(`sandbox: cannot prepare the temp folder: ${message(e)}`);
     }
@@ -284,7 +323,7 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
       vendorHome: roots.vendorHome,
       vendorHomeEnv: spec.vendorHomeEnv,
       resultPath,
-      ...(profile.proxyUrl === undefined ? {} : { proxyUrl: profile.proxyUrl }),
+      proxyUrl: proxy.url,
       ...(seeded.value.env === undefined ? {} : { credential: seeded.value.env }),
     });
     if (!env.ok) return refused(`sandbox: ${env.error.message}`);
