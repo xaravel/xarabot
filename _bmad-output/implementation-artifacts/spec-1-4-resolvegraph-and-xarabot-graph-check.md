@@ -2,10 +2,10 @@
 title: 'Story 1.4: `resolveGraph` and `xarabot graph check`'
 type: 'feature'
 created: '2026-10-22'
-status: 'in-progress'
+status: 'done'
 baseline_revision: '9b358fb11a916e4e23e9fbfd5e2bc9eea2797eb2'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-1-context.md'
 warnings: ['oversized']
@@ -99,6 +99,47 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-10-22 — Review pass
+- verdicts: 37 findings — high 4, medium 6, low 19, false 8, maybe-false 0
+- findings:
+  - `[low]` `[patch]` (verification-gap) `devDependencies`/`optionalDependencies` edges untested — added one `packageEdges` case per field, each expecting the edge.
+  - `[low]` `[patch]` (verification-gap) numeric Story-id join (`storyKey`) never run with a non-canonical id — added a `resolveGraph` case: manifest `02.1` with leading-zero `depends_on` joins heading `2.1`.
+  - `[medium]` `[patch]` (verification-gap) `graph check` could drop `epic_packages`/`retro_gates_path` from config unnoticed — added CLI fixtures for a package edge from `epic_packages` and an invalid file at a custom `retro_gates_path`.
+  - `[low]` `[patch]` (verification-gap) the deleted-tracked-file filter is untested — added a CLI fixture that commits `epics.yaml`, deletes it and expects the serial graph.
+  - `[false]` `[reject]` (verification-gap, other) `manifest-heading` epic-mismatch branch unreachable — the matrix row says `manifest-heading / invalid`, and Story 1.3's `loadManifests` returning `invalid` first is inside that contract; the branch is harmless defence.
+  - `[low]` `[patch]` (intent-alignment A) CLI tests spot-check only a few failure kinds — same root as the config-coverage gap; covered by the new CLI fixtures.
+  - `[false]` `[reject]` (intent-alignment B) manifest Epic mismatch gives `invalid` — as above, the matrix allows `invalid`.
+  - `[false]` `[reject]` (intent-alignment C) `GraphSnapshot` documented as a `main` SHA but the CLI uses the working tree — the intent defines the CLI's tree as the working tree; SHA producers are Stories 1.6/2.8.
+  - `[low]` `[patch]` (intent-alignment D) hash is insertion-order `JSON.stringify` and no digest is pinned — the order is fixed by one object literal, so it is deterministic; added a pinned-digest test so a refactor cannot change it silently.
+  - `[medium]` `[patch]` (intent-alignment E) `2.6` and `02.06` manifests both join heading 2.6 and both appear in Epic 2's stories — `resolveGraph` now fails `invalid` on a numerically duplicate `story_id`.
+  - `[low]` `[patch]` (intent-alignment F) a multi-manifest Story cycle is prefixed with one manifest's path, not `graph:` — now `graph:` for a cycle over several Stories, manifest path for a self-dependency; both pinned.
+  - `[false]` `[reject]` (intent-alignment G) refusals beyond the literal text — they follow the spec's fail-closed design note; no bad outcome.
+  - `[low]` `[reject]` (intent-alignment H) the repo test reads live repo state — the AC is stated against this repo; the test is expected to change when manifests land.
+  - `[high]` `[patch]` (blind) `--- {flow doc}` skips the duplicate scan — `findDuplicateKeys` now refuses content after a `---`/`...` marker.
+  - `[low]` `[reject]` (blind) `version: 1.0` accepted — `Bun.YAML` reads it as the number 1; nobody writes it, and a raw-value check adds a new scan path.
+  - `[false]` `[reject]` (blind) `manifest-heading` mismatch branch can never run — duplicate of the verification-gap note; the matrix allows `invalid`.
+  - `[medium]` `[patch]` (blind) duplicate retro item ids accepted — the `RetroGatesSchema` superRefine now flags a repeated item id within an entry.
+  - `[low]` `[reject]` (blind) `retro-gates.yaml` keys not checked against headings — the intent lists the `unknown-epic` sources and leaves this out; an orphan entry never applies, and adding the check is a new rule.
+  - `[low]` `[patch]` (blind) hash not canonical and not pinned — same root as intent-alignment D; pinned-digest test added.
+  - `[low]` `[reject]` (blind) config read via `existsSync` and not the tree, and no duplicate scan — the intent says the config is parsed with `ConfigSchema` when present; a gitignored config is an unlikely edge case.
+  - `[low]` `[reject]` (blind) repo test depends on the working tree — same as intent-alignment H.
+  - `[low]` `[patch]` (blind) missing CLI coverage for package edges and deleted files — same root as the verification-gap CLI gaps; covered by the new fixtures.
+  - `[low]` `[reject]` (blind) `graphInputPaths` reads every `package.json` — the signature sees only the tree, so it cannot read `workspaces`; the cost is extra I/O, and fixing it would change the public surface.
+  - `[false]` `[reject]` (blind) block-scalar or quoted `epics:` passes the scan — `EpicsYamlSchema` rejects a non-mapping `epics`, so nothing collapses.
+  - `[false]` `[reject]` (blind) `version: 2` with a duplicate key gives `unsupported-version` — intended: an unknown version may have another shape.
+  - `[low]` `[reject]` (blind) spec metadata inconsistent mid-review — the fix would edit this build's spec.
+  - `[high]` `[patch]` (edge-case) inline content after `---` bypasses the scan — same root as blind's `---` finding; refused now.
+  - `[high]` `[patch]` (edge-case) a top-level `<<` merge key merges an unscanned map — `findDuplicateKeys` now refuses a `<<` key.
+  - `[medium]` `[reject]` (edge-case) duplicate keys inside an entry (`depends_on` twice) collapse — the intent-contract fixes the scan at the top level and the first level under `epics:`, so deeper scanning is outside this Story.
+  - `[medium]` `[patch]` (edge-case) numerically equal Story ids — same root as intent-alignment E; fixed.
+  - `[low]` `[reject]` (edge-case) `version: 1.0`/`0x1` accepted — same as blind's version finding.
+  - `[low]` `[reject]` (edge-case) retro-gates keys for missing Epics accepted — same as blind's retro-gates finding.
+  - `[medium]` `[patch]` (edge-case) duplicate retro item ids — same root as blind's; fixed.
+  - `[false]` `[reject]` (edge-case) transitive package edges via an unmapped package dropped — the intent defines an edge only when P lists Q directly.
+  - `[low]` `[reject]` (edge-case) recursive DFS could overflow on huge chains — real graphs have tens of nodes; an iterative rewrite is not a direct correction.
+  - `[low]` `[reject]` (edge-case) a symlinked input outside the repo is read — a local CLI over the user's own checkout; guarding it is a new rule.
+  - `[high]` `[patch]` (edge-case claim) "strict, raw-text duplicate scan" is skipped for inline documents and merge keys — same root as the `---` and `<<` fixes.
+
 ## Design Notes
 
 - **Fail closed on the unscannable.** Flow-style `epics:` maps and unknown mapped package names are refused rather than guessed at: `Bun.YAML` keeps the last duplicate silently, and an unmatched package map would drop an edge silently.
@@ -113,3 +154,38 @@ deferred: []
 - `bun --bun oxlint` -- expected: exit 0.
 - `bun --bun tsc` -- expected: exit 0.
 - `bun src/cli/main.ts graph check` -- expected: exit 0, `6 → [4]`, `7 → [5, 6]`.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Added the pure `resolveGraph(snapshot)` in `src/core/graph/`. It parses `.xarabot/epics.yaml` strictly, with a raw-text duplicate-key scan, and also reads the `epics.md` headings, the manifests, optional package edges and `retro-gates.yaml`. It validates them and returns the resolved Epic graph with a stable `sha256:` hash. The same validator ships as `xarabot graph check` over the working tree.
+
+**Files changed:**
+- `src/core/graph/yaml-keys.ts`: the raw-text duplicate-key scan; fails closed on flow style, anchors, tags, tabs, content after a document marker and `<<` merge keys. Also holds the one-mapping YAML parse and the raw Epic-key spelling check.
+- `src/core/schemas/epics-yaml.ts`, `src/core/schemas/retro-gates.ts`: zod schemas for `epics.yaml` and `retro-gates.yaml` (AR13), including key/`<N>` consistency and unique item ids.
+- `src/core/graph/epics-yaml.ts`, `src/core/graph/retro-gates.ts`: the strict parsers.
+- `src/core/graph/package-edges.ts`: Epic edges from workspace package dependencies.
+- `src/core/graph/resolve-graph.ts`: `GraphConfig`, `DEFAULT_GRAPH_CONFIG`, `GraphSnapshot`, `ResolvedGraph`, `graphInputPaths` and `resolveGraph`, with every validation failure kind and the hash.
+- `src/cli/graph-check.ts`, `src/cli/main.ts`: the `xarabot graph check` command and its dispatch and usage line.
+- `test/core/graph/*.test.ts`, `test/cli/graph-check.test.ts`, `test/cli/main.test.ts`: case tables for every matrix row, plus CLI fixture repos and this repo.
+
+**Review findings:** 37 findings, one row each in the Review Triage Log. Eight entries were patched, grouped by root cause:
+- high 1: the duplicate-key scan failed open on `--- {…}` and `<<`.
+- medium 3: numerically duplicate Story ids; duplicate retro item ids; CLI coverage of `epic_packages`, a custom `retro_gates_path` and deleted tracked files.
+- low 4: `devDependencies`/`optionalDependencies` tests; the non-canonical Story-id join test; the pinned hash digest; the `graph:` prefix for a Story cycle across several Stories.
+
+Nothing was deferred. The rejected findings and their reasons are in the triage log: version spellings like `1.0`, retro-gates keys for unknown Epics, duplicate keys nested below the first `epics:` level (the intent-contract fixes the scan's scope), transitive package edges, recursion depth, symlinks, how the config is read, `graphInputPaths` reading every `package.json`, the live-repo test, and spec metadata.
+
+**Follow-up review recommended:** true. The first pass patched a high entry. The unverified risk is that the raw-text duplicate-key scanner may have more YAML forms that `Bun.YAML` accepts but the scanner does not refuse. `---` and `<<` were found only at review. Patched counts by verdict: high 1, medium 3, low 4.
+
+**Verification:**
+- `bun install`: exit 0, `bun.lock` unchanged.
+- `bun test`: 492 pass, 0 fail.
+- `bun --bun oxlint` and `bun --bun tsc`: both exit 0.
+- `bun src/cli/main.ts graph check`: exit 0, printing `1 → []` … `5 → [4]`, `6 → [4]`, `7 → [5, 6]`, with one warning per Story heading.
+
+**Residual risks:**
+- The duplicate-key scan covers only the top level and the first level under `epics:`, so a duplicate nested key (e.g. `depends_on` twice in one entry) still collapses silently.
+- `graph check` needs a full `ConfigSchema`-valid config when `.xarabot/config.yaml` exists.
+- A package mapped to two Epics fails as `invalid`, a choice the spec does not settle.

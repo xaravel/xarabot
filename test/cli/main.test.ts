@@ -21,7 +21,7 @@ describe("xarabot bin", () => {
     expect(r.stderr).toBe("");
   });
 
-  test.each([[["--nope"]], [["run"]], [["--version", "extra"]]])("%j prints usage and exits 1", (args) => {
+  test.each([[["--nope"]], [["run"]], [["--version", "extra"]], [["graph"]], [["graph", "check", "extra"]]])("%j prints usage and exits 1", (args) => {
     const r = run(args);
     expect(r.code).toBe(1);
     expect(r.stdout).toBe("");
