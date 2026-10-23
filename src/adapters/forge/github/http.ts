@@ -1,4 +1,4 @@
-import { deadlinePassed, forgeErr, forgeOk, rateLimited, type ForgeFailure, type ForgeResult } from "../../../ports/forge.ts";
+import { deadlinePassed, forgeErr, forgeOk, rateLimited, type ForgeErrorKind, type ForgeFailure, type ForgeResult } from "../../../ports/forge.ts";
 
 /**
  * The GitHub adapter's single HTTP path (AR27, AR39). Every call names an
@@ -21,8 +21,10 @@ export type Permission =
   | "app-jwt"
   | "contents: write"
   | "pull_requests: write"
+  | "issues: write"
   | "metadata: read"
   | "checks: read"
+  | "statuses: read"
   | "actions: read"
   /** No credential at all: a signed download URL. */
   | "none";
@@ -37,6 +39,8 @@ export type Operation = {
   readonly permission: Permission;
   /** A status this operation maps to `conflict` instead of the default kind. */
   readonly conflictOn?: number;
+  /** A status this operation maps to `not-found` instead of the default kind. */
+  readonly notFoundOn?: number;
 };
 
 export const GITHUB_OPERATIONS = {
@@ -56,10 +60,34 @@ export const GITHUB_OPERATIONS = {
   createPull: { name: "createPull", method: "POST", permission: "pull_requests: write" },
   updatePull: { name: "updatePull", method: "PATCH", permission: "pull_requests: write" },
   createComment: { name: "createComment", method: "POST", permission: "pull_requests: write" },
-  listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read" },
+  listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read", notFoundOn: 422 },
+  getCombinedStatus: { name: "getCombinedStatus", method: "GET", permission: "statuses: read", notFoundOn: 422 },
+  pullQueueState: { name: "pullQueueState", method: "POST", permission: "pull_requests: write" },
+  enqueuePullRequest: { name: "enqueuePullRequest", method: "POST", permission: "contents: write" },
+  dequeuePullRequest: { name: "dequeuePullRequest", method: "POST", permission: "contents: write" },
+  listIssues: { name: "listIssues", method: "GET", permission: "issues: write" },
+  createIssue: { name: "createIssue", method: "POST", permission: "issues: write" },
+  listIssueComments: { name: "listIssueComments", method: "GET", permission: "issues: write" },
+  createIssueComment: { name: "createIssueComment", method: "POST", permission: "issues: write" },
   getJobLogs: { name: "getJobLogs", method: "GET", permission: "actions: read" },
   downloadLog: { name: "downloadLog", method: "GET", permission: "none" },
 } as const satisfies Readonly<Record<string, Operation>>;
+
+/**
+ * The installation permissions the App asks for (AR38), exactly. The merge
+ * queue needs no permission of its own (verified live 2026-10-23):
+ * `enqueuePullRequest` and `dequeuePullRequest` run under `contents: write`.
+ * `docs/maintainer/app-permissions.md` lists the same set.
+ */
+export const APP_PERMISSIONS = [
+  "contents: write",
+  "pull_requests: write",
+  "issues: write",
+  "checks: read",
+  "statuses: read",
+  "actions: read",
+  "metadata: read",
+] as const satisfies readonly Permission[];
 
 /** The injectable `fetch`: the subset of the global one the adapter uses. */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -170,6 +198,7 @@ export function mapHttpError(op: Operation, reply: Pick<HttpReply, "status" | "b
   const message = githubMessage(reply.body);
   const what = `${op.name}: ${status}${message === "" ? "" : ` ${message}`}`;
   if (op.conflictOn !== undefined && status === op.conflictOn) return forgeErr("conflict", what);
+  if (op.notFoundOn !== undefined && status === op.notFoundOn) return forgeErr("not-found", what);
   if (status === 401) return forgeErr("auth", what);
   if (status === 403 || status === 429) {
     if (headers.get("x-ratelimit-remaining") === "0") {
@@ -183,11 +212,37 @@ export function mapHttpError(op: Operation, reply: Pick<HttpReply, "status" | "b
       const seconds = headerNumber(retryAfter);
       return rateLimited(Number.isFinite(seconds) ? seconds : SECONDARY_RATE_LIMIT_WAIT, what);
     }
-    if (status === 403) return forgeErr("forbidden", what);
+    if (status === 403) return forgeErr("forbidden", `${what} (needs ${op.permission})`);
   }
   if (status === 404) return forgeErr("not-found", what);
   if (status >= 500 && status < 600) return forgeErr("transient", what);
   return forgeErr("forbidden", what);
+}
+
+/** One entry of a GraphQL reply's `errors[]`. */
+export type GraphqlError = { readonly type?: string; readonly message?: string };
+
+/**
+ * Maps the `errors[]` of a GraphQL reply of `op` to a forge error. Pure. The
+ * first error that maps to a known kind decides; otherwise `fallback`.
+ */
+export function mapGraphqlErrors(
+  op: Operation,
+  errors: readonly GraphqlError[],
+  fallback: Exclude<ForgeErrorKind, "rate-limited">,
+): ForgeFailure {
+  const messages = errors.map((e) => `${e.type === undefined ? "" : `${e.type}: `}${e.message ?? ""}`.trim()).filter((m) => m !== "");
+  const what = `${op.name}: ${messages.length === 0 ? "GraphQL error" : messages.join("; ")}`;
+  for (const e of errors) {
+    const message = e.message ?? "";
+    if (e.type === "FORBIDDEN" || /not accessible by integration/i.test(message)) return forgeErr("forbidden", `${what} (needs ${op.permission})`);
+    if (e.type === "NOT_FOUND") return forgeErr("not-found", what);
+    if (e.type === "RATE_LIMITED" || /rate limit/i.test(message)) return rateLimited(SECONDARY_RATE_LIMIT_WAIT, what);
+    if (e.type === "INTERNAL" || e.type === "SERVICE_UNAVAILABLE" || e.type === "TIMEOUT") return forgeErr("transient", what);
+    // A schema or parse error carries no `type`: the request itself is wrong.
+    if (e.type === undefined) return forgeErr("forbidden", what);
+  }
+  return forgeErr(fallback, what);
 }
 
 /** Formats epoch milliseconds as `YYYY-MM-DDTHH:MM:SSZ`. */

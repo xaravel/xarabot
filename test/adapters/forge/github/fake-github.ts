@@ -1,13 +1,14 @@
 import { createVerify, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
 import type { LedgerCommit } from "../../../../src/core/ledger/edits.ts";
 import type { FetchLike } from "../../../../src/adapters/forge/github/http.ts";
-import type { ForgeCheck } from "../../../../src/ports/forge.ts";
+import type { ForgeCheck, ForgePr } from "../../../../src/ports/forge.ts";
 
 /**
  * An in-process GitHub emulator: a `fetch` for the endpoints the GitHub forge
  * adapter calls. It holds git objects, refs, PRs, a clock that sets `Date`,
- * App JWT and installation-token checks, pull requests, issue comments, check
- * runs and Actions job logs (redirected to a log host it also serves), a
+ * App JWT and installation-token checks, pull requests, issues and their
+ * comments, check runs, commit statuses, a merge queue behind a GraphQL
+ * endpoint, Actions job logs (redirected to a log host it also serves), a
  * request log and one-shot hooks and response injections. Each request yields a macrotask and checks its signal
  * before any change, so an aborted request changes nothing.
  */
@@ -29,6 +30,8 @@ export type FakeGitHubOptions = {
   readonly now?: number;
   readonly ledgerBranch?: string;
   readonly mainBranch?: string;
+  /** The App's slug; comments made with an installation token are by `<slug>[bot]`. Default `alice-xarabot`. */
+  readonly appSlug?: string;
 };
 
 export type LoggedRequest = {
@@ -71,6 +74,22 @@ export type FakeCheckRun = ForgeCheck & {
   readonly details_url?: string;
 };
 
+/** A commit status as `setStatuses` takes it. */
+export type FakeStatus = { readonly context: string; readonly state: "success" | "failure" | "error" | "pending" };
+
+/** An issue as the emulator holds it. */
+export type FakeIssue = {
+  readonly number: number;
+  readonly title: string;
+  readonly body: string;
+  readonly state: "open" | "closed";
+  readonly labels: readonly string[];
+  readonly assignees: readonly string[];
+};
+
+/** A comment on an issue or PR. */
+export type FakeComment = { readonly id: number; readonly body: string; readonly login: string; readonly created_at: string };
+
 type Entry = { readonly mode: string; readonly sha: string };
 type Commit = { readonly tree: string; readonly parents: readonly string[]; readonly message: string };
 type Matcher = { readonly method: string; readonly path: RegExp };
@@ -102,6 +121,20 @@ export type FakeGitHubControl = {
   tokenValid(token: string): boolean;
   /** The bodies of the comments on issue or PR `number`, oldest first. */
   comments(number: number): string[];
+  /** Every comment on issue or PR `number`, oldest first. */
+  commentRecords(number: number): FakeComment[];
+  /** Adds a comment by `login` on issue or PR `number`, at the clock's time. */
+  addComment(number: number, body: string, login: string): void;
+  /** Every issue (not PRs), ascending by number. */
+  issues(): FakeIssue[];
+  /** Creates or replaces an issue; `number` defaults to the next free one. Returns its number. */
+  setIssue(issue: Omit<FakeIssue, "number"> & { readonly number?: number }): number;
+  /** Queued PR numbers, head first; an entry whose PR closed or whose head moved is dropped. */
+  queue(): number[];
+  /** Merges the PR at the head of the queue onto `main`; `null` when the queue is empty. */
+  mergeQueueHead(): ForgePr | null;
+  /** Replaces the commit statuses on `sha`. */
+  setStatuses(sha: string, statuses: readonly FakeStatus[]): void;
   /** Replaces the check runs on `sha`. */
   setChecks(sha: string, checks: readonly FakeCheckRun[]): void;
   /** Sets the log of the Actions job behind check `check` on `sha`. */
@@ -155,6 +188,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   const installationId = options.installationId ?? 777;
   const ledgerBranch = options.ledgerBranch ?? "xarabot/claims";
   const mainBranch = options.mainBranch ?? "main";
+  const botLogin = `${options.appSlug ?? "alice-xarabot"}[bot]`;
   let clock = options.now ?? Date.parse("2026-01-01T00:00:00Z");
   let installed = true;
   let truncate = false;
@@ -164,6 +198,8 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   const blobs = new Map<string, Uint8Array>();
   const trees = new Map<string, ReadonlyMap<string, Entry>>([[EMPTY_TREE, new Map()]]);
   const commits = new Map<string, Commit>();
+  /** Each commit's committer date: the clock when it was made. */
+  const commitDates = new Map<string, number>();
   const refs = new Map<string, string>();
   type PullRecord = {
     state: "open" | "closed";
@@ -175,7 +211,11 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     body: string | null;
   };
   const pulls = new Map<number, PullRecord>();
-  const comments = new Map<number, { id: number; body: string }[]>();
+  const comments = new Map<number, FakeComment[]>();
+  const issues = new Map<number, FakeIssue>();
+  /** Merge-queue entries, head first, with the PR head at enqueue time. */
+  const queue: { number: number; head: string }[] = [];
+  const statuses = new Map<string, FakeStatus[]>();
   let commentCounter = 1000;
   type CheckRunRecord = FakeCheckRun & { readonly id: number };
   const checkRuns = new Map<string, CheckRunRecord[]>();
@@ -209,6 +249,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   function putCommit(c: Commit): string {
     const sha = sha1(`commit ${c.tree} ${c.parents.join(",")} ${c.message} ${commitCounter++}`);
     commits.set(sha, c);
+    commitDates.set(sha, clock);
     return sha;
   }
 
@@ -282,7 +323,90 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   }
 
   function nextNumber(): number {
-    return Math.max(0, ...pulls.keys()) + 1;
+    return Math.max(0, ...pulls.keys(), ...issues.keys()) + 1;
+  }
+
+  const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  /** Drops queue entries whose PR is no longer open or whose head moved. */
+  function pruneQueue(): void {
+    for (let i = queue.length - 1; i >= 0; i -= 1) {
+      const e = queue[i] as { number: number; head: string };
+      const p = pulls.get(e.number);
+      if (p === undefined || p.state !== "open" || p.merged || headOf(p) !== e.head) queue.splice(i, 1);
+    }
+  }
+
+  function addComment(n: number, text: string, login: string): FakeComment {
+    const c: FakeComment = { id: commentCounter++, body: text, login, created_at: iso(clock) };
+    comments.set(n, [...(comments.get(n) ?? []), c]);
+    return c;
+  }
+
+  const commentJson = (c: FakeComment) => ({ id: c.id, body: c.body, user: { login: c.login }, created_at: c.created_at, updated_at: c.created_at });
+
+  function issueJson(i: FakeIssue): Record<string, unknown> {
+    return {
+      number: i.number,
+      title: i.title,
+      body: i.body,
+      state: i.state,
+      labels: i.labels.map((name) => ({ name })),
+      assignees: i.assignees.map((login) => ({ login })),
+      assignee: i.assignees[0] === undefined ? null : { login: i.assignees[0] },
+    };
+  }
+
+  const gqlError = (type: string, message: string) => json(200, { data: null, errors: [{ type, message }] });
+
+  /** `POST /graphql`: the queue-state query and the enqueue and dequeue mutations. */
+  function handleGraphql(body: unknown): Reply {
+    const b = obj(body);
+    const query = b?.["query"];
+    const vars = obj(b?.["variables"]) ?? {};
+    if (typeof query !== "string") return json(200, { errors: [{ message: "A query attribute must be specified and must be a string." }] });
+    pruneQueue();
+    const byNode = (id: unknown): number | undefined => {
+      const m = typeof id === "string" ? /^PR_(\d+)$/.exec(id) : null;
+      return m === null || !pulls.has(Number(m[1])) ? undefined : Number(m[1]);
+    };
+    if (/\benqueuePullRequest\b/.test(query)) {
+      const n = byNode(vars["pullRequestId"]);
+      if (n === undefined) return gqlError("NOT_FOUND", `Could not resolve to a node with the global id of '${String(vars["pullRequestId"])}'`);
+      const p = pulls.get(n) as PullRecord;
+      if (p.state !== "open" || p.merged) return gqlError("UNPROCESSABLE", "Pull request is not open");
+      if (vars["expectedHeadOid"] !== headOf(p)) return gqlError("UNPROCESSABLE", "Pull request head has moved");
+      if (queue.some((e) => e.number === n)) return gqlError("UNPROCESSABLE", "Pull request is already queued");
+      queue.push({ number: n, head: headOf(p) });
+      return json(200, { data: { enqueuePullRequest: { mergeQueueEntry: { id: `MQE_${n}` } } } });
+    }
+    if (/\bdequeuePullRequest\b/.test(query)) {
+      const n = byNode(vars["id"]);
+      if (n === undefined) return gqlError("NOT_FOUND", `Could not resolve to a node with the global id of '${String(vars["id"])}'`);
+      const i = queue.findIndex((e) => e.number === n);
+      if (i === -1) return gqlError("UNPROCESSABLE", "Pull request is not in the queue");
+      queue.splice(i, 1);
+      return json(200, { data: { dequeuePullRequest: { mergeQueueEntry: { id: `MQE_${n}` } } } });
+    }
+    if (/\bpullRequest\s*\(/.test(query) && /\bmergeQueueEntry\b/.test(query)) {
+      if (vars["owner"] !== owner || vars["name"] !== name) {
+        return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: `Could not resolve to a Repository with the name '${String(vars["owner"])}/${String(vars["name"])}'.` }] });
+      }
+      const n = vars["number"];
+      const p = typeof n === "number" ? pulls.get(n) : undefined;
+      if (p === undefined) {
+        return json(200, {
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "NOT_FOUND", path: ["repository", "pullRequest"], message: `Could not resolve to a PullRequest with the number of ${String(n)}.` }],
+        });
+      }
+      const state = p.merged ? "MERGED" : p.state === "open" ? "OPEN" : "CLOSED";
+      const queued = queue.some((e) => e.number === n);
+      return json(200, {
+        data: { repository: { pullRequest: { id: `PR_${String(n)}`, state, headRefOid: headOf(p), mergeQueueEntry: queued ? { id: `MQE_${String(n)}` } : null } } },
+      });
+    }
+    return json(200, { errors: [{ message: "Parse error on query" }] });
   }
 
   function validation(errors: readonly Record<string, unknown>[]): Reply {
@@ -333,7 +457,15 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     if (method === "GET" && (m = /^\/git\/commits\/([0-9a-f]{40})$/.exec(rest)) !== null) {
       const c = commits.get(m[1] as string);
       if (c === undefined) return notFound();
-      return json(200, { sha: m[1], tree: { sha: c.tree }, parents: c.parents.map((sha) => ({ sha })), message: c.message });
+      const date = iso(commitDates.get(m[1] as string) ?? clock);
+      return json(200, {
+        sha: m[1],
+        tree: { sha: c.tree },
+        parents: c.parents.map((sha) => ({ sha })),
+        message: c.message,
+        committer: { name: "xarabot", email: "x@xarabot.invalid", date },
+        author: { name: "xarabot", email: "x@xarabot.invalid", date },
+      });
     }
     if (method === "GET" && (m = /^\/git\/trees\/([0-9a-f]{40})(\?recursive=1)?$/.exec(rest)) !== null) {
       const t = trees.get(m[1] as string);
@@ -479,17 +611,56 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     }
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(route)) !== null) {
       const n = Number(m[1]);
-      if (!pulls.has(n)) return notFound();
+      if (!pulls.has(n) && !issues.has(n)) return notFound();
       const text = b?.["body"];
       if (typeof text !== "string") return unprocessable("Invalid request.");
-      const c = { id: commentCounter++, body: text };
-      comments.set(n, [...(comments.get(n) ?? []), c]);
-      return json(201, { id: c.id, body: c.body });
+      return json(201, commentJson(addComment(n, text, botLogin)));
     }
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(route)) !== null) {
       const n = Number(m[1]);
-      if (!pulls.has(n)) return notFound();
-      return json(200, comments.get(n) ?? []);
+      if (!pulls.has(n) && !issues.has(n)) return notFound();
+      const since = params.get("since");
+      const from = since === null ? Number.NEGATIVE_INFINITY : Date.parse(since);
+      if (Number.isNaN(from)) return unprocessable("Invalid since");
+      const perPage = Number(params.get("per_page") ?? "30");
+      const page = Number(params.get("page") ?? "1");
+      const list = (comments.get(n) ?? []).filter((c) => Date.parse(c.created_at) >= from).map(commentJson);
+      return json(200, list.slice((page - 1) * perPage, page * perPage));
+    }
+    if (method === "GET" && route === "/issues") {
+      const labels = (params.get("labels") ?? "").split(",").filter((l) => l !== "");
+      const assignee = params.get("assignee");
+      const state = params.get("state") ?? "open";
+      const direction = params.get("direction") ?? "desc";
+      const perPage = Number(params.get("per_page") ?? "30");
+      const page = Number(params.get("page") ?? "1");
+      const list = [...issues.values()]
+        .filter((i) => labels.every((l) => i.labels.includes(l)))
+        .filter((i) => assignee === null || i.assignees.includes(assignee))
+        .filter((i) => state === "all" || i.state === state)
+        .sort((x, y) => (direction === "asc" ? x.number - y.number : y.number - x.number))
+        .map(issueJson);
+      return json(200, list.slice((page - 1) * perPage, page * perPage));
+    }
+    if (method === "POST" && route === "/issues") {
+      const title = b?.["title"];
+      const text = b?.["body"] ?? "";
+      const labels = b?.["labels"] ?? [];
+      const assignees = b?.["assignees"] ?? [];
+      if (typeof title !== "string" || typeof text !== "string") return unprocessable("Invalid request.");
+      if (!Array.isArray(labels) || !labels.every((l) => typeof l === "string")) return unprocessable("Invalid request.");
+      if (!Array.isArray(assignees) || !assignees.every((l) => typeof l === "string")) return unprocessable("Invalid request.");
+      const issue: FakeIssue = { number: nextNumber(), title, body: text, state: "open", labels: labels as string[], assignees: assignees as string[] };
+      issues.set(issue.number, issue);
+      return json(201, issueJson(issue));
+    }
+    if (method === "GET" && (m = /^\/commits\/([0-9a-f]{40})\/status$/.exec(route)) !== null) {
+      const perPage = Number(params.get("per_page") ?? "30");
+      const page = Number(params.get("page") ?? "1");
+      const list = (statuses.get(m[1] as string) ?? []).map((st, i) => ({ id: 9000 + i, context: st.context, state: st.state, description: null, target_url: null }));
+      const states = list.map((x) => x.state);
+      const combined = states.length === 0 ? "pending" : states.some((x) => x === "failure" || x === "error") ? "failure" : states.every((x) => x === "success") ? "success" : "pending";
+      return json(200, { state: combined, sha: m[1], total_count: list.length, statuses: list.slice((page - 1) * perPage, page * perPage) });
     }
     if (method === "GET" && (m = /^\/commits\/([0-9a-f]{40})\/check-runs$/.exec(route)) !== null) {
       const perPage = Number(params.get("per_page") ?? "30");
@@ -569,6 +740,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       return respond(handleJwt(method, path, body));
     }
     if (!tokenValid(credential)) return respond(json(401, { message: "Bad credentials" }));
+    if (method === "POST" && path === "/graphql") return respond(handleGraphql(body));
     if (!path.startsWith(`${repoPrefix}/`)) return respond(notFound());
     return respond(handleRepo(method, path.slice(repoPrefix.length), body));
   };
@@ -631,6 +803,38 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     },
     tokenValid,
     comments: (number) => (comments.get(number) ?? []).map((c) => c.body),
+    commentRecords: (number) => [...(comments.get(number) ?? [])],
+    addComment(number, text, login) {
+      addComment(number, text, login);
+    },
+    issues: () => [...issues.values()].sort((a, b) => a.number - b.number),
+    setIssue(issue) {
+      const number = issue.number ?? nextNumber();
+      issues.set(number, { ...issue, number });
+      return number;
+    },
+    queue() {
+      pruneQueue();
+      return queue.map((e) => e.number);
+    },
+    mergeQueueHead() {
+      pruneQueue();
+      const entry = queue.shift();
+      if (entry === undefined) return null;
+      const p = pulls.get(entry.number) as PullRecord;
+      p.head_sha = headOf(p);
+      p.merged = true;
+      p.state = "closed";
+      const parent = refs.get(mainBranch);
+      refs.set(mainBranch, putCommit({ tree: commits.get(parent ?? "")?.tree ?? EMPTY_TREE, parents: parent === undefined ? [] : [parent], message: `merge #${entry.number}` }));
+      return { number: entry.number, branch: p.branch, base: p.base, state: "merged", head_sha: p.head_sha, title: p.title, body: p.body ?? "" };
+    },
+    setStatuses(sha, list) {
+      statuses.set(
+        sha,
+        list.map((x) => ({ ...x })),
+      );
+    },
     setChecks(sha, checks) {
       const old = checkRuns.get(sha) ?? [];
       checkRuns.set(

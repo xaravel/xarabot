@@ -266,6 +266,12 @@ describe("prefetch", () => {
     }
   });
 
+  test("an unknown commit (check-runs 422) is not-found", async () => {
+    const { gh, forge } = setup();
+    gh.control.inject("GET", /\/check-runs\?/, { status: 422, body: { message: "No commit found for SHA" } });
+    expect(kind(await forge.prefetch({ kind: "ci-log", sha: SHA, dir: tempDir() }, live()))).toBe("not-found");
+  });
+
   test("another failed log download goes through mapHttpError", async () => {
     const { gh, forge } = setup(logHostAnswers(403));
     gh.control.setChecks(SHA, [{ name: "test", status: "completed", conclusion: "failure" }]);
