@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createFakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger } from "../../src/core/ledger/codec.ts";
-import { claim, type LedgerEdit } from "../../src/core/ledger/edits.ts";
+import { claim, deleteMerged, type LedgerEdit } from "../../src/core/ledger/edits.ts";
 import { ok } from "../../src/core/result.ts";
 import { CAS_MAX_TRIES, defaultSleep, jitterDelay, swapLedger, type Sleep } from "../../src/lane/ledger-cas.ts";
-import { ALICE, BOB, NOW, rec, tip } from "../core/ledger/fixtures.ts";
+import { ALICE, BOB, COORD, NOW, rec, tip } from "../core/ledger/fixtures.ts";
 
 const claimAlice: LedgerEdit = claim({ unit: "story:1.5", by: ALICE, now: NOW, globs: ["src/core/ledger/**"], expectGeneration: null });
 
@@ -204,6 +204,86 @@ describe("swapLedger", () => {
     expect(r.ok ? r.value.tries : r.error.kind).toBe(1);
     expect(waits).toEqual([]);
     expect(control.ledgerLog()).toHaveLength(2);
+  });
+
+  test("lost ack: a swap that lands but reports transient is ok on the next try without a second write", async () => {
+    const { forge, control } = createFakeForge();
+    const swap = forge.ledgerSwap.bind(forge);
+    let swaps = 0;
+    const lossy = {
+      ...forge,
+      ledgerSwap: async (...args: Parameters<typeof forge.ledgerSwap>) => {
+        swaps += 1;
+        const r = await swap(...args);
+        return swaps === 1 && r.ok ? ({ ok: false, error: { kind: "transient", message: "ack lost" } } as const) : r;
+      },
+    };
+    const { sleep, waits } = recorder();
+    const r = await swapLedger({ forge: lossy, edit: claimAlice, signal: new AbortController().signal, sleep, random: () => 0.5 });
+    const log = control.ledgerLog();
+    expect(log).toHaveLength(2);
+    expect(swaps).toBe(1);
+    expect(waits).toEqual([50]);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.tries).toBe(2);
+    expect(r.value.tip).toBe(log[1]?.sha as string);
+    expect(r.value.commit?.message).toBe(log[1]?.message as string);
+  });
+
+  test("lost ack: a delete-only swap that lands but reports transient is ok with its commit", async () => {
+    const { forge, control } = createFakeForge();
+    control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([rec({ state: "merged" })]), deletes: [] });
+    const swap = forge.ledgerSwap.bind(forge);
+    let swaps = 0;
+    let attempted: Parameters<typeof forge.ledgerSwap>[1] | undefined;
+    const lossy = {
+      ...forge,
+      ledgerSwap: async (...args: Parameters<typeof forge.ledgerSwap>) => {
+        swaps += 1;
+        attempted = args[1];
+        const r = await swap(...args);
+        return swaps === 1 && r.ok ? ({ ok: false, error: { kind: "transient", message: "ack lost" } } as const) : r;
+      },
+    };
+    const edit = deleteMerged({ unit: "story:1.5", by: COORD, now: NOW });
+    const r = await swapLedger({ forge: lossy, edit, signal: new AbortController().signal, sleep: recorder().sleep });
+    expect(swaps).toBe(1);
+    expect(control.ledgerLog()).toHaveLength(3);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(attempted?.deletes).toEqual(["units/story__1.5.json"]);
+    expect(r.value.commit).toEqual(attempted as NonNullable<typeof attempted>);
+    expect(r.value.tries).toBe(2);
+    expect(r.value.tip).toBe(control.ledgerLog()[2]?.sha as string);
+  });
+
+  test("lost ack check: a transient swap that did not land retries the edit", async () => {
+    const { forge, control } = createFakeForge();
+    control.injectError("ledgerSwap", { kind: "transient", message: "timeout" });
+    const r = await swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep });
+    expect(r.ok ? [r.value.tries, r.value.commit === null] : r.error.kind).toEqual([2, false]);
+    expect(control.ledgerLog()).toHaveLength(2);
+  });
+
+  test("lost ack check: a foreign commit after a transient swap is not taken for it", async () => {
+    const { forge, control } = createFakeForge();
+    let swaps = 0;
+    const flaky = {
+      ...forge,
+      ledgerSwap: async (...args: Parameters<typeof forge.ledgerSwap>) => {
+        swaps += 1;
+        if (swaps === 1) {
+          control.writeForeignLedger(foreign(1));
+          return { ok: false, error: { kind: "transient", message: "timeout" } } as const;
+        }
+        return forge.ledgerSwap(...args);
+      },
+    };
+    const r = await swapLedger({ forge: flaky, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep });
+    expect(r.ok ? r.value.tries : r.error.kind).toBe(2);
+    expect(swaps).toBe(2);
+    expect(control.ledgerLog()).toHaveLength(3);
   });
 
   test("maxTries must be a positive integer", async () => {
