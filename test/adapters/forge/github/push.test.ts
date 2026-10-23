@@ -186,7 +186,8 @@ describe("token leak", () => {
     const psDumps: string[] = [];
     const hold = async (r: Request) => {
       if (r.headers.get("authorization") === null) return;
-      const ps = Bun.spawn(["ps", "-axwwE"], { stdio: ["ignore", "pipe", "ignore"] });
+      // BSD-style flags: Linux procps-ng has no -E, so it would print nothing on CI.
+      const ps = Bun.spawn(["ps", "axwwe"], { stdio: ["ignore", "pipe", "ignore"] });
       psDumps.push(await new Response(ps.stdout).text());
       await ps.exited;
     };
