@@ -62,12 +62,18 @@ export type RunGitOpts = {
   readonly signal: AbortSignal;
   readonly credential?: GitCredential;
   readonly identity?: GitIdentity;
+  /** Written to git's stdin; with none, stdin is closed. */
+  readonly stdin?: string;
+  /** A work tree: emits `--work-tree=<path>` right after `--git-dir`. */
+  readonly workTree?: string;
+  /** An index file, passed as `GIT_INDEX_FILE`. */
+  readonly indexFile?: string;
 };
 
 export type GitRun = { readonly code: number; readonly stdout: string; readonly stderr: string };
 
 /** The whole environment a git run gets. */
-export function runnerGitEnv(gitDir: string, identity?: GitIdentity): Record<string, string> {
+export function runnerGitEnv(gitDir: string, identity?: GitIdentity, indexFile?: string): Record<string, string> {
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     HOME: gitDir,
@@ -88,12 +94,14 @@ export function runnerGitEnv(gitDir: string, identity?: GitIdentity): Record<str
       env["GIT_COMMITTER_DATE"] = identity.date;
     }
   }
+  if (indexFile !== undefined) env["GIT_INDEX_FILE"] = indexFile;
   return env;
 }
 
 /** The full argv of a git run, without the program name. */
-export function runnerGitArgs(gitDir: string, args: readonly string[], credential?: GitCredential): string[] {
+export function runnerGitArgs(gitDir: string, args: readonly string[], credential?: GitCredential, workTree?: string): string[] {
   const out = [`--git-dir=${gitDir}`];
+  if (workTree !== undefined) out.push(`--work-tree=${workTree}`);
   for (const c of RUNNER_GIT_CONFIG) out.push("-c", c);
   if (credential !== undefined) out.push("-c", `credential.${credential.url}.helper=${CREDENTIAL_HELPER}`);
   out.push(...args);
@@ -108,11 +116,12 @@ export async function runGit(gitDir: string, args: readonly string[], opts: RunG
   const what = `git ${args[0] ?? ""}`.trimEnd();
   if (opts.signal.aborted) return deadlinePassed(what);
   const withPipe = opts.credential !== undefined;
+  const stdin = opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin);
   let child: Subprocess<"ignore", "pipe", "pipe">;
   try {
-    child = Bun.spawn(["git", ...runnerGitArgs(gitDir, args, opts.credential)], {
-      env: runnerGitEnv(gitDir, opts.identity),
-      stdio: withPipe ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+    child = Bun.spawn(["git", ...runnerGitArgs(gitDir, args, opts.credential, opts.workTree)], {
+      env: runnerGitEnv(gitDir, opts.identity, opts.indexFile),
+      stdio: withPipe ? [stdin, "pipe", "pipe", "pipe"] : [stdin, "pipe", "pipe"],
     }) as Subprocess<"ignore", "pipe", "pipe">;
   } catch (e) {
     return forgeErr("transient", `${what}: cannot start git: ${e instanceof Error ? e.message : String(e)}`);

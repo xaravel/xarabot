@@ -196,6 +196,37 @@ describe("runGit hardening", () => {
   });
 });
 
+describe("runGit options: stdin, workTree, indexFile", () => {
+  test("stdin is written to git's stdin", async () => {
+    const { gitDir } = await fresh();
+    const sha = ran(await runGit(gitDir, ["hash-object", "--stdin"], { ...live(), stdin: "hello\n" }));
+    expect(sha).toBe("ce013625030ba8dba906f756967f9e9ca394464a");
+    const msg = ran(await runGit(gitDir, ["commit-tree", EMPTY_TREE], { ...live(), identity: IDENTITY, stdin: "line one\n\nline two\n" }));
+    expect(ran(await runGit(gitDir, ["log", "-1", "--format=%B", msg], live()))).toBe("line one\n\nline two");
+  });
+
+  test("workTree and indexFile: add from a work tree into a separate index; runner.git gets no index", async () => {
+    const { gitDir } = await fresh();
+    const work = tempDir();
+    writeFileSync(join(work, "a.txt"), "a\n");
+    mkdirSync(join(work, "d"));
+    writeFileSync(join(work, "d", "b.txt"), "b\n");
+    const indexFile = join(tempDir(), "index");
+    ran(await runGit(gitDir, ["add", "-A"], { ...live(), workTree: work, indexFile }));
+    expect(ran(await runGit(gitDir, ["ls-files"], { ...live(), indexFile })).split("\n")).toEqual(["a.txt", "d/b.txt"]);
+    expect(existsSync(indexFile)).toBe(true);
+    expect(existsSync(join(gitDir, "index"))).toBe(false);
+  });
+
+  test("runnerGitArgs puts --work-tree right after --git-dir; runnerGitEnv sets GIT_INDEX_FILE only when given", () => {
+    const args = runnerGitArgs("/g", ["status"], undefined, "/w");
+    expect(args.slice(0, 2)).toEqual(["--git-dir=/g", "--work-tree=/w"]);
+    expect(runnerGitArgs("/g", ["status"]).some((a) => a.startsWith("--work-tree"))).toBe(false);
+    expect(runnerGitEnv("/g", undefined, "/i/index")["GIT_INDEX_FILE"]).toBe("/i/index");
+    expect("GIT_INDEX_FILE" in runnerGitEnv("/g")).toBe(false);
+  });
+});
+
 describe("the adapter source", () => {
   test("Bun.spawn appears only in runner-git.ts:runGit", () => {
     const dir = join(import.meta.dir, "../../../../src/adapters/forge/github");
@@ -215,5 +246,19 @@ describe("the adapter source", () => {
     const end = source.findIndex((l, i) => i > start && l === "}");
     expect(Number(line) - 1).toBeGreaterThan(start);
     expect(Number(line) - 1).toBeLessThan(end);
+  });
+
+  test("src/lane/ never spawns: its git goes through runGit", () => {
+    const dir = join(import.meta.dir, "../../../../src/lane");
+    const hits: string[] = [];
+    for (const file of readdirSync(dir, { recursive: true }) as string[]) {
+      if (!file.endsWith(".ts")) continue;
+      readFileSync(join(dir, file), "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          if (/Bun\s*\.\s*spawn|Bun\s*\.\s*\$|child_process|\bspawnSync\b/.test(line)) hits.push(`${file}:${i + 1}`);
+        });
+    }
+    expect(hits).toEqual([]);
   });
 });
