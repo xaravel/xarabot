@@ -46,9 +46,18 @@ export type PrStepInput = {
   readonly clone: string;
   /** The unit budget's signal. */
   readonly signal: AbortSignal;
+  /** Writes a note to the unit log. */
+  readonly log: (text: string) => void;
 };
 
-export type PrStepOutput = { readonly outcome: LaneOutcome; readonly state: UnitState | null };
+export type PrStepOutput = {
+  readonly outcome: LaneOutcome;
+  readonly state: UnitState | null;
+  /** The latest ledger record the step saw or wrote. */
+  readonly record?: UnitRecord;
+  /** Why the step ended as it did; added to the journal reason. */
+  readonly reason?: string;
+};
 
 /** Commits, pushes and opens the PR (Story 1.16a). Never throws. */
 export type PrStep = (input: PrStepInput) => Promise<PrStepOutput>;
@@ -118,7 +127,7 @@ type Swapped =
   | { readonly kind: "failed"; readonly message: string };
 
 /** The record `commit` writes for `unit`, or `null`. */
-function writtenRecord(commit: LedgerCommit | null, unit: string): UnitRecord | null {
+export function writtenRecord(commit: LedgerCommit | null, unit: string): UnitRecord | null {
   const text = commit?.writes[unitPath(unit)];
   if (text === undefined) return null;
   try {
@@ -444,11 +453,13 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     if (record === null) return failUnit(t, "no claimed record to hand to the PR step");
     let out: PrStepOutput;
     try {
-      out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget });
+      out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note });
     } catch (e) {
       return failUnit(t, `PR step threw: ${message(e)}`);
     }
     t.state = out.state;
+    if (out.record !== undefined) t.record = out.record;
+    if (out.reason !== undefined) addReason(t, out.reason);
     note(`PR step: ${out.outcome} (${out.state ?? "unknown"})`);
     if (budget.aborted && out.outcome !== "stop" && out.state === "claimed") {
       // The budget passed during the PR step: release the unit, unless the step already moved it on.
