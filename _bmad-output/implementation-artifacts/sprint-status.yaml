@@ -53,7 +53,7 @@ development_status:
   1-15-runner-git-clone-rebuild-bot-commit-and-sanitizer: done
   1-16-the-lane-process-one-unit-from-claim-to-result: done
   1-16a-opening-the-pr: done
-  1-17-ci-polling-ci-fixes-and-conflicts: backlog
+  1-17-ci-polling-ci-fixes-and-conflicts: done
   1-17a-approval-gate-and-merge-queue: backlog
   1-18-waits-stop-wake-stop-now-and-usage-limits: backlog
   1-19-xarabot-lane-install-and-the-pinned-runner: backlog
