@@ -238,6 +238,8 @@ export type ClaimParams = EditBase & {
   /** An Infrastructure Story's manifest SHA, which must carry an approval. */
   readonly manifestSha?: string | null;
   readonly adoptPr?: AdoptedPr | null;
+  /** The SHA a claim with no adopted PR starts from (`main`); an adopted PR carries its own. */
+  readonly baseSha?: string | null;
 };
 
 /** `none → claimed` and `released → claimed`. */
@@ -256,11 +258,17 @@ export function claim(p: ClaimParams): LedgerEdit {
     }
     const adopted = p.adoptPr == null ? null : check("claim adoptPr", AdoptedPrSchema, p.adoptPr);
     if (adopted !== null && !adopted.ok) return adopted;
+    const baseSha = p.baseSha ?? null;
+    if (baseSha !== null) {
+      if (adopted !== null) return bad("claim: baseSha and adoptPr are exclusive (an adopted PR carries its base_sha)");
+      const b = check("claim baseSha", GitSha, baseSha);
+      if (!b.ok) return b;
+    }
     const prFields = {
       pr: adopted?.value.pr ?? null,
       pr_owner: adopted?.value.pr_owner ?? null,
       head_sha: adopted?.value.head_sha ?? null,
-      base_sha: adopted?.value.base_sha ?? null,
+      base_sha: adopted?.value.base_sha ?? baseSha,
     };
 
     for (const [id, other] of ctx.ledger.units) {
