@@ -220,6 +220,20 @@ const STOP_CASES: readonly StopCase[] = [
   })),
   { name: "config proxy_hosts wildcard", files: { [CONFIG_PATH]: `${CONFIG}proxy_hosts: ["*"]\n` }, kind: "invalid", path: CONFIG_PATH, reason: "proxy_hosts" },
   { name: "config proxy_hosts URL", files: { [CONFIG_PATH]: `${CONFIG}proxy_hosts: ["https://pypi.org"]\n` }, kind: "invalid", path: CONFIG_PATH, reason: "proxy_hosts" },
+  ...["github.com", "api.github.com", "objects.githubusercontent.com", "ghcr.io", "GitHub.com.", "mygithubmirror.example"].map((host) => ({
+    name: `config proxy_hosts GitHub host ${host}`,
+    files: { [CONFIG_PATH]: `${CONFIG}proxy_hosts: [pypi.org, "${host}"]\n` },
+    kind: "invalid" as const,
+    path: CONFIG_PATH,
+    reason: "a GitHub host is never allowed",
+  })),
+  ...["1.2.3.4", "140.82.112.3", "::1", "localhost", "app.localhost"].map((host) => ({
+    name: `config proxy_hosts ${host}`,
+    files: { [CONFIG_PATH]: `${CONFIG}proxy_hosts: ["${host}"]\n` },
+    kind: "invalid" as const,
+    path: CONFIG_PATH,
+    reason: "proxy_hosts",
+  })),
   { name: "config unit_budget_hours zero", files: { [CONFIG_PATH]: `${CONFIG}unit_budget_hours: 0\n` }, kind: "invalid", path: CONFIG_PATH, reason: "unit_budget_hours" },
   { name: "config ci_max_wait_minutes fractional", files: { [CONFIG_PATH]: `${CONFIG}ci_max_wait_minutes: 1.5\n` }, kind: "invalid", path: CONFIG_PATH, reason: "ci_max_wait_minutes" },
   { name: "config empty story branch prefix", files: { [CONFIG_PATH]: `${CONFIG}branches: {story: ""}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "branches.story" },
@@ -272,6 +286,15 @@ describe("loadRepoConfig: stop cases", () => {
       if (c.reason !== undefined) expect(r.error.message).toContain(c.reason);
     });
   }
+
+  test("a GitHub host in proxy_hosts names the field and says it is never allowed", () => {
+    const r = loadRepoConfig(snapshot({ [CONFIG_PATH]: `${CONFIG}proxy_hosts: [raw.githubusercontent.com]\n` }));
+    if (r.ok) throw new Error("expected a stop error");
+    expect(r.error.kind).toBe("invalid");
+    expect(r.error.message).toContain("proxy_hosts");
+    expect(r.error.message).toContain("raw.githubusercontent.com");
+    expect(r.error.message).toContain("a GitHub host is never allowed");
+  });
 
   test("a non-object snapshot is invalid-snapshot, not a throw", () => {
     const r = loadRepoConfig(null as unknown as RepoSnapshot);

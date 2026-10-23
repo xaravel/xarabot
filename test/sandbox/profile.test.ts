@@ -133,3 +133,32 @@ describe("renderProfile", () => {
     expect(renderProfile({ ...INPUT, ...patch }).ok).toBe(false);
   });
 });
+
+describe("renderProfile: proxyPort", () => {
+  test("opens exactly the proxy port, right after deny network*, as the last rule", () => {
+    const lines = render({ ...INPUT, proxyPort: 51234 }).trimEnd().split("\n");
+    expect(lines.slice(-2)).toEqual(["(deny network*)", '(allow network-outbound (remote tcp "localhost:51234"))']);
+    expect(lines.filter((l) => l.includes("network"))).toHaveLength(2);
+  });
+
+  test("allows no UDP, no DNS and no other Mach service", () => {
+    const p = render({ ...INPUT, proxyPort: 51234 });
+    expect(p).not.toContain("udp");
+    expect(p).not.toContain("mDNSResponder");
+    expect(p.match(/mach-lookup/g)).toHaveLength(1);
+  });
+
+  test("without a proxy port the profile is unchanged", () => {
+    expect(render({ ...INPUT })).toBe(render());
+  });
+
+  test("the port's bounds are accepted", () => {
+    for (const port of [1, 65535]) expect(renderProfile({ ...INPUT, proxyPort: port }).ok).toBe(true);
+  });
+
+  test.each([[0], [65536], [-1], [1.5], [Number.NaN]])("refuses port %p", (port) => {
+    const r = renderProfile({ ...INPUT, proxyPort: port });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("invalid");
+  });
+});

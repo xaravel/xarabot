@@ -34,6 +34,11 @@ export type LaunchSpec = {
   /** The variable that points the CLI at its vendor home, e.g. `CLAUDE_CONFIG_DIR`. */
   readonly vendorHomeEnv: string;
   readonly credential: LaunchCredential;
+  /**
+   * The vendor's API hosts, the session's only hosts besides the package
+   * hosts and the repo's `proxy_hosts`. Never a GitHub host or an IP literal.
+   */
+  readonly apiHosts: readonly string[];
 };
 
 /** Where the session may write, and what it must never see. All absolute paths. */
@@ -45,8 +50,8 @@ export type SandboxProfile = {
   readonly runnerGit: string;
   /** Where the session writes its result; inside `tempDir`. */
   readonly resultPath: string;
-  /** The Xarabot proxy (Story 1.12); the session's only proxy variables. */
-  readonly proxyUrl?: string;
+  /** The repo's `proxy_hosts`, added to the proxy allowlist; default `[]`. */
+  readonly repoHosts?: readonly string[];
 };
 
 /** A finished session. Times are epoch ms from the implementation's clock. */

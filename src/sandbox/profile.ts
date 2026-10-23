@@ -57,6 +57,8 @@ export type ProfileInput = {
   readonly writable: readonly string[];
   /** Always denied, after the writable roots: `runner.git`, credential and vendor folders. */
   readonly denied: readonly string[];
+  /** The session's proxy on `127.0.0.1`: its port is the only network the profile opens. */
+  readonly proxyPort?: number;
 };
 
 /**
@@ -81,6 +83,10 @@ function filters(kind: "literal" | "subpath", paths: readonly string[]): Result<
 
 export function renderProfile(input: ProfileInput): Result<string> {
   if (input.writable.length === 0) return err("invalid", "sandbox profile: no writable roots");
+  const port = input.proxyPort;
+  if (port !== undefined && !(Number.isInteger(port) && port >= 1 && port <= 65535)) {
+    return err("invalid", `sandbox profile: proxy port ${String(port)} is not an integer from 1 to 65535`);
+  }
   const systemLiterals = filters("literal", SYSTEM_READ_LITERALS);
   if (!systemLiterals.ok) return systemLiterals;
   const systemPaths = filters("subpath", SYSTEM_READ_PATHS);
@@ -128,8 +134,10 @@ export function renderProfile(input: ProfileInput): Result<string> {
   lines.push(
     // 8. Harmless devices.
     `(allow file-write* ${DEVICE_WRITES})`,
-    // 9. No network at all, Unix sockets included (Story 1.12 opens the proxy port).
+    // 9. No network at all, Unix sockets included, and no DNS.
     "(deny network*)",
   );
+  // 10. The proxy's port, the profile's last rule and only network allowance.
+  if (port !== undefined) lines.push(`(allow network-outbound (remote tcp "localhost:${port}"))`);
   return ok(`${lines.join("\n")}\n`);
 }

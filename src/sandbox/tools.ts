@@ -30,6 +30,8 @@ export type ResolvedTools = {
   readonly helpers: readonly Tool[];
   /** Real directories to read: git's exec-path and `share/git-core`, the uv Python directory. */
   readonly dirs: readonly string[];
+  /** The real uv Python directory, when it exists; the session's `HOME` links it at uv's default path. */
+  readonly uvPython: string | null;
 };
 
 function isExecutableFile(path: string): boolean {
@@ -143,7 +145,8 @@ export async function resolveTools(launching: LaunchingEnv, agentCommand: string
   }
   const uvDir = uvPythonDir(launching);
   const uvReal = uvDir !== null && isAbsolute(uvDir) ? real(uvDir) : null;
-  if (uvReal !== null && isDirectory(uvReal)) dirs.push(uvReal);
+  const uvPython = uvReal !== null && isDirectory(uvReal) ? uvReal : null;
+  if (uvPython !== null) dirs.push(uvPython);
 
-  return ok({ agent, helpers, dirs: [...new Set(dirs)] });
+  return ok({ agent, helpers, dirs: [...new Set(dirs)], uvPython });
 }
