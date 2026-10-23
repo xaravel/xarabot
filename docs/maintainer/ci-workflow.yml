@@ -1,0 +1,34 @@
+# Proposed CI workflow (Story 1.1). Lanes never write .github/**, so the
+# Maintainer copies this file to .github/workflows/ci.yml by hand.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pushes to main get their own group per commit, so a newer push never cancels an older pending run.
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun --bun oxlint
+      - run: bun --bun tsc

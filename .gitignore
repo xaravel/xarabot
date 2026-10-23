@@ -4,3 +4,6 @@
 
 # BMAD: per-user install answers (team config lives in _bmad/config.toml and _bmad/custom/config.toml)
 _bmad/config.user.toml
+
+# Bun: installed packages
+node_modules/
