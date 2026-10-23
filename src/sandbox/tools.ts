@@ -150,3 +150,17 @@ export async function resolveTools(launching: LaunchingEnv, agentCommand: string
 
   return ok({ agent, helpers, dirs: [...new Set(dirs)], uvPython });
 }
+
+/**
+ * The agent CLI's `--version` output, for the adapter's start check: runs
+ * `<command> --version` through the same probe as the tool lookup, with a
+ * minimal environment and a 10 s limit. Refused when the command is not on
+ * the launching `PATH`, fails, or prints nothing.
+ */
+export async function agentVersion(launching: LaunchingEnv, command: string): Promise<Result<string, "refused">> {
+  const path = which(command, launching["PATH"]);
+  if (path === null) return err("refused", `sandbox: agent CLI ${JSON.stringify(command)} not found on PATH`);
+  const out = await probe([path, "--version"], launching);
+  if (out === null) return err("refused", `sandbox: ${command} --version failed or printed nothing`);
+  return ok(out);
+}

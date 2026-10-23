@@ -97,8 +97,8 @@ Map how \`bmad-build-auto\` halted to \`outcome\` and \`blocked\`:
 
 - It halted \`done\`: \`outcome\` \`done\`.
 - It halted \`blocked\`: \`outcome\` \`blocked\`, with its blocking condition in \`blocked.text\` and \`blocked.kind\` from that condition: \`intent gap\` is \`intent-gap\`; a failed verification is \`verification\`; a Human Live Step is \`human-live-step\`, with \`blocked.step_id\` set to the id of a step listed under Human Live Steps, never one you make up; a decision for the Maintainer is \`escalation\`; anything else is \`other\`.
-- It halted any other way: \`outcome\` \`blocked\` with \`blocked.kind\` \`other\`.
-- There was nothing to change: \`outcome\` \`no-op\`.
+- It halted \`ready-for-dev\` (after planning, before building): \`outcome\` \`blocked\` with \`blocked.kind\` \`other\`, and its halt in \`blocked.text\`.
+- It halted any other way: \`outcome\` \`blocked\` with \`blocked.kind\` \`other\`, and its halt in \`blocked.text\`.
 
 ${RESULT_FIELDS}`,
 

@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realpathLoose, within } from "../../src/sandbox/macos.ts";
-import { resolveTools, uvPythonDir, which } from "../../src/sandbox/tools.ts";
+import { agentVersion, resolveTools, uvPythonDir, which } from "../../src/sandbox/tools.ts";
 
 const dirs: string[] = [];
 
@@ -113,5 +113,35 @@ describe("realpathLoose", () => {
 
   test.skipIf(process.platform !== "darwin")("resolves an existing path fully", () => {
     expect(realpathLoose("/tmp")).toBe("/private/tmp");
+  });
+});
+
+describe("agentVersion", () => {
+  function script(dir: string, name: string, body: string): void {
+    writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(dir, name), 0o755);
+  }
+
+  test("returns the stub's --version output", async () => {
+    const d = tempDir();
+    script(d, "claude", 'if [ "$1" = "--version" ]; then echo "2.1.309 (Claude Code)"; else exit 9; fi');
+    expect(await agentVersion({ PATH: d, HOME: d }, "claude")).toEqual({ ok: true, value: "2.1.309 (Claude Code)" });
+  });
+
+  test("a missing command is refused", async () => {
+    const r = await agentVersion({ PATH: tempDir(), HOME: "/h" }, "claude");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("refused");
+  });
+
+  test.each([
+    ["a failing command", "echo 2.1.309; exit 1"],
+    ["empty output", "true"],
+  ])("%s is refused", async (_name, body) => {
+    const d = tempDir();
+    script(d, "claude", body);
+    const r = await agentVersion({ PATH: d, HOME: d }, "claude");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("refused");
   });
 });

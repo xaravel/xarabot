@@ -4,6 +4,7 @@ import { z } from "zod";
 import { buildPrompt, type BuildPromptInput, type PromptMode } from "../../../src/core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE, type PromptTemplate } from "../../../src/core/prompt/template.ts";
 import { BuildResultSchema } from "../../../src/core/schemas/session-result.ts";
+import { BUILD_AUTO_OUTCOMES } from "../../../src/adapters/agent/claude/claude-agent.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const KEY = "1-7-forge-port-fake-forge-and-contract-suite";
@@ -64,9 +65,20 @@ describe("first build", () => {
   });
   test("result section maps build-auto's halt", () => {
     const r = resultSection(p);
-    for (const kind of ["intent-gap", "verification", "human-live-step", "escalation", "other", "no-op", "blocked.step_id"]) {
+    for (const kind of ["intent-gap", "verification", "human-live-step", "escalation", "other", "blocked.step_id"]) {
       expect(r).toContain(`\`${kind}\``);
     }
+  });
+  test("result section states each AR42 outcome row and offers no no-op", () => {
+    const mapping = resultSection(p).replace(/```json\n[\s\S]*?\n```/, "");
+    for (const row of BUILD_AUTO_OUTCOMES) {
+      const at = mapping.indexOf(`\n- It halted ${row.halt}`);
+      expect(at).toBeGreaterThan(-1);
+      const line = mapping.slice(at + 1, mapping.indexOf("\n", at + 1));
+      expect(line).toContain(`\`outcome\` \`${row.outcome}\``);
+      if (row.kind !== null && row.kind !== "table") expect(line).toContain(`\`blocked.kind\` \`${row.kind}\``);
+    }
+    expect(mapping).not.toContain("no-op");
   });
   test("a Story id with a suffix", () => {
     const q = build({ unit: { kind: "story", id: "1.17a", sprint_key: "1-17a-approval-gate" } });
