@@ -24,6 +24,9 @@ export type Permission =
   | "metadata: read"
   | "checks: read"
   | "actions: read"
+  | "statuses: read"
+  | "issues: write"
+  | "merge_queues: write"
   /** No credential at all: a signed download URL. */
   | "none";
 
@@ -38,6 +41,14 @@ export type Operation = {
   /** A status this operation maps to `conflict` instead of the default kind. */
   readonly conflictOn?: number;
 };
+
+/**
+ * The App permission the merge-queue mutations (`enqueuePullRequest`,
+ * `dequeuePullRequest`) are assumed to need. AR38 is UNVERIFIED: GitHub's docs
+ * do not name it, and no live run has confirmed it yet. The Maintainer settles
+ * it with the AR38 probe (`docs/maintainer/app-permissions.md`).
+ */
+export const ENQUEUE_PERMISSION = "merge_queues: write" satisfies Permission;
 
 export const GITHUB_OPERATIONS = {
   getInstallation: { name: "getInstallation", method: "GET", permission: "app-jwt" },
@@ -57,6 +68,14 @@ export const GITHUB_OPERATIONS = {
   updatePull: { name: "updatePull", method: "PATCH", permission: "pull_requests: write" },
   createComment: { name: "createComment", method: "POST", permission: "pull_requests: write" },
   listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read" },
+  listStatuses: { name: "listStatuses", method: "GET", permission: "statuses: read" },
+  readPullGraph: { name: "readPullGraph", method: "POST", permission: "pull_requests: write" },
+  enqueuePullRequest: { name: "enqueuePullRequest", method: "POST", permission: ENQUEUE_PERMISSION },
+  dequeuePullRequest: { name: "dequeuePullRequest", method: "POST", permission: ENQUEUE_PERMISSION },
+  listIssues: { name: "listIssues", method: "GET", permission: "issues: write" },
+  createIssue: { name: "createIssue", method: "POST", permission: "issues: write" },
+  listIssueComments: { name: "listIssueComments", method: "GET", permission: "issues: write" },
+  createIssueComment: { name: "createIssueComment", method: "POST", permission: "issues: write" },
   getJobLogs: { name: "getJobLogs", method: "GET", permission: "actions: read" },
   downloadLog: { name: "downloadLog", method: "GET", permission: "none" },
 } as const satisfies Readonly<Record<string, Operation>>;

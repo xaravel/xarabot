@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ENQUEUE_PERMISSION,
   formatDate,
   GITHUB_OPERATIONS,
   mapHttpError,
@@ -172,11 +173,54 @@ describe("request", () => {
 
 describe("the operation table", () => {
   test("every entry names itself and a known permission", () => {
-    const permissions = ["app-jwt", "contents: write", "pull_requests: write", "metadata: read", "checks: read", "actions: read", "none"];
+    const permissions = [
+      "app-jwt",
+      "contents: write",
+      "pull_requests: write",
+      "metadata: read",
+      "checks: read",
+      "actions: read",
+      "statuses: read",
+      "issues: write",
+      "merge_queues: write",
+      "none",
+    ];
     for (const [key, op] of Object.entries(GITHUB_OPERATIONS) as [string, Operation][]) {
       expect(op.name).toBe(key);
       expect(permissions).toContain(op.permission);
     }
+  });
+});
+
+describe("docs/maintainer/app-permissions.md", () => {
+  const doc = readFileSync(join(import.meta.dir, "../../../../docs/maintainer/app-permissions.md"), "utf8");
+  /** The table rows: first cell the permission in backticks, second the operations. */
+  const rows = new Map(
+    doc
+      .split("\n")
+      .map((line) => /^\|\s*`([^`]+)`\s*\|([^|]*)\|/.exec(line))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .map((m) => [m[1] as string, m[2] as string]),
+  );
+  const ops = Object.values(GITHUB_OPERATIONS) as Operation[];
+
+  test("has a row for every permission an operation uses, naming its operations", () => {
+    for (const op of ops) {
+      expect([op.permission, rows.has(op.permission)]).toEqual([op.permission, true]);
+      expect([op.name, (rows.get(op.permission) as string).includes(`\`${op.name}\``)]).toEqual([op.name, true]);
+    }
+  });
+
+  test("lists no permission that no operation uses", () => {
+    const used = new Set(ops.map((op) => op.permission));
+    for (const permission of rows.keys()) expect([permission, used.has(permission as Operation["permission"])]).toEqual([permission, true]);
+  });
+
+  test("names ENQUEUE_PERMISSION as unverified in an AR38 section", () => {
+    expect(doc).toContain("## AR38");
+    expect(doc).toContain(ENQUEUE_PERMISSION);
+    expect(doc).toMatch(/unverified/i);
+    expect(doc).toContain("XARABOT_LIVE=1 bun test test/contracts/forge.github.contract.test.ts -t AR38");
   });
 });
 

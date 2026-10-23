@@ -6,25 +6,15 @@ import { loadAppCredentials, type AppCredentials } from "../../src/adapters/forg
 import { createGitHubForge, type SnapshotPart } from "../../src/adapters/forge/github/github-forge.ts";
 import { GITHUB_OPERATIONS, isSuccess, request, SWAP_CONFLICT_STATUS, type Operation } from "../../src/adapters/forge/github/http.ts";
 import { openRunnerGit, runGit, type GitIdentity } from "../../src/adapters/forge/github/runner-git.ts";
-import { createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
-import type { Forge, ForgeOperation, ForgePr, ForgeResult, GitSha } from "../../src/ports/forge.ts";
+import { createAppJwt, createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
+import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgePr, type ForgeResult, type GitSha } from "../../src/ports/forge.ts";
 import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
 import { isLive } from "../support/live.ts";
 import { forgeContract, type ForgeFixture } from "./forge.contract.ts";
 
-/** The operations Stories 1.8 and 1.9 implement; the rest are stubs until Story 1.10. */
-const IMPLEMENTED: readonly ForgeOperation[] = [
-  "snapshot",
-  "ledgerSwap",
-  "pushBranch",
-  "openPr",
-  "updatePr",
-  "closePr",
-  "listPrsByBranch",
-  "comment",
-  "prefetch",
-];
+/** Every operation: Story 1.10 implemented the last ones. */
+const IMPLEMENTED: readonly ForgeOperation[] = FORGE_OPERATIONS;
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const TEST_IDENTITY: GitIdentity = { name: "xarabot test", email: "test@xarabot.invalid" };
@@ -49,7 +39,7 @@ function signal(): AbortSignal {
 forgeContract({
   name: "github (emulator)",
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace"],
+  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace"],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -76,6 +66,7 @@ forgeContract({
         onRead: (part) => trace.push(part),
         runnerGit: gitDir,
         gitUrl: server.url,
+        maintainer: "alice",
       });
       let n = 0;
       return {
@@ -92,6 +83,8 @@ forgeContract({
           setMain: (files) => gh.control.setMain(files),
           setNow: (now) => gh.control.setNow(now),
           writeForeignLedger: (commit) => gh.control.writeForeignLedger(commit),
+          queue: () => gh.control.queue(),
+          mergeQueueHead: () => gh.control.mergeQueueHead(),
           trace: () => [...trace],
         },
         cleanup: async () => {
@@ -111,7 +104,8 @@ forgeContract({
 
 const LIVE_REPO = process.env.XARABOT_LIVE_GITHUB_REPO ?? "";
 const LIVE_LOGIN = process.env.XARABOT_LIVE_GITHUB_LOGIN ?? "";
-const liveEnabled = isLive && LIVE_REPO !== "" && LIVE_LOGIN !== "";
+const LIVE_MAINTAINER = process.env.XARABOT_LIVE_GITHUB_MAINTAINER ?? "";
+const liveEnabled = isLive && LIVE_REPO !== "" && LIVE_LOGIN !== "" && LIVE_MAINTAINER !== "";
 
 /** Test-only: deletes a scratch ledger branch. Not part of the adapter. */
 const DELETE_REF: Operation = { name: "deleteRef (live test cleanup)", method: "DELETE", permission: "contents: write" };
@@ -138,6 +132,8 @@ const encodePath = (branch: string): string => branch.split("/").map(encodeURICo
 /**
  * Wraps a forge so every branch a case names gets `prefix`, and maps the
  * branches in its results back. `touched` collects the real branch names.
+ * Alert conditions get the prefix too, so a re-run's alerts are not
+ * deduplicated against an earlier run's comments on the live inbox.
  */
 function prefixed(forge: Forge, prefix: string, touched: Set<string>): Forge {
   const to = (branch: string): string => {
@@ -156,8 +152,12 @@ function prefixed(forge: Forge, prefix: string, touched: Set<string>): Forge {
       const r = await forge.listPrsByBranch(to(branch), opts);
       return r.ok ? { ok: true, value: r.value.map(back) } : r;
     },
+    alert: (condition, mainSha, opts) => forge.alert(`${condition} [${prefix}]`, mainSha, opts),
   };
 }
+
+/** Test-only: a raw GraphQL read. Not part of the adapter. */
+const GRAPHQL_READ: Operation = { name: "graphql (live test)", method: "POST", permission: "pull_requests: write" };
 
 /**
  * A live scratch area: a ledger branch, a `runner.git`, a forge whose unit
@@ -168,6 +168,7 @@ async function liveScratch(): Promise<{
   branch: string;
   forge: Forge;
   raw: (op: Operation, path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
+  queue: () => Promise<number[]>;
   makeCommit: () => Promise<GitSha>;
   cleanup: () => Promise<void>;
   trace: SnapshotPart[];
@@ -179,7 +180,14 @@ async function liveScratch(): Promise<{
   const dir = mkdtempSync(join(tmpdir(), "xarabot-gh-live-"));
   const gitDir = must(await openRunnerGit(join(dir, "lane"), { signal: signal() }));
   const trace: SnapshotPart[] = [];
-  const inner = createGitHubForge({ repo, credentials, ledgerBranch: branch, onRead: (part) => trace.push(part), runnerGit: gitDir });
+  const inner = createGitHubForge({
+    repo,
+    credentials,
+    ledgerBranch: branch,
+    onRead: (part) => trace.push(part),
+    runnerGit: gitDir,
+    maintainer: LIVE_MAINTAINER,
+  });
   const touched = new Set<string>();
   const forge = prefixed(inner, prefix, touched);
   const tokens = createTokenSource({ credentials, repo });
@@ -188,6 +196,19 @@ async function liveScratch(): Promise<{
     const token = must(await tokens.get(s));
     const r = must(await request({ op, path: `/repos/${repo.owner}/${repo.name}${path}`, token, signal: s, body }));
     return { status: r.status, body: r.body };
+  };
+  /** This fixture's PRs in `main`'s merge queue, front first. */
+  const queue = async (): Promise<number[]> => {
+    const s = signal();
+    const token = must(await tokens.get(s));
+    const query = `query XarabotTestQueue($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number headRefName } } } } }
+}`;
+    const r = must(await request({ op: GRAPHQL_READ, path: "/graphql", token, signal: s, body: { query, variables: repo } }));
+    const body = r.body as { data?: { repository?: { mergeQueue?: { entries?: { nodes?: { pullRequest?: { number: number; headRefName: string } }[] } } | null } } };
+    if (!isSuccess(r.status) || body.data?.repository === undefined) throw new Error(`merge queue read: ${r.status} ${r.text}`);
+    const nodes = body.data.repository.mergeQueue?.entries?.nodes ?? [];
+    return nodes.flatMap((n) => (n.pullRequest !== undefined && n.pullRequest.headRefName.startsWith(prefix) ? [n.pullRequest.number] : []));
   };
 
   const repoUrl = `https://github.com/${repo.owner}/${repo.name}.git`;
@@ -216,6 +237,8 @@ async function liveScratch(): Promise<{
       const listed = await inner.listPrsByBranch(b, { signal: signal() });
       if (listed.ok) {
         for (const pr of listed.value.filter((p) => p.state === "open")) {
+          const dequeued = await inner.dequeue(pr.number, { signal: signal() });
+          if (!dequeued.ok) problems.push(`dequeue #${pr.number}: ${dequeued.error.kind}`);
           const closed = await inner.closePr(pr.number, { signal: signal() });
           if (!closed.ok) problems.push(`close #${pr.number}: ${closed.error.kind}`);
         }
@@ -228,18 +251,18 @@ async function liveScratch(): Promise<{
     rmSync(dir, { recursive: true, force: true });
     if (problems.length > 0) throw new Error(`live cleanup: ${problems.join("; ")}`);
   };
-  return { branch, forge, raw, makeCommit, cleanup, trace };
+  return { branch, forge, raw, queue, makeCommit, cleanup, trace };
 }
 
 forgeContract({
   name: "github (live)",
   enabled: liveEnabled,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "writeForeignLedger", "trace"],
+  controls: ["makeCommit", "comments", "writeForeignLedger", "queue", "trace"],
   make: async (): Promise<ForgeFixture> => {
     const s = await liveScratch();
     // A second adapter instance on the same branch writes as another lane would.
-    const other = createGitHubForge({ repo: liveRepo(), credentials: await liveCredentials(), ledgerBranch: s.branch });
+    const other = createGitHubForge({ repo: liveRepo(), credentials: await liveCredentials(), ledgerBranch: s.branch, maintainer: LIVE_MAINTAINER });
     return {
       forge: s.forge,
       control: {
@@ -249,6 +272,7 @@ forgeContract({
           if (!isSuccess(r.status) || !Array.isArray(r.body)) throw new Error(`list comments of #${pr}: ${r.status}`);
           return r.body.map((c) => String((c as { body?: unknown }).body));
         },
+        queue: s.queue,
         writeForeignLedger: async (commit) => {
           const tip = must(await other.snapshot({ signal: signal() })).ledger.tip;
           return must(await other.ledgerSwap(tip, commit, { signal: signal() })).tip;
@@ -274,6 +298,29 @@ test.skipIf(!liveEnabled)("live: a stale PATCH git/refs answers SWAP_CONFLICT_ST
       force: false,
     });
     expect(patch.status).toBe(SWAP_CONFLICT_STATUS);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test.skipIf(!liveEnabled)("live: AR38 enqueue permission probe", async () => {
+  const s = await liveScratch();
+  try {
+    const credentials = await liveCredentials();
+    const repo = liveRepo();
+    const jwt = createAppJwt(credentials.app.id, credentials.key, Date.now());
+    const installation = must(
+      await request({ op: GITHUB_OPERATIONS.getInstallation, path: `/repos/${repo.owner}/${repo.name}/installation`, token: jwt, signal: signal() }),
+    );
+    const permissions = (installation.body as { permissions?: unknown } | null)?.permissions;
+    const sha = await s.makeCommit();
+    must(await s.forge.pushBranch({ branch: "ar38/probe", expected_sha: null, sha }, { signal: signal() }));
+    const pr = must(await s.forge.openPr({ branch: "ar38/probe", base: "main", title: "AR38 probe (xarabot live test)", body: "Closed by the test." }, { signal: signal() }));
+    const result = await s.forge.enqueue(pr.number, pr.head_sha, { signal: signal() });
+    console.log(`AR38 probe: installation permissions ${JSON.stringify(permissions)}`);
+    console.log(`AR38 probe: enqueue #${pr.number} -> ${JSON.stringify(result)}`);
+    // `ok` or `conflict` (the queue refused the PR) means the permission is enough; anything else settles nothing.
+    expect(["ok", "conflict"]).toContain(result.ok ? "ok" : result.error.kind);
   } finally {
     await s.cleanup();
   }

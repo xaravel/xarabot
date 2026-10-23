@@ -275,7 +275,7 @@ export function forgeContract(harness: ForgeHarness): void {
 
     // ------------------------------------------------------------ deadline
 
-    // Calls only the operations the harness offers (the GitHub adapter's stubs are checked in its own tests).
+    // Calls only the operations the harness offers.
     scenario("every operation with an aborted signal returns transient", [], [], async (fx) => {
       const f = fx.forge;
       const sha = "a".repeat(40);
@@ -466,6 +466,12 @@ export function forgeContract(harness: ForgeHarness): void {
       ];
       await need(fx, "setChecks")(sha, list);
       expect(value(await fx.forge.checks(sha, live()))).toEqual({ checks: list });
+    });
+
+    scenario("checks on a pushed commit with no CI are empty", ["pushBranch", "checks"], ["makeCommit"], async (fx) => {
+      const sha = await need(fx, "makeCommit")();
+      value(await fx.forge.pushBranch({ branch: "story/4.2", expected_sha: null, sha }, live()));
+      expect(value(await fx.forge.checks(sha, live()))).toEqual({ checks: [] });
     });
 
     // ------------------------------------------------------------ queue

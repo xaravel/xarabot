@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAppCredentials } from "../../../../src/adapters/forge/github/credentials.ts";
 import { createGitHubForge, EMPTY_TREE, LEDGER_ROOT_MESSAGE, type SnapshotPart } from "../../../../src/adapters/forge/github/github-forge.ts";
+import { GITHUB_OPERATIONS, type Operation } from "../../../../src/adapters/forge/github/http.ts";
 import { serializeUnitRecord } from "../../../../src/core/ledger/codec.ts";
 import { unitPath } from "../../../../src/core/schemas/ledger.ts";
 import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgeResult } from "../../../../src/ports/forge.ts";
@@ -308,15 +309,16 @@ describe("every operation", () => {
     expect(gh.control.log()).toEqual([]);
   });
 
-  test("the Story 1.10 stubs are forbidden, naming their Story, and make no request", async () => {
-    const { gh, forge } = setup();
-    const c = calls(forge, new AbortController().signal);
-    const story110: readonly ForgeOperation[] = ["checks", "enqueue", "dequeue", "alert"];
-    for (const op of story110) {
-      const r = await c[op]();
-      expect(r.ok ? "ok" : r.error).toEqual({ kind: "forbidden", message: `${op}: not implemented until Story 1.10` });
+  test("the adapter has no merge, auto-merge or branch-delete path", () => {
+    const dir = join(import.meta.dir, "../../../../src/adapters/forge/github");
+    for (const file of readdirSync(dir)) {
+      const source = readFileSync(join(dir, file), "utf8");
+      for (const banned of ["mergePullRequest", "enablePullRequestAutoMerge", '/merge"', "delete_branch", "--delete-branch"]) {
+        expect([file, banned, source.includes(banned)]).toEqual([file, banned, false]);
+      }
     }
-    expect(gh.control.log()).toEqual([]);
+    const deletes = Object.values(GITHUB_OPERATIONS as Readonly<Record<string, Operation>>).filter((op) => op.method === "DELETE");
+    expect(deletes).toEqual([]);
   });
 });
 
