@@ -586,6 +586,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
   - **The key and its record.** The App's key is at `$XDG_CONFIG_HOME/xarabot/apps/<login>-xarabot/private-key.pem` (falling back to `~/.config`), mode 600. `app.json` next to it records the App's ID and slug.
   - **Tokens.** Installation tokens are minted on demand, last 1 hour and stay in memory only.
   - **App rights.** The App has no admin, bypass or approve rights, and the `Forge` port has no approve operation.
+  - **The merge queue needs no permission of its own (AR38, verified live on 2026-10-23).** With only `contents: write` and `pull_requests: write` granted, GitHub authorized `enqueuePullRequest` on the scratch repo twice; neither call was refused for a permission. The table names `contents: write` for `enqueue` and `dequeue`. Which of the two grants covers the mutation was not isolated, since the App needs both anyway.
   - **`workflows: write`** is deliberately absent. A diff that touches `.github/workflows/**` is a write-check refusal (AD-30).
   - **One request function.** Every REST and GraphQL call in the GitHub forge adapter goes through one request function. The function takes an entry from a single operation table in the adapter, which names the operation and the App permission it needs. No other code in the adapter calls `fetch`.
   - **Exactly what is used.** A test fails if an operation needs a permission the App manifest does not ask for, or a higher level than it asks for. It also fails if the manifest asks for a permission no operation needs.
@@ -594,12 +595,11 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
 | Permission | Operations |
 | --- | --- |
 | `metadata: read` | GitHub grants it to every App; the table lists it so the manifest matches exactly. Repository lookups. |
-| `contents: write` | Reading files and trees from `main` for the snapshot and `prefetch`; `ledgerSwap` (`PATCH git/refs` and the commits it writes). Git fetches and pushes (`pushBranch`) also need it; they go through the credential helper (AD-18), not the request function. |
+| `contents: write` | Reading files and trees from `main` for the snapshot and `prefetch`; `ledgerSwap` (`PATCH git/refs` and the commits it writes); `enqueue` and `dequeue` (GraphQL `enqueuePullRequest` and `dequeuePullRequest`). Git fetches and pushes (`pushBranch`) also need it; they go through the credential helper (AD-18), not the request function. |
 | `pull_requests: write` | PR open, update, close and state reads; `postReview`; `comment` |
 | `issues: write` | The inbox issue: its body (`renderDigest`), the daily digest comment, `alert`, `readRulings` and ruling acknowledgements |
 | `checks: read`, `statuses: read` | `checks` |
 | `actions: read` | `prefetch` of CI logs for a CI-fix session |
-| The merge-queue permission (an open item, Deferred) | `enqueue`, `dequeue` |
 | None: no installation token | `xarabot join`'s manifest conversion, and the App-JWT calls: reading the App, finding the installation and minting installation tokens |
 | `administration: read`, which the App never has | Branch-protection reads for the consumer prerequisite checks (AD-33). They report "unverified", and the lane continues with a warning. |
 
@@ -705,7 +705,7 @@ Every move out of `merging` other than to `merged` dequeues the PR first. Every 
     - the merge queue enabled on `main`;
     - squash messages set to PR title + body;
     - Protected Paths requiring the owner's review, with stale approvals dismissed on push and approval of the most recent push required;
-    - the App installed with `issues: write` and the merge-queue permission (AD-26).
+    - the App installed with `issues: write` (AD-26).
 
 ## Consistency Conventions
 
@@ -856,7 +856,6 @@ bootstrap/     # join.ts; the bootstrap loop copy runs as a dedicated macOS user
 - **Rotating the App key.**
 - **Linux sandbox packaging:** the AppArmor user-namespace profile on Ubuntu 24.04+, and where `bwrap` comes from.
 - **Open items:**
-  - **The App permission the merge queue's `enqueuePullRequest` needs.** GitHub's docs don't state it. Verify with a live test before the merge-plumbing Story.
   - **Which response from `PATCH git/refs` means "retry the swap"** (409 or 422). The contract suite settles it.
   - **Adapter Story spikes**, `claude`'s in its first adapter Story, before the code that needs it:
     - for each adapter, how `bmad-build-auto`'s outcomes (a `ready-for-dev` halt; it never yields `no-op`) map onto the `build` result, and session resume (AD-14);
