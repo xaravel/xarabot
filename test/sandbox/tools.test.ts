@@ -88,7 +88,8 @@ describe("resolveTools", () => {
     const run = Bun.spawnSync([git?.path ?? "git", "--exec-path"]);
     const execPath = realpathSync(run.stdout.toString().trim());
     expect(r.value.dirs).toContain(execPath);
-    expect(git?.path).not.toBe("/usr/bin/git");
+    // /usr/bin/git is the xcrun shim on macOS only; elsewhere it is the real git.
+    if (process.platform === "darwin") expect(git?.path).not.toBe("/usr/bin/git");
   });
 });
 

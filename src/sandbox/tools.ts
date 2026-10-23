@@ -92,9 +92,9 @@ function real(path: string): string | null {
   }
 }
 
-/** The real git behind the xcrun shim, or the git found itself. */
+/** The real git behind the xcrun shim, or the git found itself (`/usr/bin/git` is real where there is no xcrun, as on Linux). */
 async function realGit(found: string, launching: LaunchingEnv): Promise<string | null> {
-  if (found !== XCRUN_GIT_SHIM) return found;
+  if (found !== XCRUN_GIT_SHIM || !isExecutableFile(XCRUN)) return found;
   const located = await probe([XCRUN, "--find", "git"], launching);
   if (located === null || !isAbsolute(located)) return null;
   const path = real(located);
