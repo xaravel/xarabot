@@ -242,12 +242,19 @@ function bareName(specifier: string): string {
   return specifier.split("/")[0] as string;
 }
 
-/** Applies the layer table, core purity and the agent spawn ban to one file. */
+/** The macOS sandbox launcher, named in code (strings included, comments not). */
+const SANDBOX_EXEC = /sandbox-exec/;
+
+/** Applies the layer table, core purity, the agent spawn ban and the `sandbox-exec` rule to one file. */
 export function checkSource(path: string, source: string): Violation[] {
   const filePath = posix.normalize(path);
   const here = locate(filePath);
   const violations: Violation[] = [];
   const { code, bare } = strip(source);
+
+  if (filePath.startsWith("src/") && !filePath.startsWith("src/sandbox/") && SANDBOX_EXEC.test(code)) {
+    violations.push({ path: filePath, rule: "spawn", detail: "only src/sandbox/ may name sandbox-exec" });
+  }
 
   if (here === undefined) {
     if (filePath.startsWith("src/")) {

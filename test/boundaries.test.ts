@@ -213,6 +213,38 @@ describe("I/O matrix", () => {
   });
 });
 
+describe("sandbox-exec", () => {
+  test.each([
+    ["src/adapters/agent/claude/x.ts", 'const argv = ["sandbox-exec", "-p", profile];'],
+    ["src/adapters/forge/github/x.ts", "const bin = `/usr/bin/sandbox-exec`;"],
+    ["src/lane/x.ts", "const bin = '/usr/bin/sandbox-exec';"],
+    ["src/cli/x.ts", 'const tool = "sandbox-exec";'],
+    ["src/ports/x.ts", 'export const LAUNCHER = "sandbox-exec";'],
+    ["src/core/x.ts", 'const s = "sandbox-exec";'],
+  ])("%s may not name it", (path, source) => {
+    expect(checkSource(path, source)).toEqual([{ path, rule: "spawn", detail: "only src/sandbox/ may name sandbox-exec" }]);
+  });
+
+  test("a file outside every layer may not name it either", () => {
+    expect(checkSource("src/stray.ts", 'const s = "sandbox-exec";').map((v) => v.detail)).toEqual([
+      "only src/sandbox/ may name sandbox-exec",
+      "file is outside every layer",
+    ]);
+  });
+
+  test("src/sandbox/ may name it", () => {
+    expect(checkSource("src/sandbox/macos.ts", 'const DEFAULT = "/usr/bin/sandbox-exec";')).toEqual([]);
+  });
+
+  test("a comment elsewhere may mention it", () => {
+    expect(checkSource("src/lane/x.ts", "// the sandbox runs sandbox-exec for us")).toEqual([]);
+  });
+
+  test("files outside src/ are not checked", () => {
+    expect(checkSource("test/sandbox/x.ts", 'const s = "sandbox-exec";')).toEqual([]);
+  });
+});
+
 describe("outside the layers", () => {
   test("a file directly under src/ is a violation", () => {
     expect(checkSource("src/stray.ts", "")).toEqual([
