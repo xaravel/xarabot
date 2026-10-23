@@ -1,0 +1,588 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
+import { parseLedger } from "../../src/core/ledger/codec.ts";
+import type { NextStory } from "../../src/core/next/next.ts";
+import { err, ok } from "../../src/core/result.ts";
+import type { Lane } from "../../src/core/schemas/host.ts";
+import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
+import type { UnitRecord } from "../../src/core/schemas/ledger.ts";
+import type { BuildResult } from "../../src/core/schemas/session-result.ts";
+import type { CommitOutcome } from "../../src/lane/commit.ts";
+import type { CommitRequest, Committer } from "../../src/lane/committer.ts";
+import { runLaneProcess, type PrStepInput } from "../../src/lane/lane-process.ts";
+import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { createPrStep, prText, statusComment, type PrStepDeps } from "../../src/lane/pr-step.ts";
+import type { Workspace } from "../../src/lane/workspace.ts";
+import type { Agent } from "../../src/ports/agent.ts";
+import type { Forge, ForgeError, ForgeOperation } from "../../src/ports/forge.ts";
+import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
+import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+
+// ------------------------------------------------------------------ world
+
+const AUTHORITY = "docs/standing-authority.md";
+const SPEC_DIR = "_bmad-output/implementation-artifacts";
+const UNIT = "story:1.1";
+const BRANCH = "story/1.1";
+const opts = () => ({ signal: AbortSignal.timeout(5000) });
+
+function mainFiles(o: { readonly authority?: "ok" | "missing" | "expired" } = {}): Record<string, string> {
+  const files: Record<string, string> = {
+    ".xarabot/config.yaml": [
+      "schema_version: 1",
+      'runner_version: "0.1.0"',
+      "maintainer: edanisko",
+      `standing_authority_path: ${AUTHORITY}`,
+      "manifests:",
+      "  dir: stories",
+      "proxy_hosts: [files.pythonhosted.org]",
+      "",
+    ].join("\n"),
+    ".xarabot/policy.yaml": "schema_version: 1\n",
+    ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
+    "_bmad-output/planning-artifacts/epics.md": "# Epics\n\n## Epic 1: One\n\n### Story 1.1: Story 1.1\n\nBody.\n",
+    "_bmad-output/implementation-artifacts/epic-1-context.md": "# Epic 1 Context: One\n\nGoal.\n",
+    [`${SPEC_DIR}/sprint-status.yaml`]: "development_status:\n  epic-1: in-progress\n  1-1-first: backlog\n",
+    "stories/1.1.md": '---\nstory_id: "1.1"\nepic: 1\nsprint_key: 1-1-first\ntitle: Story 1.1\nglobs: ["src/s0/**"]\n---\n',
+  };
+  const a = o.authority ?? "ok";
+  if (a !== "missing") {
+    const expires = a === "expired" ? "expires: 2026-10-01\n" : "";
+    files[AUTHORITY] = `---\nschema_version: 1\ngranted_by: edanisko\ngranted_at: 2026-09-01\nrepo: xaravel/xarabot\n${expires}---\n\nGranted.\n`;
+  }
+  return files;
+}
+
+const STORY: NextStory = {
+  unit: UNIT,
+  story_id: "1.1",
+  epic: 1,
+  sprint_key: "1-1-first",
+  title: "Story 1.1",
+  manifest_path: "stories/1.1.md",
+  manifest_sha: "f".repeat(40),
+  globs: ["src/s0/**"],
+  infrastructure: false,
+  expect_generation: null,
+};
+
+function result(over: Partial<Pick<BuildResult, "summary" | "body" | "denied_actions">> = {}): BuildResult {
+  return { kind: "build", outcome: "done", summary: "Did it", body: "", verification: ["bun test"], denied_actions: [], ...over };
+}
+
+/** A forge that records each operation called. */
+function spied(forge: Forge): { forge: Forge; calls: ForgeOperation[] } {
+  const calls: ForgeOperation[] = [];
+  const out = {} as Record<string, unknown>;
+  for (const [name, fn] of Object.entries(forge)) {
+    out[name] = (...args: unknown[]) => {
+      calls.push(name as ForgeOperation);
+      return (fn as (...a: unknown[]) => unknown)(...args);
+    };
+  }
+  return { forge: out as Forge, calls };
+}
+
+type StubCommitter = Committer & { readonly requests: CommitRequest[] };
+
+/** A committer returning `outcome`; `committed` gets a fresh head on `ontoSha`. */
+function stubCommitter(fake: FakeForge, outcome: "committed" | CommitOutcome | "error" = "committed"): StubCommitter {
+  const requests: CommitRequest[] = [];
+  return {
+    requests,
+    async commit(r) {
+      requests.push(r);
+      if (outcome === "error") return err("git", "boom");
+      if (outcome === "committed") return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() });
+      return ok(outcome);
+    },
+  };
+}
+
+type World = {
+  readonly fake: FakeForge;
+  readonly calls: ForgeOperation[];
+  readonly committer: StubCommitter;
+  readonly record: UnitRecord;
+  readonly main: string;
+  readonly logs: string[];
+  run(input?: Partial<PrStepInput>, deps?: Partial<PrStepDeps>): ReturnType<ReturnType<typeof createPrStep>>;
+  ledger(): Promise<UnitRecord | undefined>;
+};
+
+async function world(
+  o: { readonly authority?: "ok" | "missing" | "expired"; readonly record?: Partial<UnitRecord>; readonly commit?: "committed" | CommitOutcome | "error" } = {},
+): Promise<World> {
+  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o) });
+  const s = await fake.forge.snapshot(opts());
+  if (!s.ok) throw new Error(s.error.message);
+  const main = s.value.main.sha;
+  const record = rec({ unit: UNIT, globs: ["src/s0/**"], base_sha: main, ...o.record });
+  fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([record]), deletes: [] });
+  const spy = spied(fake.forge);
+  const committer = stubCommitter(fake, o.commit);
+  const logs: string[] = [];
+  return {
+    fake,
+    calls: spy.calls,
+    committer,
+    record,
+    main,
+    logs,
+    run: (input = {}, deps = {}) =>
+      createPrStep({ forge: spy.forge, committer, identity: ALICE, repo: "xaravel/xarabot", sleep: async () => {}, random: () => 0, ...deps })({
+        unit: STORY,
+        record,
+        result: result(),
+        specPath: `${SPEC_DIR}/spec-1-1-first.md`,
+        clone: "/nonexistent/clone",
+        signal: AbortSignal.timeout(60_000),
+        log: (t) => logs.push(t),
+        ...input,
+      }),
+    async ledger() {
+      const snap = await fake.forge.snapshot(opts());
+      if (!snap.ok) throw new Error(snap.error.message);
+      const l = parseLedger(snap.value.ledger.files);
+      if (!l.ok) throw new Error(l.error.message);
+      return l.value.units.get(UNIT);
+    },
+  };
+}
+
+async function prs(fake: FakeForge) {
+  const l = await fake.forge.listPrsByBranch(BRANCH, opts());
+  if (!l.ok) throw new Error(l.error.message);
+  return l.value;
+}
+
+// -------------------------------------------------------------- pure parts
+
+describe("prText and statusComment", () => {
+  test("the body is the summary alone when the body is blank, else summary, blank line, body", () => {
+    expect(prText(STORY, { summary: "S", body: "  \n" })).toEqual({ title: "Story 1.1: Story 1.1", body: "S" });
+    expect(prText(STORY, { summary: "S", body: "B" })).toEqual({ title: "Story 1.1: Story 1.1", body: "S\n\nB" });
+  });
+
+  test("the comment names the Story, short head and lane, and lists denied actions or none", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    expect(statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: [] })).toBe(
+      "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions: none.\n",
+    );
+    expect(statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: ["git push", "@bob rm", "two\nlines"] })).toBe(
+      "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions:\n- git push\n- bob rm\n- two lines\n",
+    );
+  });
+
+  test("line breaks collapse before sanitizing, and actions that sanitize to nothing are skipped", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    const comment = (deniedActions: string[]) => statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions });
+    expect(comment(["fixes\n#12", "closes\nowner/repo#3", "Co-Authored-By: X <x@y>"])).toBe(
+      "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions: none.\n",
+    );
+    expect(comment(["rm -rf\n/tmp, fixes\n#12", "Co-Authored-By: X <x@y>"])).toBe(
+      "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions:\n- rm -rf /tmp,\n",
+    );
+  });
+});
+
+// -------------------------------------------------------------- the matrix
+
+describe("createPrStep", () => {
+  test("happy path: commit onto fresh main, push with a null lease, open the PR, record it, comment", async () => {
+    const w = await world();
+    const out = await w.run();
+    expect(out.outcome).toBe("progress");
+    expect(out.state).toBe("claimed");
+    expect(w.committer.requests).toHaveLength(1);
+    expect(w.committer.requests[0]).toMatchObject({ unit: UNIT, ontoSha: w.main, message: "1.1: Did it" });
+
+    const list = await prs(w.fake);
+    expect(list).toHaveLength(1);
+    const pr = list[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(pr).toMatchObject({ state: "open", base: "main", title: "Story 1.1: Story 1.1", body: "Did it" });
+
+    const record = await w.ledger();
+    expect(record).toMatchObject({ state: "claimed", generation: 1, pr: pr.number, pr_owner: "alice", head_sha: pr.head_sha, base_sha: w.main });
+    expect(out.record).toEqual(record as UnitRecord);
+
+    const comments = w.fake.control.comments(pr.number);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.startsWith("🤖")).toBe(true);
+    expect(comments[0]).toContain("Story 1.1");
+    expect(comments[0]).toContain(pr.head_sha.slice(0, 7));
+    expect(comments[0]).toContain("builder-1");
+    expect(comments[0]).toContain("Denied actions: none.");
+    expect(w.fake.control.ledgerLog().map((c) => c.message)).toEqual([
+      "root",
+      "seed [skip ci]",
+      "ledger: heartbeat story:1.1 [skip ci]",
+      "ledger: heartbeat story:1.1 [skip ci]",
+    ]);
+    expect(w.calls.filter((c) => c === "pushBranch" || c === "openPr" || c === "comment")).toEqual(["pushBranch", "openPr", "comment"]);
+    expect(w.fake.control.alerts()).toEqual([]);
+  });
+
+  test("attribution and mentions never reach the title, body or comment", async () => {
+    const w = await world();
+    const out = await w.run({
+      unit: { ...STORY, title: "Story with @carol" },
+      result: result({
+        summary: "Did it for @someone",
+        body: "Details, fixes #12.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+        denied_actions: ["@someone push", "Co-Authored-By: X <x@y>"],
+      }),
+    });
+    expect(out.outcome).toBe("progress");
+    const pr = (await prs(w.fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    const comment = w.fake.control.comments(pr.number).join("\n");
+    for (const text of [pr.title, pr.body, comment]) {
+      expect(text).not.toContain("@");
+      expect(text.toLowerCase()).not.toContain("co-authored-by");
+    }
+    expect(pr.body).toContain("Did it for someone");
+  });
+
+  test("adopted PR: push leased on the recorded head, update the PR, open none", async () => {
+    const w = await world();
+    // Put an open PR on the branch and record it as adopted.
+    const h0 = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: h0 }, opts())).ok).toBe(true);
+    const opened = await w.fake.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const number = opened.value.number;
+    const adopted = rec({ unit: UNIT, globs: ["src/s0/**"], pr: number, pr_owner: "alice", head_sha: h0, base_sha: w.main });
+    w.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([adopted]), deletes: [] });
+
+    const out = await w.run({ record: adopted });
+    expect(out.outcome).toBe("progress");
+    const list = await prs(w.fake);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ number: number, title: "Story 1.1: Story 1.1", body: "Did it", state: "open" });
+    expect(list[0]?.head_sha).not.toBe(h0);
+    expect(w.calls).not.toContain("openPr");
+    expect(w.calls).toContain("updatePr");
+    expect(await w.ledger()).toMatchObject({ pr: number, head_sha: list[0]?.head_sha, base_sha: w.main });
+  });
+
+  test.each(["missing", "expired"] as const)("Standing Authority %s: stop with no push, no PR, no ledger edit, no alert", async (authority) => {
+    const w = await world({ authority });
+    const before = w.fake.control.ledgerLog().length;
+    const out = await w.run();
+    expect(out.outcome).toBe("stop");
+    expect(out.state).toBe("claimed");
+    expect(out.reason).toContain(authority === "missing" ? "missing" : "authority-expired");
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await prs(w.fake)).toEqual([]);
+    expect(w.fake.control.ledgerLog()).toHaveLength(before);
+    expect(w.fake.control.alerts()).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "claimed", pr: null });
+  });
+
+  test("denied actions are listed in the comment, sanitized and in order", async () => {
+    const w = await world();
+    await w.run({ result: result({ denied_actions: ["git push", "@bob rm"] }) });
+    const pr = (await prs(w.fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(w.fake.control.comments(pr.number)[0]).toContain("Denied actions:\n- git push\n- bob rm\n");
+  });
+
+  test("lease conflict: the branch is at another SHA, so no PR and the unit is released", async () => {
+    const w = await world();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: w.fake.control.makeCommit() }, opts())).ok).toBe(true);
+    const out = await w.run();
+    expect(out.outcome).toBe("failed");
+    expect(out.state).toBe("released");
+    expect(out.reason).toContain("pushBranch conflict");
+    expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("commit conflict: no push, released", async () => {
+    const w = await world({ commit: { kind: "conflict", paths: ["a"] } });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("a committer error is a failed attempt", async () => {
+    const w = await world({ commit: "error" });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("commit git: boom");
+  });
+
+  test("empty commit: parked blocked no-op, no push, progress", async () => {
+    const w = await world({ commit: { kind: "empty" } });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await w.ledger()).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "no-op" }, attempts: 0 });
+  });
+
+  test("lost claim: another lane bumped the generation, so no push and no ledger edit", async () => {
+    const w = await world();
+    const theirs = rec({ unit: UNIT, globs: ["src/s0/**"], generation: 2, owner: BOB.owner, host: BOB.host, lane: BOB.lane });
+    w.fake.control.writeForeignLedger({ message: "takeover [skip ci]", writes: tip([theirs]), deletes: [] });
+    const before = w.fake.control.ledgerLog().length;
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("unit lost");
+    expect(w.calls).not.toContain("pushBranch");
+    expect(w.fake.control.ledgerLog()).toHaveLength(before);
+    expect(await w.ledger()).toMatchObject({ generation: 2, owner: "bob" });
+  });
+
+  test.each(["auth", "forbidden", "uninstalled"] as const)("forge %s on pushBranch: alert forge-<kind> on fresh main and stop", async (kind) => {
+    const w = await world();
+    w.fake.control.injectError("pushBranch", { kind, message: "nope" } as ForgeError);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "stop", state: "claimed" });
+    expect(w.fake.control.alerts()).toEqual([{ condition: `forge-${kind}`, main_sha: w.main }]);
+    expect(await prs(w.fake)).toEqual([]);
+  });
+
+  test("forge auth on the snapshot: alert with 40 zeros and stop", async () => {
+    const w = await world();
+    w.fake.control.injectError("snapshot", { kind: "auth", message: "bad token" });
+    const out = await w.run();
+    expect(out.outcome).toBe("stop");
+    expect(w.fake.control.alerts()).toEqual([{ condition: "forge-auth", main_sha: "0".repeat(40) }]);
+    expect(w.committer.requests).toHaveLength(0);
+  });
+
+  test("a failed status comment is noted; the PR stays recorded and the outcome is progress", async () => {
+    const w = await world();
+    w.fake.control.injectError("comment", { kind: "transient", message: "down" });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(out.reason).toContain("status comment");
+    const pr = (await prs(w.fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(w.fake.control.comments(pr.number)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ pr: pr.number, head_sha: pr.head_sha });
+    expect(w.logs.some((l) => l.includes("status comment failed"))).toBe(true);
+  });
+
+  test("budget: a signal aborted before the push means no push and a release", async () => {
+    const w = await world();
+    const ctl = new AbortController();
+    ctl.abort();
+    const out = await w.run({ signal: ctl.signal });
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("budget");
+    expect(w.committer.requests).toHaveLength(0);
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("ledger times are the forge's now plus the host time since the snapshot", async () => {
+    const w = await world();
+    let host = Date.parse("2001-01-01T00:00:00Z");
+    const out = await w.run({}, { now: () => (host += 5000) });
+    expect(out.outcome).toBe("progress");
+    // Clock reads: the snapshot, the fence, then the record heartbeat.
+    expect((await w.ledger())?.heartbeat_at).toBe("2026-10-23T10:00:10.000Z");
+  });
+
+  test("an unknown schema_version found by the fence alerts ledger-schema-version and stops", async () => {
+    const w = await world();
+    const v2 = JSON.stringify({ ...w.record, schema_version: 2 });
+    w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.1.json": v2 }, deletes: [] });
+    const out = await w.run();
+    expect(out.outcome).toBe("stop");
+    expect(w.fake.control.alerts()).toEqual([{ condition: "ledger-schema-version", main_sha: w.main }]);
+    expect(w.calls).not.toContain("pushBranch");
+  });
+
+  test("an openPr failure is a failed attempt", async () => {
+    const w = await world();
+    w.fake.control.injectError("openPr", { kind: "transient", message: "down" });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("openPr transient");
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("the attempts cap parks the unit on a failed attempt", async () => {
+    const w = await world({ record: { attempts: 2 }, commit: { kind: "conflict", paths: ["a"] } });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "parked" });
+    expect(await w.ledger()).toMatchObject({ state: "parked", attempts: 3, park: { reason: "attempts-cap" } });
+  });
+});
+
+// -------------------------------------------------------------- end to end
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+const LANE: Lane = { repo: "xaravel/xarabot", role: "builder", owner: "alice", agent: "claude", effort: "high" };
+
+function writeIn(root: string, path: string, text: string): void {
+  mkdirSync(dirname(join(root, path)), { recursive: true });
+  writeFileSync(join(root, path), text);
+}
+
+type EndToEndHooks = {
+  /** Runs before the lane process starts. */
+  readonly before?: (fake: FakeForge) => Promise<void> | void;
+  /** Runs inside the session, after the claim and before the PR step. */
+  readonly during?: (fake: FakeForge) => void;
+};
+
+async function endToEnd(
+  deniedActions: readonly string[],
+  hooks: EndToEndHooks = {},
+): Promise<{ fake: FakeForge; journal: UnitJournalRecord; outcome: string }> {
+  const root = mkdtempSync(join(tmpdir(), "xarabot-prstep-"));
+  dirs.push(root);
+  const laneDir = join(root, "lanes", "builder-1");
+  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles() });
+
+  const agent: Agent = {
+    vendor: "claude",
+    defaultModel: "claude-opus-5-5",
+    minVersion: "2.1.304",
+    launchSpec: (_unit, settings, resultPath) =>
+      ok({
+        argv: ["stub-agent", settings.effort, resultPath],
+        stdin: "",
+        vendor: "claude",
+        vendorHomeEnv: "STUB_HOME",
+        credential: { file: "token", env: "STUB_TOKEN" },
+        apiHosts: ["api.example.com"],
+      } as LaunchSpec),
+    parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
+    effortValues: () => ["high"],
+    startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
+  };
+  const sandbox: Sandbox = {
+    async run(_spec, profile) {
+      hooks.during?.(fake);
+      writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, "---\ntitle: 'Story'\nstatus: 'done'\n---\n\n# Story\n\n## Auto Run Result\n\nStatus: done\n");
+      writeFileSync(
+        profile.resultPath,
+        JSON.stringify({ kind: "build", outcome: "done", summary: "Did it", body: "", verification: ["bun test"], denied_actions: deniedActions }),
+      );
+      return ok({ pid: 999, exitCode: 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
+    },
+  };
+  const workspace: Workspace = {
+    async prepare(p) {
+      const clone = join(laneDir, "clone");
+      rmSync(clone, { recursive: true, force: true });
+      writeIn(clone, "README.md", "hello\n");
+      return ok({ sha: p.start, resumed: false });
+    },
+  };
+  const prStep = createPrStep({
+    forge: fake.forge,
+    committer: stubCommitter(fake),
+    identity: ALICE,
+    repo: LANE.repo,
+    sleep: async () => {},
+    random: () => 0,
+  });
+  await hooks.before?.(fake);
+  const r = await runLaneProcess({
+    forge: fake.forge,
+    agent,
+    sandbox,
+    store: createFsLaneStore({ laneDir, hostStop: join(root, "home", ".xarabot", "STOP") }),
+    workspace,
+    prStep,
+    laneDir,
+    identity: ALICE,
+    lane: LANE,
+    pid: 12345,
+    sleep: async () => {},
+    random: () => 0,
+  });
+  const path = join(laneDir, "journal.jsonl");
+  const records = existsSync(path)
+    ? readFileSync(path, "utf8")
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => JSON.parse(l) as JournalRecord)
+    : [];
+  const units = records.filter((x): x is UnitJournalRecord => x.type === "unit");
+  expect(units).toHaveLength(1);
+  return { fake, journal: units[0] as UnitJournalRecord, outcome: r.outcome };
+}
+
+async function ledgerRecord(fake: FakeForge): Promise<UnitRecord | undefined> {
+  const snap = await fake.forge.snapshot(opts());
+  if (!snap.ok) throw new Error(snap.error.message);
+  const l = parseLedger(snap.value.ledger.files);
+  if (!l.ok) throw new Error(l.error.message);
+  return l.value.units.get(UNIT);
+}
+
+describe("runLaneProcess with createPrStep", () => {
+  test("a lease conflict: the journal carries the step's record and reason", async () => {
+    const { fake, journal, outcome } = await endToEnd([], {
+      before: async (f) => {
+        expect((await f.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: f.control.makeCommit() }, opts())).ok).toBe(true);
+      },
+    });
+    expect(outcome).toBe("failed");
+    expect(journal).toMatchObject({ outcome: "failed", state: "released", attempts: 1 });
+    expect(journal.reason).toContain("pushBranch conflict");
+    expect(await prs(fake)).toEqual([]);
+  });
+
+  test("the Standing Authority removed after the claim: stop, no PR, the record still claimed", async () => {
+    const { fake, journal, outcome } = await endToEnd([], {
+      during: (f) => {
+        const files = mainFiles();
+        delete files[AUTHORITY];
+        f.control.setMain(files);
+      },
+    });
+    expect(outcome).toBe("stop");
+    expect(journal).toMatchObject({ outcome: "stop", state: "claimed" });
+    expect(await prs(fake)).toEqual([]);
+    expect(await ledgerRecord(fake)).toMatchObject({ state: "claimed", pr: null });
+  });
+
+  test("happy path: one open PR on story/1.1 whose head is the commit, recorded in the ledger and journal", async () => {
+    const { fake, journal, outcome } = await endToEnd([]);
+    expect(outcome).toBe("progress");
+    const list = await prs(fake);
+    expect(list).toHaveLength(1);
+    const pr = list[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(pr.state).toBe("open");
+    const snap = await fake.forge.snapshot(opts());
+    if (!snap.ok) throw new Error(snap.error.message);
+    const l = parseLedger(snap.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    expect(l.value.units.get(UNIT)).toMatchObject({
+      state: "claimed",
+      pr: pr.number,
+      pr_owner: "alice",
+      head_sha: pr.head_sha,
+      base_sha: snap.value.main.sha,
+    });
+    expect(journal).toMatchObject({ outcome: "progress", state: "claimed", result: "done", generation: 1 });
+    expect(fake.control.comments(pr.number)[0]).toContain("Denied actions: none.");
+    expect(readFileSync(journal.log, "utf8")).toContain("PR step: opened PR #");
+  });
+
+  test("denied actions land in both the journal and the status comment", async () => {
+    const { fake, journal } = await endToEnd(["git push", "@bob rm"]);
+    expect(journal.denied_actions).toEqual(["git push", "@bob rm"]);
+    const pr = (await prs(fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(fake.control.comments(pr.number)[0]).toContain("Denied actions:\n- git push\n- bob rm\n");
+  });
+});

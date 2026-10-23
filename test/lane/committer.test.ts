@@ -1,0 +1,129 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { err, ok, type Result } from "../../src/core/result.ts";
+import { rebuildClone, type RebuildParams } from "../../src/lane/clone.ts";
+import { createGitCommitter } from "../../src/lane/committer.ts";
+import type { FetchShas } from "../../src/lane/workspace.ts";
+import { BOT, BRANCH, cleanup, commit, files, live, rg, setup, UNIT, value, type Repo } from "./git-fixture.ts";
+
+afterEach(cleanup);
+
+function rebuild(repo: Repo, sha: string, over: Partial<RebuildParams> = {}): RebuildParams {
+  return { gitDir: repo.gitDir, clone: repo.clone, unit: UNIT, branch: BRANCH, sha, generation: 1, resumeWip: false, ...live(), ...over };
+}
+
+/** A fetch that records its calls and fails. */
+function noFetch(): { calls: (readonly string[])[]; fetch: FetchShas } {
+  const calls: (readonly string[])[] = [];
+  return {
+    calls,
+    fetch: async (shas) => {
+      calls.push([...shas]);
+      return err("fetch", "offline");
+    },
+  };
+}
+
+/** Plain git fetch of `ref` from another repo (test only; the runner's git refuses file transport). */
+function plainFetch(gitDir: string, from: string, ref: string): Result<void> {
+  const p = Bun.spawnSync(["git", `--git-dir=${gitDir}`, "fetch", "-q", from, `${ref}:${ref}`], {
+    env: { PATH: process.env.PATH ?? "", HOME: gitDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+  });
+  return p.exitCode === 0 ? ok(undefined) : err("fetch", p.stderr.toString());
+}
+
+describe("createGitCommitter", () => {
+  test("commits the session onto a newer main as the bot, with no fetch when main is present", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { a: "a1\na2\na3\n", b: "b1\nb2\nb3\n" });
+    const onto = await commit(repo.gitDir, { a: "a1\na2\na3\n", b: "b1\nMAIN\nb3\n" }, [base]);
+    value(await rebuildClone(rebuild(repo, base)));
+    writeFileSync(join(repo.clone, "a"), "a1\nSESSION\na3\n");
+    const f = noFetch();
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: f.fetch });
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it\n\nCo-Authored-By: X <x@y>\n", ...live() }));
+    if (r.kind !== "committed") throw new Error(r.kind);
+    expect(f.calls).toEqual([]);
+    expect(r.base_sha).toBe(onto);
+    expect(await rg(repo.gitDir, ["log", "-1", "--format=%P", r.head_sha])).toBe(onto);
+    expect(await rg(repo.gitDir, ["log", "-1", "--format=%an <%ae>|%cn <%ce>", r.head_sha])).toBe(`${BOT.name} <${BOT.email}>|${BOT.name} <${BOT.email}>`);
+    expect(await rg(repo.gitDir, ["log", "-1", "--format=%B", r.head_sha])).toBe("1.15: Did it");
+    expect(await files(repo.gitDir, r.head_sha)).toEqual({ a: "a1\nSESSION\na3", b: "b1\nMAIN\nb3" });
+  });
+
+  test("fetches ontoSha only when runner.git lacks it", async () => {
+    const repo = await setup();
+    const other = await setup();
+    const base = await commit(other.gitDir, { a: "a\n", b: "b\n" });
+    const onto = await commit(other.gitDir, { a: "a\n", b: "MAIN\n" }, [base]);
+    await rg(other.gitDir, ["update-ref", "refs/x/base", base]);
+    await rg(other.gitDir, ["update-ref", "refs/x/onto", onto]);
+    value(plainFetch(repo.gitDir, other.gitDir, "refs/x/base"));
+    value(await rebuildClone(rebuild(repo, base)));
+    writeFileSync(join(repo.clone, "a"), "SESSION\n");
+
+    const calls: (readonly string[])[] = [];
+    const fetch: FetchShas = async (shas) => {
+      calls.push([...shas]);
+      return plainFetch(repo.gitDir, other.gitDir, "refs/x/onto");
+    };
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch });
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it", ...live() }));
+    if (r.kind !== "committed") throw new Error(r.kind);
+    expect(calls).toEqual([[onto]]);
+    expect(await files(repo.gitDir, r.head_sha)).toEqual({ a: "SESSION", b: "MAIN" });
+
+    // A second commit finds ontoSha present and fetches nothing.
+    value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: again", ...live() }));
+    expect(calls).toEqual([[onto]]);
+  });
+
+  test("a failed fetch of a missing ontoSha is a fetch error", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { a: "a\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    const f = noFetch();
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: f.fetch });
+    const missing = "e".repeat(40);
+    const r = await committer.commit({ unit: UNIT, ontoSha: missing, message: "m", ...live() });
+    expect(r.ok ? "ok" : r.error.kind).toBe("fetch");
+    expect(f.calls).toEqual([[missing]]);
+  });
+
+  test("an adopted PR head: the base is merge-base(start, main), so the whole PR lands on fresh main", async () => {
+    const repo = await setup();
+    const m0 = await commit(repo.gitDir, { a: "a1\na2\na3\n", b: "b1\nb2\nb3\n", c: "c\n" });
+    const head = await commit(repo.gitDir, { a: "a1\nPR\na3\n", b: "b1\nb2\nb3\n", c: "c\n" }, [m0]);
+    const m1 = await commit(repo.gitDir, { a: "a1\na2\na3\n", b: "b1\nMAIN\nb3\n", c: "c\n" }, [m0]);
+    value(await rebuildClone(rebuild(repo, head)));
+    writeFileSync(join(repo.clone, "c"), "SESSION\n");
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: m1, message: "1.15: more", ...live() }));
+    if (r.kind !== "committed") throw new Error(r.kind);
+    expect(r.base_sha).toBe(m1);
+    expect(await rg(repo.gitDir, ["log", "-1", "--format=%P", r.head_sha])).toBe(m1);
+    expect(await files(repo.gitDir, r.head_sha)).toEqual({ a: "a1\nPR\na3", b: "b1\nMAIN\nb3", c: "SESSION" });
+  });
+
+  test("a clone marker for another unit is refused as no-session", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { a: "a\n" });
+    value(await rebuildClone(rebuild(repo, base, { unit: "story:9.9", branch: "story/9.9" })));
+    writeFileSync(join(repo.clone, "a"), "b\n");
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const r = await committer.commit({ unit: UNIT, ontoSha: base, message: "m", ...live() });
+    expect(r.ok ? "ok" : r.error.kind).toBe("no-session");
+    expect(await rg(repo.gitDir, ["for-each-ref", "refs/xarabot/head/"])).toBe("");
+  });
+
+  test("commits with no merge base are invalid", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { a: "a\n" });
+    const unrelated = await commit(repo.gitDir, { z: "z\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const r = await committer.commit({ unit: UNIT, ontoSha: unrelated, message: "m", ...live() });
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+});
