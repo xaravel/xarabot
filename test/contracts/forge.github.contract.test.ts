@@ -7,24 +7,14 @@ import { createGitHubForge, type SnapshotPart } from "../../src/adapters/forge/g
 import { GITHUB_OPERATIONS, isSuccess, request, SWAP_CONFLICT_STATUS, type Operation } from "../../src/adapters/forge/github/http.ts";
 import { openRunnerGit, runGit, type GitIdentity } from "../../src/adapters/forge/github/runner-git.ts";
 import { createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
-import type { Forge, ForgeOperation, ForgePr, ForgeResult, GitSha } from "../../src/ports/forge.ts";
+import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgePr, type ForgeResult, type GitSha } from "../../src/ports/forge.ts";
 import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
 import { isLive } from "../support/live.ts";
 import { forgeContract, type ForgeFixture } from "./forge.contract.ts";
 
-/** The operations Stories 1.8 and 1.9 implement; the rest are stubs until Story 1.10. */
-const IMPLEMENTED: readonly ForgeOperation[] = [
-  "snapshot",
-  "ledgerSwap",
-  "pushBranch",
-  "openPr",
-  "updatePr",
-  "closePr",
-  "listPrsByBranch",
-  "comment",
-  "prefetch",
-];
+/** The operations the GitHub adapter implements: all of them (Stories 1.8 to 1.10). */
+const IMPLEMENTED: readonly ForgeOperation[] = FORGE_OPERATIONS;
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const TEST_IDENTITY: GitIdentity = { name: "xarabot test", email: "test@xarabot.invalid" };
@@ -49,7 +39,7 @@ function signal(): AbortSignal {
 forgeContract({
   name: "github (emulator)",
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace"],
+  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace"],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -76,6 +66,7 @@ forgeContract({
         onRead: (part) => trace.push(part),
         runnerGit: gitDir,
         gitUrl: server.url,
+        maintainer: "alice",
       });
       let n = 0;
       return {
@@ -92,6 +83,8 @@ forgeContract({
           setMain: (files) => gh.control.setMain(files),
           setNow: (now) => gh.control.setNow(now),
           writeForeignLedger: (commit) => gh.control.writeForeignLedger(commit),
+          queue: () => gh.control.queue(),
+          mergeQueueHead: () => gh.control.mergeQueueHead(),
           trace: () => [...trace],
         },
         cleanup: async () => {
@@ -138,6 +131,7 @@ const encodePath = (branch: string): string => branch.split("/").map(encodeURICo
 /**
  * Wraps a forge so every branch a case names gets `prefix`, and maps the
  * branches in its results back. `touched` collects the real branch names.
+ * Every `alert` condition gets the prefix too, so dedupe never crosses runs.
  */
 function prefixed(forge: Forge, prefix: string, touched: Set<string>): Forge {
   const to = (branch: string): string => {
@@ -156,12 +150,14 @@ function prefixed(forge: Forge, prefix: string, touched: Set<string>): Forge {
       const r = await forge.listPrsByBranch(to(branch), opts);
       return r.ok ? { ok: true, value: r.value.map(back) } : r;
     },
+    alert: (condition, mainSha, opts) => forge.alert(`${prefix}${condition}`, mainSha, opts),
   };
 }
 
 /**
  * A live scratch area: a ledger branch, a `runner.git`, a forge whose unit
- * branches are prefixed `xarabot-test/<uuid>/`, a raw API call for test setup,
+ * branches and alert conditions are prefixed `xarabot-test/<uuid>/` and whose
+ * alerts go to `LIVE_LOGIN`'s inbox, a raw API call for test setup,
  * a commit maker, and cleanup that closes the PRs and deletes the branches.
  */
 async function liveScratch(): Promise<{
@@ -179,7 +175,7 @@ async function liveScratch(): Promise<{
   const dir = mkdtempSync(join(tmpdir(), "xarabot-gh-live-"));
   const gitDir = must(await openRunnerGit(join(dir, "lane"), { signal: signal() }));
   const trace: SnapshotPart[] = [];
-  const inner = createGitHubForge({ repo, credentials, ledgerBranch: branch, onRead: (part) => trace.push(part), runnerGit: gitDir });
+  const inner = createGitHubForge({ repo, credentials, ledgerBranch: branch, onRead: (part) => trace.push(part), runnerGit: gitDir, maintainer: LIVE_LOGIN });
   const touched = new Set<string>();
   const forge = prefixed(inner, prefix, touched);
   const tokens = createTokenSource({ credentials, repo });
@@ -274,6 +270,40 @@ test.skipIf(!liveEnabled)("live: a stale PATCH git/refs answers SWAP_CONFLICT_ST
       force: false,
     });
     expect(patch.status).toBe(SWAP_CONFLICT_STATUS);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test.skipIf(!liveEnabled)(
+  "live AR38: enqueue at the head is ok or conflict, never forbidden",
+  async () => {
+    const s = await liveScratch();
+    let pr: ForgePr | undefined;
+    try {
+      const sha = await s.makeCommit();
+      must(await s.forge.pushBranch({ branch: "story/ar38", expected_sha: null, sha }, { signal: signal() }));
+      pr = must(await s.forge.openPr({ branch: "story/ar38", base: "main", title: "xarabot live AR38 probe", body: "Closed by the test." }, { signal: signal() }));
+      const r = await s.forge.enqueue(pr.number, sha, { signal: signal() });
+      expect(r.ok ? "ok" : `${r.error.kind}: ${r.error.message}`).toMatch(/^(?:ok|conflict: )/);
+    } finally {
+      try {
+        if (pr !== undefined) must(await s.forge.dequeue(pr.number, { signal: signal() }));
+      } finally {
+        await s.cleanup();
+      }
+    }
+  },
+  120_000,
+);
+
+test.skipIf(!liveEnabled)("live: checks reads a pushed commit", async () => {
+  const s = await liveScratch();
+  try {
+    const sha = await s.makeCommit();
+    must(await s.forge.pushBranch({ branch: "story/checks", expected_sha: null, sha }, { signal: signal() }));
+    const r = await s.forge.checks(sha, { signal: signal() });
+    expect(r.ok ? "ok" : `${r.error.kind}: ${r.error.message}`).toBe("ok");
   } finally {
     await s.cleanup();
   }

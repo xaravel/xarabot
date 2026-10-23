@@ -9,6 +9,7 @@ import {
   forgeOk,
   type CallOpts,
   type Forge,
+  type ForgeCheck,
   type ForgeFailure,
   type ForgeOperation,
   type ForgePr,
@@ -24,8 +25,10 @@ import {
   formatDate,
   GITHUB_OPERATIONS,
   isSuccess,
+  mapGraphqlErrors,
   mapHttpError,
   request,
+  type GraphqlError,
   type FetchLike,
   type HttpReply,
   type Operation,
@@ -35,13 +38,17 @@ import { runGit, type GitRun } from "./runner-git.ts";
 import { createTokenSource } from "./tokens.ts";
 
 /**
- * The GitHub `Forge` adapter (FR24, AR7, AR16, AR19, AR27, AR39). `snapshot`
- * and `ledgerSwap` work over the REST git data API; `pushBranch` runs
- * `git push --force-with-lease` from the lane's private `runner.git`; the PR
- * operations, `comment` and the CI-log prefetch use REST. `checks`, `enqueue`,
- * `dequeue` and `alert` are stubs until Story 1.10. Each call makes one
- * attempt, never throws, and returns `transient` for an already-aborted
- * signal before any request.
+ * The GitHub `Forge` adapter (FR6, FR9, FR13, FR24, AR7, AR16, AR19, AR24,
+ * AR27, AR38, AR39). `snapshot` and `ledgerSwap` work over the REST git data
+ * API; `pushBranch` runs `git push --force-with-lease` from the lane's private
+ * `runner.git`; the PR operations, `comment`, `checks` (check runs plus the
+ * combined commit status) and the CI-log prefetch use REST; `enqueue` and
+ * `dequeue` read the PR's merge-queue state over GraphQL and then call
+ * `enqueuePullRequest` or `dequeuePullRequest` (the merge queue is the only
+ * merge path; the adapter has no direct or admin merge call); `alert`
+ * posts one deduplicated comment on the Maintainer's inbox issue. Each call
+ * makes one attempt, never throws, and returns `transient` for an
+ * already-aborted signal before any request.
  */
 
 export const DEFAULT_LEDGER_BRANCH = "xarabot/claims";
@@ -56,6 +63,34 @@ const PER_PAGE = 100;
 /** Check conclusions that are not failures. */
 const PASSING_CONCLUSIONS: readonly string[] = ["success", "neutral", "skipped"];
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** A GitHub login: alphanumerics and single inner hyphens, at most 39 characters. */
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+export const DEFAULT_INBOX_LABEL = "xarabot-inbox";
+export const INBOX_TITLE = "🤖 Xarabot inbox";
+/** How far before `mainSha`'s committer date the alert dedupe scan starts. */
+const ALERT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** The hidden marker an alert comment carries for (`condition`, `mainSha`). */
+export function alertMarker(condition: string, mainSha: GitSha): string {
+  return `<!-- xarabot-alert ${encodeURIComponent(condition)} ${mainSha} -->`;
+}
+
+/** The body of the alert comment for (`condition`, `mainSha`) to `maintainer`. */
+export function alertBody(maintainer: string, condition: string, mainSha: GitSha): string {
+  const shown = condition.replace(/`/g, "'").replace(/\r\n|\r|\n/g, " ");
+  return `🤖 @${maintainer} Xarabot alert: \`${shown}\` stops every lane (main \`${mainSha}\`).\n\n${alertMarker(condition, mainSha)}`;
+}
+
+/** The merge-queue state of one PR, by number. */
+const PULL_QUEUE_STATE_QUERY =
+  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id state headRefOid mergeQueueEntry { id } } } }";
+const ENQUEUE_MUTATION =
+  "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id } } }";
+const DEQUEUE_MUTATION = "mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }";
+/** An enqueue refused because the PR is already queued. */
+const ALREADY_QUEUED = /already (?:queued|enqueued|in (?:the )?(?:merge )?queue)/i;
+/** A dequeue refused because the PR is not queued. */
+const NOT_QUEUED = /not in (?:the )?(?:merge )?queue|not queued/i;
 
 export type SnapshotPart = "ledger" | "main" | "prs";
 
@@ -74,6 +109,10 @@ export type GitHubForgeOptions = {
   readonly runnerGit?: string;
   /** The git host; default `https://github.com`. */
   readonly gitUrl?: string;
+  /** The Maintainer's GitHub login, whom `alert` @mentions and assigns the inbox to. */
+  readonly maintainer?: string;
+  /** The inbox issue's label; default `xarabot-inbox`. */
+  readonly inboxLabel?: string;
 };
 
 type Obj = Readonly<Record<string, unknown>>;
@@ -192,11 +231,16 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
 
   /** As `api`, but any HTTP reply, 2xx or not, comes back `ok` for the caller to map. */
   async function apiReply(ctx: Ctx, op: Operation, path: string, body?: unknown, redirect?: Redirect): Promise<ForgeResult<HttpReply>> {
+    return send(ctx, op, `${repoPath}${path}`, body, redirect);
+  }
+
+  /** One installation-token call to `path` below the API URL (not repo-prefixed). */
+  async function send(ctx: Ctx, op: Operation, path: string, body?: unknown, redirect?: Redirect): Promise<ForgeResult<HttpReply>> {
     const token = await tokens.get(ctx.signal);
     if (!token.ok) return redacted(token);
     const r = await request({
       op,
-      path: `${repoPath}${path}`,
+      path,
       token: token.value,
       signal: ctx.signal,
       fetch: options.fetch,
@@ -659,13 +703,212 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     });
   }
 
-  /** A stub: `forbidden` until the Story that implements it. */
-  function stub<T>(operation: ForgeOperation): (...args: readonly unknown[]) => Promise<ForgeResult<T>> {
-    return async (...args) => {
-      const opts = args[args.length - 1] as CallOpts;
-      if (opts.signal.aborted) return deadlinePassed(operation);
-      return forgeErr("forbidden", `${operation}: not implemented until Story 1.10`);
-    };
+  // ------------------------------------------------------------ checks
+
+  /** A check run as a `ForgeCheck`; `undefined` when malformed. */
+  function toCheck(raw: unknown): ForgeCheck | undefined {
+    const run = asObj(raw);
+    const name = run?.["name"];
+    if (typeof name !== "string") return undefined;
+    const given = run?.["status"];
+    const status = given === "completed" || given === "in_progress" ? given : "queued";
+    const conclusion = run?.["conclusion"];
+    return { name, status, conclusion: status === "completed" && typeof conclusion === "string" ? conclusion : null };
+  }
+
+  /** A commit status as a `ForgeCheck`; `undefined` when malformed. */
+  function statusCheck(raw: unknown): ForgeCheck | undefined {
+    const name = str(raw, "context");
+    const state = str(raw, "state");
+    if (name === undefined) return undefined;
+    if (state === "success" || state === "failure" || state === "error") return { name, status: "completed", conclusion: state };
+    if (state === "pending") return { name, status: "in_progress", conclusion: null };
+    return undefined;
+  }
+
+  async function checks(sha: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly checks: readonly ForgeCheck[] }>> {
+    return guarded("checks", opts, async (ctx) => {
+      if (!SHA_PATTERN.test(sha)) return forgeErr("not-found", `checks: ${JSON.stringify(sha)} is not a commit SHA`);
+      const runOp = GITHUB_OPERATIONS.listCheckRuns;
+      const runs = await paged(ctx, runOp, (page) => `/commits/${sha}/check-runs?filter=latest&per_page=${PER_PAGE}&page=${page}`, (b) => {
+        const list = asObj(b)?.["check_runs"];
+        return Array.isArray(list) ? list : undefined;
+      });
+      if (!runs.ok) return runs;
+      const statusOp = GITHUB_OPERATIONS.getCombinedStatus;
+      const statuses = await paged(ctx, statusOp, (page) => `/commits/${sha}/status?per_page=${PER_PAGE}&page=${page}`, (b) => {
+        const list = asObj(b)?.["statuses"];
+        return Array.isArray(list) ? list : undefined;
+      });
+      if (!statuses.ok) return statuses;
+      const out: ForgeCheck[] = [];
+      for (const raw of runs.value) {
+        const c = toCheck(raw);
+        if (c === undefined) return malformed(runOp, "not a check run");
+        out.push(c);
+      }
+      for (const raw of statuses.value) {
+        const c = statusCheck(raw);
+        if (c === undefined) return malformed(statusOp, "not a commit status");
+        out.push(c);
+      }
+      return forgeOk({ checks: out });
+    });
+  }
+
+  // ------------------------------------------------------------ merge queue
+
+  type GraphqlReply = { readonly data: Obj | undefined; readonly errors: readonly GraphqlError[] };
+
+  /** One GraphQL call: a non-2xx reply is mapped by `mapHttpError`; `errors[]` comes back for the caller. */
+  async function graphql(ctx: Ctx, op: Operation, query: string, variables: Readonly<Record<string, unknown>>): Promise<ForgeResult<GraphqlReply>> {
+    const r = await send(ctx, op, "/graphql", { query, variables });
+    if (!r.ok) return r;
+    if (!isSuccess(r.value.status)) return redacted(mapHttpError(op, r.value));
+    const body = asObj(r.value.body);
+    if (body === undefined) return malformed(op, "not a GraphQL reply");
+    const raw = body["errors"];
+    const errors: GraphqlError[] = [];
+    if (Array.isArray(raw)) {
+      for (const e of raw) {
+        const type = str(e, "type");
+        const message = str(e, "message");
+        errors.push({ ...(type === undefined ? {} : { type }), ...(message === undefined ? {} : { message }) });
+      }
+    }
+    return forgeOk({ data: asObj(body["data"]), errors });
+  }
+
+  type QueueState = { readonly id: string; readonly state: string; readonly head: string; readonly queued: boolean };
+
+  /** The PR's node id, state, head and whether it has a merge-queue entry; a missing PR is `not-found`. */
+  async function queueState(ctx: Ctx, pr: number, operation: string): Promise<ForgeResult<QueueState>> {
+    const op = GITHUB_OPERATIONS.pullQueueState;
+    const r = await graphql(ctx, op, PULL_QUEUE_STATE_QUERY, { owner, name, number: pr });
+    if (!r.ok) return r;
+    if (r.value.errors.length > 0) return redacted(mapGraphqlErrors(op, r.value.errors, "transient"));
+    const repository = r.value.data?.["repository"];
+    if (repository === null) return forgeErr("not-found", `${operation}: no repository ${owner}/${name}`);
+    const pull = asObj(repository)?.["pullRequest"];
+    if (pull === null || pull === undefined) {
+      return asObj(repository) === undefined ? malformed(op, "no repository") : forgeErr("not-found", `${operation}: no PR #${pr}`);
+    }
+    const id = str(pull, "id");
+    const state = str(pull, "state");
+    const head = str(pull, "headRefOid");
+    const entry = asObj(pull)?.["mergeQueueEntry"];
+    if (id === undefined || state === undefined || head === undefined || entry === undefined) return malformed(op, `PR #${pr}`);
+    return forgeOk({ id, state, head, queued: entry !== null });
+  }
+
+  /** A mutation's errors: `ok` when every one matches `fine`, else `mapGraphqlErrors` with fallback `conflict`. */
+  function mutationResult(op: Operation, errors: readonly GraphqlError[], fine: RegExp): ForgeResult<null> {
+    if (errors.length === 0) return forgeOk(null);
+    if (errors.every((e) => fine.test(e.message ?? ""))) return forgeOk(null);
+    return redacted(mapGraphqlErrors(op, errors, "conflict"));
+  }
+
+  async function enqueue(pr: number, expectedHead: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly queued: true }>> {
+    return guarded("enqueue", opts, async (ctx) => {
+      const current = await queueState(ctx, pr, "enqueue");
+      if (!current.ok) return current;
+      const { id, state, head, queued } = current.value;
+      if (state !== "OPEN") return forgeErr("conflict", `enqueue: PR #${pr} is ${state.toLowerCase()}`);
+      if (head !== expectedHead) return forgeErr("conflict", `enqueue: PR #${pr} head is ${head}, not ${expectedHead}`);
+      if (queued) return forgeOk({ queued: true as const });
+      const op = GITHUB_OPERATIONS.enqueuePullRequest;
+      const r = await graphql(ctx, op, ENQUEUE_MUTATION, { pullRequestId: id, expectedHeadOid: expectedHead });
+      if (!r.ok) return r;
+      const done = mutationResult(op, r.value.errors, ALREADY_QUEUED);
+      return done.ok ? forgeOk({ queued: true as const }) : done;
+    });
+  }
+
+  async function dequeue(pr: number, opts: CallOpts): Promise<ForgeResult<{ readonly queued: false }>> {
+    return guarded("dequeue", opts, async (ctx) => {
+      const current = await queueState(ctx, pr, "dequeue");
+      if (!current.ok) return current;
+      if (!current.value.queued) return forgeOk({ queued: false as const });
+      const op = GITHUB_OPERATIONS.dequeuePullRequest;
+      const r = await graphql(ctx, op, DEQUEUE_MUTATION, { id: current.value.id });
+      if (!r.ok) return r;
+      const done = mutationResult(op, r.value.errors, NOT_QUEUED);
+      return done.ok ? forgeOk({ queued: false as const }) : done;
+    });
+  }
+
+  // ------------------------------------------------------------ alert
+
+  const inboxLabel = options.inboxLabel ?? DEFAULT_INBOX_LABEL;
+  const botLogin = `${options.credentials.app.slug}[bot]`;
+
+  /** The lowest-numbered open inbox issue assigned to `maintainer`, created when missing. */
+  async function inboxIssue(ctx: Ctx, maintainer: string): Promise<ForgeResult<number>> {
+    const listOp = GITHUB_OPERATIONS.listIssues;
+    const query = `labels=${encodeURIComponent(inboxLabel)}&assignee=${encodeURIComponent(maintainer)}&state=open&sort=created&direction=asc`;
+    const listed = await paged(ctx, listOp, (page) => `/issues?${query}&per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
+    if (!listed.ok) return listed;
+    let lowest: number | undefined;
+    for (const raw of listed.value) {
+      const issue = asObj(raw);
+      const number = issue?.["number"];
+      if (typeof number !== "number") return malformed(listOp, "not an issue");
+      if (issue?.["pull_request"] !== undefined) continue;
+      if (lowest === undefined || number < lowest) lowest = number;
+    }
+    if (lowest !== undefined) return forgeOk(lowest);
+    const createOp = GITHUB_OPERATIONS.createIssue;
+    const body = `🤖 Xarabot posts alerts for @${maintainer} here: each comment names a condition that stops every lane.`;
+    const created = await api(ctx, createOp, "/issues", { title: INBOX_TITLE, body, labels: [inboxLabel], assignees: [maintainer] });
+    if (!created.ok) return created;
+    const number = asObj(created.value.body)?.["number"];
+    return typeof number === "number" ? forgeOk(number) : malformed(createOp, "no number");
+  }
+
+  /** The dedupe scan's lower bound: `mainSha`'s committer date less 24 h; `null` when GitHub has no such commit. */
+  async function alertSince(ctx: Ctx, mainSha: GitSha): Promise<ForgeResult<string | null>> {
+    const op = GITHUB_OPERATIONS.getCommit;
+    const r = await apiReply(ctx, op, `/git/commits/${mainSha}`);
+    if (!r.ok) return r;
+    if (r.value.status === 404 || r.value.status === 422) return forgeOk(null);
+    if (!isSuccess(r.value.status)) return redacted(mapHttpError(op, r.value));
+    const date = str(asObj(r.value.body)?.["committer"], "date");
+    const at = date === undefined ? Number.NaN : Date.parse(date);
+    if (!Number.isFinite(at)) return malformed(op, "no committer.date");
+    return forgeOk(formatDate(at - ALERT_LOOKBACK_MS));
+  }
+
+  async function alert(condition: string, mainSha: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly posted: boolean }>> {
+    return guarded<{ readonly posted: boolean }>("alert", opts, async (ctx) => {
+      const maintainer = options.maintainer;
+      if (maintainer === undefined || !LOGIN_PATTERN.test(maintainer)) {
+        return forgeErr("forbidden", `alert: maintainer ${JSON.stringify(maintainer ?? null)} is not a GitHub login`);
+      }
+      if (!SHA_PATTERN.test(mainSha)) return forgeErr("not-found", `alert: ${JSON.stringify(mainSha)} is not a commit SHA`);
+      const issue = await inboxIssue(ctx, maintainer);
+      if (!issue.ok) return issue;
+      const since = await alertSince(ctx, mainSha);
+      if (!since.ok) return since;
+      const marker = alertMarker(condition, mainSha);
+      const listOp = GITHUB_OPERATIONS.listIssueComments;
+      const sinceQuery = since.value === null ? "" : `since=${encodeURIComponent(since.value)}&`;
+      const comments = await paged(
+        ctx,
+        listOp,
+        (page) => `/issues/${issue.value}/comments?${sinceQuery}per_page=${PER_PAGE}&page=${page}`,
+        (b) => (Array.isArray(b) ? b : undefined),
+      );
+      if (!comments.ok) return comments;
+      for (const raw of comments.value) {
+        const login = str(asObj(raw)?.["user"], "login");
+        const body = str(raw, "body");
+        if (login === botLogin && body !== undefined && body.includes(marker)) return forgeOk({ posted: false });
+      }
+      const postOp = GITHUB_OPERATIONS.createIssueComment;
+      const posted = await api(ctx, postOp, `/issues/${issue.value}/comments`, { body: alertBody(maintainer, condition, mainSha) });
+      if (!posted.ok) return posted;
+      return forgeOk({ posted: true });
+    });
   }
 
   return {
@@ -677,10 +920,10 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     closePr,
     listPrsByBranch,
     comment,
-    checks: stub("checks"),
-    enqueue: stub("enqueue"),
-    dequeue: stub("dequeue"),
-    alert: stub("alert"),
+    checks,
+    enqueue,
+    dequeue,
+    alert,
     prefetch: prefetchCiLogs,
   };
 }

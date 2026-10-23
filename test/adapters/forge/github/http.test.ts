@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  APP_PERMISSIONS,
   formatDate,
   GITHUB_OPERATIONS,
+  mapGraphqlErrors,
   mapHttpError,
   request,
   SWAP_CONFLICT_STATUS,
@@ -88,6 +90,27 @@ describe("mapHttpError", () => {
   test("the overrides apply to their operation only", () => {
     expect(mapHttpError(GITHUB_OPERATIONS.createCommit, reply(422)).error.kind).toBe("forbidden");
   });
+
+  test("notFoundOn maps its status to not-found; other statuses keep their kind", () => {
+    const checks = GITHUB_OPERATIONS.listCheckRuns;
+    expect(mapHttpError(checks, reply(422, {}, { message: "No commit found for SHA: x" })).error).toEqual({
+      kind: "not-found",
+      message: "listCheckRuns: 422 No commit found for SHA: x",
+    });
+    expect(mapHttpError(GITHUB_OPERATIONS.getCombinedStatus, reply(422)).error.kind).toBe("not-found");
+    expect(mapHttpError(checks, reply(409)).error.kind).toBe("forbidden");
+    expect(mapHttpError(GITHUB_OPERATIONS.getCommit, reply(422)).error.kind).toBe("forbidden");
+  });
+
+  test("a 403 that is not a rate limit names the operation's permission", () => {
+    expect(mapHttpError(GITHUB_OPERATIONS.listCheckRuns, reply(403, {}, { message: "Resource not accessible by integration" })).error).toEqual({
+      kind: "forbidden",
+      message: "listCheckRuns: 403 Resource not accessible by integration (needs checks: read)",
+    });
+    expect(mapHttpError(GET_REF, reply(403)).error).toEqual({ kind: "forbidden", message: "getRef: 403 (needs contents: write)" });
+    // Other forbidden statuses keep their message as it was.
+    expect(mapHttpError(GET_REF, reply(400)).error).toEqual({ kind: "forbidden", message: "getRef: 400" });
+  });
 });
 
 describe("request", () => {
@@ -170,13 +193,101 @@ describe("request", () => {
   });
 });
 
+describe("mapGraphqlErrors", () => {
+  const ENQUEUE = GITHUB_OPERATIONS.enqueuePullRequest;
+  test.each([
+    [[{ type: "FORBIDDEN", message: "nope" }], "conflict", "forbidden"],
+    [[{ message: "Resource not accessible by integration" }], "conflict", "forbidden"],
+    [[{ type: "NOT_FOUND", message: "Could not resolve to a node" }], "conflict", "not-found"],
+    [[{ type: "RATE_LIMITED", message: "slow" }], "conflict", "rate-limited"],
+    [[{ type: "UNPROCESSABLE", message: "API rate limit exceeded" }], "conflict", "rate-limited"],
+    [[{ type: "INTERNAL", message: "x" }], "conflict", "transient"],
+    [[{ type: "SERVICE_UNAVAILABLE", message: "x" }], "conflict", "transient"],
+    [[{ type: "TIMEOUT", message: "x" }], "conflict", "transient"],
+    [[{ message: "Parse error on \"}\"" }], "transient", "forbidden"],
+    [[{ type: "UNPROCESSABLE", message: "Pull request is not mergeable" }], "conflict", "conflict"],
+    [[{ type: "UNPROCESSABLE", message: "x" }], "transient", "transient"],
+    [[], "conflict", "conflict"],
+  ] as const)("%p with fallback %s is %s", (errors, fallback, kind) => {
+    expect(mapGraphqlErrors(ENQUEUE, errors, fallback).error.kind).toBe(kind);
+  });
+
+  test("forbidden names the permission; rate-limited waits 60 s", () => {
+    expect(mapGraphqlErrors(ENQUEUE, [{ type: "FORBIDDEN", message: "denied" }], "conflict").error).toEqual({
+      kind: "forbidden",
+      message: "enqueuePullRequest: FORBIDDEN: denied (needs contents: write)",
+    });
+    const e = mapGraphqlErrors(ENQUEUE, [{ type: "RATE_LIMITED", message: "slow" }], "conflict").error;
+    expect(e.kind === "rate-limited" ? e.retry_after : -1).toBe(60);
+  });
+});
+
 describe("the operation table", () => {
   test("every entry names itself and a known permission", () => {
-    const permissions = ["app-jwt", "contents: write", "pull_requests: write", "metadata: read", "checks: read", "actions: read", "none"];
+    const permissions = [
+      "app-jwt",
+      "contents: write",
+      "pull_requests: write",
+      "issues: write",
+      "metadata: read",
+      "checks: read",
+      "statuses: read",
+      "actions: read",
+      "none",
+    ];
     for (const [key, op] of Object.entries(GITHUB_OPERATIONS) as [string, Operation][]) {
       expect(op.name).toBe(key);
       expect(permissions).toContain(op.permission);
     }
+  });
+
+  test("no operation deletes, merges or approves", () => {
+    for (const [key, op] of Object.entries(GITHUB_OPERATIONS) as [string, Operation][]) {
+      expect([key, op.method]).not.toEqual([key, "DELETE"]);
+      expect(key).not.toMatch(/merge(?!Queue)|approve|delete/i);
+    }
+  });
+});
+
+describe("the App permission manifest", () => {
+  const ops = Object.values(GITHUB_OPERATIONS) as Operation[];
+
+  test("is exactly the AR38 set", () => {
+    expect([...APP_PERMISSIONS]).toEqual([
+      "contents: write",
+      "pull_requests: write",
+      "issues: write",
+      "checks: read",
+      "statuses: read",
+      "actions: read",
+      "metadata: read",
+    ]);
+  });
+
+  test("covers every operation's permission, and every entry but metadata: read is used", () => {
+    const manifest: readonly string[] = APP_PERMISSIONS;
+    for (const op of ops) {
+      if (op.permission === "app-jwt" || op.permission === "none") continue;
+      expect([op.name, manifest.includes(op.permission)]).toEqual([op.name, true]);
+    }
+    const used = new Set<string>(ops.map((op) => op.permission));
+    for (const p of APP_PERMISSIONS) if (p !== "metadata: read") expect([p, used.has(p)]).toEqual([p, true]);
+  });
+
+  test("the merge queue needs no permission of its own", () => {
+    expect(GITHUB_OPERATIONS.enqueuePullRequest.permission).toBe("contents: write");
+    expect(GITHUB_OPERATIONS.dequeuePullRequest.permission).toBe("contents: write");
+  });
+
+  test("docs/maintainer/app-permissions.md has one table row per entry and no merge-queue row", () => {
+    const doc = readFileSync(join(import.meta.dir, "../../../../docs/maintainer/app-permissions.md"), "utf8");
+    const rows = doc
+      .split("\n")
+      .filter((l) => l.startsWith("|") && !/^\|\s*-/.test(l))
+      .slice(1);
+    const names = rows.map((r) => (/^\|\s*`([^`]+)`\s*\|/.exec(r) ?? [])[1] ?? r);
+    expect(names).toEqual([...APP_PERMISSIONS]);
+    for (const r of rows) expect(r).not.toMatch(/merge.?queue/i);
   });
 });
 

@@ -113,8 +113,8 @@ The Maintainer installs a pinned Xarabot runner on the Xarabot host (macOS), and
   - The journal is `journal.jsonl`: one record per unit, plus idle and waiting spans. Subscription cost is labelled an estimate.
   - Config comes in three layers: package defaults, repo `.xarabot/*` read from `origin/main`, and host `host.yaml`.
   - The Standing Authority frontmatter has `schema_version: 1`, `granted_by` (the Maintainer's login), `granted_at`, `repo` and an optional `expires`.
+- **App permissions:** the App asks for exactly `contents: write`, `pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`, `actions: read` and `metadata: read`, never `workflows`, `administration` or any bypass right. The merge queue needs no permission of its own (verified live): `enqueue` and `dequeue` are listed under `contents: write`. One operation table in the GitHub adapter names each operation's permission, all REST and GraphQL calls go through one request function, and a missing permission maps to `forbidden` with a message naming it.
 - **Spikes:**
-  - The merge-queue App permission (Story 1.10, before merge plumbing).
   - Whether `PATCH git/refs` signals a retry with 409 or 422 (forge contract suite).
   - The proxy hostname allowlist (Story 1.12).
   - The `claude` outcome mapping, resume and `--output-format` (Story 1.14).

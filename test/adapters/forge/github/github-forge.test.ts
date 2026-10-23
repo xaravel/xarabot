@@ -307,17 +307,6 @@ describe("every operation", () => {
     for (const op of FORGE_OPERATIONS) expect([op, kind(await c[op]())]).toEqual([op, "transient"]);
     expect(gh.control.log()).toEqual([]);
   });
-
-  test("the Story 1.10 stubs are forbidden, naming their Story, and make no request", async () => {
-    const { gh, forge } = setup();
-    const c = calls(forge, new AbortController().signal);
-    const story110: readonly ForgeOperation[] = ["checks", "enqueue", "dequeue", "alert"];
-    for (const op of story110) {
-      const r = await c[op]();
-      expect(r.ok ? "ok" : r.error).toEqual({ kind: "forbidden", message: `${op}: not implemented until Story 1.10` });
-    }
-    expect(gh.control.log()).toEqual([]);
-  });
 });
 
 describe("token leak", () => {
