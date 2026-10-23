@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGitHubForge, MAX_PAGES } from "../../../../src/adapters/forge/github/github-forge.ts";
+import type { FetchLike } from "../../../../src/adapters/forge/github/http.ts";
 import type { Forge, ForgeResult } from "../../../../src/ports/forge.ts";
 import { createFakeGitHub, LOGS_HOST, testKeys, type FakeGitHub } from "./fake-github.ts";
 
@@ -11,13 +12,13 @@ const H1 = "1".repeat(40);
 const H2 = "2".repeat(40);
 const SHA = "d".repeat(40);
 
-function setup(): { gh: FakeGitHub; forge: Forge } {
+function setup(wrap?: (fetch: FetchLike) => FetchLike): { gh: FakeGitHub; forge: Forge } {
   const { privateKey, publicKey } = testKeys();
   const gh = createFakeGitHub({ publicKey });
   const forge = createGitHubForge({
     repo: { owner: "acme", name: "widgets" },
     credentials: { app: { id: 4242, slug: "alice-xarabot" }, key: privateKey },
-    fetch: gh.fetch,
+    fetch: wrap === undefined ? gh.fetch : wrap(gh.fetch),
     apiUrl: gh.control.apiUrl,
     now: gh.control.clock,
   });
@@ -164,6 +165,21 @@ describe("listPrsByBranch", () => {
     expect(value(await forge.listPrsByBranch("story/1.9", live())).map((p) => p.number)).toEqual([3]);
   });
 
+  test("a list entry with merged_at and no merged field is merged, as GitHub's list sends it", async () => {
+    const { gh, forge } = setup();
+    gh.control.inject("GET", /\/pulls\?/, {
+      status: 200,
+      body: [
+        { number: 3, state: "closed", merged_at: "2026-10-22T00:00:00Z", title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+        { number: 4, state: "closed", merged_at: null, title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+      ],
+    });
+    expect(value(await forge.listPrsByBranch("story/1.9", live())).map((p) => [p.number, p.state])).toEqual([
+      [3, "merged"],
+      [4, "closed"],
+    ]);
+  });
+
   test(`more than ${MAX_PAGES} full pages is transient`, async () => {
     const { gh, forge } = setup();
     for (let n = 1; n <= MAX_PAGES * 100; n += 1) gh.control.setPull(n, { state: "closed", merged: false, head_sha: H1, branch: "story/1.9" });
@@ -234,6 +250,27 @@ describe("prefetch", () => {
       ["expired.log", "logs unavailable (404)\n"],
       ["gone.log", "logs unavailable (410)\n"],
     ]);
+  });
+
+  /** Answers every download from the log host with `status`. */
+  const logHostAnswers = (status: number) => (fetch: FetchLike): FetchLike => (url, init) =>
+    url.startsWith(`${LOGS_HOST}/`) ? Promise.resolve(new Response("nope", { status })) : fetch(url, init);
+
+  test("a 404 or 410 from the log download writes logs unavailable", async () => {
+    for (const status of [404, 410]) {
+      const { gh, forge } = setup(logHostAnswers(status));
+      gh.control.setChecks(SHA, [{ name: "test", status: "completed", conclusion: "failure" }]);
+      gh.control.setCiLog(SHA, "test", "1 failing\n");
+      const { files } = value(await forge.prefetch({ kind: "ci-log", sha: SHA, dir: tempDir() }, live()));
+      expect(files.map((f) => readFileSync(f, "utf8"))).toEqual([`logs unavailable (${status})\n`]);
+    }
+  });
+
+  test("another failed log download goes through mapHttpError", async () => {
+    const { gh, forge } = setup(logHostAnswers(403));
+    gh.control.setChecks(SHA, [{ name: "test", status: "completed", conclusion: "failure" }]);
+    gh.control.setCiLog(SHA, "test", "1 failing\n");
+    expect(kind(await forge.prefetch({ kind: "ci-log", sha: SHA, dir: tempDir() }, live()))).toBe("forbidden");
   });
 
   test("a non-Actions run writes its output and details_url; names dedupe case-insensitively", async () => {

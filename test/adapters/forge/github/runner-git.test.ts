@@ -12,6 +12,7 @@ import {
   type GitRun,
 } from "../../../../src/adapters/forge/github/runner-git.ts";
 import type { ForgeResult } from "../../../../src/ports/forge.ts";
+import { startGitServer, type GitServer } from "./git-server.ts";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const IDENTITY = { name: "t", email: "t@xarabot.invalid" };
@@ -167,6 +168,26 @@ describe("runGit hardening", () => {
     const r = await pending;
     expect(r.ok ? "ok" : r.error).toEqual({ kind: "transient", message: "git -c: deadline passed" });
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("the credential goes only to its own URL: another remote never sees the token", async () => {
+    const { gitDir } = await fresh();
+    const servers = await Promise.all(
+      ["a", "b"].map((n) => startGitServer({ root: join(tempDir(), "remote"), owner: "acme", name: n, tokenValid: (t) => t === "ghs_scoped" })),
+    );
+    const [a, b] = servers as [GitServer, GitServer];
+    try {
+      const sha = ran(await runGit(gitDir, ["commit-tree", EMPTY_TREE, "-m", "scoped"], { ...live(), identity: IDENTITY }));
+      const credential = { url: a.repoUrl, token: "ghs_scoped" };
+      const other = value(await runGit(gitDir, ["push", "--porcelain", b.repoUrl, `${sha}:refs/heads/x`], { ...live(), credential }));
+      expect(other.code).not.toBe(0);
+      expect(b.seen()).not.toContain("ghs_scoped");
+      expect(await b.refs()).toEqual({});
+      ran(await runGit(gitDir, ["push", "--porcelain", a.repoUrl, `${sha}:refs/heads/x`], { ...live(), credential }));
+      expect(a.seen()).toContain("ghs_scoped");
+    } finally {
+      await Promise.all(servers.map((s) => s.stop()));
+    }
   });
 
   test("an already-aborted signal starts nothing", async () => {

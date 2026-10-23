@@ -148,7 +148,7 @@ export async function runGit(gitDir: string, args: readonly string[], opts: RunG
     const done = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     done.catch(() => {});
     const r = await Promise.race([done, aborted]);
-    if (r === "aborted" || opts.signal.aborted) return deadlinePassed(what);
+    if (r === "aborted") return deadlinePassed(what);
     const [stdout, stderr, code] = r;
     return forgeOk({ code, stdout, stderr });
   } finally {

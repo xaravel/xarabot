@@ -9,7 +9,7 @@ import { openRunnerGit, runGit, type GitIdentity } from "../../src/adapters/forg
 import { createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
 import type { Forge, ForgeOperation, ForgePr, ForgeResult, GitSha } from "../../src/ports/forge.ts";
 import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
-import { startGitServer } from "../adapters/forge/github/git-server.ts";
+import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
 import { isLive } from "../support/live.ts";
 import { forgeContract, type ForgeFixture } from "./forge.contract.ts";
 
@@ -40,8 +40,6 @@ function must<T>(r: ForgeResult<T>): T {
   return r.value;
 }
 
-const mustOk = must;
-
 function signal(): AbortSignal {
   return AbortSignal.timeout(60_000);
 }
@@ -56,8 +54,9 @@ forgeContract({
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
     const dir = mkdtempSync(join(tmpdir(), "xarabot-gh-contract-"));
+    let server: GitServer | undefined;
     try {
-      const server = await startGitServer({
+      server = await startGitServer({
         root: join(dir, "remote"),
         owner: "acme",
         name: "widgets",
@@ -66,7 +65,7 @@ forgeContract({
           for (const [branch, sha] of Object.entries(refs)) gh.control.setBranch(branch, sha);
         },
       });
-      const gitDir = mustOk(await openRunnerGit(join(dir, "lane"), { signal: signal() }));
+      const gitDir = must(await openRunnerGit(join(dir, "lane"), { signal: signal() }));
       const trace: SnapshotPart[] = [];
       const forge = createGitHubForge({
         repo: { owner: "acme", name: "widgets" },
@@ -96,11 +95,12 @@ forgeContract({
           trace: () => [...trace],
         },
         cleanup: async () => {
-          await server.stop();
+          await server?.stop();
           rmSync(dir, { recursive: true, force: true });
         },
       };
     } catch (e) {
+      await server?.stop();
       rmSync(dir, { recursive: true, force: true });
       throw e;
     }
@@ -129,7 +129,6 @@ async function liveCredentials(): Promise<AppCredentials> {
   if (!r.ok) throw new Error(r.error.message);
   return r.value;
 }
-
 
 /** Test-only: lists a PR's comments. Not part of the adapter. */
 const LIST_COMMENTS: Operation = { name: "listComments (live test)", method: "GET", permission: "pull_requests: write" };
