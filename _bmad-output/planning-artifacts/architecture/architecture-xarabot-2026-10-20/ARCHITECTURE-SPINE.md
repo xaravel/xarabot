@@ -146,7 +146,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
     - `attempts`, `loopbacks`, `ci_fixes`. These counters live in the record, so a takeover never resets a cap.
     - `approval` (`by`, `manifest_sha`)
   - **States:** `claimed`, `merging`, `parked`, `released`, `merged`. The diagram in the Structural Seed is normative.
-  - **Records are never deleted** except `merged` records, which the coordinator removes (AD-3). `generation` only ever goes up, and `attempts` is kept on release.
+  - **Records are never deleted** except `merged` records, which the coordinator removes (AD-3), and superseded `released` `reconcile:<n>` records, which a later `reconcile` run removes (Story 2.5). `generation` only ever goes up, and `attempts` is kept on release.
   - **Time.** `now` is the forge server's time, returned by `Forge.snapshot()`. Local-only mode uses the host clock. The host clock is used only for local sleep lengths.
   - **Unknown schema.** A lane that meets a `schema_version` it doesn't know, or a newer one, stops before running `next` and posts an alert. Failing closed is the rule here.
   - **`host`** is a UUID that `xarabot lane install` writes to `host.yaml`. It is not the machine's hostname.
@@ -192,7 +192,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 
 Every move out of `merging` other than to `merged` dequeues the PR first. Every cap (`attempts`, `loopbacks`, `ci_fixes`) is tested with `>=`.
 
-**`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, it becomes `parked` (held). No attempt is counted either way.
+**`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, or its enqueue was refused because it conflicts, the run closes the PR and the record becomes `released`. A `reconcile` PR holds only runner-written content, so it is disposable: the next due run deletes the `released` record and opens a fresh PR from fresh `main`. No attempt is counted either way.
 
 ### AD-8: The coordinator role is a claim
 
@@ -772,11 +772,12 @@ stateDiagram-v2
   merging --> merged: PR merged
   merging --> claimed: builder PR ejected (same holder)
   merging --> parked: approval-gated PR ejected or dequeued (held)
-  merging --> released: stale and not queued (attempts + 1) / stop --now or budget (dequeue first)
+  merging --> released: stale and not queued (attempts + 1) / stop --now or budget (dequeue first) / reconcile PR ejected, dequeued or conflicting (closed, no attempt)
   parked --> merging: reconcile takes approved PR at approved_sha (generation + 1)
   parked --> merged: PR found merged
   parked --> released: ruling rebuild / release / approve
   merged --> [*]: coordinator deletes once done on main
+  released --> [*]: a later reconcile run deletes a superseded reconcile record
 ```
 
 **Host layout and source tree:**

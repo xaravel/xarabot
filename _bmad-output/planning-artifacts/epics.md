@@ -136,7 +136,7 @@ Requirements from the architecture spine (AR*n* cites the spine's AD):
 - AR3 (AD-2): one process per unit, started by the lane's launchd or systemd job, which runs at most one unit, waits, then exits. PID in `lane.pid`; heartbeats continue through the trailing wait; every wait is a child `sleep` with its PID in `wait.pid` (1 min after progress, 30 after idle, 15 after a failure, and usage-limit sleeps); `xarabot wake <lane>` kills exactly that PID after checking it. Every forge, git or HTTP call has an `AbortSignal` deadline; git runs with `GIT_TERMINAL_PROMPT=0`. Unit wall-clock budget is config (default 6 h); overrun stops heartbeating and releases as a failed attempt. Code never calls `pkill` or a `timeout` binary.
 - AR4 (AD-3): every piece of state has one home and one writer, per the spine's AD-3 table (sprint status: coordinator; `retro-gates.yaml`: `reconcile` runner code only; Story manifests and `epics.md`: graph planning units; Epic context at `epic_context_path` on `main`: the coordinator's status planning unit; ledger records by state; forge objects: the runner; the `status:` line of the unit's own Story file: the agent session; journal, PIDs, outcome: the lane process; `STOP`: the operator). The only other writes are the Maintainer's bootstrap writes in Xarabot's own repo, each in a Maintainer PR: at the self-host switch, a `bmad-sprint-planning` run that creates or updates `sprint-status.yaml` so Epic 1's Stories are `done`, Epic 2's Story manifests and Epic 2's context file; and, until the rulings Story (4.6) merges, a rejected retro's go in `retro-gates.yaml`. Any other write is a defect.
 - AR5 (AD-4): the ledger is the branch `xarabot/claims`, holding `units/<unit-file-id>.json` and `coordinator.json`. Every write fetches the tip and applies a pure edit that re-checks every precondition (state, owner, generation, glob overlap against `claimed`, `merging` and held `parked` records) against that tip; the swap is fast-forward-only (`PATCH git/refs` with `force: false`; `git update-ref <ref> <new> <old>` locally). On conflict, re-fetch and retry with jittered back-off; on a failed precondition, run `next` again. Ledger commits carry `[skip ci]`. Snapshot order: ledger, then `main`, then each ledger unit's PR state; the ledger wins over `main`.
-- AR6 (AD-5): ledger records are a versioned state machine with the fields `schema_version`, `unit`, `state`, `owner`, `host`, `lane`, `generation`, `globs`, `heartbeat_at`, `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`, `approved_sha`, `builder_providers[]`, `park` {`kind` (`awaiting-approval` | `needs-approval` | `blocked`), `reason` (a `blocked.kind`, or a runner cause: `review-cap` | `ci-fix-cap` | `ci-timeout` | `write-check` | `no-op` | `attempts-cap` | `unclaimable` | `graph-invalid`), `inbox_owner`, `globs_held`}, `attempts`, `loopbacks`, `ci_fixes`, `approval` {`by`, `manifest_sha`}. States `claimed`, `merging`, `parked`, `released`, `merged`; the Structural Seed state diagram is normative. Only `merged` records are deleted (by the coordinator); `generation` only goes up; `attempts` survives release. `now` is the forge server's time from `Forge.snapshot()` (host clock only in local-only mode and for sleep lengths). An unknown or newer `schema_version` stops the lane before `next`, with an alert. `host` is a UUID written to `host.yaml` by `xarabot lane install`.
+- AR6 (AD-5): ledger records are a versioned state machine with the fields `schema_version`, `unit`, `state`, `owner`, `host`, `lane`, `generation`, `globs`, `heartbeat_at`, `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`, `approved_sha`, `builder_providers[]`, `park` {`kind` (`awaiting-approval` | `needs-approval` | `blocked`), `reason` (a `blocked.kind`, or a runner cause: `review-cap` | `ci-fix-cap` | `ci-timeout` | `write-check` | `no-op` | `attempts-cap` | `unclaimable` | `graph-invalid`), `inbox_owner`, `globs_held`}, `attempts`, `loopbacks`, `ci_fixes`, `approval` {`by`, `manifest_sha`}. States `claimed`, `merging`, `parked`, `released`, `merged`; the Structural Seed state diagram is normative. Only `merged` records, and superseded `released` `reconcile:<n>` records (Story 2.5), are deleted (by the coordinator); `generation` only goes up; `attempts` survives release. `now` is the forge server's time from `Forge.snapshot()` (host clock only in local-only mode and for sleep lengths). An unknown or newer `schema_version` stops the lane before `next`, with an alert. `host` is a UUID written to `host.yaml` by `xarabot lane install`.
 - AR7 (AD-6): heartbeat every 5 minutes for `claimed` records and builder-held `merging` records. A stale `claimed` record (30 min) may be taken over at `generation` + 1, `attempts` + 1, parking on the 3rd. A stale builder-held `merging` record: merged PR → `merged`; still queued → any lane may take it over; otherwise → `released` with `attempts` + 1 and `pr` kept. `parked` never expires. CAS retry loops give up after 10 tries or the call's deadline. Before each push, PR change, enqueue or merge, a fencing heartbeat swap requires the lane's own `owner/host/lane` and `generation`, or the unit is abandoned. Pushes use `--force-with-lease` against `head_sha`; enqueue and merge pass the expected head SHA.
 - AR8 (AD-7): each outcome's ledger effect per the spine's AD-7 table, including: `merging` written before enqueue; awaiting approval → `parked` holding only the diff's paths; blocked kinds → `parked` with globs released and an inbox item; crash, missing or invalid result, timeout or budget overrun → `released` with `attempts` + 1, `parked` at ≥ 3; recurring units with nothing to commit → `merged` with no PR, deleted at once, except the newest `reconcile:<n>` record, which stays as the last run's time (Story 2.4); an ejected or dequeued approval-gated PR → `parked`, `approved_sha` cleared; Infrastructure Story without approval → `parked` (`needs-approval`); `stop --now` or STOP during a usage-limit sleep → `released` without counting an attempt. Every move out of `merging` other than to `merged` dequeues first; every cap is tested with `>=`. Coordinator-held `merging` records are checked by later `reconcile` runs, never by heartbeat.
 - AR9 (AD-8): the coordinator role is a claim in `coordinator.json`, heartbeated through its units and waits; the same `<owner>/<host>/coordinator` identity re-claims without a takeover; a different identity refuses to start while it is live; if expired or missing, builders continue and post the alert.
@@ -1287,11 +1287,12 @@ So that sprint status follows merges with no agent writing status, and merged le
 
 **Given** a `merged` record whose unit is done on `main`
 **When** `reconcile` runs
-**Then** it deletes the record; no other code deletes ledger records.
+**Then** it deletes the record; no other code deletes ledger records (the one other deletion, superseded `released` `reconcile:<n>` records, is also `reconcile`'s, below).
 
-**Given** a `reconcile` PR that conflicts or is ejected
-**When** the next `reconcile` runs
-**Then** it regenerates the PR on fresh `main`.
+**Given** a `reconcile` PR that is ejected or dequeued, or whose enqueue is refused because it conflicts
+**When** `reconcile` sees it
+**Then** the PR is disposable, since it holds only runner-written content: the run dequeues it if needed, closes it, and releases its record with no attempt counted
+**And** the next due run deletes that `released` record and opens a fresh PR from fresh `main` on its own record and branch, so one record carries one PR and no unit works on another's branch.
 
 **Given** a `reconcile` run with nothing to commit
 **When** it ends
@@ -1300,7 +1301,7 @@ So that sprint status follows merges with no agent writing status, and merged le
 
 **Given** a `merging` record that `reconcile` holds
 **When** a later `reconcile` runs
-**Then** a merged PR makes it `merged`, a still-queued PR leaves it unchanged, and an ejected or dequeued PR makes it `parked` (held), with no attempt counted.
+**Then** a merged PR makes it `merged`, a still-queued PR leaves it unchanged, and an ejected or dequeued PR is closed and the record `released` (above), with no attempt counted.
 
 The Maintainer's decisions of 2026-10-24 (readiness R7 and this Story's intent gap):
 
@@ -1311,7 +1312,7 @@ The Maintainer's decisions of 2026-10-24 (readiness R7 and this Story's intent g
 
 **Given** an earlier `reconcile` PR that is still open (parked or queued)
 **When** a later `reconcile` run has work
-**Then** it does the ledger work but opens no new PR; it regenerates the open PR on fresh `main` only after a conflict or an ejection.
+**Then** it does the ledger work but opens no new PR; once that PR is ejected, dequeued or conflicting, it is closed and replaced as above (revised by the Maintainer on 2026-10-24 from "regenerate it").
 
 **Given** a `reconcile` PR
 **When** it is opened
@@ -1327,7 +1328,7 @@ The Maintainer's decisions of 2026-10-24 (readiness R7 and this Story's intent g
 
 **Given** earlier `reconcile:<n>` records that ended `released`
 **When** a later `reconcile` run finishes
-**Then** it deletes them, since it supersedes them; `parked` ones stay until their PR or inbox item is resolved; the due rule reads the newest `merged` `reconcile:<n>` record.
+**Then** it deletes them, since it supersedes them (the spine's `released → [*]` edge, `reconcile` only); their PRs were already closed when they were released; `parked` ones (a CI failure or timeout) stay until their inbox item is resolved; the due rule reads the newest `merged` `reconcile:<n>` record.
 
 ### Story 2.6: `reconcile` enqueues approved PRs
 
