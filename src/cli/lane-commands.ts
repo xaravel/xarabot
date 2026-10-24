@@ -1,13 +1,12 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createGitHubForge } from "../adapters/forge/github/github-forge.ts";
 import { loadAppCredentials, type CredentialEnv } from "../adapters/forge/github/credentials.ts";
-import { loadHostConfig } from "../core/config/load-host-config.ts";
 import type { Lane } from "../core/schemas/host.ts";
 import type { LaneIdentity } from "../core/schemas/ledger.ts";
 import type { Forge } from "../ports/forge.ts";
 import { createPsProcessTable, describeKill, type ProcessTable } from "../lane/processes.ts";
 import { releaseHeld, stopNow, wakeLane, writeStop, type ReleaseReport } from "../lane/stop.ts";
+import { findLane, hostPaths, laneDirFor } from "./host-paths.ts";
 
 /**
  * `xarabot wake <lane>`, `xarabot stop <lane>`, `xarabot stop --all` and
@@ -27,37 +26,7 @@ export type LaneCommandDeps = {
 
 export const LANE_USAGE = "xarabot wake <lane> | xarabot stop <lane> | xarabot stop --all | xarabot stop --now <lane>";
 
-type Paths = { readonly xarabot: string; readonly hostYaml: string };
-
-function paths(env: CredentialEnv): Paths | null {
-  const home = env["HOME"];
-  if (home === undefined || home === "") return null;
-  const xdg = env["XDG_CONFIG_HOME"];
-  const config = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
-  return { xarabot: join(home, ".xarabot"), hostYaml: join(config, "xarabot", "host.yaml") };
-}
-
-/** A lane's folder: `~/.xarabot/repos/<owner>__<name>/lanes/<lane>/`. */
-export function laneDirFor(xarabot: string, lane: Lane, name: string): string {
-  const [owner, repo] = lane.repo.split("/") as [string, string];
-  return join(xarabot, "repos", `${owner}__${repo}`, "lanes", name);
-}
-
-type Found = { readonly ok: true; readonly lane: Lane; readonly laneDir: string; readonly hostId: string | undefined } | { readonly ok: false; readonly message: string };
-
-function findLane(p: Paths, name: string): Found {
-  let text: string;
-  try {
-    text = readFileSync(p.hostYaml, "utf8");
-  } catch (e) {
-    return { ok: false, message: `${p.hostYaml}: cannot read: ${e instanceof Error ? e.message : String(e)}` };
-  }
-  const host = loadHostConfig(text, p.hostYaml);
-  if (!host.ok) return { ok: false, message: host.error.message };
-  const lane = Object.hasOwn(host.value.lanes, name) ? host.value.lanes[name] : undefined;
-  if (lane === undefined) return { ok: false, message: `unknown lane ${JSON.stringify(name)} (not in ${p.hostYaml})` };
-  return { ok: true, lane, laneDir: laneDirFor(p.xarabot, lane, name), hostId: host.value.host_id };
-}
+export { laneDirFor };
 
 async function githubForge(env: CredentialEnv, lane: Lane): Promise<{ readonly ok: true; readonly forge: Forge } | { readonly ok: false; readonly message: string }> {
   const creds = await loadAppCredentials({ login: lane.owner, env });
@@ -74,12 +43,12 @@ export async function laneCommand(args: readonly string[], deps: LaneCommandDeps
     errOut(`xarabot ${args[0] ?? ""}: ${message}`);
     return 1;
   };
-  const p = paths(deps.env);
+  const p = hostPaths(deps.env);
   if (p === null) return fail("HOME is not set");
   const table = deps.table ?? createPsProcessTable();
 
   if (args.length === 2 && args[0] === "stop" && args[1] === "--all") {
-    const path = join(p.xarabot, "STOP");
+    const path = p.hostStop;
     const w = writeStop(path);
     if (!w.ok) return fail(w.error.message);
     out(`wrote ${path}`);

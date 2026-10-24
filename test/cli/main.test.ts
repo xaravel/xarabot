@@ -4,8 +4,8 @@ import pkg from "../../package.json" with { type: "json" };
 
 const MAIN = join(import.meta.dir, "..", "..", "src", "cli", "main.ts");
 
-function run(args: readonly string[]): { code: number; stdout: string; stderr: string } {
-  const proc = Bun.spawnSync([process.execPath, MAIN, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+function run(args: readonly string[], env?: Record<string, string>): { code: number; stdout: string; stderr: string } {
+  const proc = Bun.spawnSync([process.execPath, MAIN, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000, ...(env !== undefined ? { env } : {}) });
   return { code: proc.exitCode ?? -1, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
 
@@ -26,5 +26,16 @@ describe("xarabot bin", () => {
     expect(r.code).toBe(1);
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("usage: xarabot");
+  });
+
+  test.each([
+    [["lane", "run", "x/y", "b"], "xarabot lane run: HOME is not set\n"],
+    [["lane", "install", "b", "--repo", "x/y", "--role", "builder", "--owner", "alice", "--agent", "claude"], "xarabot lane install: HOME is not set\n"],
+  ])("%j reaches its subcommand", (args, stderr) => {
+    // A scrubbed environment with no HOME, so the subcommand stops before touching anything.
+    const r = run(args, { PATH: "/usr/bin:/bin" });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe(stderr);
   });
 });

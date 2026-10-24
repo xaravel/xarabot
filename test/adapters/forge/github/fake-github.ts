@@ -32,6 +32,8 @@ export type FakeGitHubOptions = {
   readonly mainBranch?: string;
   /** The App's slug; comments made with an installation token are by `<slug>[bot]`. Default `alice-xarabot`. */
   readonly appSlug?: string;
+  /** The bot account's user id, served at `GET /users/<slug>[bot]`; default 41898282. */
+  readonly botUserId?: number;
 };
 
 export type LoggedRequest = {
@@ -189,6 +191,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   const ledgerBranch = options.ledgerBranch ?? "xarabot/claims";
   const mainBranch = options.mainBranch ?? "main";
   const botLogin = `${options.appSlug ?? "alice-xarabot"}[bot]`;
+  const botUserId = options.botUserId ?? 41898282;
   let clock = options.now ?? Date.parse("2026-01-01T00:00:00Z");
   let installed = true;
   let truncate = false;
@@ -738,6 +741,12 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     if (appRoute) {
       if (!isJwt || !verifyJwt(credential)) return respond(json(401, { message: "A JSON web token could not be decoded" }));
       return respond(handleJwt(method, path, body));
+    }
+    if (method === "GET" && path.startsWith("/users/")) {
+      // Public users need no credential; only the App's bot account exists.
+      const login = decodeURIComponent(path.slice("/users/".length));
+      if (login !== botLogin) return respond(notFound());
+      return respond(json(200, { login: botLogin, id: botUserId, type: "Bot" }));
     }
     if (!tokenValid(credential)) return respond(json(401, { message: "Bad credentials" }));
     if (method === "POST" && path === "/graphql") return respond(handleGraphql(body));
