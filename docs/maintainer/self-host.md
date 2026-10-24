@@ -10,7 +10,7 @@ Unless a step says otherwise:
 
 - **Host commands** run on the Xarabot host as the lane's macOS user, `edanisko-xarabot` (ssh in). That user holds the App key in `~/.config/xarabot/apps/edanisko-xarabot/` and the Claude credential.
 - **`gh` commands** run on your own machine, logged in as `edanisko`.
-- **File changes** to this repo go in a Maintainer PR from a `planning/<topic>` branch. You approve your own PR through the admin review bypass, then add it to the merge queue.
+- **File changes** to this repo go in a Maintainer PR from a `planning/<topic>` branch. GitHub never lets you approve your own PR, and the merge queue refuses a PR without another person's approval, so you merge your own PR with the admin bypass (`gh pr merge <n> --merge --admin`), which skips the queue. Bot PRs always go through the queue.
 
 ## Before you start: the evidence
 
@@ -50,14 +50,14 @@ usage-limit sleep, the claim, the bot commit, the PR, CI, the merge queue and
 
 **Set up the scratch repo once:**
 
-1. Create a scratch repo, for example `edanisko/xarabot-canary`, with an initial commit on `main`.
+1. Create the scratch repo `xaravel/xarabot-scratch`, with an initial commit on `main`.
 2. Install the `edanisko-xarabot` App on it.
 3. Seed it with the canary's files: the config, policy, Standing Authority, `epics.md` with Story 1.1, the manifest and the CI workflow. Run this **on your own machine**, from a checkout of this repo, because the push needs your git credentials. The lane's macOS user has none:
 
    ```sh
-   seed=$(mktemp -d)/xarabot-canary
-   git clone https://github.com/edanisko/xarabot-canary.git "$seed"
-   bun test/e2e/scratch-seed.ts "$seed" edanisko/xarabot-canary edanisko
+   seed=$(mktemp -d)/xarabot-scratch
+   git clone https://github.com/xaravel/xarabot-scratch.git "$seed"
+   bun test/e2e/scratch-seed.ts "$seed" xaravel/xarabot-scratch edanisko
    git -C "$seed" add -A
    git -C "$seed" commit -m "Seed the Xarabot canary"
    git -C "$seed" push origin main
@@ -66,7 +66,7 @@ usage-limit sleep, the claim, the bot commit, the PR, CI, the merge queue and
 4. Add a ruleset on the scratch repo's `main` that requires the status check `check` and a merge queue with merge method squash. It must not require a review: the canary's paths need no owner approval, so the lane enqueues at once. Use the scratch repo's Settings → Rules → Rulesets, or:
 
    ```sh
-   gh api -X POST repos/edanisko/xarabot-canary/rulesets --input - <<'EOF'
+   gh api -X POST repos/xaravel/xarabot-scratch/rulesets --input - <<'EOF'
    {
      "name": "canary main",
      "target": "branch",
@@ -83,13 +83,13 @@ usage-limit sleep, the claim, the bot commit, the PR, CI, the merge queue and
 5. Set the scratch repo's squash messages to the PR title and body, as step 4 of the switch does for this repo:
 
    ```sh
-   gh api -X PATCH repos/edanisko/xarabot-canary -F allow_squash_merge=true -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
+   gh api -X PATCH repos/xaravel/xarabot-scratch -F allow_squash_merge=true -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
    ```
 
 **Run it on the host:**
 
 ```sh
-XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=edanisko/xarabot-canary XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/canary.test.ts
+XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/canary.test.ts
 ```
 
 **Expected result:** `22 pass`, `0 skip`, `0 fail`, in about 5 to 10
@@ -140,6 +140,16 @@ branches to be up to date" off: the merge queue tests each PR against fresh
 gh api repos/xaravel/xarabot/rules/branches/main --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'
 # expected: check
 ```
+
+**The macOS job (Maintainer decision, 2026-10-24).** The sandbox and agent
+suites need macOS, so add a second job in a Maintainer `.github/` PR: a
+GitHub-hosted `macos-latest` job that runs
+`bun test test/sandbox/ test/contracts/` on every PR. The repo is public, so
+the job is free. Before you make it required, check in its first run that
+`sandbox-exec` works on the runner. Then add the job's name, next to
+`check`, to the required status checks in `Protect main`, and add it to
+`docs/maintainer/ci-workflow.yml` in the same PR so the `diff` above stays
+empty.
 
 ### 2. The `xarabot/claims` ruleset
 
@@ -254,7 +264,7 @@ Until Epic 3 merges, every path needs the Maintainer's approval, and only
 # .xarabot/policy.yaml
 schema_version: 1
 unattended_adapters: [claude]
-expected_checks: [check]
+expected_checks: []
 owner_approval_paths: ["**"]
 ```
 
@@ -290,8 +300,14 @@ I, edanisko, let Xarabot's lanes on the Xarabot host build the Stories that
 `story/<id>` branches as `edanisko-xarabot[bot]`, open and update their PRs,
 and poll CI. A lane adds a PR to the merge queue only when none of its paths
 needs my approval. Until Epic 3 merges, every path needs it, so every PR parks
-awaiting my approving review, and I approve it and add it to the merge queue
-by hand.
+awaiting my approving review. Once I approve its current head, the coordinator
+re-checks this file and adds it to the merge queue (Story 2.6); until a
+coordinator runs a runner with Story 2.6, I add it to the merge queue by hand.
+
+One exemption: a coordinator's `reconcile` PR, which holds only runner-written
+status content and no agent change, skips that approval. Once its CI passes,
+the runner re-checks this file, fences and adds it to the merge queue itself
+(Story 2.5).
 ```
 
 The runner re-checks this file from fresh `main` before every claim, push,
@@ -369,8 +385,13 @@ other name passes `lane install` but stops the lane at its first snapshot.
 ```sh
 git clone --branch <tag> --depth 1 https://github.com/xaravel/xarabot.git ~/xarabot-<tag>
 cd ~/xarabot-<tag> && bun install --frozen-lockfile
-XARABOT_MAX_BUILDERS=1 bun src/cli/main.ts lane install builder-1 --repo xaravel/xarabot --role builder --owner edanisko --agent claude
+PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=1 bun src/cli/main.ts lane install builder-1 --repo xaravel/xarabot --role builder --owner edanisko --agent claude
 ```
+
+The `PATH` prefix matters: `lane install` writes its `PATH` into the plist,
+and the lane needs `claude`, `bun`, `git` and `uv` on it. Until Story 2.11
+makes `lane install` check them, check by hand that each resolves on that
+`PATH`.
 
 It installs `~/.xarabot/runner/<tag>/` and writes `host.yaml`, the lane folder
 and its `runner` file, the launcher `~/.xarabot/bin/xarabot-lane` and the plist.
@@ -425,32 +446,70 @@ or `touch ~/.xarabot/STOP` for the whole host. Every PR it opens parks
 awaiting your approval. Approve it, then add it to the merge queue by hand.
 The lane records it `merged` at its next start.
 
+Xarabot requests no review and sends no notice for a parked PR. Until Story
+4.2's daily digest, watch the repo with "All Activity" (the repo page →
+Watch → All Activity) so GitHub notifies you of each new bot PR (Maintainer
+decision, 2026-10-24).
+
 ## While Epic 2 is built
 
 - **Advancing the runner.** A lane runs only the pinned `runner_version` (Story 1.19). When a Story merges whose code the lanes need:
   1. On your own machine, tag that `main` commit: `git tag -a <new-tag> <sha> -m "Xarabot runner <new-tag>" && git push origin <new-tag>`.
   2. In a Maintainer PR, set `runner_version: "<new-tag>"` in `.xarabot/config.yaml`.
-  3. Approve the PR and add it to the merge queue by hand.
+  3. Merge the PR with the admin bypass (`gh pr merge <n> --merge --admin`); your own PR can't enter the merge queue.
 
   At its next start, each lane sees the new version on `main`, installs `~/.xarabot/runner/<new-tag>/`, and exits without a claim. The start after that runs the new runner. A lane never switches versions mid-unit.
+
+  **When to advance (Maintainer decision, 2026-10-24).** In this order:
+  1. Advance `runner_version` past Story 2.4 only together with the coordinator install (below), and only after the `Protect main` change in "`reconcile` PRs and `Protect main`" (below). A runner with Story 2.4 posts `coordinator-missing` on every `main` SHA until the coordinator runs.
+  2. Then advance after each of these Stories merges: 2.5c (the blocked-Story fixes of 2.5a–2.5c), 2.6 (the coordinator enqueues approved PRs), 2.7 (planning units, which compile Epic 3's context and write its manifests), 2.8 (the graph-change gate) and 2.9 (Epic 2's retro).
 - **The coordinator lane.** Never install it while `runner_version` lacks Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done). A runner with 2.4 alone claims `coordinator.json` and then idles ("no reconcile step (Story 2.5)"). In this order:
-  1. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.
-  2. Advance `runner_version` to that tag in a Maintainer PR (Story 1.19), as in steps 2 and 3.
-  3. Install the lane. Its name must be `coordinator`: `lane install` refuses any other name for role `coordinator`, and refuses the name `coordinator` for a builder.
+  1. Make the `Protect main` change in "`reconcile` PRs and `Protect main`" (below).
+  2. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.
+  3. Advance `runner_version` to that tag in a Maintainer PR (Story 1.19), as in steps 2 and 3.
+  4. Install the lane at once. Its name must be `coordinator`: `lane install` refuses any other name for role `coordinator`, and refuses the name `coordinator` for a builder.
 
      ```sh
-     XARABOT_MAX_BUILDERS=1 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install coordinator --repo xaravel/xarabot --role coordinator --owner edanisko --agent claude
+     PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=1 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install coordinator --repo xaravel/xarabot --role coordinator --owner edanisko --agent claude
      ```
 
      Then run the two printed `sudo` commands. Epic 2's retro, and so Epic 3, waits on this lane.
 
-  With Story 2.5, the lane runs a `reconcile:<n>` unit whenever the ledger shows a record whose PR merged, or a `merged` record whose unit is done on `main`, and at least every 10 min otherwise; after an idle round it waits 10 min. `reconcile` starts no agent session. It records merged PRs as `merged`, deletes `merged` records once their unit is done on `main` (a Story is done once its `sprint-status.yaml` key is `done`), and cleans up earlier `reconcile` runs. When `sprint-status.yaml` needs a change (a merged Story's key to `done`, a merged graph unit's new keys as `backlog`), it opens one runner-written PR from `xarabot/reconcile-<n>` that changes only that file. Once the PR's checks pass, the runner queues it itself: the Standing Authority exempts `reconcile` PRs from owner approval, so you do not approve or queue them. A Protected Path still gates one, and a failing or timed-out check parks it for you (`verification`, `ci-timeout`). An ejected or conflicting `reconcile` PR is closed, and a later run opens a fresh one; no new one opens while another is open. While the `Protect main` ruleset requires an approving review, GitHub refuses the runner's enqueue. Letting `reconcile` PRs into the queue without a review is a ruleset change, a github-settings decision for the Maintainer; until that change, do not install the coordinator lane. A refused enqueue stops the lane with an alert, and a later run closes that PR.
+  With Story 2.5, the lane runs a `reconcile:<n>` unit whenever the ledger shows a record whose PR merged, or a `merged` record whose unit is done on `main`, and at least every 10 min otherwise; after an idle round it waits 10 min. `reconcile` starts no agent session. It records merged PRs as `merged`, deletes `merged` records once their unit is done on `main` (a Story is done once its `sprint-status.yaml` key is `done`), and cleans up earlier `reconcile` runs. When `sprint-status.yaml` needs a change (a merged Story's key to `done`, a merged graph unit's new keys as `backlog`), it opens one runner-written PR from `xarabot/reconcile-<n>` that changes only that file. Once the PR's checks pass, the runner queues it itself: the Standing Authority exempts `reconcile` PRs from owner approval, so you do not approve or queue them. A Protected Path still gates one, and a failing or timed-out check parks it for you (`verification`, `ci-timeout`). An ejected or conflicting `reconcile` PR is closed, and a later run opens a fresh one; no new one opens while another is open.
+
+  **`reconcile` PRs and `Protect main`.** While `Protect main` requires an approving review on every PR, GitHub refuses the runner's enqueue of a `reconcile` PR. The Maintainer decided (2026-10-24) to use code-owner review instead of a blanket approval, with no bypass actor. Do this before you install the coordinator lane:
+  1. In a Maintainer PR, add `.github/CODEOWNERS`:
+
+     ```text
+     * @edanisko
+     /_bmad-output/implementation-artifacts/sprint-status.yaml
+     /_bmad-output/implementation-artifacts/retro-gates.yaml
+     ```
+
+     The last matching line wins, and a line with no owner leaves its file with no code owner. A `reconcile` PR touches only those two files, so it needs no review. Every other PR, the bot's included, still needs edanisko's.
+  2. In `Protect main` → "Require a pull request before merging", set "Required approvals" to 0 and turn on "Require review from Code Owners". Keep "Dismiss stale pull request approvals when new commits are pushed" and "Require approval of the most recent reviewable push" on.
+  3. Verify:
+
+     ```sh
+     gh api repos/xaravel/xarabot/rules/branches/main --jq '.[] | select(.type=="pull_request") | .parameters | {required_approving_review_count, require_code_owner_review, dismiss_stale_reviews_on_push, require_last_push_approval}'
+     # expected: {"required_approving_review_count":0,"require_code_owner_review":true,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true}
+     gh api repos/xaravel/xarabot/codeowners/errors --jq '.errors | length'
+     # expected: 0
+     ```
+
+  On the first `reconcile` PR, check that GitHub shows no review required before the runner enqueues it. Before the change, a refused enqueue stops the lane with an alert, and a later run closes that PR.
 
   **Parked reconcile PR.** A parked `reconcile` PR (`verification`, `ci-timeout`, or a Protected Path) blocks new `reconcile` PRs. Closing it lets a later run open a fresh one; the parked record stays until its inbox item is resolved.
 
-  **Hand edits.** Once the coordinator lane runs, stop marking Stories `done` in `sprint-status.yaml` by hand. A hand edit while a `reconcile` PR is open can get that PR ejected, and a later run then regenerates it.
+  **Hand edits.** Once the coordinator lane runs, stop marking Stories `done` in `sprint-status.yaml` by hand. A hand edit while a `reconcile` PR is open can get that PR ejected, and a later run closes it and opens a fresh one.
 
   At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until Story 2.6 merges, keep adding approved PRs to the merge queue by hand.
+- **A crashed lane.** A crashed lane's unit is taken over 30 min after its last heartbeat; `stop --now <lane>` releases it at once.
+- **Recovering a blocked Story's work.** A Story that parks `blocked` keeps its work on the host only, as the wip ref `refs/wip/story__<id>` in the lane's `runner.git`; it is never pushed, and the run after a release starts fresh from `main`. To see the work, run this on the host as `edanisko-xarabot`, before the unit's next session overwrites it:
+
+  ```sh
+  git --git-dir ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/runner.git show refs/wip/story__<id>
+  ```
 - **Graph PRs.** Until Story 2.8 (the graph-change gate) merges, check every PR that changes `.xarabot/epics.yaml`, `epics.md` or `stories/` before approving it:
 
   ```sh

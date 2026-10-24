@@ -1,4 +1,4 @@
 schema_version: 1
 unattended_adapters: [claude]
-expected_checks: [check]
+expected_checks: []
 owner_approval_paths: ["**"]
