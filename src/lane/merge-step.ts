@@ -17,9 +17,9 @@ import { defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
  * `awaiting-approval` for the Maintainer, who approves and queues it by hand.
  * Any other PR is fenced, written `merging`, enqueued at its head and watched
  * until it merges, is ejected (back to `claimed`, for the CI step to run
- * again) or fails. Every move out of `merging` other than to `merged`
- * dequeues the PR first. There is no merge call: the merge queue does every
- * merge. It never throws.
+ * again) or fails. Every enqueue retry is fenced again, and every move out
+ * of `merging` other than to `merged` fences and dequeues the PR first.
+ * There is no merge call: the merge queue does every merge. It never throws.
  */
 
 export type MergeStepInput = {
@@ -166,14 +166,23 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
     };
 
     /**
-     * Before any move out of `merging` other than to `merged`: dequeue the PR.
-     * A dequeue that fails (and does not stop the lane) ends the step `failed`
-     * with the record still `merging` and no edit.
+     * Before any move out of `merging` other than to `merged`: fence, then
+     * dequeue the PR. A lost fence ends the step with no dequeue and no edit;
+     * a fence or dequeue that fails otherwise (and does not stop the lane)
+     * ends it `failed` with the record still `merging` and no edit. The fence
+     * is a direct swap, so it never recurses into `failed`.
      */
     const leaveMerging = async (): Promise<void> => {
       if (record.state !== "merging") return;
       const pr = record.pr;
       if (pr === null) return;
+      const fenced = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation }));
+      if (fenced.kind === "lost") lost("dequeue fence", fenced.message);
+      if (fenced.kind === "failed") {
+        reasons.push(`dequeue fence: ${fenced.message}; the record stays merging`);
+        note(`dequeue fence failed: ${fenced.message}; the record stays merging`);
+        throw end("failed", "merging");
+      }
       const r = await call("dequeue", (o) => forge.dequeue(pr, o));
       if (r.ok) {
         note(`dequeued PR #${pr}`);
@@ -281,6 +290,8 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       note(`merging at ${head}`);
       for (let n = 0; ; n += 1) {
         await aborted();
+        // The first enqueue follows the fence and startMerging; each retry is fenced again.
+        if (n > 0) await beat("fence");
         const r = await call("enqueue", (o) => forge.enqueue(pr, head, o));
         if (r.ok) break;
         if (!isBackoffKind(r.error.kind) || n + 1 >= ENQUEUE_TRIES) return await failed(`enqueue ${describeError(r.error)}`);

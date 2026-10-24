@@ -8,10 +8,9 @@ import {
   RESULT_POLL_MS,
   SESSION_MS,
   trailingWaitMs,
-  USAGE_LIMIT_TICK_MS,
   usageLimitSleepMs,
 } from "../core/lane/waits.ts";
-import { claim, failAttempt, heartbeat, markMerged, park, parkNew, release, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
+import { claim, failAttempt, markMerged, park, parkNew, release, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import { next, type NextStory } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { buildPrompt, type PromptMode, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -28,6 +27,7 @@ import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
 import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
+import { startHeartbeat, type Heartbeat } from "./heartbeat.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
 import type { MergeStep } from "./merge-step.ts";
@@ -45,6 +45,11 @@ import type { Workspace } from "./workspace.ts";
  * the result linger; a usage limit sleeps through the `Waiter` and starts
  * the session again. After the outcome the process waits its trailing wait,
  * then clears `lane.pid` (Story 1.18).
+ *
+ * From the claim until the process ends, one heartbeat keeper stamps the
+ * record every 5 minutes (Story 2.1). When it loses the unit, or releases it
+ * (or fails to) before the heartbeat lapses, it aborts the running session and
+ * the lane abandons the unit: no further edit.
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
@@ -111,6 +116,11 @@ export type LaneDeps = {
   /** The ledger swap's back-off sleep and jitter source (tests). */
   readonly sleep?: Sleep;
   readonly random?: () => number;
+  /**
+   * The heartbeat keeper's interval (default 5 min), retry wait (default
+   * 60 s) and sleep, kept apart from `sleep` (tests).
+   */
+  readonly heartbeat?: { readonly everyMs?: number; readonly retryMs?: number; readonly sleep?: Sleep };
   /** Runs the trailing wait and usage-limit sleeps (Story 1.18). */
   readonly waiter: Waiter;
   readonly limits?: SessionLimits;
@@ -142,6 +152,9 @@ class Halt extends Error {
     super(reason);
   }
 }
+
+/** The heartbeat keeper lost or released the unit: abandon it, with no further edit. */
+class Abandon extends Halt {}
 
 /**
  * Installed tool trees: skills for the agents and the BMAD install. The runner
@@ -305,16 +318,43 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     if (s.value.lane) throw new Halt("stop", "lane STOP marker present");
   };
 
-  /** The forge's current time for a ledger edit; the last one seen when the read fails. */
+  /** The last forge time seen, advanced by the host time since; the host time before any. */
+  const estimatedNow = (): string => {
+    if (lastNow === null) return iso(clock());
+    return iso(Date.parse(lastNow) + Math.max(0, clock() - lastNowAt));
+  };
+
+  /** The forge's current time for a ledger edit; the estimate when the read fails. */
   const forgeNow = async (): Promise<string> => {
     const s = await call("snapshot", (o) => forge.snapshot(o));
     if (s.ok) {
       seeNow(s.value.now);
       return s.value.now;
     }
-    if (lastNow === null) return iso(clock());
-    // The last forge time seen, advanced by the host time since.
-    return iso(Date.parse(lastNow) + Math.max(0, clock() - lastNowAt));
+    return estimatedNow();
+  };
+
+  /** The claimed unit's heartbeat keeper, from the claim until the process ends. */
+  let keeper: Heartbeat | null = null;
+  /** The keeper's signal, to join into a run's or a wait's signal. */
+  const keeperSignals = (): AbortSignal[] => (keeper === null ? [] : [keeper.signal]);
+
+  /**
+   * Throws `Abandon` (`failed`) once the keeper lost or released the unit,
+   * with the unit's state and record from the keeper's end: `null` when lost
+   * or lapsed, the released record when released.
+   */
+  const checkHeld = (t: UnitTrack): void => {
+    const end = keeper?.end() ?? null;
+    if (end === null || end.kind === "moved-on") return;
+    if (end.kind === "released") {
+      if (end.record !== null) t.record = end.record;
+      t.state = "released";
+    } else {
+      t.state = null;
+    }
+    note(`abandoning the unit: heartbeat: ${end.message}`);
+    throw new Abandon("failed", `heartbeat: ${end.message}`);
   };
 
   /** One ledger edit through the CAS loop under its own deadline. */
@@ -334,8 +374,9 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
   };
 
-  /** Applies a held edit to the claimed unit; records the state after. */
+  /** Applies a held edit to the claimed unit; records the state after. None once the keeper lost the unit. */
   const held = async (t: UnitTrack, make: (now: string, generation: number) => LedgerEdit, what: string): Promise<boolean> => {
+    checkHeld(t);
     const generation = t.record?.generation;
     if (generation === undefined) {
       t.state = null;
@@ -496,7 +537,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const poll = setInterval(() => {
         if (lingerTimer === null && resultSeen()) lingerTimer = setTimeout(() => linger.abort(), limits.resultLingerMs);
       }, limits.resultPollMs);
-      const signal = AbortSignal.any([budget, session.signal, linger.signal]);
+      // The keeper's signal kills the run when the unit is lost or released.
+      const signal = AbortSignal.any([budget, session.signal, linger.signal, ...keeperSignals()]);
       const command = basename(spec.argv[0] ?? "");
       let run: SandboxResult<SandboxRun>;
       try {
@@ -525,9 +567,13 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const spec = agent.launchSpec(u, settings, layout.resultPath);
       if (!spec.ok) return { fail: `launch spec: ${spec.error.message}` };
       const n = t.sessions + 1;
+      checkHeld(t);
       note(`run ${n} (${u.kind}) starts`);
       const { run, timedOut } = await sandboxed(spec.value);
-      if (!run.ok) return { fail: `sandbox refused: ${run.error.message}` };
+      if (!run.ok) {
+        checkHeld(t);
+        return { fail: `sandbox refused: ${run.error.message}` };
+      }
       t.sessions = n;
       const r = run.value;
       logRun(`run ${n} (${u.kind})`, r);
@@ -549,6 +595,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
           estimate: (t.cost?.estimate ?? false) || (usage.cost?.estimate ?? true) || t.uncosted,
         };
       }
+      // A unit the keeper lost or released during the run is abandoned here, before any resume.
+      checkHeld(t);
       return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut };
     };
 
@@ -623,29 +671,20 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     };
 
     /**
-     * Sleeps through a usage limit under the budget, heartbeating the claim
-     * every tick, then journals one `usage-limit` span. `null` means the
-     * session starts again; otherwise the failure's reason. A STOP releases
-     * the unit and sets `limitStop`.
+     * Sleeps through a usage limit under the budget, the heartbeat keeper
+     * stamping the claim meanwhile, then journals one `usage-limit` span.
+     * `null` means the session starts again; otherwise the failure's reason.
+     * A STOP releases the unit and sets `limitStop`; a unit the keeper lost or
+     * released is abandoned.
      */
     const usageLimitSleep = async (resetAt: number | null): Promise<string | null> => {
       const startedMs = clock();
       const ms = usageLimitSleepMs(resetAt, startedMs);
       const reset = resetAt === null ? "unknown" : iso(resetAt);
       note(`usage limit, reset ${reset}: sleeping ${ms} ms`);
-      const generation = t.record?.generation;
-      const beat = async (): Promise<void> => {
-        if (generation === undefined) return;
-        try {
-          const r = await swap(heartbeat({ unit: story.unit, by: identity, now: await forgeNow(), generation }), story.unit);
-          if (r.kind !== "ok") note(`heartbeat failed: ${r.message}`);
-        } catch (e) {
-          note(`heartbeat failed: ${message(e)}`);
-        }
-      };
       let waited: WaitResult;
       try {
-        waited = await deps.waiter.wait({ ms, signal: budget, tickMs: USAGE_LIMIT_TICK_MS, onTick: beat });
+        waited = await deps.waiter.wait({ ms, signal: AbortSignal.any([budget, ...keeperSignals()]) });
       } catch (e) {
         waited = { end: "failed", message: message(e) };
       }
@@ -659,6 +698,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       });
       reportStore(span, "journal");
       note(`usage-limit sleep: ${waited.end}${waited.message === undefined ? "" : ` (${waited.message})`}`);
+      checkHeld(t);
       switch (waited.end) {
         case "elapsed":
         case "woken":
@@ -797,6 +837,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (out.record !== undefined) t.record = out.record;
       if (out.reason !== undefined) addReason(t, out.reason);
       note(`${what}: ${out.outcome} (${out.state ?? "unknown"})`);
+      checkHeld(t);
       if (budget.aborted && out.outcome !== "stop" && out.state === "claimed") {
         // The budget passed during the step: release the unit, unless the step already moved it on.
         const before = t.reason;
@@ -813,6 +854,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     const record = t.record;
     if (record === null) return failUnit(t, "no claimed record to hand to the PR step");
+    checkHeld(t);
     let out: PrStepOutput;
     try {
       out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note, kind: "build" });
@@ -888,6 +930,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const snap = snapped.value;
       mainSha = snap.main.sha;
       seeNow(snap.now);
+      /** The host time the claim's stamp (`snap.now`) was seen: the keeper's first good beat. */
+      const claimNowAt = lastNowAt;
       const assembled = assembleSnapshot({
         repo: lane.repo,
         now: snap.now,
@@ -982,6 +1026,23 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       t.record = claimed.record;
       t.state = claimed.record?.state ?? "claimed";
       note(`claimed at generation ${t.record?.generation ?? "unknown"}${decided.kind === "none" ? "" : ` (PR #${decided.pr.number} ${decided.kind})`}`);
+      if (t.record !== null) {
+        keeper = startHeartbeat({
+          forge,
+          identity,
+          unit: story.unit,
+          generation: t.record.generation,
+          clock,
+          forgeNow: estimatedNow,
+          claimedMs: claimNowAt,
+          callTimeoutMs,
+          ...(deps.heartbeat?.everyMs !== undefined ? { everyMs: deps.heartbeat.everyMs } : {}),
+          ...(deps.heartbeat?.retryMs !== undefined ? { retryMs: deps.heartbeat.retryMs } : {}),
+          ...(deps.heartbeat?.sleep !== undefined ? { sleep: deps.heartbeat.sleep } : {}),
+          ...(deps.random !== undefined ? { random: deps.random } : {}),
+          log: note,
+        });
+      }
 
       if (decided.kind === "merged") {
         t.reason = `PR #${decided.pr.number} merged`;
@@ -1015,7 +1076,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
           try {
             await failUnit(t, t.reason);
           } catch (inner) {
-            t.state = null;
+            // An abandoned unit keeps the state the keeper's end gave it.
+            if (!(inner instanceof Abandon)) t.state = null;
             if (inner instanceof Halt) {
               outcome = inner.outcome;
               addReason(t, inner.reason);
@@ -1026,34 +1088,39 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     }
   }
 
-  const t = unit as UnitTrack | null;
-  if (t !== null) {
-    note(`outcome ${outcome}`);
-    journalUnit({
-      unit: t.story.unit,
-      logName: t.logName,
-      startedMs: t.startedMs,
-      record: t.record,
-      state: t.state,
-      outcome,
-      reason: t.reason,
-      tokens: t.tokens,
-      cost: t.cost,
-      sessions: t.sessions,
-      result: t.result,
-    });
-  }
-  reportStore(store.writeOutcome(outcome), "outcome");
-
-  const waitMs = trailingWaitMs(outcome);
-  if (waitMs !== null) {
-    let waited: WaitResult;
-    try {
-      waited = await deps.waiter.wait({ ms: waitMs });
-    } catch (e) {
-      waited = { end: "failed", message: message(e) };
+  try {
+    const t = unit as UnitTrack | null;
+    if (t !== null) {
+      note(`outcome ${outcome}`);
+      journalUnit({
+        unit: t.story.unit,
+        logName: t.logName,
+        startedMs: t.startedMs,
+        record: t.record,
+        state: t.state,
+        outcome,
+        reason: t.reason,
+        tokens: t.tokens,
+        cost: t.cost,
+        sessions: t.sessions,
+        result: t.result,
+      });
     }
-    if (waited.end === "failed") console.error(`lane wait failed: ${waited.message ?? "no message"}`);
+    reportStore(store.writeOutcome(outcome), "outcome");
+
+    // The keeper goes on through the trailing wait while the record is still claimed or merging.
+    const waitMs = trailingWaitMs(outcome);
+    if (waitMs !== null) {
+      let waited: WaitResult;
+      try {
+        waited = await deps.waiter.wait({ ms: waitMs });
+      } catch (e) {
+        waited = { end: "failed", message: message(e) };
+      }
+      if (waited.end === "failed") console.error(`lane wait failed: ${waited.message ?? "no message"}`);
+    }
+  } finally {
+    await (keeper as Heartbeat | null)?.stop();
   }
   reportStore(store.clearPid("lane"), "lane.pid");
   return { outcome };

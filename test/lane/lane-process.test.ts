@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
@@ -9,10 +9,11 @@ import type { Lane } from "../../src/core/schemas/host.ts";
 import { UnitJournalRecordSchema, type JournalRecord, type UnitJournalRecord } from "../../src/core/schemas/journal.ts";
 import type { LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
-import type { ForgeError } from "../../src/ports/forge.ts";
+import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { defaultSleep, type Sleep } from "../../src/lane/ledger-cas.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
@@ -145,8 +146,6 @@ type HarnessOpts = MainOpts & {
   readonly usageLimits?: readonly ({ resetAt: number | null } | null)[];
   /** How each stub wait ends, in order; default `elapsed`. */
   readonly waitEnds?: readonly WaitEnd[];
-  /** Calls each wait's `onTick` this many times before it ends. */
-  readonly ticks?: number;
 };
 
 function harness(o: HarnessOpts = {}): Harness {
@@ -256,7 +255,6 @@ function harness(o: HarnessOpts = {}): Harness {
           const lanePid = join(laneDir, "lane.pid");
           seen.lanePid = existsSync(lanePid) ? readFileSync(lanePid, "utf8") : null;
         }
-        for (let i = 0; i < (o.ticks ?? 0); i += 1) await p.onTick?.();
         return { end: o.waitEnds?.[n] ?? "elapsed" };
       },
     },
@@ -327,6 +325,20 @@ async function pr(fake: FakeForge, id: string, state: "open" | "merged" | "close
 
 function foreignRecords(fake: FakeForge, records: readonly UnitRecord[]): void {
   fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: tip(records), deletes: [] });
+}
+
+/** The heartbeat keeper's sleep in tests: 5 ms of real time whatever it is asked for. */
+const fastBeats: Sleep = (_ms, signal) => defaultSleep(5, signal);
+
+/** The keeper's `keepAlive` commits so far. */
+const keepAlives = (fake: FakeForge): number => fake.control.ledgerLog().filter((c) => c.message.startsWith("ledger: keepAlive ")).length;
+
+async function until(cond: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting");
+    await Bun.sleep(1);
+  }
 }
 
 const mainSha = async (fake: FakeForge): Promise<string> => {
@@ -893,7 +905,10 @@ describe("runLaneProcess waits and limits", () => {
     const h = harness({ usageLimits: [{ resetAt: T0 + MIN }], behaviors: [() => {}, finishes("done")] });
     const r = await h.run({ now: () => T0 });
     expect(r.outcome).toBe("progress");
-    expect(h.waits[0]).toMatchObject({ ms: 3 * MIN, tickMs: 5 * MIN });
+    expect(h.waits[0]?.ms).toBe(3 * MIN);
+    // The keeper heartbeats the claim through the sleep; the wait itself has no tick.
+    expect(h.waits[0]?.tickMs).toBeUndefined();
+    expect(h.waits[0]?.onTick).toBeUndefined();
     expect(h.waits[0]?.signal).toBeInstanceOf(AbortSignal);
     expect(h.runs.map((x) => x.unit.kind)).toEqual(["fresh", "fresh"]);
     expect(h.prepares).toHaveLength(2);
@@ -920,7 +935,8 @@ describe("runLaneProcess waits and limits", () => {
       now: () => clockMs,
       waiter: {
         async wait(p) {
-          if (p.onTick !== undefined) {
+          // Only the usage-limit sleep carries a signal.
+          if (p.signal !== undefined) {
             waitStartedMs = clockMs;
             clockMs += p.ms;
           }
@@ -958,22 +974,49 @@ describe("runLaneProcess waits and limits", () => {
     expect(h.waits.map((w) => w.ms)).toEqual([MIN]);
   });
 
-  test("each tick of a usage-limit sleep heartbeats the claim", async () => {
-    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")], ticks: 2 });
-    expect((await h.run()).outcome).toBe("progress");
-    const beats = h.fake.control.ledgerLog().filter((c) => c.message.includes("heartbeat"));
-    expect(beats).toHaveLength(2);
+  test("the keeper heartbeats the claim through a usage-limit sleep", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")] });
+    let during = 0;
+    const r = await h.run({
+      heartbeat: { sleep: fastBeats },
+      waiter: {
+        async wait(p) {
+          if (p.signal === undefined) return { end: "elapsed" };
+          const before = keepAlives(h.fake);
+          await until(() => keepAlives(h.fake) >= before + 2);
+          during = keepAlives(h.fake) - before;
+          return { end: "elapsed" };
+        },
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(during).toBeGreaterThanOrEqual(2);
+    expect(h.runs).toHaveLength(2);
   });
 
-  test("a failed heartbeat is logged and the sleep goes on", async () => {
-    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")], ticks: 1 });
-    h.fake.control.beforeSwap(({ n }) => {
-      if (n === 2) foreignRecords(h.fake, [rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 9 })]);
+  test("a unit lost during a usage-limit sleep ends the sleep and the run: no further session, failed, state null", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")] });
+    const theirs = rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 });
+    const r = await h.run({
+      heartbeat: { sleep: fastBeats },
+      waiter: {
+        async wait(p) {
+          const signal = p.signal;
+          if (signal === undefined) return { end: "elapsed" };
+          foreignRecords(h.fake, [theirs]);
+          await new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve())));
+          return { end: "aborted" };
+        },
+      },
     });
-    const r = await h.run();
-    expect(h.waits).toHaveLength(2);
-    expect(r.outcome).toBeDefined();
-    expect(readFileSync(h.unitRecord().log, "utf8")).toContain("heartbeat failed");
+    expect(r.outcome).toBe("failed");
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toEqual(theirs);
+    const rec1 = h.unitRecord();
+    expect(rec1).toMatchObject({ outcome: "failed", state: null });
+    expect(rec1.reason).toContain("lost");
+    expect(readFileSync(rec1.log, "utf8")).toContain("abandoning the unit");
   });
 
   test("usage limit then STOP: released with no attempt, outcome stop", async () => {
@@ -1065,6 +1108,258 @@ describe("runLaneProcess waits and limits", () => {
     expect(asked).toEqual([MIN]);
     expect(during).toEqual({ command: "sleep", args: expect.stringMatching(/^(\S*\/)?sleep 0\.4$/) });
     expect(existsSync(join(h.laneDir, "wait.pid"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------- Story 2.1
+
+describe("runLaneProcess heartbeat keeper", () => {
+  /** A run that waits for its signal, then ends on SIGTERM; `onKill` says it was killed. */
+  const untilAborted =
+    (onKill: () => void = () => {}): Behavior =>
+    ({ signal }) =>
+      new Promise<Partial<SandboxRun>>((resolve) => {
+        const end = () => {
+          onKill();
+          resolve({ exitCode: null, signal: "SIGTERM" });
+        };
+        if (signal.aborted) end();
+        else signal.addEventListener("abort", end, { once: true });
+      });
+
+  test("keepAlive commits stamp the claim during a session that runs until aborted", async () => {
+    let before = 0;
+    let during = 0;
+    const hang = untilAborted(() => {
+      during = keepAlives(h.fake) - before;
+    });
+    const h = harness({
+      behaviors: [
+        (ctx) => {
+          before = keepAlives(h.fake);
+          return hang(ctx);
+        },
+      ],
+    });
+    const r = await h.run({ limits: { sessionMs: 200 }, heartbeat: { sleep: fastBeats } });
+    expect(r.outcome).toBe("failed");
+    expect(during).toBeGreaterThanOrEqual(2);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1, owner: "alice", generation: 1 });
+  });
+
+  test.each(["claimed", "merging"] as const)("keepAlive commits go on through the trailing wait while the record is %s, and stop after it", async (state) => {
+    const h = harness({ behaviors: [finishes("done")] });
+    let during = 0;
+    const r = await h.run({
+      heartbeat: { sleep: fastBeats },
+      prStep: async (input) => {
+        if (state === "merging") foreignRecords(h.fake, [{ ...input.record, state: "merging", pr: 7, passed_sha: "a".repeat(40) }]);
+        return { outcome: "progress", state };
+      },
+      waiter: {
+        async wait() {
+          const before = keepAlives(h.fake);
+          await until(() => keepAlives(h.fake) >= before + 2);
+          during = keepAlives(h.fake) - before;
+          return { end: "elapsed" };
+        },
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(during).toBeGreaterThanOrEqual(2);
+    const after = keepAlives(h.fake);
+    await Bun.sleep(40);
+    expect(keepAlives(h.fake)).toBe(after);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state, owner: "alice", generation: 1 });
+  });
+
+  test("lost during the session: the keeper kills the run, no PR step, nothing more written, journal failed with state null", async () => {
+    let killed = false;
+    const theirs = rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 });
+    const hang = untilAborted(() => {
+      killed = true;
+    });
+    const h = harness({
+      behaviors: [
+        (ctx) => {
+          foreignRecords(h.fake, [theirs]);
+          return hang(ctx);
+        },
+      ],
+    });
+    const r = await h.run({ heartbeat: { sleep: fastBeats } });
+    expect(r.outcome).toBe("failed");
+    expect(killed).toBe(true);
+    // No resume after the kill, and no PR step: nothing pushed.
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toEqual(theirs);
+    expect(h.fake.control.ledgerLog().at(-1)?.message).toBe("foreign [skip ci]");
+    const j = h.unitRecord();
+    expect(j).toMatchObject({ outcome: "failed", state: null, sessions: 1 });
+    expect(j.reason).toContain("lost");
+    expect(h.waits.map((w) => w.ms)).toEqual([15 * 60_000]);
+  });
+
+  test.each([
+    ["transient", { kind: "transient", message: "502" }],
+    ["rate-limited", { kind: "rate-limited", message: "slow down", retry_after: 60 }],
+  ] as const)("heartbeats failing %s until the next retry would lapse: released with attempts unchanged, the run failed", async (_name, error) => {
+    let clockMs = T0;
+    const h = harness({ behaviors: [untilAborted()] });
+    const failure: ForgeError = { ...error };
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: (oldSha, commit, opts) =>
+        commit.message.startsWith("ledger: keepAlive ") ? Promise.resolve({ ok: false as const, error: failure }) : h.fake.forge.ledgerSwap(oldSha, commit, opts),
+    };
+    const r = await h.run({
+      forge,
+      now: () => clockMs,
+      heartbeat: {
+        sleep: async (ms, signal) => {
+          clockMs += ms;
+          await defaultSleep(1, signal);
+        },
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0, owner: "alice", generation: 1 });
+    const j = h.unitRecord();
+    expect(j).toMatchObject({ outcome: "failed", state: "released", attempts: 0 });
+    expect(j.reason).toContain("released");
+    expect(clockMs - T0).toBeGreaterThanOrEqual(25 * 60_000);
+    expect(clockMs - T0).toBeLessThan(40 * 60_000);
+  });
+
+  test("the lapse counts from the claim's snapshot time, not from the keeper's start after a slow claim swap", async () => {
+    let clockMs = T0;
+    let slowClaim = true;
+    const h = harness({ behaviors: [untilAborted()] });
+    const failure: ForgeError = { kind: "transient", message: "502" };
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: (oldSha, commit, opts) => {
+        if (commit.message.startsWith("ledger: claim ") && slowClaim) {
+          // The claim swap takes 20 min of host time after the snapshot's now was seen.
+          slowClaim = false;
+          clockMs += 20 * 60_000;
+        }
+        return commit.message.startsWith("ledger: keepAlive ") ? Promise.resolve({ ok: false as const, error: failure }) : h.fake.forge.ledgerSwap(oldSha, commit, opts);
+      },
+    };
+    const r = await h.run({
+      forge,
+      now: () => clockMs,
+      heartbeat: {
+        sleep: async (ms, signal) => {
+          clockMs += ms;
+          await defaultSleep(1, signal);
+        },
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
+    // Beats fail from T0 + 25 min; the try at T0 + 28 min could land at T0 + 30 min. From the keeper's start it would be T0 + 48 min.
+    expect(clockMs - T0).toBe(28 * 60_000);
+  });
+
+  test("lapsed: the beats and the release on the lapse fail, so the run fails with state null and the record stays claimed", async () => {
+    let clockMs = T0;
+    const h = harness({ behaviors: [untilAborted()] });
+    const failure: ForgeError = { kind: "transient", message: "502" };
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: (oldSha, commit, opts) =>
+        commit.message.startsWith("ledger: keepAlive ") || commit.message.startsWith("ledger: release ")
+          ? Promise.resolve({ ok: false as const, error: failure })
+          : h.fake.forge.ledgerSwap(oldSha, commit, opts),
+    };
+    const r = await h.run({
+      forge,
+      now: () => clockMs,
+      heartbeat: {
+        sleep: async (ms, signal) => {
+          clockMs += ms;
+          await defaultSleep(1, signal);
+        },
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", attempts: 0, owner: "alice", generation: 1 });
+    expect(h.fake.control.ledgerLog().some((c) => c.message.startsWith("ledger: failAttempt "))).toBe(false);
+    const j = h.unitRecord();
+    expect(j).toMatchObject({ outcome: "failed", state: null, attempts: 0 });
+    expect(j.reason).toContain("lapsed");
+  });
+
+  test("lost during the CI step: abandoned at the step's end, no merge step, journal failed with state null", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const logText = (): string => {
+      const dir = join(h.laneDir, "logs");
+      return existsSync(dir) ? readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf8")).join("") : "";
+    };
+    let mergeSteps = 0;
+    const r = await h.run({
+      heartbeat: { sleep: fastBeats },
+      prStep: async (input) => ({ outcome: "progress", state: "claimed", record: { ...input.record, pr: 7 } }),
+      ciStep: async (input) => {
+        foreignRecords(h.fake, [{ ...input.record, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 }]);
+        await until(() => logText().includes("heartbeat: story:1.1 lost"));
+        return { outcome: "progress", state: "claimed", record: input.record };
+      },
+      mergeStep: async (input) => {
+        mergeSteps += 1;
+        return { outcome: "progress", state: "merged", record: input.record };
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect(mergeSteps).toBe(0);
+    expect(h.fake.control.ledgerLog().at(-1)?.message).toBe("foreign [skip ci]");
+    const j = h.unitRecord();
+    expect(j).toMatchObject({ outcome: "failed", state: null });
+    expect(j.reason).toContain("lost");
+  });
+
+  test("the keeper stamps forge time: the snapshot's now plus the host time since, far from the host clock", async () => {
+    // The host clock is years from the fake forge's `now` (T0); only the keeper's sleeps move it.
+    const host0 = Date.parse("2031-01-01T00:00:00.000Z");
+    let clockMs = host0;
+    const stamps: string[] = [];
+    const h = harness({
+      behaviors: [
+        async (ctx) => {
+          await until(() => stamps.length >= 1);
+          finishes("done")(ctx);
+        },
+      ],
+    });
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: (oldSha, commit, opts) => {
+        if (commit.message.startsWith("ledger: keepAlive ")) {
+          for (const text of Object.values(commit.writes)) stamps.push((JSON.parse(text) as UnitRecord).heartbeat_at);
+        }
+        return h.fake.forge.ledgerSwap(oldSha, commit, opts);
+      },
+    };
+    const r = await h.run({
+      forge,
+      now: () => clockMs,
+      heartbeat: {
+        sleep: async (ms, signal) => {
+          clockMs += ms;
+          await defaultSleep(1, signal);
+        },
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    // The first beat, 5 min of host time after the snapshot's now was seen.
+    expect(stamps[0]).toBe(new Date(T0 + 5 * 60_000).toISOString());
   });
 });
 

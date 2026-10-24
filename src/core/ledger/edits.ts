@@ -365,6 +365,27 @@ export function heartbeat(p: HeartbeatParams): LedgerEdit {
   });
 }
 
+/**
+ * The heartbeat keeper's beat: `claimed → claimed` and `merging → merging`,
+ * stamping `heartbeat_at` only. A record still held by `by` at `generation`
+ * but in another state (the holder's own steps moved it on) gives `null`; any
+ * other mismatch is a precondition error (the unit is lost).
+ */
+export function keepAlive(p: HeldParams): LedgerEdit {
+  return makeEdit("keepAlive", p, (ctx) => {
+    const rec = requireRecord(ctx);
+    if (!rec.ok) return rec;
+    const g = requireGeneration(rec.value, p.generation);
+    if (!g.ok) return g;
+    const { owner, host, lane } = rec.value;
+    if (owner !== ctx.by.owner || host !== ctx.by.host || lane !== ctx.by.lane) {
+      return pre(`${ctx.unit} is held by ${owner}/${host}/${lane}, not the writer`);
+    }
+    if (rec.value.state !== "claimed" && rec.value.state !== "merging") return ok(null);
+    return to(rec.value.state, stamp(ctx, rec.value, {}));
+  });
+}
+
 // ---------------------------------------------------------------- loopback / ciFix
 
 export type CappedParams = HeldParams & { readonly cap: number };
