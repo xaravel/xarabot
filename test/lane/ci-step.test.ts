@@ -29,7 +29,7 @@ import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck, ForgeError, ForgeOperation } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
-import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
+import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -547,6 +547,52 @@ describe("createCiStep", () => {
     expect(out).toMatchObject({ outcome: "failed", state: null });
     expect(w.fake.control.ledgerLog()).toHaveLength(before);
     expect(w.calls).not.toContain("pushBranch");
+  });
+
+  /** The PR branch's head on the fake. */
+  const branchHead = async (w: World): Promise<string | undefined> => {
+    const list = await w.fake.forge.listPrsByBranch(BRANCH, opts());
+    if (!list.ok) throw new Error(list.error.message);
+    return list.value.at(-1)?.head_sha;
+  };
+
+  /** Another lane takes the record at generation + 1 right before swap `at`. */
+  const takenAt = (w: World, at: number): (() => UnitRecord | null) => {
+    let taken: UnitRecord | null = null;
+    w.fake.control.beforeSwap(({ n }) => {
+      if (n !== at) return;
+      taken = { ...w.record, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 };
+      w.fake.control.writeForeignLedger({ message: "take [skip ci]", writes: tip([taken]), deletes: [] });
+    });
+    return () => taken;
+  };
+
+  test("another lane takes the record before the merge push's fence: no push, the branch unchanged, no further edit", async () => {
+    const w = await world({ merges: [{ kind: "merged", head_sha: "9".repeat(40), resolved: [STATUS] }] });
+    const taken = takenAt(w, 1);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("unit lost");
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await branchHead(w)).toBe(w.head);
+    expect(await w.ledger()).toEqual(taken() ?? undefined);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("take [skip ci]");
+  });
+
+  test("another lane takes the record before a CI fix's push fence: no push, the branch unchanged, no updatePr", async () => {
+    const w = await world({ checks: [[failure("lint")]] });
+    w.fake.control.setCiLog(w.head, "lint", "lint failed\n");
+    // Swap 1 is the ciFix, swap 2 the PR step's fence before its push.
+    const taken = takenAt(w, 2);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("unit lost");
+    expect(w.prSteps).toHaveLength(1);
+    expect(w.calls).not.toContain("pushBranch");
+    expect(w.calls).not.toContain("updatePr");
+    expect(w.calls).not.toContain("openPr");
+    expect(await branchHead(w)).toBe(w.head);
+    expect(await w.ledger()).toEqual(taken() ?? undefined);
   });
 
   test("an aborted signal ends failed and leaves the record claimed", async () => {

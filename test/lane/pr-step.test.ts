@@ -220,6 +220,8 @@ describe("createPrStep", () => {
     expect(w.fake.control.ledgerLog().map((c) => c.message)).toEqual([
       "root",
       "seed [skip ci]",
+      // The fence before the push, the fence before openPr, then the record.
+      "ledger: heartbeat story:1.1 [skip ci]",
       "ledger: heartbeat story:1.1 [skip ci]",
       "ledger: heartbeat story:1.1 [skip ci]",
     ]);
@@ -360,6 +362,81 @@ describe("createPrStep", () => {
     expect(w.calls).not.toContain("pushBranch");
     expect(w.fake.control.ledgerLog()).toHaveLength(before);
     expect(await w.ledger()).toMatchObject({ generation: 2, owner: "bob" });
+    expect(await prs(w.fake)).toEqual([]);
+  });
+
+  /** Another lane takes the record at generation + 1 right before swap `at`. */
+  const takenAt = (w: World, at: number): (() => UnitRecord | null) => {
+    let taken: UnitRecord | null = null;
+    w.fake.control.beforeSwap(({ n }) => {
+      if (n !== at) return;
+      taken = { ...w.record, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 };
+      w.fake.control.writeForeignLedger({ message: "take [skip ci]", writes: tip([taken]), deletes: [] });
+    });
+    return () => taken;
+  };
+
+  test("lost before the push fence: no push, the branch unchanged, no PR", async () => {
+    const w = await world();
+    const taken = takenAt(w, 1);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("fence: unit lost");
+    expect(w.calls.filter((c) => c === "pushBranch" || c === "openPr" || c === "updatePr")).toEqual([]);
+    const branch = await w.fake.forge.listPrsByBranch(BRANCH, opts());
+    expect(branch.ok && branch.value).toEqual([]);
+    expect(await w.ledger()).toEqual(taken() ?? undefined);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("take [skip ci]");
+  });
+
+  test("lost before the PR fence: pushed, but no openPr and no further edit", async () => {
+    const w = await world();
+    const taken = takenAt(w, 2);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("fence: unit lost");
+    expect(w.calls.filter((c) => c === "pushBranch" || c === "openPr" || c === "updatePr" || c === "comment")).toEqual(["pushBranch"]);
+    expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toEqual(taken() ?? undefined);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("take [skip ci]");
+  });
+
+  test("lost before the PR fence of an adopted PR: no updatePr, its title and body stay", async () => {
+    const w = await world();
+    const h0 = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: h0 }, opts())).ok).toBe(true);
+    const opened = await w.fake.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const adopted = rec({ unit: UNIT, globs: ["src/s0/**"], pr: opened.value.number, pr_owner: "alice", head_sha: h0, base_sha: w.main });
+    w.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([adopted]), deletes: [] });
+    let taken: UnitRecord | null = null;
+    w.fake.control.beforeSwap(({ n }) => {
+      if (n !== 2) return;
+      taken = { ...adopted, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 };
+      w.fake.control.writeForeignLedger({ message: "take [skip ci]", writes: tip([taken]), deletes: [] });
+    });
+    const out = await w.run({ record: adopted });
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(w.calls).not.toContain("updatePr");
+    expect((await prs(w.fake))[0]).toMatchObject({ title: "old", body: "old" });
+    expect(await w.ledger()).toEqual(taken ?? undefined);
+  });
+
+  test("a fix leaves the PR text alone, so it has no PR fence: one fence, then the record", async () => {
+    const w = await world();
+    const h0 = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: h0 }, opts())).ok).toBe(true);
+    const opened = await w.fake.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const withPr = rec({ unit: UNIT, globs: ["src/s0/**"], pr: opened.value.number, pr_owner: "alice", head_sha: h0, base_sha: w.main });
+    w.fake.control.writeForeignLedger({ message: "pr [skip ci]", writes: tip([withPr]), deletes: [] });
+    const before = w.fake.control.ledgerLog().length;
+    const out = await w.run({ record: withPr, kind: "fix" });
+    expect(out.outcome).toBe("progress");
+    expect(w.fake.control.ledgerLog().slice(before).map((c) => c.message)).toEqual([
+      "ledger: heartbeat story:1.1 [skip ci]",
+      "ledger: heartbeat story:1.1 [skip ci]",
+    ]);
   });
 
   test.each(["auth", "forbidden", "uninstalled"] as const)("forge %s on pushBranch: alert forge-<kind> on fresh main and stop", async (kind) => {
@@ -410,8 +487,8 @@ describe("createPrStep", () => {
     let host = Date.parse("2001-01-01T00:00:00Z");
     const out = await w.run({}, { now: () => (host += 5000) });
     expect(out.outcome).toBe("progress");
-    // Clock reads: the snapshot, the fence, then the record heartbeat.
-    expect((await w.ledger())?.heartbeat_at).toBe("2026-10-23T10:00:10.000Z");
+    // Clock reads: the snapshot, the push fence, the PR fence, then the record heartbeat.
+    expect((await w.ledger())?.heartbeat_at).toBe("2026-10-23T10:00:15.000Z");
   });
 
   test("an unknown schema_version found by the fence alerts ledger-schema-version and stops", async () => {

@@ -350,6 +350,36 @@ describe("enqueue", () => {
     expect(w.sleeps[0]).toBe(30_000);
   });
 
+  test("every enqueue retry is fenced: fence, startMerging, enqueue, then fence and enqueue again", async () => {
+    const w = await world({ onSleep: (i, _ms, ww) => (i === 1 ? void ww.fake.control.mergeQueueHead() : undefined) });
+    w.fake.control.injectError("enqueue", { kind: "transient", message: "502" });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    expect(w.events.slice(0, 5)).toEqual(["ledgerSwap heartbeat", "ledgerSwap startMerging", "enqueue", "ledgerSwap heartbeat", "enqueue"]);
+  });
+
+  test("another lane takes the record before an enqueue retry's fence: no enqueue reaches the queue, no dequeue, no further edit", async () => {
+    const w = await world();
+    w.fake.control.injectError("enqueue", { kind: "transient", message: "502" });
+    let bumped: UnitRecord | null = null;
+    // Swap 1 is the fence, 2 startMerging, 3 the retry's fence.
+    w.fake.control.beforeSwap(async ({ n }) => {
+      if (n !== 3) return;
+      const current = await w.ledger();
+      if (current === undefined) throw new Error("no record");
+      bumped = { ...current, owner: "bob", host: "22222222-2222-4222-8222-222222222222", lane: "builder-2", generation: 2 };
+      w.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: { [unitPath(UNIT)]: serializeUnitRecord(bumped) }, deletes: [] });
+    });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["failed", null]);
+    expect(out.reason).toContain("unit lost");
+    expect(w.events.filter((e) => e === "enqueue")).toEqual(["enqueue"]);
+    expect(w.events).not.toContain("dequeue");
+    expect(w.fake.control.queue()).toEqual([]);
+    expect(await w.ledger()).toEqual(bumped ?? undefined);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("bump [skip ci]");
+  });
+
   test("three back-off replies leave merging after dequeue and count a failed attempt; retry_after stretches the wait", async () => {
     const slow = { kind: "rate-limited", message: "slow down", retry_after: 90 } as const;
     const w = await world({ onSleep: (i, _ms, ww) => (i < 2 ? ww.fake.control.injectError("enqueue", slow) : undefined) });
@@ -426,6 +456,44 @@ describe("watching the queue", () => {
     expect([out.outcome, out.state]).toEqual(["failed", "merging"]);
     expect((await w.ledger())?.state).toBe("merging");
     expect(w.events.at(-1)).toBe("dequeue");
+  });
+
+  test("another lane takes the record before the dequeue's fence: no dequeue, the PR stays queued, no further edit", async () => {
+    let bumped: UnitRecord | null = null;
+    const w = await world({
+      onSleep: async (i, _ms, ww) => {
+        if (i !== 1) return;
+        const current = await ww.ledger();
+        if (current === undefined) throw new Error("no record");
+        bumped = { ...current, owner: "bob", host: "22222222-2222-4222-8222-222222222222", lane: "builder-2", generation: 2 };
+        ww.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: { [unitPath(UNIT)]: serializeUnitRecord(bumped) }, deletes: [] });
+        // The budget passes too, so the step leaves merging.
+        ww.budget.abort();
+      },
+    });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["failed", null]);
+    expect(out.reason).toContain("dequeue fence: unit lost");
+    expect(w.events).not.toContain("dequeue");
+    expect(w.fake.control.queue()).toEqual([w.pr]);
+    expect(await w.ledger()).toEqual(bumped ?? undefined);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("bump [skip ci]");
+  });
+
+  test("a dequeue fence that fails otherwise keeps the record merging and the PR queued", async () => {
+    const w = await world({
+      onSleep: (i, _ms, ww) => {
+        if (i !== 1) return;
+        ww.fake.control.injectError("ledgerSwap", { kind: "not-fast-forward", message: "ledger rewound" });
+        ww.budget.abort();
+      },
+    });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["failed", "merging"]);
+    expect(out.reason).toContain("dequeue fence");
+    expect(w.events).not.toContain("dequeue");
+    expect(w.fake.control.queue()).toEqual([w.pr]);
+    expect((await w.ledger())?.state).toBe("merging");
   });
 
   test.each(["not-found", "conflict"] as const)("a %s queue read: dequeue, then released with attempts + 1", async (kind) => {

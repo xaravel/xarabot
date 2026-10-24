@@ -22,8 +22,6 @@ export const USAGE_LIMIT_MARGIN_MS = 2 * MINUTE_MS;
 export const USAGE_LIMIT_UNKNOWN_MS = 15 * MINUTE_MS;
 /** The longest usage-limit sleep. */
 export const USAGE_LIMIT_CAP_MS = 8 * HOUR_MS;
-/** How often a usage-limit sleep heartbeats the claim. */
-export const USAGE_LIMIT_TICK_MS = 5 * MINUTE_MS;
 
 /** An agent session's own limit and how long it may linger after its result. */
 export const SESSION_MS = 3 * HOUR_MS;

@@ -12,9 +12,9 @@ import { swapLedger, type Sleep } from "./ledger-cas.ts";
 /**
  * The PR step after a `done` result (FR6, FR13, FR22, NFR10, AR7, AR16, AR21,
  * AR44): one fresh snapshot, the bot commit onto its `main`, the Standing
- * Authority re-check on that `main`, a fencing heartbeat, a leased push, the
- * PR opened (or the adopted one updated), the record's `pr` and SHAs, and one
- * 🤖 status comment. It never throws.
+ * Authority re-check on that `main`, a fencing heartbeat, a leased push, a
+ * second fence and the PR opened (or the adopted one updated), the record's
+ * `pr` and SHAs, and one 🤖 status comment. It never throws.
  */
 
 export type PrStepDeps = {
@@ -245,6 +245,8 @@ export function createPrStep(deps: PrStepDeps): PrStep {
         pr = adopted;
         note(`fix pushed to PR #${pr}`);
       } else {
+        // A PR change is fenced: a unit lost since the push opens or updates no PR.
+        await beat("fence");
         const opened =
           adopted === null
             ? await call("openPr", (o) => forge.openPr({ branch, base: "main", title: text.title, body: text.body }, o))
