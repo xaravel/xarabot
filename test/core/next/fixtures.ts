@@ -1,7 +1,8 @@
 import type { AssembleInput } from "../../../src/core/next/snapshot.ts";
 import { assembleSnapshot } from "../../../src/core/next/snapshot.ts";
-import type { LaneRole, Snapshot } from "../../../src/core/schemas/snapshot.ts";
-import type { UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { COORDINATOR_PATH as LEDGER_COORDINATOR_PATH, serializeCoordinator } from "../../../src/core/ledger/codec.ts";
+import type { LaneRole, PrState, Snapshot } from "../../../src/core/schemas/snapshot.ts";
+import type { CoordinatorRecord, UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import { ALICE, NOW, rec, tip } from "../ledger/fixtures.ts";
 
 export { ALICE, NOW, rec };
@@ -51,6 +52,12 @@ export type World = {
   readonly ledgerFiles?: Record<string, string>;
   /** Manifest paths left out of `blob_shas`. */
   readonly noSha?: readonly string[];
+  /** Unit id → its PR as the forge reports it; default none. */
+  readonly prs?: Record<string, PrState>;
+  /** The ledger's `coordinator.json`; default none. */
+  readonly coordinator?: CoordinatorRecord | null;
+  /** Config `digest_time`; default the package default (08:00). */
+  readonly digestTime?: string;
 };
 
 export const manifestPath = (id: string) => `stories/${id}.md`;
@@ -81,6 +88,7 @@ function config(w: World): string {
     "maintainer: edanisko",
     `standing_authority_path: ${AUTHORITY}`,
     `bootstrapped_epics: [${(w.bootstrapped ?? []).join(", ")}]`,
+    ...(w.digestTime === undefined ? [] : [`digest_time: "${w.digestTime}"`]),
     "manifests:",
     "  dir: stories",
   ];
@@ -137,8 +145,8 @@ export function input(w: World): AssembleInput {
     main_sha: MAIN_SHA,
     blob_shas,
     ledger_tip: LEDGER_SHA,
-    ledger_files: w.ledgerFiles ?? tip(w.records ?? []),
-    prs: {},
+    ledger_files: w.ledgerFiles ?? tip(w.records ?? [], w.coordinator == null ? {} : { [LEDGER_COORDINATOR_PATH]: serializeCoordinator(w.coordinator) }),
+    prs: { ...w.prs },
     escalations: w.escalations === undefined ? null : w.escalations === null ? null : { open: [...w.escalations] },
     lane: ALICE,
     role: w.role ?? "builder",

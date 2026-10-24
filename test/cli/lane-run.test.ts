@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { ok } from "../../src/core/result.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
 import { laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
+import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
+import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
 import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
 import { cleanup, fakeConnect, HOST_ID, mainFiles, stubInstaller, world, writeCredential, type MainOpts, type World } from "./lane-fixture.ts";
 
@@ -37,6 +40,8 @@ type Setup = {
   readonly installFails?: string;
   readonly connectFail?: string;
   readonly botUserFails?: boolean;
+  /** The ledger's files at the start. */
+  readonly ledger?: Record<string, string>;
 };
 
 type Ran = {
@@ -45,6 +50,9 @@ type Ran = {
   readonly err: string[];
   readonly fake: FakeForge;
   readonly starts: LaneDeps[];
+  readonly coordinatorStarts: CoordinatorDeps[];
+  /** The run lane's folder. */
+  readonly laneDir: string;
   readonly installs: { version: string }[];
   readonly record: ReturnType<typeof fakeConnect>["record"];
   readonly w: World;
@@ -57,20 +65,27 @@ function read(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
 }
 
-async function laneRunWith(o: Setup = {}, args: readonly string[] = [REPO, "builder-1"], start?: LaneRunDeps["start"]): Promise<Ran> {
+async function laneRunWith(
+  o: Setup = {},
+  args: readonly string[] = [REPO, "builder-1"],
+  start?: LaneRunDeps["start"],
+  startCoordinator?: LaneRunDeps["startCoordinator"],
+): Promise<Ran> {
   const w = world(dirs, o.env ?? {});
+  const laneDir = join(dirname(w.laneDir), args[1] ?? "builder-1");
   mkdirSync(join(w.xdg, "xarabot"), { recursive: true });
   writeFileSync(w.hostYaml, o.host ?? hostYaml());
-  mkdirSync(w.laneDir, { recursive: true });
+  mkdirSync(laneDir, { recursive: true });
   const runner = o.runner === undefined ? "v1\n" : o.runner;
-  if (runner !== null) writeFileSync(join(w.laneDir, "runner"), runner);
-  if (o.failedStarts !== undefined) writeFileSync(join(w.laneDir, "failed-starts"), `${o.failedStarts}\n`);
+  if (runner !== null) writeFileSync(join(laneDir, "runner"), runner);
+  if (o.failedStarts !== undefined) writeFileSync(join(laneDir, "failed-starts"), `${o.failedStarts}\n`);
   for (const v of o.installed ?? ["v1"]) mkdirSync(join(w.runnerRoot, v), { recursive: true });
   if (o.credential !== false) writeCredential(w);
-  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main) });
+  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main), ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
   const conn = fakeConnect(fake, { ...(o.connectFail !== undefined ? { fail: o.connectFail } : {}), ...(o.botUserFails === true ? { botUserFails: true } : {}) });
   const installer = stubInstaller(o.installFails !== undefined ? { fail: o.installFails } : {});
   const starts: LaneDeps[] = [];
+  const coordinatorStarts: CoordinatorDeps[] = [];
   const out: string[] = [];
   const err: string[] = [];
   const deps: LaneRunDeps = {
@@ -84,6 +99,12 @@ async function laneRunWith(o: Setup = {}, args: readonly string[] = [REPO, "buil
         starts.push(d);
         return { outcome: "idle" };
       }),
+    startCoordinator:
+      startCoordinator ??
+      (async (d) => {
+        coordinatorStarts.push(d);
+        return { outcome: "idle" };
+      }),
     out: (l) => out.push(l),
     errOut: (l) => err.push(l),
   };
@@ -94,11 +115,13 @@ async function laneRunWith(o: Setup = {}, args: readonly string[] = [REPO, "buil
     err,
     fake,
     starts,
+    coordinatorStarts,
+    laneDir,
     installs: installer.calls,
     record: conn.record,
     w,
-    failedStarts: () => read(join(w.laneDir, "failed-starts")),
-    runnerFile: () => read(join(w.laneDir, "runner")),
+    failedStarts: () => read(join(laneDir, "failed-starts")),
+    runnerFile: () => read(join(laneDir, "runner")),
     again: () => laneRun(args, deps),
   };
 }
@@ -197,7 +220,6 @@ describe("xarabot lane run: refusals", () => {
     ["no credential", { credential: false }, "missing"],
     ["builders over the limit", { host: hostYaml({ lanes: [{}, other] }) }, "more than XARABOT_MAX_BUILDERS=1"],
     ["an invalid XARABOT_MAX_BUILDERS", { env: { XARABOT_MAX_BUILDERS: "many" } }, "is not a positive integer"],
-    ["coordinator", { host: hostYaml({ lanes: [{ role: "coordinator" }] }) }, "no coordinator process before Epic 2"],
     ["no App credentials", { connectFail: "credentials auth: missing" }, "credentials auth: missing"],
   ] as const)("%s: refused, reason named, failed-starts + 1", async (_name, o, why) => {
     const r = await laneRunWith(o as Setup);
@@ -311,5 +333,118 @@ describe("xarabot lane run: a passing start", () => {
     expect(journal[0]).toMatchObject({ schema_version: 1, type: "span", span: "idle" });
     expect(read(join(r.w.laneDir, "outcome"))).toBe("idle\n");
     expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+});
+
+describe("xarabot lane run: a coordinator lane", () => {
+  const COORD_HOST = hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] });
+  const ARGS = [REPO, "coordinator"] as const;
+  const IDENTITY = { owner: "alice", host: HOST_ID, lane: "coordinator" };
+  const other = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
+    schema_version: 1,
+    owner: "dave",
+    host: "44444444-4444-4444-8444-444444444444",
+    lane: "coordinator",
+    generation: 1,
+    heartbeat_at: "2026-10-23T09:45:00Z",
+    digest_posted_at: null,
+    rulings_cursor: null,
+    ...over,
+  });
+  const seed = (c: CoordinatorRecord) => ({ [COORDINATOR_PATH]: serializeCoordinator(c) });
+  const coordinatorOf = async (r: Ran) => {
+    const s = await r.fake.forge.snapshot({ signal: AbortSignal.timeout(5000) });
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  };
+
+  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with no steps", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, failedStarts: 2 }, ARGS);
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(r.starts).toEqual([]);
+    expect(r.coordinatorStarts).toHaveLength(1);
+    const d = r.coordinatorStarts[0] as CoordinatorDeps;
+    expect(d.identity).toEqual(IDENTITY);
+    expect(d.steps).toEqual({});
+    expect(d.laneDir).toBe(r.laneDir);
+    expect(d.claim).toMatchObject({ ...IDENTITY, generation: 1, heartbeat_at: "2026-10-23T10:00:00Z" });
+    expect(await coordinatorOf(r)).toEqual(d.claim);
+    expect(r.out.at(-1)).toBe("lane coordinator: idle");
+  });
+
+  test("the same identity re-claims at the same generation", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, ledger: seed(other({ owner: "alice", host: HOST_ID, generation: 3, rulings_cursor: "r-9" })) }, ARGS);
+    expect(r.code).toBe(0);
+    expect(r.coordinatorStarts[0]?.claim).toMatchObject({ generation: 3, rulings_cursor: "r-9", heartbeat_at: "2026-10-23T10:00:00Z" });
+  });
+
+  test("another identity's stale claim is taken over at generation + 1", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, ledger: seed(other({ heartbeat_at: "2026-10-23T09:30:00Z", generation: 4 })) }, ARGS);
+    expect(r.code).toBe(0);
+    expect(r.coordinatorStarts[0]?.claim).toMatchObject({ ...IDENTITY, generation: 5 });
+  });
+
+  test("another identity's live claim: a failed start naming the holder, no ledger write, no process", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, ledger: seed(other()) }, ARGS);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("dave/44444444-4444-4444-8444-444444444444/coordinator");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.coordinatorStarts).toEqual([]);
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+    expect(await coordinatorOf(r)).toEqual(other());
+  });
+
+  test("the third such start in a row writes STOP and posts lane-start-failed", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, ledger: seed(other()), failedStarts: 2 }, ARGS);
+    expect(r.code).toBe(1);
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(true);
+    expect(r.fake.control.alerts().map((a) => a.condition)).toEqual([LANE_START_FAILED]);
+  });
+
+  test.each([
+    ["a builder lane named coordinator", hostYaml({ lanes: [{ name: "coordinator" }] }), "coordinator", "lane coordinator has role builder"],
+    ["a coordinator lane under another name", hostYaml({ lanes: [{ name: "builder-1", role: "coordinator" }] }), "builder-1", "lane builder-1 has role coordinator"],
+  ] as const)("%s: a failed start before the forge connect, nothing claimed", async (_name, host, lane, why) => {
+    const r = await laneRunWith({ host }, [REPO, lane]);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(why);
+    expect(r.err.join("\n")).toContain("a coordinator lane must be named coordinator");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.record.connects).toBe(0);
+    expect(r.starts).toEqual([]);
+    expect(r.coordinatorStarts).toEqual([]);
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+
+  test("a coordinator is not counted against XARABOT_MAX_BUILDERS", async () => {
+    const host = hostYaml({ lanes: [{}, { name: "coordinator", role: "coordinator" }] });
+    const r = await laneRunWith({ host }, ARGS);
+    expect(r.code).toBe(0);
+    expect(r.coordinatorStarts).toHaveLength(1);
+  });
+
+  test("the other start checks still apply", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, main: { unattended: [] } }, ARGS);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("unattended_adapters");
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+
+  test("with the real process: idle with no reconcile step, no unit record, coordinator.json at generation 1", async () => {
+    const r = await laneRunWith({ host: COORD_HOST }, ARGS, undefined, (d) => runCoordinatorProcess({ ...d, waiter: { wait: async () => ({ end: "elapsed" }) } }));
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.out.at(-1)).toBe("lane coordinator: idle");
+    const journal = (read(join(r.laneDir, "journal.jsonl")) ?? "")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as JournalRecord);
+    expect(journal).toEqual([expect.objectContaining({ type: "span", span: "idle", reason: "no reconcile step (Story 2.5)" })]);
+    expect(await coordinatorOf(r)).toMatchObject({ ...IDENTITY, generation: 1 });
+    expect(r.fake.control.ledgerLog().map((c) => c.message)).toEqual(["root", "ledger: claimCoordinator coordinator [skip ci]"]);
   });
 });

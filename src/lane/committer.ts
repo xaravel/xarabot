@@ -1,5 +1,5 @@
 import type { BotIdentity } from "../core/bot-identity.ts";
-import type { WriteRules } from "../core/lane/write-check.ts";
+import type { CoordinatorWriteRules, WriteRules } from "../core/lane/write-check.ts";
 import { err, type Result } from "../core/result.ts";
 import { failed, gitRun, needCommit, readMarker } from "./clone.ts";
 import { commitSession, type CommitOutcome } from "./commit.ts";
@@ -20,8 +20,8 @@ export type CommitRequest = {
   readonly ontoSha: string;
   /** The agent's message; `commitSession` sanitizes it. */
   readonly message: string;
-  /** The write check's rules, built from the same fresh `main`. */
-  readonly rules: WriteRules;
+  /** The write check's rules, built from the same fresh `main`: a builder's or the coordinator's. */
+  readonly rules: WriteRules | CoordinatorWriteRules;
   readonly signal: AbortSignal;
 };
 

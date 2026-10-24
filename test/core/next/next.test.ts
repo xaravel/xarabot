@@ -496,9 +496,23 @@ describe("next: stop", () => {
     });
   });
 
-  test("coordinator", () => {
+  test("coordinator: no longer a stop; with no reconcile run on the ledger, reconcile:1", () => {
     const o = next(snapshotOf(BOOT(["1"], { role: "coordinator" })), "coordinator");
-    expect(o.kind).toBe("stop");
+    expect(o.kind === "coordinator" ? o.unit.unit : o.kind).toBe("reconcile:1");
+  });
+
+  test("coordinator: a graph cycle stops it as it stops a builder", () => {
+    const w: World = {
+      epics: { 1: [], 2: [] },
+      epicsYaml: "version: 1\nepics:\n  1:\n    depends_on: [2]\n  2:\n    depends_on: [1]\n",
+      role: "coordinator",
+    };
+    expect(next(snapshotOf(w), "coordinator")).toEqual({ kind: "stop", reason: "graph: cycle among Epics 1 → 2 → 1" });
+  });
+
+  test("coordinator: a malformed snapshot stops it", () => {
+    const bad = { ...snapshotOf(BOOT(["1"], { role: "coordinator" })), main_sha: "nope" } as Snapshot;
+    expect(next(bad, "coordinator").kind).toBe("stop");
   });
 
   test("unknown lane role", () => {

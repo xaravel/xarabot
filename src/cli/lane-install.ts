@@ -32,6 +32,9 @@ export const LANE_INSTALL_USAGE =
 /** A `host.yaml` lane name. */
 export const LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
+/** The one name a coordinator lane has, and only it. */
+export const COORDINATOR_LANE = "coordinator";
+
 export const DEFAULT_CALL_TIMEOUT_MS = 60_000;
 /** The runner install's deadline: a shallow fetch and `bun install`. */
 export const INSTALL_TIMEOUT_MS = 10 * 60_000;
@@ -172,6 +175,9 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   });
   if (!laneParse.success) return fail(`lane ${name}: ${describeIssues(laneParse.error)}`);
   const lane = laneParse.data;
+  // The coordinator's identity is `<owner>/<host>/coordinator` (AD-8), so the role and the name go together.
+  if (lane.role === "coordinator" && name !== COORDINATOR_LANE) return fail(`a coordinator lane must be named ${COORDINATOR_LANE}, not ${JSON.stringify(name)}`);
+  if (lane.role !== "coordinator" && name === COORDINATOR_LANE) return fail(`the lane name ${COORDINATOR_LANE} is only for role coordinator, not ${lane.role}`);
 
   const paths = hostPaths(deps.env);
   if (paths === null) return fail("HOME is not set");

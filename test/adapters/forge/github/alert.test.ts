@@ -52,6 +52,18 @@ describe("alert", () => {
     ]);
   });
 
+  test.each([
+    ["coordinator-missing", "missing"],
+    ["coordinator-expired", "expired"],
+  ] as const)("%s says the claim is %s and builders keep going, with the same marker and mention", async (condition, state) => {
+    const { gh, forge } = setup();
+    const main = gh.control.ref("main") as string;
+    expect(value(await forge.alert(condition, main, live()))).toEqual({ posted: true });
+    expect(gh.control.comments(1)).toEqual([
+      `🤖 @alice Xarabot alert: \`${condition}\`: the coordinator claim is ${state}; builders keep going (main \`${main}\`).\n\n<!-- xarabot-alert ${condition} ${main} -->`,
+    ]);
+  });
+
   test("the list query and request order", async () => {
     const { gh, forge } = setup();
     const main = gh.control.ref("main") as string;

@@ -3,11 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { parseLedger } from "../../src/core/ledger/codec.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import { ok } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import { UnitJournalRecordSchema, type JournalRecord, type UnitJournalRecord } from "../../src/core/schemas/journal.ts";
-import type { LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts";
+import type { CoordinatorRecord, LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
@@ -149,14 +149,32 @@ type HarnessOpts = MainOpts & {
   readonly usageLimits?: readonly ({ resetAt: number | null } | null)[];
   /** How each stub wait ends, in order; default `elapsed`. */
   readonly waitEnds?: readonly WaitEnd[];
+  /** The ledger's `coordinator.json`; default a live claim, `null` for none. */
+  readonly coordinator?: CoordinatorRecord | null;
 };
+
+/** A `coordinator.json` claim stamped at `heartbeatAt` (default the forge's `now`, so live). */
+function liveCoordinator(heartbeatAt = FORGE_NOW): CoordinatorRecord {
+  return {
+    schema_version: 1,
+    owner: "carol",
+    host: "33333333-3333-4333-8333-333333333333",
+    lane: "coordinator",
+    generation: 1,
+    heartbeat_at: heartbeatAt,
+    digest_posted_at: null,
+    rulings_cursor: null,
+  };
+}
 
 function harness(o: HarnessOpts = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "xarabot-lane-"));
   dirs.push(root);
   const laneDir = join(root, "lanes", "builder-1");
   const hostStop = join(root, "home", ".xarabot", "STOP");
-  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o) });
+  const coordinator = o.coordinator === undefined ? liveCoordinator() : o.coordinator;
+  const ledger: Record<string, string> = coordinator === null ? {} : { [COORDINATOR_PATH]: serializeCoordinator(coordinator) };
+  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o), ledger });
   const runs: RunCall[] = [];
   const prepares: PrepareParams[] = [];
   const prSteps: PrStepInput[] = [];
@@ -1685,5 +1703,51 @@ describe("readsPath", () => {
   ];
   test.each(cases)("%s → %p", (path, expected) => {
     expect(readsPath(path)).toBe(expected);
+  });
+});
+
+describe("runLaneProcess: the coordinator claim", () => {
+  const claimed = (h: Harness) => h.fake.control.ledgerLog().some((c) => c.message === "ledger: claim story:1.1 [skip ci]");
+
+  test.each([
+    ["missing", null, "coordinator-missing"],
+    ["expired (30 min since its heartbeat)", liveCoordinator("2026-10-23T09:30:00Z"), "coordinator-expired"],
+  ] as const)("%s: one alert for this main SHA, and the builder still claims its Story", async (_name, coordinator, condition) => {
+    const h = harness({ coordinator, behaviors: [finishes("done"), finishes("done", "done", "second", "1-2")] });
+    const main = await mainSha(h.fake);
+    expect((await h.run()).outcome).toBe("progress");
+    expect(claimed(h)).toBe(true);
+    expect(h.fake.control.alerts()).toEqual([{ condition, main_sha: main }]);
+    // A second run on the same main posts nothing more.
+    await h.run();
+    expect(h.fake.control.alerts()).toHaveLength(1);
+  });
+
+  test("a live claim (29 min since its heartbeat) posts nothing", async () => {
+    const h = harness({ coordinator: liveCoordinator("2026-10-23T09:31:00Z"), behaviors: [finishes("done")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(claimed(h)).toBe(true);
+    expect(h.fake.control.alerts()).toEqual([]);
+  });
+
+  test("a failed alert is ignored: the builder goes on building", async () => {
+    const h = harness({ coordinator: null, behaviors: [finishes("done")] });
+    h.fake.control.injectError("alert", { kind: "auth", message: "bad token" });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(claimed(h)).toBe(true);
+    expect(h.fake.control.alerts()).toEqual([]);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "claimed" });
+  });
+
+  test("a throwing alert is ignored too", async () => {
+    const h = harness({ coordinator: null, behaviors: [finishes("done")] });
+    const forge: Forge = {
+      ...h.fake.forge,
+      alert: async () => {
+        throw new Error("boom");
+      },
+    };
+    expect((await h.run({ forge })).outcome).toBe("progress");
+    expect(claimed(h)).toBe(true);
   });
 });

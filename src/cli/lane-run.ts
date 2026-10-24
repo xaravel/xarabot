@@ -7,9 +7,11 @@ import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
 import type { Result } from "../core/result.ts";
+import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
 import { createCiStep } from "../lane/ci-step.ts";
+import { claimCoordinatorRecord, runCoordinatorProcess, type CoordinatorDeps } from "../lane/coordinator-process.ts";
 import { createGitCommitter } from "../lane/committer.ts";
 import { createGitDiffPaths } from "../lane/diff-paths.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type LaneProcessResult } from "../lane/lane-process.ts";
@@ -25,7 +27,7 @@ import { createMacSandbox } from "../sandbox/macos.ts";
 import { cliVersion as defaultCliVersion } from "../sandbox/tools.ts";
 import { credentialPath, readCredential } from "../sandbox/vendor-home.ts";
 import { FAILED_STARTS_FILE, findLane, hostPaths, RUNNER_FILE } from "./host-paths.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, ensureRunner, INSTALL_TIMEOUT_MS, pinnedConfig, writeFileAtomic } from "./lane-install.ts";
+import { COORDINATOR_LANE, DEFAULT_CALL_TIMEOUT_MS, ensureRunner, INSTALL_TIMEOUT_MS, pinnedConfig, writeFileAtomic } from "./lane-install.ts";
 import { githubConnect, type Connect } from "./lane-connection.ts";
 
 /**
@@ -33,9 +35,11 @@ import { githubConnect, type Connect } from "./lane-connection.ts";
  * what the launcher runs, from the pinned runner. It checks STOP, then that
  * `main` still pins the running version (installing the new one and exiting
  * when not), then the refusal table; only then does it compose the real
- * adapters and run one `runLaneProcess`. Every refusal or failure after the
- * STOP check, apart from a version switch, is a failed start: three in a row
- * write the lane's `STOP` and post an alert.
+ * adapters and run one `runLaneProcess`. A coordinator lane skips the
+ * builder limit, and its last start check claims `coordinator.json`
+ * (AD-8); it then runs one `runCoordinatorProcess`. Every refusal or failure
+ * after the STOP check, apart from a version switch, is a failed start:
+ * three in a row write the lane's `STOP` and post an alert.
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -55,8 +59,10 @@ export type LaneRunDeps = {
   readonly installRunner?: InstallRunner;
   /** The agent CLI's `--version` probe; default `cliVersion`. */
   readonly cliVersion?: (cmd: string, env: CredentialEnv) => Promise<Result<string, "refused">>;
-  /** Runs the composed lane; default `runLaneProcess`. */
+  /** Runs the composed builder lane; default `runLaneProcess`. */
   readonly start?: (deps: LaneDeps) => Promise<LaneProcessResult>;
+  /** Runs the composed coordinator lane; default `runCoordinatorProcess`. */
+  readonly startCoordinator?: (deps: CoordinatorDeps) => Promise<LaneProcessResult>;
   readonly callTimeoutMs?: number;
   readonly installTimeoutMs?: number;
   readonly out?: (line: string) => void;
@@ -160,6 +166,11 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     return 1;
   };
 
+  // The coordinator's identity is `<owner>/<host>/coordinator` (AD-8): a host.yaml from before Story 2.4, or edited by hand, may break that.
+  if ((lane.role === "coordinator") !== (name === COORDINATOR_LANE)) {
+    return failedStart(`lane ${name} has role ${lane.role}: a coordinator lane must be named ${COORDINATOR_LANE}, and only a coordinator lane may have that name`);
+  }
+
   // 3. Credentials, the snapshot and config.yaml.
   const connected = await (deps.connect ?? githubConnect(deps.env))(lane);
   if (!connected.ok) return failedStart(connected.message);
@@ -201,7 +212,6 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   // 5. The repo config and the refusals.
   const repoConfig = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
   if (!repoConfig.ok) return failedStart(`repo config ${repoConfig.error.kind}: ${repoConfig.error.message}`);
-  if (lane.role === "coordinator") return failedStart("lane role coordinator: there is no coordinator process before Epic 2");
   const unattended = unattendedRefusal(repoConfig.value.repo.policy, lane.agent);
   if (!unattended.ok) return failedStart(unattended.error.message);
   const agent = adapterFor(lane.agent);
@@ -220,8 +230,11 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   if (!credential.ok) return failedStart(credential.error.message);
   const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);
   if (!limit.ok) return failedStart(limit.error.message);
-  const builders = builderRefusal(host, name, limit.value);
-  if (!builders.ok) return failedStart(builders.error.message);
+  const coordinator = lane.role === "coordinator";
+  if (!coordinator) {
+    const builders = builderRefusal(host, name, limit.value);
+    if (!builders.ok) return failedStart(builders.error.message);
+  }
 
   // 6. Every check passed: compose the real dependencies and run one unit.
   const gitDir = await openRunnerGit(laneDir, deadline());
@@ -230,6 +243,19 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   if (!botId.ok) return failedStart(`bot user id: ${botId.error.kind}: ${botId.error.message}`);
   const bot = botIdentity(lane.owner, botId.value);
   if (!bot.ok) return failedStart(bot.error.message);
+
+  const runnerGit = gitDir.value;
+  const forge = connection.forge({ runnerGit, maintainer });
+  const identity = { owner: lane.owner, host: hostId, lane: name };
+
+  // A coordinator's last start check: the claim on coordinator.json (AD-8).
+  let claimed: CoordinatorRecord | null = null;
+  if (coordinator) {
+    const c = await claimCoordinatorRecord({ forge, identity, now: snap.now, callTimeoutMs });
+    if (!c.ok) return failedStart(c.error.message);
+    claimed = c.value;
+  }
+
   // The start passed: the run of failed starts ends here.
   try {
     mkdirSync(laneDir, { recursive: true, mode: 0o700 });
@@ -238,11 +264,16 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     say(`${failedPath}: ${message(e)}`);
   }
 
-  const runnerGit = gitDir.value;
-  const forge = connection.forge({ runnerGit, maintainer });
-  const identity = { owner: lane.owner, host: hostId, lane: name };
-  const fetch = connection.fetchShas(runnerGit);
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
+  if (claimed !== null) {
+    // No coordinator step is wired before Story 2.5: every unit ends idle, unclaimed.
+    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: {}, waiter: createSleepWaiter({ store }) };
+    const result = await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps);
+    out(`lane ${name}: ${result.outcome}`);
+    return 0;
+  }
+
+  const fetch = connection.fetchShas(runnerGit);
   const laneDeps: LaneDeps = {
     forge,
     agent,

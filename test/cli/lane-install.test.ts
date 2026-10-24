@@ -187,6 +187,9 @@ describe("xarabot lane install", () => {
     [["builder-1", "--repo", "a/b", "--role", "boss", "--owner", "alice", "--agent", "claude"], "role"],
     [["builder-1", "--repo", "a/b", "--role", "builder", "--owner", "alice", "--agent", "gpt"], "agent"],
     [[...ARGS, "--effort", "huge"], "effort"],
+    [["coord", "--repo", "xaravel/xarabot", "--role", "coordinator", "--owner", "alice", "--agent", "claude"], "a coordinator lane must be named coordinator"],
+    [["builder-1", "--repo", "xaravel/xarabot", "--role", "coordinator", "--owner", "alice", "--agent", "claude"], "a coordinator lane must be named coordinator"],
+    [["coordinator", ...ARGS.slice(1)], "the lane name coordinator is only for role coordinator"],
   ])("%j is refused before anything is read or written", async (args, why) => {
     const w = world(dirs);
     const r = await install(w, args);
@@ -194,6 +197,16 @@ describe("xarabot lane install", () => {
     expect(r.err.join("\n")).toContain(why);
     expect(r.record.connects).toBe(0);
     nothingWritten(w);
+  });
+
+  test("a coordinator lane named coordinator installs in lanes/coordinator", async () => {
+    const w = world(dirs);
+    const r = await install(w, ["coordinator", "--repo", "xaravel/xarabot", "--role", "coordinator", "--owner", "alice", "--agent", "claude"]);
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const host = loadHostConfig(readFileSync(w.hostYaml, "utf8"));
+    expect(host.ok && host.value.lanes["coordinator"]).toEqual({ repo: "xaravel/xarabot", role: "coordinator", owner: "alice", agent: "claude", effort: "high" });
+    expect(existsSync(join(w.xarabot, "repos", "xaravel__xarabot", "lanes", "coordinator", "runner"))).toBe(true);
   });
 
   test("parseInstallArgs", () => {

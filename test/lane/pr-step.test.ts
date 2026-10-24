@@ -454,6 +454,7 @@ describe("createPrStep", () => {
     const w = await world();
     await w.run();
     expect(w.committer.requests[0]?.rules).toEqual({
+      role: "builder",
       coordinatorFiles: [`${SPEC_DIR}/sprint-status.yaml`, `${SPEC_DIR}/retro-gates.yaml`, "_bmad-output/planning-artifacts/epics.md"],
       manifestsDir: "stories",
       standingAuthorityPath: AUTHORITY,
@@ -482,7 +483,8 @@ describe("createPrStep", () => {
         w.fake.control.setMain(files);
       }
       await w.run({ unit: { ...STORY, infrastructure: o.infrastructure, manifest_sha: sha } });
-      return w.committer.requests[0]?.rules.infrastructureApproved;
+      const rules = w.committer.requests[0]?.rules;
+      return rules?.role === "builder" ? rules.infrastructureApproved : undefined;
     };
 
     test("approved: Infrastructure, the record's approval and main's manifest all match", async () => {
