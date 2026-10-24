@@ -55,7 +55,7 @@ development_status:
   1-16a-opening-the-pr: done
   1-17-ci-polling-ci-fixes-and-conflicts: done
   1-17a-approval-gate-and-merge-queue: done
-  1-18-waits-stop-wake-stop-now-and-usage-limits: backlog
+  1-18-waits-stop-wake-stop-now-and-usage-limits: done
   1-19-xarabot-lane-install-and-the-pinned-runner: backlog
   1-20-canary-and-self-host-runbook: backlog
   epic-1-retrospective: optional

@@ -53,8 +53,8 @@ describe("createFsLaneStore", () => {
   test("writes PID files, creating the lane folder, and clears them", () => {
     const { laneDir, store } = setup();
     for (const name of ["lane", "agent", "wait"] as const) {
-      expect(store.writePid(name, 4242).ok).toBe(true);
-      expect(readFileSync(join(laneDir, `${name}.pid`), "utf8")).toBe("4242\n");
+      expect(store.writePid(name, 4242, "sleep").ok).toBe(true);
+      expect(readFileSync(join(laneDir, `${name}.pid`), "utf8")).toBe("4242\nsleep\n");
       expect(store.clearPid(name).ok).toBe(true);
       expect(existsSync(join(laneDir, `${name}.pid`))).toBe(false);
     }
@@ -63,9 +63,12 @@ describe("createFsLaneStore", () => {
 
   test("refuses an unknown PID file or a non-PID", () => {
     const { store } = setup();
-    expect(store.writePid("other" as "lane", 1)).toMatchObject({ ok: false, error: { kind: "invalid" } });
-    expect(store.writePid("lane", 0)).toMatchObject({ ok: false, error: { kind: "invalid" } });
-    expect(store.writePid("lane", 1.5)).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    expect(store.writePid("other" as "lane", 1, "bun")).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    expect(store.writePid("lane", 0, "bun")).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    expect(store.writePid("lane", 1.5, "bun")).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    for (const command of ["", "/usr/bin/sleep", "two words", "a\nb"]) {
+      expect(store.writePid("lane", 1, command)).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    }
   });
 
   test("reads the host and lane STOP markers", () => {
@@ -128,7 +131,7 @@ describe("createFsLaneStore", () => {
     const file = join(root, "file");
     writeFileSync(file, "");
     const store = createFsLaneStore({ laneDir: join(file, "lane"), hostStop: join(root, "STOP") });
-    expect(store.writePid("lane", 1)).toMatchObject({ ok: false, error: { kind: "io" } });
+    expect(store.writePid("lane", 1, "bun")).toMatchObject({ ok: false, error: { kind: "io" } });
     expect(store.writeOutcome("stop")).toMatchObject({ ok: false, error: { kind: "io" } });
     expect(store.appendJournal(SPAN)).toMatchObject({ ok: false, error: { kind: "io" } });
   });

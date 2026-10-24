@@ -1,9 +1,17 @@
 import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { storySpecGlob } from "../core/config/story-spec-path.ts";
 import { checkBuildSpec, specMatches } from "../core/lane/build-check.ts";
-import { claim, failAttempt, markMerged, park, parkNew, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
+import {
+  RESULT_LINGER_MS,
+  RESULT_POLL_MS,
+  SESSION_MS,
+  trailingWaitMs,
+  USAGE_LIMIT_TICK_MS,
+  usageLimitSleepMs,
+} from "../core/lane/waits.ts";
+import { claim, failAttempt, heartbeat, markMerged, park, parkNew, release, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import { next, type NextStory } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { buildPrompt, type PromptMode, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -14,7 +22,7 @@ import type { Lane } from "../core/schemas/host.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
 import { unitPath, UnitRecordSchema, type LaneIdentity, type ParkReason, type UnitRecord, type UnitState } from "../core/schemas/ledger.ts";
 import { parseSessionResult, type BuildResult } from "../core/schemas/session-result.ts";
-import type { Agent, AgentSettings, AgentUnit } from "../ports/agent.ts";
+import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgePr, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
@@ -23,6 +31,7 @@ import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
 import type { MergeStep } from "./merge-step.ts";
+import type { Waiter, WaitResult } from "./wait.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -31,6 +40,11 @@ import type { Workspace } from "./workspace.ts";
  * validated result. It leaves a ledger state, at most one journal record, a
  * log and the `outcome` file saying what happened. The PR step after a
  * `done` result is injected (Story 1.16a).
+ *
+ * Every sandboxed run is bounded by the unit budget, the session limit and
+ * the result linger; a usage limit sleeps through the `Waiter` and starts
+ * the session again. After the outcome the process waits its trailing wait,
+ * then clears `lane.pid` (Story 1.18).
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
@@ -97,7 +111,25 @@ export type LaneDeps = {
   /** The ledger swap's back-off sleep and jitter source (tests). */
   readonly sleep?: Sleep;
   readonly random?: () => number;
+  /** Runs the trailing wait and usage-limit sleeps (Story 1.18). */
+  readonly waiter: Waiter;
+  readonly limits?: SessionLimits;
+  /** The command `lane.pid` records; default the basename of `process.execPath`. */
+  readonly command?: string;
 };
+
+/** An agent session's limits (AR3); defaults 3 h, 5 min and 5 s. */
+export type SessionLimits = {
+  /** A run still going after this is killed; with no result it is a failed attempt. */
+  readonly sessionMs?: number;
+  /** A run still going this long after its result file is first seen is killed. */
+  readonly resultLingerMs?: number;
+  /** How often the lane looks for the result file during a run. */
+  readonly resultPollMs?: number;
+};
+
+/** Why a run ended `stop` after a STOP during a usage-limit sleep. */
+export const LIMIT_STOP_REASON = "STOP during a usage-limit sleep";
 
 export type LaneProcessResult = { readonly outcome: LaneOutcome };
 
@@ -197,6 +229,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const layout: LaneLayout = laneLayout(deps.laneDir);
+  const limits = {
+    sessionMs: deps.limits?.sessionMs ?? SESSION_MS,
+    resultLingerMs: deps.limits?.resultLingerMs ?? RESULT_LINGER_MS,
+    resultPollMs: deps.limits?.resultPollMs ?? RESULT_POLL_MS,
+  };
   const iso = (ms: number) => new Date(ms).toISOString();
   const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
 
@@ -398,6 +435,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     const story = t.story;
     const budget = AbortSignal.timeout(config.unit_budget_hours * HOUR_MS);
     const overBudget = () => `unit budget of ${config.unit_budget_hours} h passed`;
+    /** Set when a STOP ended a usage-limit sleep and the unit was released. */
+    let limitStop: { readonly record: UnitRecord | null; readonly state: UnitState | null } | null = null;
     const branch = `${config.branches.story}${story.story_id}`;
 
     const profile: SandboxProfile = {
@@ -429,20 +468,58 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return null;
     };
 
-    /** One sandboxed run: its session id when it ran, else the failure. */
-    const runOnce = async (u: AgentUnit): Promise<{ readonly sessionId: string | null } | { readonly fail: string }> => {
+    const resultSeen = (): boolean => {
+      try {
+        return lstatSync(layout.resultPath, { throwIfNoEntry: false }) !== undefined;
+      } catch {
+        return false;
+      }
+    };
+
+    /**
+     * One sandboxed run under one signal: the unit budget, the session limit,
+     * and an abort `resultLingerMs` after the result file is first seen.
+     * `timedOut` says the session limit fired.
+     */
+    const sandboxed = async (spec: LaunchSpec): Promise<{ readonly run: SandboxResult<SandboxRun>; readonly timedOut: boolean }> => {
+      const session = new AbortController();
+      const linger = new AbortController();
+      const sessionTimer = setTimeout(() => session.abort(), limits.sessionMs);
+      let lingerTimer: ReturnType<typeof setTimeout> | null = null;
+      const poll = setInterval(() => {
+        if (lingerTimer === null && resultSeen()) lingerTimer = setTimeout(() => linger.abort(), limits.resultLingerMs);
+      }, limits.resultPollMs);
+      const signal = AbortSignal.any([budget, session.signal, linger.signal]);
+      const command = basename(spec.argv[0] ?? "");
+      let run: SandboxResult<SandboxRun>;
+      try {
+        run = await sandbox.run(spec, profile, signal, { onSpawn: (pid) => reportStore(store.writePid("agent", pid, command), "agent.pid") });
+      } catch (e) {
+        run = { ok: false as const, error: { kind: "refused" as const, message: `sandbox threw: ${message(e)}` } };
+      } finally {
+        clearTimeout(sessionTimer);
+        clearInterval(poll);
+        if (lingerTimer !== null) clearTimeout(lingerTimer);
+        reportStore(store.clearPid("agent"), "agent.pid");
+      }
+      if (linger.signal.aborted && !session.signal.aborted) note(`run killed ${limits.resultLingerMs} ms after its result appeared`);
+      return { run, timedOut: session.signal.aborted && !budget.aborted };
+    };
+    const sessionPast = (): string => `agent session ran past ${limits.sessionMs / HOUR_MS} h`;
+
+    type Once = {
+      readonly sessionId: string | null;
+      readonly usageLimit: AgentUsage["usageLimit"];
+      readonly timedOut: boolean;
+    };
+
+    /** One sandboxed run: its session id, usage limit and whether the session limit fired, else the failure. */
+    const runOnce = async (u: AgentUnit): Promise<Once | { readonly fail: string }> => {
       const spec = agent.launchSpec(u, settings, layout.resultPath);
       if (!spec.ok) return { fail: `launch spec: ${spec.error.message}` };
       const n = t.sessions + 1;
       note(`run ${n} (${u.kind}) starts`);
-      let run: SandboxResult<SandboxRun>;
-      try {
-        run = await sandbox.run(spec.value, profile, budget, { onSpawn: (pid) => reportStore(store.writePid("agent", pid), "agent.pid") });
-      } catch (e) {
-        run = { ok: false as const, error: { kind: "refused" as const, message: `sandbox threw: ${message(e)}` } };
-      } finally {
-        reportStore(store.clearPid("agent"), "agent.pid");
-      }
+      const { run, timedOut } = await sandboxed(spec.value);
       if (!run.ok) return { fail: `sandbox refused: ${run.error.message}` };
       t.sessions = n;
       const r = run.value;
@@ -465,7 +542,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
           estimate: (t.cost?.estimate ?? false) || (usage.cost?.estimate ?? true) || t.uncosted,
         };
       }
-      return { sessionId: usage.sessionId };
+      return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut };
     };
 
     const resultText = (): string | null => {
@@ -480,15 +557,16 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       | { readonly ok: true; readonly result: BuildResult; readonly specPath: string; readonly specText: string }
       | { readonly ok: false; readonly reason: string };
 
+    type Runs = { readonly text: string | null; readonly limit: NonNullable<AgentUsage["usageLimit"]> | null } | { readonly fail: string };
+
     /**
-     * One builder session at `at`: prepare, prompt, run with the one resume,
-     * parse the build result, then the single spec match. With `ciLog` the
-     * session runs in `ci-fix` mode, its log in `tmp/ci-fix-log.md`.
+     * Prepares the clone at `at`, builds the prompt and runs the session with
+     * its one resume. A run that hit a usage limit and left no result returns
+     * that `limit`, with no further run.
      */
-    const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
-      const fail = (reason: string): Ran => ({ ok: false, reason });
+    const sessionRuns = async (at: string, ciLog: string | null): Promise<Runs> => {
       const setUpFailed = await setUp(at);
-      if (setUpFailed !== null) return fail(setUpFailed);
+      if (setUpFailed !== null) return { fail: setUpFailed };
 
       let mode: PromptMode = { mode: "build" };
       if (ciLog !== null) {
@@ -496,12 +574,12 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         try {
           writeFileSync(logPath, ciLog);
         } catch (e) {
-          return fail(`ci-fix log: cannot write ${logPath}: ${message(e)}`);
+          return { fail: `ci-fix log: cannot write ${logPath}: ${message(e)}` };
         }
         mode = { mode: "ci-fix", log_path: logPath };
       }
       const repo = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-      if (!repo.ok) return fail(`config: ${repo.error.message}`);
+      if (!repo.ok) return { fail: `config: ${repo.error.message}` };
       const sections: PromptSection[] = [];
       for (const path of snap.main.tree) {
         const m = PROMPT_SECTION.exec(path);
@@ -516,17 +594,106 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         human_live_steps: repo.value.repo.humanLiveSteps.steps,
         result_path: layout.resultPath,
       });
-      if (!prompt.ok) return fail(`prompt ${prompt.error.kind}: ${prompt.error.message}`);
+      if (!prompt.ok) return { fail: `prompt ${prompt.error.kind}: ${prompt.error.message}` };
 
+      /** After a run: the budget, then the result, the session limit and the usage limit decide. */
+      const after = (once: Once): Runs | null => {
+        if (budget.aborted) return { fail: overBudget() };
+        const text = resultText();
+        if (text !== null) return { text, limit: null };
+        if (once.timedOut) return { fail: sessionPast() };
+        if (once.usageLimit !== null) return { text: null, limit: once.usageLimit };
+        return null;
+      };
       const first = await runOnce({ kind: "fresh", prompt: prompt.value });
-      if ("fail" in first) return fail(first.fail);
-      if (budget.aborted) return fail(overBudget());
-      let text = resultText();
-      if (text === null && first.sessionId !== null) {
-        const second = await runOnce({ kind: "resume", sessionId: first.sessionId });
-        if ("fail" in second) return fail(second.fail);
-        if (budget.aborted) return fail(overBudget());
-        text = resultText();
+      if ("fail" in first) return first;
+      const firstEnd = after(first);
+      if (firstEnd !== null) return firstEnd;
+      if (first.sessionId === null) return { text: null, limit: null };
+      const second = await runOnce({ kind: "resume", sessionId: first.sessionId });
+      if ("fail" in second) return second;
+      return after(second) ?? { text: null, limit: null };
+    };
+
+    /**
+     * Sleeps through a usage limit under the budget, heartbeating the claim
+     * every tick, then journals one `usage-limit` span. `null` means the
+     * session starts again; otherwise the failure's reason. A STOP releases
+     * the unit and sets `limitStop`.
+     */
+    const usageLimitSleep = async (resetAt: number | null): Promise<string | null> => {
+      const startedMs = clock();
+      const ms = usageLimitSleepMs(resetAt, startedMs);
+      const reset = resetAt === null ? "unknown" : iso(resetAt);
+      note(`usage limit, reset ${reset}: sleeping ${ms} ms`);
+      const generation = t.record?.generation;
+      const beat = async (): Promise<void> => {
+        if (generation === undefined) return;
+        try {
+          const r = await swap(heartbeat({ unit: story.unit, by: identity, now: await forgeNow(), generation }), story.unit);
+          if (r.kind !== "ok") note(`heartbeat failed: ${r.message}`);
+        } catch (e) {
+          note(`heartbeat failed: ${message(e)}`);
+        }
+      };
+      let waited: WaitResult;
+      try {
+        waited = await deps.waiter.wait({ ms, signal: budget, tickMs: USAGE_LIMIT_TICK_MS, onTick: beat });
+      } catch (e) {
+        waited = { end: "failed", message: message(e) };
+      }
+      const span = store.appendJournal({
+        schema_version: 1,
+        type: "span",
+        span: "usage-limit",
+        reason: `usage limit; reset ${reset}`,
+        started_at: iso(startedMs),
+        ended_at: iso(clock()),
+      });
+      reportStore(span, "journal");
+      note(`usage-limit sleep: ${waited.end}${waited.message === undefined ? "" : ` (${waited.message})`}`);
+      switch (waited.end) {
+        case "elapsed":
+        case "woken":
+          return null;
+        case "aborted":
+          return overBudget();
+        case "failed":
+          return `usage-limit sleep failed: ${waited.message ?? "no message"}`;
+        case "stopped":
+          await held(t, (now, gen) => release({ unit: story.unit, by: identity, now, generation: gen }), "release");
+          limitStop = { record: t.record, state: t.state };
+          return LIMIT_STOP_REASON;
+      }
+    };
+
+    /** The run ends `stop` with the record the usage-limit STOP released. */
+    const stopAfterLimit = (stopped: { readonly record: UnitRecord | null; readonly state: UnitState | null }): LaneOutcome => {
+      t.record = stopped.record;
+      t.state = stopped.state;
+      addReason(t, LIMIT_STOP_REASON);
+      note(`stop: ${LIMIT_STOP_REASON}`);
+      return "stop";
+    };
+
+    /**
+     * One builder session at `at`: prepare, prompt, run with the one resume,
+     * parse the build result, then the single spec match. With `ciLog` the
+     * session runs in `ci-fix` mode, its log in `tmp/ci-fix-log.md`.
+     */
+    const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
+      const fail = (reason: string): Ran => ({ ok: false, reason });
+      let text: string | null = null;
+      for (;;) {
+        const attempt = await sessionRuns(at, ciLog);
+        if ("fail" in attempt) return fail(attempt.fail);
+        if (attempt.limit === null) {
+          text = attempt.text;
+          break;
+        }
+        const slept = await usageLimitSleep(attempt.limit.resetAt);
+        if (slept !== null) return fail(slept);
+        note("usage-limit sleep over: the session starts again");
       }
       if (text === null) return fail(`no result at ${layout.resultPath} after ${t.sessions} run(s)`);
       const parsed = parseSessionResult(layout.resultPath, text, "build");
@@ -573,17 +740,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const s = spec.value;
       const launch: LaunchSpec = { argv: [...command], vendor: s.vendor, vendorHomeEnv: s.vendorHomeEnv, credential: s.credential, apiHosts: s.apiHosts };
       note(`lockfile command starts: ${command.join(" ")}`);
-      let run: SandboxResult<SandboxRun>;
-      try {
-        run = await sandbox.run(launch, profile, budget, { onSpawn: (pid) => reportStore(store.writePid("agent", pid), "agent.pid") });
-      } catch (e) {
-        run = { ok: false as const, error: { kind: "refused" as const, message: `sandbox threw: ${message(e)}` } };
-      } finally {
-        reportStore(store.clearPid("agent"), "agent.pid");
-      }
+      const { run, timedOut } = await sandboxed(launch);
       if (!run.ok) return err("sandbox", `sandbox refused: ${run.error.message}`);
       logRun("lockfile command", run.value);
       if (budget.aborted) return err("budget", overBudget());
+      if (timedOut) return err("session-limit", `the lockfile command ran past ${limits.sessionMs / HOUR_MS} h`);
       if (run.value.exitCode !== 0) return err("exit", `the lockfile command exited ${run.value.exitCode ?? `on ${run.value.signal ?? "a signal"}`}`);
       const texts: Record<string, string> = {};
       for (const path of paths) {
@@ -603,7 +764,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     };
 
     const ran = await sessionAt(start, null);
-    if (!ran.ok) return failUnit(t, ran.reason);
+    if (!ran.ok) {
+      const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+      if (stopped !== null) return stopAfterLimit(stopped);
+      return failUnit(t, ran.reason);
+    }
     const { result, specPath } = ran;
     const checked = checkBuildSpec(result.outcome, ran.specText);
     if (!checked.ok) return failUnit(t, `${specPath}: ${checked.error.message}`);
@@ -676,7 +841,14 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
           regenerate,
         });
       } catch (e) {
+        const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+        if (stopped !== null) return stopAfterLimit(stopped);
         return failUnit(t, `CI step threw: ${message(e)}`);
+      }
+      {
+        // A STOP during a CI session's usage-limit sleep released the unit: the CI step's own ending is moot.
+        const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+        if (stopped !== null) return stopAfterLimit(stopped);
       }
       const ciEnd = await settle(ci, "CI step");
       if (ciEnd !== null) return ciEnd;
@@ -697,7 +869,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   };
 
   const body = async (): Promise<LaneOutcome> => {
-    const pid = store.writePid("lane", deps.pid ?? process.pid);
+    const pid = store.writePid("lane", deps.pid ?? process.pid, deps.command ?? basename(process.execPath));
     if (!pid.ok) throw new Halt("failed", `lane.pid: ${pid.error.message}`);
 
     for (let round = 1; round <= MAX_CLAIM_ROUNDS; round += 1) {
@@ -865,5 +1037,17 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     });
   }
   reportStore(store.writeOutcome(outcome), "outcome");
+
+  const waitMs = trailingWaitMs(outcome);
+  if (waitMs !== null) {
+    let waited: WaitResult;
+    try {
+      waited = await deps.waiter.wait({ ms: waitMs });
+    } catch (e) {
+      waited = { end: "failed", message: message(e) };
+    }
+    if (waited.end === "failed") console.error(`lane wait failed: ${waited.message ?? "no message"}`);
+  }
+  reportStore(store.clearPid("lane"), "lane.pid");
   return { outcome };
 }

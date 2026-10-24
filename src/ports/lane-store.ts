@@ -18,8 +18,8 @@ export type LaneStoreResult<T> = Result<T, LaneStoreErrorKind>;
 export type LaneStore = {
   /** Whether the host STOP (`~/.xarabot/STOP`) and the lane's own `STOP` exist. */
   stopMarkers(): LaneStoreResult<{ readonly host: boolean; readonly lane: boolean }>;
-  /** Writes `<name>.pid` holding `pid`. */
-  writePid(name: PidName, pid: number): LaneStoreResult<void>;
+  /** Writes `<name>.pid` as `<pid>\n<command>\n`; `command` is a plain basename. */
+  writePid(name: PidName, pid: number, command: string): LaneStoreResult<void>;
   /** Removes `<name>.pid`; a missing file is fine. */
   clearPid(name: PidName): LaneStoreResult<void>;
   /** Validates `record` and appends it to `journal.jsonl` as one JSON line; an invalid record is refused. */

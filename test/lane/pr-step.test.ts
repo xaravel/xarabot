@@ -529,6 +529,7 @@ async function endToEnd(
     pid: 12345,
     sleep: async () => {},
     random: () => 0,
+    waiter: { wait: async () => ({ end: "elapsed" as const }) },
   });
   const path = join(laneDir, "journal.jsonl");
   const records = existsSync(path)
