@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "unit": "story:2.3",
-  "state": "parked",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -13,7 +13,7 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-24T09:34:32.104Z",
+  "heartbeat_at": "2026-10-24T10:10:01Z",
   "pr": 59,
   "pr_owner": "edanisko",
   "base_sha": "767a31f475c89d01c593214bbd56bad50d16ebd3",
@@ -22,24 +22,7 @@
   "passed_sha": null,
   "approved_sha": null,
   "builder_providers": [],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "_bmad-output/implementation-artifacts/spec-2-3-the-0-x-write-check.md",
-      "src/core/config/protected-paths.ts",
-      "src/core/lane/write-check.ts",
-      "src/lane/commit.ts",
-      "src/lane/committer.ts",
-      "src/lane/pr-step.ts",
-      "test/core/lane/write-check.test.ts",
-      "test/lane/commit.test.ts",
-      "test/lane/committer.test.ts",
-      "test/lane/git-fixture.ts",
-      "test/lane/pr-step.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
