@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAppCredentials } from "../../../../src/adapters/forge/github/credentials.ts";
-import { createGitHubForge, EMPTY_TREE, LEDGER_ROOT_MESSAGE, type SnapshotPart } from "../../../../src/adapters/forge/github/github-forge.ts";
+import { BLOB_READS_IN_FLIGHT, createGitHubForge, EMPTY_TREE, LEDGER_ROOT_MESSAGE, type SnapshotPart } from "../../../../src/adapters/forge/github/github-forge.ts";
 import { serializeUnitRecord } from "../../../../src/core/ledger/codec.ts";
 import { unitPath } from "../../../../src/core/schemas/ledger.ts";
 import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgeResult } from "../../../../src/ports/forge.ts";
@@ -123,6 +123,44 @@ describe("snapshot", () => {
     expect(s.main.files).toEqual({ "a.md": "hello\n" });
     expect(s.main.blob_shas["a.md"]).toBe("ce013625030ba8dba906f756967f9e9ca394464a");
     expect(apiCalls(gh).filter((c) => c.startsWith("GET /git/blobs/"))).toEqual(["GET /git/blobs/ce013625030ba8dba906f756967f9e9ca394464a"]);
+  });
+
+  test("blob reads stay within BLOB_READS_IN_FLIGHT at once, and every accepted path is read", async () => {
+    const { privateKey, publicKey } = testKeys();
+    const gh = createFakeGitHub({ publicKey });
+    let inFlight = 0;
+    let peak = 0;
+    const forge = createGitHubForge({
+      repo: { owner: "acme", name: "widgets" },
+      credentials: { app: { id: 4242, slug: "alice-xarabot" }, key: privateKey },
+      fetch: async (url, init) => {
+        if (!String(url).includes("/git/blobs/")) return gh.fetch(url, init);
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        try {
+          await Bun.sleep(1);
+          return await gh.fetch(url, init);
+        } finally {
+          inFlight -= 1;
+        }
+      },
+      apiUrl: gh.control.apiUrl,
+      now: gh.control.clock,
+    });
+    const files = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`docs/${i}.md`, `file ${i}\n`]));
+    gh.control.setMain(files);
+    const s = value(await forge.snapshot({ ...live(), read: () => true }));
+    expect(s.main.files).toEqual(files);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(BLOB_READS_IN_FLIGHT);
+  });
+
+  test("a failed blob read fails the snapshot", async () => {
+    const { gh, forge } = setup();
+    gh.control.setMain({ "a.md": "x", "b.md": "y" });
+    value(await forge.snapshot(live()));
+    gh.control.inject("GET", /\/git\/blobs\//, { status: 404, body: { message: "Not Found" } });
+    expect(kind(await forge.snapshot({ ...live(), read: () => true }))).toBe("not-found");
   });
 
   test("a truncated tree is transient", async () => {

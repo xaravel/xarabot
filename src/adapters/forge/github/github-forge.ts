@@ -63,6 +63,8 @@ export const DEFAULT_GIT_URL = "https://github.com";
 /** A list is read 100 entries a page, at most this many pages. */
 export const MAX_PAGES = 50;
 const PER_PAGE = 100;
+/** Blob reads a snapshot keeps in flight at once. */
+export const BLOB_READS_IN_FLIGHT = 8;
 /** Check conclusions that are not failures. */
 const PASSING_CONCLUSIONS: readonly string[] = ["success", "neutral", "skipped"];
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -305,15 +307,25 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     return forgeOk(new TextDecoder().decode(Buffer.from(content, "base64")));
   }
 
-  /** Reads the blobs of `entries` in parallel, keyed by path. */
+  /**
+   * Reads the blobs of `entries`, keyed by path, at most `BLOB_READS_IN_FLIGHT`
+   * at a time: GitHub answers a burst of parallel requests with a secondary
+   * rate limit. The first failure stops further reads.
+   */
   async function readBlobs(ctx: Ctx, entries: readonly TreeEntry[]): Promise<ForgeResult<Record<string, string>>> {
-    const results = await Promise.all(entries.map((e) => readBlob(ctx, e.sha)));
     const files: Record<string, string> = {};
-    for (const [i, r] of results.entries()) {
-      if (!r.ok) return r;
-      files[(entries[i] as TreeEntry).path] = r.value;
-    }
-    return forgeOk(files);
+    let next = 0;
+    let failed: ForgeResult<never> | null = null;
+    const worker = async (): Promise<void> => {
+      while (failed === null && next < entries.length) {
+        const e = entries[next++] as TreeEntry;
+        const r = await readBlob(ctx, e.sha);
+        if (!r.ok) failed ??= r;
+        else files[e.path] = r.value;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BLOB_READS_IN_FLIGHT, entries.length) }, worker));
+    return failed ?? forgeOk(files);
   }
 
   /** Creates the ledger branch at an empty root commit; a racing creator is `conflict`. */

@@ -143,8 +143,15 @@ class Halt extends Error {
   }
 }
 
+/**
+ * Installed tool trees: skills for the agents and the BMAD install. The runner
+ * reads none of their contents, and a repo holds hundreds of files there.
+ */
+const UNREAD_TREES = [".claude/", ".agents/", "_bmad/"];
+
 /** The `main` paths a snapshot reads the contents of. */
 export function readsPath(path: string): boolean {
+  if (UNREAD_TREES.some((t) => path.startsWith(t))) return false;
   return path.startsWith(".xarabot/") || /\.(?:md|ya?ml)$/.test(path);
 }
 

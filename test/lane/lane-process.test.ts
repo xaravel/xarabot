@@ -11,7 +11,7 @@ import type { LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts"
 import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
 import type { ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
-import { runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
+import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
@@ -1065,5 +1065,25 @@ describe("runLaneProcess waits and limits", () => {
     expect(asked).toEqual([MIN]);
     expect(during).toEqual({ command: "sleep", args: expect.stringMatching(/^(\S*\/)?sleep 0\.4$/) });
     expect(existsSync(join(h.laneDir, "wait.pid"))).toBe(false);
+  });
+});
+
+describe("readsPath", () => {
+  const cases: readonly [string, boolean][] = [
+    [".xarabot/config.yaml", true],
+    [".xarabot/prompts/build.md", true],
+    ["_bmad-output/planning-artifacts/epics.md", true],
+    ["_bmad-output/implementation-artifacts/sprint-status.yaml", true],
+    ["stories/2.1.md", true],
+    ["docs/maintainer/standing-authority.md", true],
+    ["src/lane/lane-process.ts", false],
+    ["package.json", false],
+    [".claude/skills/bmad-build/SKILL.md", false],
+    [".agents/skills/bmad-build/SKILL.md", false],
+    ["_bmad/config.toml", false],
+    ["_bmad/custom/bmad-build.yaml", false],
+  ];
+  test.each(cases)("%s → %p", (path, expected) => {
+    expect(readsPath(path)).toBe(expected);
   });
 });
