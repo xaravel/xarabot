@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-22-2026 00:43
-last_updated: 10-22-2026 00:43
+last_updated: 10-23-2026 22:22
 project: xarabot
 project_key: NOKEY
 tracking_system: file-system
@@ -58,7 +58,7 @@ development_status:
   1-18-waits-stop-wake-stop-now-and-usage-limits: done
   1-19-xarabot-lane-install-and-the-pinned-runner: done
   1-20-canary-and-self-host-runbook: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-heartbeat-and-fencing: backlog
@@ -118,3 +118,112 @@ development_status:
   7-6-adoption-inputs-for-xaravel: backlog
   7-7-consumer-readiness-verification: backlog
   epic-7-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-wire-the-model-mismatch-check-the-lane-f"
+    epic: 1
+    action: "Wire the model-mismatch check: the lane fails the attempt when the reported
+      model differs from the configured one (Story 1.14 AC, E:831); journal the reported
+      model (A1)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-2-reconcile-a-transient-ledger-swap-once-b"
+    epic: 1
+    action: "Reconcile a transient ledger swap once before returning deadline/exhausted,
+      and release or fail a claimed record on Halt(failed); add a fake-forge lands-then-transient
+      mode (A3, C2)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-3-make-lane-stops-durable-and-narrower-wri"
+    epic: 1
+    action: "Make lane stops durable and narrower: write STOP or count a failed start
+      on a laneStop outcome; map unmapped 4xx and push rule rejections to unit failures,
+      not forbidden; let a Halt end the usage-limit sleep; cap agent text (A5, A6,
+      A7, C3)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-4-make-test-suites-honest-inside-a-real-sa"
+    epic: 1
+    action: "Make test suites honest inside a real sandbox: gate socket-binding suites
+      on canSandbox, gate the 1.14 real-CLI test behind XARABOT_LIVE, replace runbook
+      row self-host.md:39 with an in-session bun test (C16, C18)"
+    owner: "dev loop; Maintainer for the runbook"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-5-before-the-switch-run-one-real-claude-la"
+    epic: 1
+    action: "Before the switch, run one real claude lane unit (no stub) and the agent-contract
+      live smoke; confirm the session commit works with no configured author identity
+      (R3), one spec match (R8) and real usage/model parsing"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-6-run-bmad-correct-course-on-readiness-blo"
+    epic: 1
+    action: "Run bmad-correct-course on readiness blockers R2-R11 before the switch,
+      R3/R4/R8 first, plus the dropped hand-offs from items 1 and 2"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-7-reconcile-epics-spine-and-spec-with-acce"
+    epic: 1
+    action: "Reconcile epics, spine and SPEC with accepted Epic 1 deviations (A13),
+      AD-1/AD-2 enforcement gaps (D4) and SPEC:220 after AR38"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-8-close-credential-paths-run-the-lockfile"
+    epic: 1
+    action: "Close credential paths: run the lockfile command without the vendor credential
+      (A14); redact the credential and token-shaped strings from agent text before
+      forge writes (C6); validate lane install names and roles against LaneName (A8)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-9-add-a-test-that-drives-the-production-fo"
+    epic: 1
+    action: "Add a test that drives the production forge connection (src/cli/lane-connection.ts)
+      against the emulated forge, asserting alerts post and pushes go through (C14)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-10-in-epic-2-planning-make-story-2-2-stale"
+    epic: 1
+    action: "In Epic 2 planning, make Story 2.2 stale takeover depend on a timed claim
+      heartbeat during sessions and CI polls (C1), and Story 2.1 fencing on a per-run
+      nonce or PID lock (C10)"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-11-split-runlaneprocess-and-the-duplicated"
+    epic: 1
+    action: "Split runLaneProcess and the duplicated lane-step helpers (call, swap,
+      forgeNow, End) into one module and break the lane import cycle before Epic 2
+      changes them (D1, D2, D3)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-12-process-carry-cross-story-deferrals-into"
+    epic: 1
+    action: "Process: carry cross-Story deferrals into the receiving Story spec or
+      the Epic context, and check them at retro time (E2)"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-13-decide-on-a-macos-ci-job-or-a-required-r"
+    epic: 1
+    action: "Decide on a macOS CI job, or a required recorded host run, for changes
+      to src/sandbox/** and src/adapters/agent/** (C17)"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
+  - id: "epic-1-retro-item-14-set-epic-1-to-done-in-sprint-status-yaml"
+    epic: 1
+    action: "Set epic-1 to done in sprint-status.yaml via bmad-sprint-planning, and
+      confirm that merging PRs #21 and #23-#28 without review was an intended use
+      of the admin bypass (E6, E1)"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-10-23.md"
