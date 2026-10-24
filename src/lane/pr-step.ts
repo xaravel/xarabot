@@ -237,16 +237,22 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       if (!pushed.ok) return await failed(`pushBranch ${pushed.error.kind}: ${pushed.error.message}`);
       note(`pushed ${c.head_sha} to ${branch}`);
 
-      // 6. Open the PR, or update the adopted one.
+      // 6. Open the PR, or update the adopted one; a fix leaves the PR's text as it is.
       const text = prText(story, result);
       const adopted = input.record.pr;
-      const opened =
-        adopted === null
-          ? await call("openPr", (o) => forge.openPr({ branch, base: "main", title: text.title, body: text.body }, o))
-          : await call("updatePr", (o) => forge.updatePr(adopted, { title: text.title, body: text.body }, o));
-      if (!opened.ok) return await failed(`${adopted === null ? "openPr" : "updatePr"} ${opened.error.kind}: ${opened.error.message}`);
-      const pr = opened.value.number;
-      note(`${adopted === null ? "opened" : "updated"} PR #${pr}`);
+      let pr: number;
+      if (adopted !== null && input.kind === "fix") {
+        pr = adopted;
+        note(`fix pushed to PR #${pr}`);
+      } else {
+        const opened =
+          adopted === null
+            ? await call("openPr", (o) => forge.openPr({ branch, base: "main", title: text.title, body: text.body }, o))
+            : await call("updatePr", (o) => forge.updatePr(adopted, { title: text.title, body: text.body }, o));
+        if (!opened.ok) return await failed(`${adopted === null ? "openPr" : "updatePr"} ${opened.error.kind}: ${opened.error.message}`);
+        pr = opened.value.number;
+        note(`${adopted === null ? "opened" : "updated"} PR #${pr}`);
+      }
 
       // 7. Record the PR and SHAs.
       await beat("record", { pr, pr_owner: identity.owner, head_sha: c.head_sha, base_sha: c.base_sha });

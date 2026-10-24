@@ -270,6 +270,29 @@ describe("createPrStep", () => {
     expect(await w.ledger()).toMatchObject({ pr: number, head_sha: list[0]?.head_sha, base_sha: w.main });
   });
 
+  test("a fix (kind fix) on the open PR: push leased on the head, record it, comment, but no updatePr", async () => {
+    const w = await world();
+    const h0 = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: h0 }, opts())).ok).toBe(true);
+    const opened = await w.fake.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const number = opened.value.number;
+    const withPr = rec({ unit: UNIT, globs: ["src/s0/**"], pr: number, pr_owner: "alice", head_sha: h0, base_sha: w.main });
+    w.fake.control.writeForeignLedger({ message: "pr [skip ci]", writes: tip([withPr]), deletes: [] });
+
+    const out = await w.run({ record: withPr, kind: "fix", result: result({ summary: "Fixed lint" }) });
+    expect(out.outcome).toBe("progress");
+    expect(out.state).toBe("claimed");
+    const list = await prs(w.fake);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ number, title: "old", body: "old", state: "open" });
+    expect(list[0]?.head_sha).not.toBe(h0);
+    expect(w.calls).not.toContain("openPr");
+    expect(w.calls).not.toContain("updatePr");
+    expect(await w.ledger()).toMatchObject({ pr: number, head_sha: list[0]?.head_sha, base_sha: w.main });
+    expect(w.fake.control.comments(number)).toHaveLength(1);
+  });
+
   test.each(["missing", "expired"] as const)("Standing Authority %s: stop with no push, no PR, no ledger edit, no alert", async (authority) => {
     const w = await world({ authority });
     const before = w.fake.control.ledgerLog().length;

@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { storySpecGlob } from "../core/config/story-spec-path.ts";
@@ -6,8 +6,9 @@ import { checkBuildSpec, specMatches } from "../core/lane/build-check.ts";
 import { claim, failAttempt, markMerged, park, parkNew, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import { next, type NextStory } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
-import { buildPrompt, type PromptSection } from "../core/prompt/build-prompt.ts";
+import { buildPrompt, type PromptMode, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
+import { err, ok } from "../core/result.ts";
 import type { Config } from "../core/schemas/config.ts";
 import type { Lane } from "../core/schemas/host.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
@@ -16,8 +17,9 @@ import { parseSessionResult, type BuildResult } from "../core/schemas/session-re
 import type { Agent, AgentSettings, AgentUnit } from "../ports/agent.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgePr, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
-import type { Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
+import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
+import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
 import type { Workspace } from "./workspace.ts";
@@ -48,6 +50,8 @@ export type PrStepInput = {
   readonly signal: AbortSignal;
   /** Writes a note to the unit log. */
   readonly log: (text: string) => void;
+  /** `fix`: a CI fix pushed to the open PR, whose title and body stay as they are. Default `build`. */
+  readonly kind?: "build" | "fix";
 };
 
 export type PrStepOutput = {
@@ -69,6 +73,8 @@ export type LaneDeps = {
   readonly store: LaneStore;
   readonly workspace: Workspace;
   readonly prStep: PrStep;
+  /** Takes the open PR through CI (Story 1.17); without it the run ends after the PR step. */
+  readonly ciStep?: CiStep;
   /** The lane folder (AR37). */
   readonly laneDir: string;
   /** Who writes the ledger records. */
@@ -104,6 +110,8 @@ export function readsPath(path: string): boolean {
 }
 
 const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
+/** The CI-fix session's log file in `tmp`. */
+export const CI_FIX_LOG = "ci-fix-log.md";
 
 /** The unit being handled, for its journal record. */
 type UnitTrack = {
@@ -199,6 +207,13 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     if (unit !== null) store.appendLog(unit.logName, text);
   };
   const note = (text: string): void => log(`== ${iso(clock())} ${text} ==\n`);
+  /** A sandboxed run's exit and output, into the unit log. */
+  const logRun = (what: string, r: SandboxRun): void =>
+    log(
+      `== ${iso(clock())} ${what} pid ${r.pid} exit ${r.exitCode ?? "none"} signal ${r.signal ?? "none"} ${r.durationMs} ms ==\n` +
+        `--- stdout ---\n${r.stdout}${r.stdout.endsWith("\n") || r.stdout === "" ? "" : "\n"}` +
+        `--- stderr ---\n${r.stderr}${r.stderr.endsWith("\n") || r.stderr === "" ? "" : "\n"}`,
+    );
 
   /** A failed store write goes to the unit log (when there is one) and stderr; the outcome stays. */
   const reportStore = (r: { readonly ok: boolean; readonly error?: { readonly kind: string; readonly message: string } }, what: string): void => {
@@ -303,41 +318,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     const story = t.story;
     const budget = AbortSignal.timeout(config.unit_budget_hours * HOUR_MS);
     const overBudget = () => `unit budget of ${config.unit_budget_hours} h passed`;
-
-    try {
-      emptyDir(layout.tmp);
-    } catch (e) {
-      return failUnit(t, `tmp: cannot empty ${layout.tmp}: ${message(e)}`);
-    }
     const branch = `${config.branches.story}${story.story_id}`;
-    const generation = t.record?.generation ?? 1;
-    let prepared: Awaited<ReturnType<Workspace["prepare"]>>;
-    try {
-      prepared = await workspace.prepare({ unit: story.unit, branch, start, generation, fetch: [start], signal: budget });
-    } catch (e) {
-      return failUnit(t, `prepare: ${message(e)}`);
-    }
-    if (budget.aborted) return failUnit(t, overBudget());
-    if (!prepared.ok) return failUnit(t, `prepare ${prepared.error.kind}: ${prepared.error.message}`);
-    note(`clone at ${prepared.value.sha}${prepared.value.resumed ? " (wip resumed)" : ""}`);
-
-    const repo = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-    if (!repo.ok) return failUnit(t, `config: ${repo.error.message}`);
-    const sections: PromptSection[] = [];
-    for (const path of snap.main.tree) {
-      const m = PROMPT_SECTION.exec(path);
-      const text = snap.main.files[path];
-      if (m !== null && text !== undefined) sections.push({ name: m[1] as string, text });
-    }
-    const prompt = buildPrompt({
-      template: PACKAGE_TEMPLATE,
-      unit: { kind: "story", id: story.story_id, sprint_key: story.sprint_key },
-      mode: { mode: "build" },
-      sections,
-      human_live_steps: repo.value.repo.humanLiveSteps.steps,
-      result_path: layout.resultPath,
-    });
-    if (!prompt.ok) return failUnit(t, `prompt ${prompt.error.kind}: ${prompt.error.message}`);
 
     const profile: SandboxProfile = {
       clone: layout.clone,
@@ -346,6 +327,26 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       runnerGit: layout.runnerGit,
       resultPath: layout.resultPath,
       repoHosts: config.proxy_hosts,
+    };
+
+    /** Empties `tmp` and prepares the clone at `at`; the failure's reason, else `null`. */
+    const setUp = async (at: string): Promise<string | null> => {
+      try {
+        emptyDir(layout.tmp);
+      } catch (e) {
+        return `tmp: cannot empty ${layout.tmp}: ${message(e)}`;
+      }
+      const generation = t.record?.generation ?? 1;
+      let prepared: Awaited<ReturnType<Workspace["prepare"]>>;
+      try {
+        prepared = await workspace.prepare({ unit: story.unit, branch, start: at, generation, fetch: [at], signal: budget });
+      } catch (e) {
+        return `prepare: ${message(e)}`;
+      }
+      if (budget.aborted) return overBudget();
+      if (!prepared.ok) return `prepare ${prepared.error.kind}: ${prepared.error.message}`;
+      note(`clone at ${prepared.value.sha}${prepared.value.resumed ? " (wip resumed)" : ""}`);
+      return null;
     };
 
     /** One sandboxed run: its session id when it ran, else the failure. */
@@ -365,11 +366,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (!run.ok) return { fail: `sandbox refused: ${run.error.message}` };
       t.sessions = n;
       const r = run.value;
-      log(
-        `== ${iso(clock())} run ${n} (${u.kind}) pid ${r.pid} exit ${r.exitCode ?? "none"} signal ${r.signal ?? "none"} ${r.durationMs} ms ==\n` +
-          `--- stdout ---\n${r.stdout}${r.stdout.endsWith("\n") || r.stdout === "" ? "" : "\n"}` +
-          `--- stderr ---\n${r.stderr}${r.stderr.endsWith("\n") || r.stderr === "" ? "" : "\n"}`,
-      );
+      logRun(`run ${n} (${u.kind})`, r);
       const usage = agent.parseUsage(r.stdout);
       if (usage.tokens !== null) {
         const a = t.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -399,43 +396,136 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       }
     };
 
-    const first = await runOnce({ kind: "fresh", prompt: prompt.value });
-    if ("fail" in first) return failUnit(t, first.fail);
-    if (budget.aborted) return failUnit(t, overBudget());
-    let text = resultText();
-    if (text === null && first.sessionId !== null) {
-      const second = await runOnce({ kind: "resume", sessionId: first.sessionId });
-      if ("fail" in second) return failUnit(t, second.fail);
-      if (budget.aborted) return failUnit(t, overBudget());
-      text = resultText();
-    }
-    if (text === null) return failUnit(t, `no result at ${layout.resultPath} after ${t.sessions} run(s)`);
-    const parsed = parseSessionResult(layout.resultPath, text, "build");
-    if (!parsed.ok) return failUnit(t, `result ${parsed.error.kind}: ${parsed.error.message}`);
-    const result = parsed.value;
-    t.result = result;
-    note(`result: ${result.outcome}`);
+    type Ran =
+      | { readonly ok: true; readonly result: BuildResult; readonly specPath: string; readonly specText: string }
+      | { readonly ok: false; readonly reason: string };
 
-    const glob = storySpecGlob(config.story_spec_path, story.story_id);
-    if (!glob.ok) return failUnit(t, `spec: ${glob.error.message}`);
-    let matches: string[];
-    try {
-      matches = specMatches(glob.value, listWorkingTree(layout.clone));
-    } catch (e) {
-      return failUnit(t, `spec: cannot list the clone: ${message(e)}`);
-    }
-    if (matches.length !== 1) {
-      return failUnit(t, `spec: ${matches.length} files match ${glob.value}${matches.length > 0 ? ` (${matches.join(", ")})` : ""}, expected exactly one`);
-    }
-    const specPath = matches[0] as string;
-    let specText: string | null;
-    try {
-      specText = readRegular(join(layout.clone, specPath));
-    } catch (e) {
-      return failUnit(t, `spec: cannot read ${specPath}: ${message(e)}`);
-    }
-    if (specText === null) return failUnit(t, `spec: ${specPath} is not a regular file`);
-    const checked = checkBuildSpec(result.outcome, specText);
+    /**
+     * One builder session at `at`: prepare, prompt, run with the one resume,
+     * parse the build result, then the single spec match. With `ciLog` the
+     * session runs in `ci-fix` mode, its log in `tmp/ci-fix-log.md`.
+     */
+    const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
+      const fail = (reason: string): Ran => ({ ok: false, reason });
+      const setUpFailed = await setUp(at);
+      if (setUpFailed !== null) return fail(setUpFailed);
+
+      let mode: PromptMode = { mode: "build" };
+      if (ciLog !== null) {
+        const logPath = join(layout.tmp, CI_FIX_LOG);
+        try {
+          writeFileSync(logPath, ciLog);
+        } catch (e) {
+          return fail(`ci-fix log: cannot write ${logPath}: ${message(e)}`);
+        }
+        mode = { mode: "ci-fix", log_path: logPath };
+      }
+      const repo = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+      if (!repo.ok) return fail(`config: ${repo.error.message}`);
+      const sections: PromptSection[] = [];
+      for (const path of snap.main.tree) {
+        const m = PROMPT_SECTION.exec(path);
+        const text = snap.main.files[path];
+        if (m !== null && text !== undefined) sections.push({ name: m[1] as string, text });
+      }
+      const prompt = buildPrompt({
+        template: PACKAGE_TEMPLATE,
+        unit: { kind: "story", id: story.story_id, sprint_key: story.sprint_key },
+        mode,
+        sections,
+        human_live_steps: repo.value.repo.humanLiveSteps.steps,
+        result_path: layout.resultPath,
+      });
+      if (!prompt.ok) return fail(`prompt ${prompt.error.kind}: ${prompt.error.message}`);
+
+      const first = await runOnce({ kind: "fresh", prompt: prompt.value });
+      if ("fail" in first) return fail(first.fail);
+      if (budget.aborted) return fail(overBudget());
+      let text = resultText();
+      if (text === null && first.sessionId !== null) {
+        const second = await runOnce({ kind: "resume", sessionId: first.sessionId });
+        if ("fail" in second) return fail(second.fail);
+        if (budget.aborted) return fail(overBudget());
+        text = resultText();
+      }
+      if (text === null) return fail(`no result at ${layout.resultPath} after ${t.sessions} run(s)`);
+      const parsed = parseSessionResult(layout.resultPath, text, "build");
+      if (!parsed.ok) return fail(`result ${parsed.error.kind}: ${parsed.error.message}`);
+      const result = parsed.value;
+      if (ciLog === null) t.result = result;
+      note(`result: ${result.outcome}`);
+
+      const glob = storySpecGlob(config.story_spec_path, story.story_id);
+      if (!glob.ok) return fail(`spec: ${glob.error.message}`);
+      let matches: string[];
+      try {
+        matches = specMatches(glob.value, listWorkingTree(layout.clone));
+      } catch (e) {
+        return fail(`spec: cannot list the clone: ${message(e)}`);
+      }
+      if (matches.length !== 1) {
+        return fail(`spec: ${matches.length} files match ${glob.value}${matches.length > 0 ? ` (${matches.join(", ")})` : ""}, expected exactly one`);
+      }
+      const specPath = matches[0] as string;
+      let specText: string | null;
+      try {
+        specText = readRegular(join(layout.clone, specPath));
+      } catch (e) {
+        return fail(`spec: cannot read ${specPath}: ${message(e)}`);
+      }
+      if (specText === null) return fail(`spec: ${specPath} is not a regular file`);
+      return { ok: true, result, specPath, specText };
+    };
+
+    /** The CI step's fix and conflict sessions: no spec status cross-check. */
+    const ciSession: CiSession = async ({ start: at, logText }) => {
+      const ran = await sessionAt(at, logText);
+      if (!ran.ok) return err("session", ran.reason);
+      return ok({ result: ran.result, specPath: ran.specPath });
+    };
+
+    /** The lockfile command under the agent's own launch spec, `argv` replaced and no stdin. */
+    const regenerate: Regenerate = async ({ start: at, paths, command }) => {
+      const setUpFailed = await setUp(at);
+      if (setUpFailed !== null) return err("prepare", setUpFailed);
+      const spec = agent.launchSpec({ kind: "fresh", prompt: "Regenerate the lockfiles." }, settings, layout.resultPath);
+      if (!spec.ok) return err("launch-spec", spec.error.message);
+      const s = spec.value;
+      const launch: LaunchSpec = { argv: [...command], vendor: s.vendor, vendorHomeEnv: s.vendorHomeEnv, credential: s.credential, apiHosts: s.apiHosts };
+      note(`lockfile command starts: ${command.join(" ")}`);
+      let run: SandboxResult<SandboxRun>;
+      try {
+        run = await sandbox.run(launch, profile, budget, { onSpawn: (pid) => reportStore(store.writePid("agent", pid), "agent.pid") });
+      } catch (e) {
+        run = { ok: false as const, error: { kind: "refused" as const, message: `sandbox threw: ${message(e)}` } };
+      } finally {
+        reportStore(store.clearPid("agent"), "agent.pid");
+      }
+      if (!run.ok) return err("sandbox", `sandbox refused: ${run.error.message}`);
+      logRun("lockfile command", run.value);
+      if (budget.aborted) return err("budget", overBudget());
+      if (run.value.exitCode !== 0) return err("exit", `the lockfile command exited ${run.value.exitCode ?? `on ${run.value.signal ?? "a signal"}`}`);
+      const texts: Record<string, string> = {};
+      for (const path of paths) {
+        if (path === "" || path.startsWith("/") || path.split("/").some((p) => p === ".." || p === "." || p === "" || p === ".git")) {
+          return err("invalid", `lockfile path ${JSON.stringify(path)} is not a plain repo path`);
+        }
+        let text: string | null;
+        try {
+          text = readRegular(join(layout.clone, path));
+        } catch (e) {
+          return err("read", `cannot read ${path}: ${message(e)}`);
+        }
+        if (text === null) return err("read", `${path} is not a regular file after the lockfile command`);
+        texts[path] = text;
+      }
+      return ok(texts);
+    };
+
+    const ran = await sessionAt(start, null);
+    if (!ran.ok) return failUnit(t, ran.reason);
+    const { result, specPath } = ran;
+    const checked = checkBuildSpec(result.outcome, ran.specText);
     if (!checked.ok) return failUnit(t, `${specPath}: ${checked.error.message}`);
 
     if (result.outcome !== "done") {
@@ -449,30 +539,60 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return parked ? "progress" : "failed";
     }
 
+    /** Records a step's output; the budget rule's `failed` when it released the unit, else `null`. */
+    const settle = async (out: PrStepOutput, what: string): Promise<LaneOutcome | null> => {
+      t.state = out.state;
+      if (out.record !== undefined) t.record = out.record;
+      if (out.reason !== undefined) addReason(t, out.reason);
+      note(`${what}: ${out.outcome} (${out.state ?? "unknown"})`);
+      if (budget.aborted && out.outcome !== "stop" && out.state === "claimed") {
+        // The budget passed during the step: release the unit, unless the step already moved it on.
+        const before = t.reason;
+        const released = await held(t, (now, gen) => failAttempt({ unit: story.unit, by: identity, now, generation: gen }), "failAttempt");
+        if (released) {
+          t.reason = overBudget();
+          return "failed";
+        }
+        t.reason = before;
+        t.state = out.state;
+      }
+      return null;
+    };
+
     const record = t.record;
     if (record === null) return failUnit(t, "no claimed record to hand to the PR step");
     let out: PrStepOutput;
     try {
-      out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note });
+      out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note, kind: "build" });
     } catch (e) {
       return failUnit(t, `PR step threw: ${message(e)}`);
     }
-    t.state = out.state;
-    if (out.record !== undefined) t.record = out.record;
-    if (out.reason !== undefined) addReason(t, out.reason);
-    note(`PR step: ${out.outcome} (${out.state ?? "unknown"})`);
-    if (budget.aborted && out.outcome !== "stop" && out.state === "claimed") {
-      // The budget passed during the PR step: release the unit, unless the step already moved it on.
-      const before = t.reason;
-      const released = await held(t, (now, gen) => failAttempt({ unit: story.unit, by: identity, now, generation: gen }), "failAttempt");
-      if (released) {
-        t.reason = overBudget();
-        return "failed";
-      }
-      t.reason = before;
-      t.state = out.state;
+    const prEnd = await settle(out, "PR step");
+    if (prEnd !== null) return prEnd;
+
+    const ciStep = deps.ciStep;
+    const withPr = t.record;
+    if (ciStep === undefined || out.outcome !== "progress" || out.state !== "claimed" || withPr === null || withPr.pr === null) return out.outcome;
+    let ci: PrStepOutput;
+    try {
+      ci = await ciStep({
+        unit: story,
+        record: withPr,
+        specPath,
+        clone: layout.clone,
+        signal: budget,
+        log: note,
+        scratchDir: join(layout.laneDir, "scratch"),
+        prStep: deps.prStep,
+        session: ciSession,
+        regenerate,
+      });
+    } catch (e) {
+      return failUnit(t, `CI step threw: ${message(e)}`);
     }
-    return out.outcome;
+    const ciEnd = await settle(ci, "CI step");
+    if (ciEnd !== null) return ciEnd;
+    return ci.outcome;
   };
 
   const body = async (): Promise<LaneOutcome> => {
