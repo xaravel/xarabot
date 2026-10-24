@@ -202,7 +202,7 @@ describe("runCoordinatorProcess", () => {
     const journal = h.journal();
     expect(journal).toHaveLength(1);
     expect(journal[0]).toMatchObject({ type: "span", span: "idle", reason: "no reconcile step (Story 2.5)" });
-    expect(h.waits.map((w) => w.ms)).toEqual([30 * MIN]);
+    expect(h.waits.map((w) => w.ms)).toEqual([10 * MIN]);
     const l = await h.ledger();
     expect(l.units.size).toBe(0);
     expect(h.commits("ledger: claim ")).toBe(0);
@@ -346,6 +346,42 @@ describe("runCoordinatorProcess", () => {
     expect(h.fake.control.trace()).toEqual([]);
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     expect(h.waits).toEqual([]);
+  });
+
+  test.each([
+    ["merging: the unit keeper stops, so the record gets no further heartbeat", "merging", 0],
+    ["claimed: the unit keeper beats on through the trailing wait", "claimed", 1],
+  ] as const)("a step that leaves its unit %s", async (_name, state, beats) => {
+    let beatsInWait = -1;
+    const h = harness({
+      waiter: async (_p, hh) => {
+        const before = hh.commits("ledger: keepAlive reconcile:1 ");
+        hh.pulse();
+        if (beats > 0) await until(() => hh.commits("ledger: keepAlive reconcile:1 ") > before);
+        else await Bun.sleep(20);
+        beatsInWait = hh.commits("ledger: keepAlive reconcile:1 ") - before;
+        return { end: "elapsed" };
+      },
+    });
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      if (state === "merging") {
+        // As startMerging leaves it: still held by this lane at this generation.
+        const merging = { ...input.record, state: "merging" as const, pr: 3, passed_sha: "e".repeat(40), head_sha: "e".repeat(40) };
+        h.fake.control.writeForeignLedger({ message: "startMerging [skip ci]", writes: tip([merging]), deletes: [] });
+      }
+      return { outcome: "progress", state };
+    };
+    expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("progress");
+    expect(beatsInWait).toBe(beats);
+    expect(h.waits.map((w) => w.ms)).toEqual([MIN]);
+    expect((await h.ledger()).units.get("reconcile:1")?.state).toBe(state);
+  });
+
+  test("the step gets main's file texts as the snapshot read them", async () => {
+    const h = harness();
+    await h.run({ steps: { reconcile: stepping(h) } });
+    expect(h.steps[0]?.files["_bmad-output/implementation-artifacts/sprint-status.yaml"]).toBe(mainFiles()["_bmad-output/implementation-artifacts/sprint-status.yaml"]);
   });
 
   test("a step that throws is a failed attempt: the unit is released", async () => {

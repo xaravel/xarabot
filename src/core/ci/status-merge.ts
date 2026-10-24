@@ -24,7 +24,7 @@ export type StatusMergeInput = {
   readonly main: string;
 };
 
-type Entry = {
+export type Entry = {
   readonly kind: "entry";
   readonly key: string;
   readonly indent: number;
@@ -60,7 +60,7 @@ function isSeqItem(line: string): boolean {
 const INDICATORS = "-?#{}[]|>%@`!&*,";
 
 /** The key and the rest of a block-mapping key line, or `null` when `line` is not one. */
-function keyLine(line: string): { readonly key: string; readonly rest: string } | null {
+export function keyLine(line: string): { readonly key: string; readonly rest: string } | null {
   const s = line.slice(leading(line));
   if (s === "") return null;
   let key: string;
@@ -175,7 +175,13 @@ function splitText(path: string, text: string): Step<{ readonly lines: string[];
   return ok({ lines, crlf });
 }
 
-function parseText(path: string, text: string): Step<{ readonly level: Level; readonly crlf: boolean }> {
+/**
+ * A status YAML text split by lines into block-mapping levels: the items of
+ * each level cover its lines in order, so line positions can be counted.
+ * Whether the text used CRLF line ends. Shared with the `reconcile` status
+ * editor.
+ */
+export function parseStatusText(path: string, text: string): Step<{ readonly level: Level; readonly crlf: boolean }> {
   const split = splitText(path, text);
   if (!split.ok) return split;
   const level = parseLevel(path, split.value.lines, -1);
@@ -295,11 +301,11 @@ function mergeLevel(base: Level, pr: Level, main: Level): Step<Item[]> {
  * that does not parse as YAML, is `invalid`.
  */
 export function mergeStatusYaml(input: StatusMergeInput, path = "status file"): Result<string, "invalid"> {
-  const base = parseText(`${path} (base)`, input.base);
+  const base = parseStatusText(`${path} (base)`, input.base);
   if (!base.ok) return base;
-  const pr = parseText(`${path} (PR)`, input.pr);
+  const pr = parseStatusText(`${path} (PR)`, input.pr);
   if (!pr.ok) return pr;
-  const main = parseText(`${path} (main)`, input.main);
+  const main = parseStatusText(`${path} (main)`, input.main);
   if (!main.ok) return main;
   const merged = mergeLevel(base.value.level, pr.value.level, main.value.level);
   if (!merged.ok) return merged;

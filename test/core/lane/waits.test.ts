@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkPid, commandMatches, trailingWaitMs, usageLimitSleepMs, type CheckPidParams, type PidCheck } from "../../../src/core/lane/waits.ts";
+import { checkPid, commandMatches, coordinatorTrailingWaitMs, trailingWaitMs, usageLimitSleepMs, type CheckPidParams, type PidCheck } from "../../../src/core/lane/waits.ts";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -13,6 +13,17 @@ describe("trailingWaitMs", () => {
     ["stop", null],
   ] as const)("%s → %p", (outcome, ms) => {
     expect(trailingWaitMs(outcome)).toBe(ms);
+  });
+});
+
+describe("coordinatorTrailingWaitMs", () => {
+  test.each([
+    ["progress", MIN],
+    ["idle", 10 * MIN],
+    ["failed", 15 * MIN],
+    ["stop", null],
+  ] as const)("%s → %p", (outcome, ms) => {
+    expect(coordinatorTrailingWaitMs(outcome)).toBe(ms);
   });
 });
 

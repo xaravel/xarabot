@@ -79,10 +79,10 @@ async function treeEntry(gitDir: string, tree: string, path: string, signal: Abo
   return ok({ mode: m[1] as string, sha: m[2] as string });
 }
 
-type Replacement = { readonly path: string } & ({ readonly text: string } | { readonly fromTree: string });
+export type Replacement = { readonly path: string } & ({ readonly text: string } | { readonly fromTree: string });
 
 /** `tree` with each replacement applied, through a temp index inside `gitDir`. */
-async function rewriteTree(gitDir: string, tree: string, replacements: readonly Replacement[], signal: AbortSignal): Promise<CloneResult<string>> {
+export async function rewriteTree(gitDir: string, tree: string, replacements: readonly Replacement[], signal: AbortSignal): Promise<CloneResult<string>> {
   if (replacements.length === 0) return ok(tree);
   let tmp: string;
   try {

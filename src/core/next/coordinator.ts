@@ -80,18 +80,18 @@ export function coordinatorGlobs(spec: CoordinatorUnitSpec, config: CoordinatorG
 const RECONCILE_UNIT = /^reconcile:([1-9][0-9]*)$/;
 
 /** The run number of a `reconcile:<n>` id, or `null`. */
-function reconcileNumber(unit: string): number | null {
+export function reconcileNumber(unit: string): number | null {
   const m = RECONCILE_UNIT.exec(unit);
   return m === null ? null : Number(m[1]);
 }
 
-/** The highest-numbered `reconcile:<n>` record, or `null`. */
-function newestReconcile(snapshot: Snapshot): UnitRecord | null {
+/** The highest-numbered `reconcile:<n>` record in any state for which `keep` holds, or `null`. */
+function highestReconcile(snapshot: Snapshot, keep: (r: UnitRecord) => boolean): UnitRecord | null {
   let best: UnitRecord | null = null;
   let bestN = 0;
   for (const r of snapshot.ledger.units) {
     const n = reconcileNumber(r.unit);
-    if (n !== null && n > bestN) {
+    if (n !== null && n > bestN && keep(r)) {
       best = r;
       bestN = n;
     }
@@ -99,12 +99,72 @@ function newestReconcile(snapshot: Snapshot): UnitRecord | null {
   return best;
 }
 
+/** The highest-numbered `merged` `reconcile:<n>` record: the last finished run. */
+export function newestMergedReconcile(snapshot: Snapshot): UnitRecord | null {
+  return highestReconcile(snapshot, (r) => r.state === "merged");
+}
+
+/** The next `reconcile` run's number: the highest number of any state, plus 1. */
+export function nextReconcileNumber(snapshot: Snapshot): number {
+  const top = highestReconcile(snapshot, () => true);
+  return top === null ? 1 : (reconcileNumber(top.unit) as number) + 1;
+}
+
+/** A graph planning unit holds `xarabot:graph`. */
+export function isGraphPlanning(record: Pick<UnitRecord, "unit" | "globs">): boolean {
+  return unitKind(record.unit) === "planning" && record.globs.includes(GRAPH_PSEUDO_GLOB);
+}
+
+/** A `development_status` key the effective graph needs, and its Epic. */
+export type StatusEntry = { readonly key: string; readonly epic: number };
+
+/** An Epic's `development_status` key. */
+export function epicStatusKey(epic: number): string {
+  return `epic-${epic}`;
+}
+
+/**
+ * The graph's `development_status` keys absent on `main`, in graph order:
+ * each graph Epic's `epic-<N>`, then its manifests' `sprint_key`s in the
+ * Epic's Story order (a manifest of no graph Epic last, by Epic). `[]` when
+ * the graph did not resolve.
+ */
+export function missingStatusEntries(snapshot: Snapshot): StatusEntry[] {
+  if (!snapshot.graph.ok) return [];
+  const status = snapshot.sprint_status.development_status;
+  const has = (key: string) => Object.hasOwn(status, key);
+  const out: StatusEntry[] = [];
+  const seen = new Set<string>();
+  const add = (key: string, epic: number) => {
+    if (has(key) || seen.has(key)) return;
+    seen.add(key);
+    out.push({ key, epic });
+  };
+  const epics = [...snapshot.graph.value.epics].sort((a, b) => a.number - b.number);
+  const order = (epic: number, id: string): number => {
+    const stories = epics.find((e) => e.number === epic)?.stories ?? [];
+    const i = stories.findIndex((s) => storyKey(s) === storyKey(id));
+    return i === -1 ? stories.length : i;
+  };
+  const byEpic = (epic: number) =>
+    snapshot.manifests.filter((m) => m.epic === epic).sort((a, b) => order(epic, a.story_id) - order(epic, b.story_id));
+  for (const e of epics) {
+    add(epicStatusKey(e.number), e.number);
+    for (const m of byEpic(e.number)) add(m.sprint_key, e.number);
+  }
+  const rest = [...new Set(snapshot.manifests.map((m) => m.epic))].filter((n) => !epics.some((e) => e.number === n)).sort((a, b) => a - b);
+  for (const n of rest) for (const m of byEpic(n)) add(m.sprint_key, n);
+  return out;
+}
+
 /**
  * Whether `record`'s unit is done on `main` (AD-9): a Story `done` in
  * `sprint-status.yaml` (through its manifest's `sprint_key`), a retro with a
  * recorded verdict, a retro item with status `done`, a checkpoint with its
- * go recorded, any planning unit (a `merged` recurring record is done), and
- * every `reconcile` record but the newest.
+ * go recorded, a status planning unit always, a graph planning unit once
+ * every graph Epic's and manifest's key has a `development_status` entry
+ * (the entries land through a later, disposable `reconcile` PR), and every
+ * `merged` `reconcile` record but the newest `merged` one.
  */
 export function doneOnMain(record: UnitRecord, snapshot: Snapshot): boolean {
   const kind = unitKind(record.unit);
@@ -127,9 +187,10 @@ export function doneOnMain(record: UnitRecord, snapshot: Snapshot): boolean {
     case "checkpoint":
       return gates[body]?.checkpoint !== undefined;
     case "planning":
-      return true;
+      if (!isGraphPlanning(record)) return true;
+      return snapshot.graph.ok && missingStatusEntries(snapshot).length === 0;
     case "reconcile":
-      return newestReconcile(snapshot)?.unit !== record.unit;
+      return record.state === "merged" && newestMergedReconcile(snapshot)?.unit !== record.unit;
     case undefined:
       return false;
   }
@@ -152,19 +213,20 @@ export type ReconcileDue = {
   readonly due: boolean;
   /** Why it is due, or why not. */
   readonly why: string;
-  /** The newest `reconcile:<n>` record, the last run. */
+  /** The newest `merged` `reconcile:<n>` record, the last finished run. */
   readonly last: UnitRecord | null;
 };
 
 /**
  * When `reconcile` is due (the Maintainer's 2026-10-24 decision): the
- * snapshot shows work (a record not `merged` whose PR merged, a `merged`
- * record whose unit is done on `main`, or the digest slot passed), there is
- * no `reconcile:<n>` record, or `now` is 10 min or more past the newest
- * one's `heartbeat_at`.
+ * snapshot shows work (a record not `merged` whose PR merged, or a `merged`
+ * record whose unit is done on `main`), there is no `merged`
+ * `reconcile:<n>` record, or `now` is 10 min or more past the newest
+ * `merged` one's `heartbeat_at`. A passed digest slot is not work until
+ * Story 4.2 adds it back.
  */
 export function reconcileDue(snapshot: Snapshot): ReconcileDue {
-  const last = newestReconcile(snapshot);
+  const last = newestMergedReconcile(snapshot);
   for (const r of snapshot.ledger.units) {
     const pr = snapshot.prs[r.unit];
     if (r.state !== "merged" && pr?.state === "merged") {
@@ -174,11 +236,7 @@ export function reconcileDue(snapshot: Snapshot): ReconcileDue {
   for (const r of snapshot.ledger.units) {
     if (r.state === "merged" && doneOnMain(r, snapshot)) return { due: true, why: `${r.unit} is merged and done on main`, last };
   }
-  const posted = snapshot.ledger.coordinator?.digest_posted_at ?? null;
-  if (digestDue(snapshot.now, snapshot.config.digest_time, posted)) {
-    return { due: true, why: `the ${snapshot.config.digest_time} UTC digest is due`, last };
-  }
-  if (last === null) return { due: true, why: "no reconcile run on the ledger", last };
+  if (last === null) return { due: true, why: "no merged reconcile run on the ledger", last };
   const since = Date.parse(snapshot.now) - Date.parse(last.heartbeat_at);
   if (since >= RECONCILE_EVERY_MS) return { due: true, why: `${last.unit} ran at ${last.heartbeat_at}, 10 min or more ago`, last };
   return { due: false, why: `${last.unit} ran at ${last.heartbeat_at}, under 10 min ago, and the snapshot shows no reconcile work`, last };
@@ -207,7 +265,9 @@ const OPEN_PR_STATES: readonly UnitRecord["state"][] = ["claimed", "merging", "r
 /**
  * The coordinator's next unit from a validated snapshot whose graph resolved
  * (AD-13): `reconcile` when due, then an open coordinator PR, else `idle`.
- * Never a Story.
+ * Never a Story. The open-PR position never returns a `reconcile` record (a
+ * released or dead run's PR is the next `reconcile` run's to close), but a
+ * live one still makes later positions wait.
  */
 export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   const reasons: Reason[] = [];
@@ -215,7 +275,7 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   // 1. reconcile.
   const r = reconcileDue(snapshot);
   if (r.due) {
-    const n = r.last === null ? 1 : (reconcileNumber(r.last.unit) as number) + 1;
+    const n = nextReconcileNumber(snapshot);
     const unit = { unit: `reconcile:${n}`, kind: "reconcile", globs: [], expect_generation: null, take_over: null, pr: null, why: r.why } as const;
     return { kind: "coordinator", unit, reasons };
   }
@@ -228,7 +288,12 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
     if (kind === undefined || kind === "story" || rec.lane !== "coordinator" || !OPEN_PR_STATES.includes(rec.state)) continue;
     const pr = snapshot.prs[rec.unit];
     if (pr?.state !== "open") continue;
+    if (kind === "reconcile" && (rec.state === "released" || (rec.state === "claimed" && isStale(rec, snapshot.now)))) continue;
     open = true;
+    if (kind === "reconcile") {
+      reasons.push({ subject: rec.unit, code: "record-state", message: `${rec.unit} is ${rec.state} with reconcile PR #${pr.number} open` });
+      continue;
+    }
     const base = { unit: rec.unit, kind, globs: [...rec.globs], expect_generation: rec.generation, pr: pr.number } as const;
     if (rec.state === "released") {
       return { kind: "coordinator", unit: { ...base, take_over: null, why: `${rec.unit} is released with PR #${pr.number} open` }, reasons };

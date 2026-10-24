@@ -1,5 +1,5 @@
 import { basename, join } from "node:path";
-import { trailingWaitMs } from "../core/lane/waits.ts";
+import { coordinatorTrailingWaitMs } from "../core/lane/waits.ts";
 import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
 import { claim, claimCoordinator, failAttempt, takeOverStale, type AdoptedPr, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { CoordinatorKind, CoordinatorUnit } from "../core/next/coordinator.ts";
@@ -32,7 +32,10 @@ import type { Waiter, WaitResult } from "./wait.ts";
  * no step is not claimed, and the run ends `idle` naming the Story that adds
  * it. With a step, the unit is claimed (a stale `claimed` record taken
  * over), its own keeper starts, the step runs and one unit record is
- * journaled.
+ * journaled. A step that leaves its unit `merging` stops the unit's keeper:
+ * coordinator-held `merging` records have no heartbeat (AD-6). The trailing
+ * wait after `idle` is 10 min, matching the `reconcile` due rule; other
+ * outcomes keep the builder's waits.
  */
 
 /** What a coordinator step gets: the claimed unit and the snapshot it was picked from. */
@@ -41,6 +44,8 @@ export type CoordinatorStepInput = {
   /** The claimed ledger record. */
   readonly record: UnitRecord;
   readonly snapshot: Snapshot;
+  /** `main`'s file texts as the snapshot read them (`readsPath`), by repo path. */
+  readonly files: Readonly<Record<string, string>>;
   /** Aborted when the unit or the coordinator claim is lost. */
   readonly signal: AbortSignal;
   /** Writes a note to the unit log. */
@@ -78,7 +83,7 @@ export type CoordinatorDeps = {
   readonly lane: Lane;
   /** The `coordinator.json` record the start check wrote. */
   readonly claim: CoordinatorRecord;
-  /** The step per unit kind; `lane run` wires none before Story 2.5. */
+  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5). */
   readonly steps: CoordinatorSteps;
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;
@@ -404,7 +409,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       const signal = AbortSignal.any([unitKeeper.signal, coordinatorKeeper.signal]);
       let out: PrStepOutput;
       try {
-        out = await step({ unit: u, record, snapshot: view, signal, log: note });
+        out = await step({ unit: u, record, snapshot: view, files: snap.main.files, signal, log: note });
       } catch (e) {
         await failUnit(t, `${u.kind} step threw: ${message(e)}`);
         return "failed";
@@ -415,6 +420,11 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       note(`${u.kind} step: ${out.outcome} (${out.state ?? "unknown"})`);
       checkUnit(t);
       checkClaim();
+      if (out.state === "merging") {
+        // A coordinator-held merging record has no heartbeat (AD-6): later reconcile runs check it.
+        await unitKeeper.stop();
+        note("the unit is merging: its keeper stopped");
+      }
       return out.outcome;
     }
     track = null;
@@ -485,7 +495,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     // unless the coordinator claim is lost or lapsed: then the unit is left to go stale for the new coordinator.
     const claimEnd = (coordinatorKeeper as Heartbeat | null)?.end() ?? null;
     if (claimEnd !== null && claimEnd.kind !== "moved-on") await (unitKeeper as Heartbeat | null)?.stop();
-    const waitMs = trailingWaitMs(outcome);
+    const waitMs = coordinatorTrailingWaitMs(outcome);
     if (waitMs !== null) {
       let waited: WaitResult;
       try {

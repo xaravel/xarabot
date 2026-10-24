@@ -9,6 +9,7 @@ const DIAGRAM = new Set([
   "none>parked",
   "released>claimed",
   "released>merged",
+  "released>none",
   "claimed>claimed",
   "claimed>merging",
   "claimed>parked",

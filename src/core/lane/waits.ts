@@ -35,6 +35,14 @@ export function trailingWaitMs(outcome: LaneOutcome): number | null {
   return TRAILING_WAIT_MS[outcome];
 }
 
+/** The coordinator's wait after `idle`: 10 min, matching the `reconcile` due rule. */
+export const COORDINATOR_IDLE_WAIT_MS = 10 * MINUTE_MS;
+
+/** The coordinator's trailing wait: `COORDINATOR_IDLE_WAIT_MS` after `idle`, the builder's after any other outcome. */
+export function coordinatorTrailingWaitMs(outcome: LaneOutcome): number | null {
+  return outcome === "idle" ? COORDINATOR_IDLE_WAIT_MS : TRAILING_WAIT_MS[outcome];
+}
+
 /** Until `resetAt` plus 2 min, clamped to [0, 8 h]; 15 min when `resetAt` is `null`. */
 export function usageLimitSleepMs(resetAt: number | null, nowMs: number): number {
   if (resetAt === null) return USAGE_LIMIT_UNKNOWN_MS;

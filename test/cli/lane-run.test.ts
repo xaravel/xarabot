@@ -360,7 +360,7 @@ describe("xarabot lane run: a coordinator lane", () => {
     return l.value.coordinator;
   };
 
-  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with no steps", async () => {
+  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with the reconcile step only", async () => {
     const r = await laneRunWith({ host: COORD_HOST, failedStarts: 2 }, ARGS);
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
@@ -369,7 +369,8 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(r.coordinatorStarts).toHaveLength(1);
     const d = r.coordinatorStarts[0] as CoordinatorDeps;
     expect(d.identity).toEqual(IDENTITY);
-    expect(d.steps).toEqual({});
+    expect(Object.keys(d.steps)).toEqual(["reconcile"]);
+    expect(typeof d.steps.reconcile).toBe("function");
     expect(d.laneDir).toBe(r.laneDir);
     expect(d.claim).toMatchObject({ ...IDENTITY, generation: 1, heartbeat_at: "2026-10-23T10:00:00Z" });
     expect(await coordinatorOf(r)).toEqual(d.claim);
@@ -434,17 +435,22 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(r.fake.control.ledgerLog()).toHaveLength(1);
   });
 
-  test("with the real process: idle with no reconcile step, no unit record, coordinator.json at generation 1", async () => {
+  test("with the real process: the wired reconcile step runs reconcile:1, which finds no work and ends merged with no PR", async () => {
     const r = await laneRunWith({ host: COORD_HOST }, ARGS, undefined, (d) => runCoordinatorProcess({ ...d, waiter: { wait: async () => ({ end: "elapsed" }) } }));
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
-    expect(r.out.at(-1)).toBe("lane coordinator: idle");
+    expect(r.out.at(-1)).toBe("lane coordinator: progress");
     const journal = (read(join(r.laneDir, "journal.jsonl")) ?? "")
       .split("\n")
       .filter((l) => l !== "")
       .map((l) => JSON.parse(l) as JournalRecord);
-    expect(journal).toEqual([expect.objectContaining({ type: "span", span: "idle", reason: "no reconcile step (Story 2.5)" })]);
+    expect(journal).toEqual([expect.objectContaining({ type: "unit", unit: "reconcile:1", outcome: "progress", state: "merged", sessions: 0 })]);
     expect(await coordinatorOf(r)).toMatchObject({ ...IDENTITY, generation: 1 });
-    expect(r.fake.control.ledgerLog().map((c) => c.message)).toEqual(["root", "ledger: claimCoordinator coordinator [skip ci]"]);
+    expect(r.fake.control.ledgerLog().map((c) => c.message)).toEqual([
+      "root",
+      "ledger: claimCoordinator coordinator [skip ci]",
+      "ledger: claim reconcile:1 [skip ci]",
+      "ledger: finishRecurring reconcile:1 [skip ci]",
+    ]);
   });
 });
