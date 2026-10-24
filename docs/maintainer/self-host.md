@@ -1,0 +1,466 @@
+# Self-host runbook: from the bootstrap loop to Xarabot's own runner
+
+This runbook switches Xarabot's own repo, `xaravel/xarabot`, from the
+bootstrap copy of Xaravel's loop (`bootstrap/loop/`) to Xarabot's pinned
+runner (NFR13, NFR14), and lists what the Maintainer does while Epic 2 is
+built. Lanes never write `.xarabot/**`, `.github/**` or `AGENTS.md`, and
+never change live GitHub settings. Every step below is the Maintainer's.
+
+Unless a step says otherwise:
+
+- **Host commands** run on the Xarabot host as the lane's macOS user, `edanisko-xarabot` (ssh in). That user holds the App key in `~/.config/xarabot/apps/edanisko-xarabot/` and the Claude credential.
+- **`gh` commands** run on your own machine, logged in as `edanisko`.
+- **File changes** to this repo go in a Maintainer PR from a `planning/<topic>` branch. You approve your own PR through the admin review bypass, then add it to the merge queue.
+
+## Before you start: the evidence
+
+Run these on the Xarabot host, outside any sandbox (`XARABOT_SANDBOXED` must
+be unset), from a checkout of the `main` commit you will tag in step 7:
+
+```sh
+git clone https://github.com/xaravel/xarabot.git ~/xarabot-switch
+cd ~/xarabot-switch && bun install --frozen-lockfile
+```
+
+### The sandbox suites (Stories 1.11 and 1.12)
+
+The nested cases run a real `sandbox-exec` session, so they report skipped
+inside a sandboxed session. The live cases reach PyPI only, never GitHub.
+The counts below were measured on the Xarabot host on 2026-10-23, outside a sandbox.
+
+| Command | Expected result |
+|---|---|
+| `bun test test/sandbox/macos.test.ts` | `96 pass`, `1 skip`, `0 fail`. The skip is the live uv/PyPI case. |
+| `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `97 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
+| `bun test test/sandbox/proxy.test.ts` | `50 pass`, `1 skip`, `0 fail`. The skip is the live `CONNECT pypi.org:443` case. |
+| `XARABOT_LIVE=1 bun test test/sandbox/proxy.test.ts` | `51 pass`, `0 skip`, `0 fail` |
+| `bun test test/sandbox/` | `268 pass`, `2 skip`, `0 fail` |
+| `XARABOT_LIVE=1 bun test test/sandbox/` | `270 pass`, `0 skip`, `0 fail` |
+| `XARABOT_SANDBOXED=1 bun test test/sandbox/` (what a sandboxed session sees) | `174 pass`, `96 skip`, `0 fail` |
+
+If a nested case passes inside a sandboxed session, or is skipped on the host
+outside one, the switch is not safe. Stop and investigate before going on.
+
+### The canary (Story 1.20)
+
+The canary runs one real `laneRun` against a scratch GitHub repo. It uses a
+stub `claude` CLI inside the real macOS sandbox. In one unit it covers a
+usage-limit sleep, the claim, the bot commit, the PR, CI, the merge queue and
+`merged`, then a STOP during the trailing wait.
+
+**Set up the scratch repo once:**
+
+1. Create a scratch repo, for example `edanisko/xarabot-canary`, with an initial commit on `main`.
+2. Install the `edanisko-xarabot` App on it.
+3. Seed it with the canary's files: the config, policy, Standing Authority, `epics.md` with Story 1.1, the manifest and the CI workflow. Run this **on your own machine**, from a checkout of this repo, because the push needs your git credentials. The lane's macOS user has none:
+
+   ```sh
+   seed=$(mktemp -d)/xarabot-canary
+   git clone https://github.com/edanisko/xarabot-canary.git "$seed"
+   bun test/e2e/scratch-seed.ts "$seed" edanisko/xarabot-canary edanisko
+   git -C "$seed" add -A
+   git -C "$seed" commit -m "Seed the Xarabot canary"
+   git -C "$seed" push origin main
+   ```
+
+4. Add a ruleset on the scratch repo's `main` that requires the status check `check` and a merge queue with merge method squash. It must not require a review: the canary's paths need no owner approval, so the lane enqueues at once. Use the scratch repo's Settings → Rules → Rulesets, or:
+
+   ```sh
+   gh api -X POST repos/edanisko/xarabot-canary/rulesets --input - <<'EOF'
+   {
+     "name": "canary main",
+     "target": "branch",
+     "enforcement": "active",
+     "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+     "rules": [
+       { "type": "required_status_checks", "parameters": { "strict_required_status_checks_policy": false, "required_status_checks": [{ "context": "check" }] } },
+       { "type": "merge_queue", "parameters": { "merge_method": "SQUASH", "grouping_strategy": "ALLGREEN", "max_entries_to_build": 5, "max_entries_to_merge": 5, "min_entries_to_merge": 1, "min_entries_to_merge_wait_minutes": 0, "check_response_timeout_minutes": 15 } }
+     ]
+   }
+   EOF
+   ```
+
+5. Set the scratch repo's squash messages to the PR title and body, as step 4 of the switch does for this repo:
+
+   ```sh
+   gh api -X PATCH repos/edanisko/xarabot-canary -F allow_squash_merge=true -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
+   ```
+
+**Run it on the host:**
+
+```sh
+XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=edanisko/xarabot-canary XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/canary.test.ts
+```
+
+**Expected result:** `22 pass`, `0 skip`, `0 fail`, in about 5 to 10
+minutes. The live case asserts all of these:
+
+- `laneRun` exits 0 with outcome `progress`, within 10 s of the STOP. That is 5 s plus the waiter's 5 s STOP poll.
+- The ledger record `story:1.1` is `merged`, and it is the only record.
+- The journal has one `usage-limit` span ending at or after the reset plus 2 minutes, followed by one unit record with `sessions` 2, `result: done` and `state: merged`.
+- The PR's head commit is authored and committed by `edanisko-xarabot[bot]`, with no trailers, no `Co-Authored-By` and no "Generated with".
+- A second `laneRun`, with STOP present, exits 0 and leaves the ledger unchanged.
+
+A failed assertion starts `step "<name>":` and names the step that failed,
+followed by the lane's output and its unit log. Cleanup still runs: it closes
+the scratch PRs and deletes the `xarabot-test/<uuid>/…` branches and the
+`xarabot/test-<uuid>` ledger branch. Each run uses fresh branches, so you can
+run it again as often as you like. Each merged run adds `canary/<run>.md` to
+the scratch `main`.
+
+Without the three variables, or inside a sandbox (`XARABOT_SANDBOXED=1`), the
+live case reports skipped: `bun test test/e2e/` gives `21 pass`, `1 skip`,
+`0 fail` on the host, and `19 pass`, `3 skip`, `0 fail` inside a sandbox.
+
+### `xarabot graph check` on this repo
+
+```sh
+bun src/cli/main.ts graph check
+```
+
+**Expected:** it exits 0, prints the Epic graph `1 → []` to `7 → [5, 6]`, and
+warns once for each Story that has no manifest.
+`test/cli/graph-check.test.ts` asserts the same on every `bun test`.
+
+## The switch, in order
+
+### 1. The CI workflow as a required check
+
+`.github/workflows/ci.yml` must match `docs/maintainer/ci-workflow.yml`. Check
+with `diff docs/maintainer/ci-workflow.yml .github/workflows/ci.yml`. If they
+differ, copy the file over in a Maintainer PR.
+
+Then make the `check` job a required status check in the `Protect main`
+ruleset. Go to Settings → Rules → Rulesets → `Protect main` → "Require status
+checks to pass", and add `check` (source: GitHub Actions). Leave "Require
+branches to be up to date" off: the merge queue tests each PR against fresh
+`main`. Verify:
+
+```sh
+gh api repos/xaravel/xarabot/rules/branches/main --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'
+# expected: check
+```
+
+### 2. The `xarabot/claims` ruleset
+
+The ledger branch must refuse force-pushes and deletion, and no other ruleset
+may match it. In particular, nothing may require PRs or status checks on it,
+because the runner fast-forwards it on every claim.
+
+```sh
+gh api -X POST repos/xaravel/xarabot/rulesets --input - <<'EOF'
+{
+  "name": "xarabot claims",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/xarabot/claims"], "exclude": [] } },
+  "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }],
+  "bypass_actors": []
+}
+EOF
+```
+
+Verify that only these two rules, from this one ruleset, apply to the branch:
+
+```sh
+gh api repos/xaravel/xarabot/rules/branches/xarabot/claims --jq '[.[] | {type, ruleset_id}]'
+# expected: exactly [{deletion, <id>}, {non_fast_forward, <id>}], with the same <id>
+```
+
+### 3. The merge queue on `main`
+
+In `Protect main`, turn on "Require merge queue" with merge method Squash.
+Keep the defaults otherwise: build concurrency 5, group size 1 to 5, wait 0
+minutes, status check timeout 60 minutes or more. Every merge goes through
+the queue. Never use `--admin`, `--delete-branch` or auto-merge. Verify:
+
+```sh
+gh api repos/xaravel/xarabot/rules/branches/main --jq '.[] | select(.type=="merge_queue") | .parameters.merge_method'
+# expected: SQUASH
+```
+
+### 4. Squash messages: PR title and body
+
+```sh
+gh api -X PATCH repos/xaravel/xarabot -F allow_squash_merge=true -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
+gh api repos/xaravel/xarabot --jq '{allow_squash_merge, squash_merge_commit_title, squash_merge_commit_message}'
+# expected: {"allow_squash_merge":true,"squash_merge_commit_title":"PR_TITLE","squash_merge_commit_message":"PR_BODY"}
+```
+
+### 5. The App's permissions
+
+The `edanisko-xarabot` App asks for exactly the permissions in
+[`app-permissions.md`](app-permissions.md): `contents: write`,
+`pull_requests: write`, `issues: write`, `checks: read`, `statuses: read`,
+`actions: read` and `metadata: read`. It never asks for `workflows`,
+`administration` or any bypass right.
+
+- `issues: write` is Story 1.10's precondition, for the `xarabot-inbox` alerts.
+- AR38 found that the merge queue needs no permission of its own.
+
+Check the App's settings page,
+`https://github.com/settings/apps/edanisko-xarabot/permissions`. If you
+changed a permission, accept the new permissions on the installation for
+`xaravel`.
+
+### 6. The Claude credential
+
+On the host, as `edanisko-xarabot`, store the token from `claude setup-token`
+as the mode-600 file `$XDG_CONFIG_HOME/xarabot/vendors/claude/oauth-token`.
+That is `~/.config/xarabot/vendors/claude/oauth-token` when `XDG_CONFIG_HOME`
+is unset. Follow the exact steps in
+[`claude-credential.md`](claude-credential.md). The bootstrap setup (step 5
+of `bootstrap/loop/README.md`) may already have stored it. Verify:
+
+```sh
+stat -f '%Lp %HT' "${XDG_CONFIG_HOME:-$HOME/.config}/xarabot/vendors/claude/oauth-token"
+# expected: 600 Regular File
+claude --version   # at least 2.1.304
+```
+
+### 7. `.xarabot/config.yaml`, with `runner_version` and `bootstrapped_epics: [1]`
+
+`runner_version` is a tag in `xaravel/xarabot`. A lane installs
+`~/.xarabot/runner/<tag>/` from it, so first tag the `main` commit that holds
+Story 1.20, the commit the canary passed on. Tag names may use
+`[A-Za-z0-9._+-]`, up to 100 characters, with no `..`. Run this **on your own
+machine**, from your checkout of this repo, because the push needs your git
+credentials. The lane's macOS user has none:
+
+```sh
+git fetch origin
+git tag -a <tag> <sha> -m "Xarabot runner <tag>"
+git push origin <tag>
+```
+
+Then add `.xarabot/config.yaml` in a Maintainer PR:
+
+```yaml
+schema_version: 1
+runner_version: "<tag>"
+maintainer: edanisko
+standing_authority_path: docs/maintainer/standing-authority.md
+bootstrapped_epics: [1]
+manifests:
+  dir: stories
+```
+
+### 8. `.xarabot/policy.yaml` and `.xarabot/human-live-steps.yaml`
+
+Until Epic 3 merges, every path needs the Maintainer's approval, and only
+`claude` runs unattended. Put these in the same Maintainer PR:
+
+```yaml
+# .xarabot/policy.yaml
+schema_version: 1
+unattended_adapters: [claude]
+expected_checks: [check]
+owner_approval_paths: ["**"]
+```
+
+```yaml
+# .xarabot/human-live-steps.yaml
+schema_version: 1
+steps:
+  - id: github-settings
+    text: Change GitHub repository settings, rulesets, secrets, or the App's permissions or installations.
+  - id: ci-workflow
+    text: Write or change anything under .github/, including the CI workflow.
+  - id: npm-publish
+    text: Publish to npm or handle publish credentials.
+```
+
+`steps: []` is the opt-out if you want no Human Live Steps in the prompt.
+
+### 9. The Standing Authority
+
+Add `docs/maintainer/standing-authority.md` in the same Maintainer PR. It is
+a Protected Path, so changing it always needs your review.
+
+```markdown
+---
+schema_version: 1
+granted_by: edanisko
+granted_at: <YYYY-MM-DD>
+repo: xaravel/xarabot
+---
+
+I, edanisko, let Xarabot's lanes on the Xarabot host build the Stories that
+`next` picks in xaravel/xarabot: claim them on `xarabot/claims`, push
+`story/<id>` branches as `edanisko-xarabot[bot]`, open and update their PRs,
+and poll CI. A lane adds a PR to the merge queue only when none of its paths
+needs my approval. Until Epic 3 merges, every path needs it, so every PR parks
+awaiting my approving review, and I approve it and add it to the merge queue
+by hand.
+```
+
+The runner re-checks this file from fresh `main` before every claim, push,
+enqueue and merge. If it is missing, invalid or expired, or if `granted_by`
+is not the `maintainer` login in `.xarabot/config.yaml` (compared
+case-insensitively), the lane stops. You can add `expires: <YYYY-MM-DD>`.
+
+### 10. The bootstrap writes (AR4), each in its own Maintainer PR
+
+1. **Sprint status.** Run `bmad-sprint-planning` once, in an interactive Claude Code session on this repo ("run sprint planning"). The run may create `_bmad-output/implementation-artifacts/sprint-status.yaml` or update it. Either way, every Epic 1 Story must end up `done`. Check:
+
+   ```sh
+   grep -E '^  1-[0-9]+[a-z]?-' _bmad-output/implementation-artifacts/sprint-status.yaml | grep -v ': done$'
+   # expected: no output
+   ```
+
+2. **Epic 2's Story manifests**, one file per Story in `stories/`: `2.1.md` to `2.12.md`, for Stories 2.1 Heartbeat and fencing through 2.12 Claims race verification. Each has `globs`, plus `depends_on` where it builds on an earlier Story. For example:
+
+   ```markdown
+   ---
+   story_id: "2.2"
+   epic: 2
+   sprint_key: 2-2-stale-takeover
+   title: Stale takeover
+   globs: ["src/core/ledger/**", "src/lane/**", "test/core/ledger/**", "test/lane/**"]
+   depends_on: ["2.1"]
+   ---
+   ```
+
+   The `sprint_key` must equal the Story's key in `sprint-status.yaml`. Then `bun src/cli/main.ts graph check` must exit 0 with no warning for any Epic 2 Story.
+
+3. **Epic 2's context file**, at `epic_context_path` (`_bmad-output/implementation-artifacts/epic-2-context.md`). Compile it by following the installed stock `bmad-build-auto` skill's `.claude/skills/bmad-build-auto/compile-epic-context.md`, with these inputs:
+   - Epic number `2`;
+   - epics path `_bmad-output/planning-artifacts/epics.md`;
+   - planning artifacts directory `_bmad-output/planning-artifacts`;
+   - output path `_bmad-output/implementation-artifacts/epic-2-context.md`.
+
+   Check it:
+
+   ```sh
+   f=_bmad-output/implementation-artifacts/epic-2-context.md
+   test -s "$f" && head -n 1 "$f" | grep -q '^# Epic 2 Context:' && echo ok
+   # expected: ok
+   ```
+
+   A builder lane only picks an Epic's Stories once this file exists and starts with that heading.
+
+### 11. Epic 1's retro, interactively
+
+Once the evidence above has passed, run Epic 1's retro in an interactive
+Claude Code session ("lets retro the epic 1", `bmad-retrospective`). Merge its
+document (`_bmad-output/implementation-artifacts/epic-1-retro-<date>.md`) in a
+Maintainer PR. Epic 1 is in `bootstrapped_epics`, so it already counts as
+done for `next`. The retro decides whether the switch goes ahead.
+
+### 12. `XARABOT_MAX_BUILDERS=1`
+
+Until Epic 3 merges, the host runs one builder lane. Set the variable when you
+run `lane install`, as in step 13, so it is written into the lane's
+LaunchDaemon plist. With it unset, the default is also 1. Check after the
+install:
+
+```sh
+/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:XARABOT_MAX_BUILDERS' \
+  ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/com.xarabot.lane.xaravel__xarabot.builder-1.plist
+# expected: 1
+```
+
+### 13. `xarabot lane install`
+
+On the host, as `edanisko-xarabot`, from a checkout of the tag. Lane names
+must be `builder-<n>` or `coordinator`, the names ledger records accept. Any
+other name passes `lane install` but stops the lane at its first snapshot.
+
+```sh
+git clone --branch <tag> --depth 1 https://github.com/xaravel/xarabot.git ~/xarabot-<tag>
+cd ~/xarabot-<tag> && bun install --frozen-lockfile
+XARABOT_MAX_BUILDERS=1 bun src/cli/main.ts lane install builder-1 --repo xaravel/xarabot --role builder --owner edanisko --agent claude
+```
+
+It installs `~/.xarabot/runner/<tag>/` and writes `host.yaml`, the lane folder
+and its `runner` file, the launcher `~/.xarabot/bin/xarabot-lane` and the plist.
+At the end it prints two `sudo` commands: `sudo cp <plist> /Library/LaunchDaemons/`
+and `sudo launchctl bootstrap system <daemon>`. **Do not run them yet.** Step 15 starts the lane.
+
+### 14. Stop the bootstrap loop
+
+First, close or finish any open bootstrap PR. The lane adopts an open
+`story/<id>` PR only for a Story that `next` picks. Check:
+
+```sh
+gh pr list --repo xaravel/xarabot --state open --search 'head:story/'
+# expected: no bootstrap PR listed
+```
+
+Then, on the host, as `edanisko-xarabot`:
+
+```sh
+touch ~/.xarabot-bootstrap/state/STOP
+```
+
+Wait until the current iteration ends: `tail -n 1 ~/.xarabot-bootstrap/state/history`
+shows the last iteration, and no `claude -p` from the loop remains. If one
+does, stop it by its exact PID, never with `pkill -f`. Then unload the
+daemon, as your admin account:
+
+```sh
+sudo launchctl bootout system/com.xarabot.bootstrap
+sudo rm /Library/LaunchDaemons/com.xarabot.bootstrap.plist
+```
+
+### 15. Start the lane
+
+As your admin account, run the two commands step 13 printed:
+
+```sh
+sudo cp <plist> /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/<label>.plist
+```
+
+The lane's label is `com.xarabot.lane.xaravel__xarabot.builder-1`. Watch it,
+as `edanisko-xarabot`:
+
+```sh
+tail -n 5 ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/journal.jsonl
+cat ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/outcome
+```
+
+To stop it, use `bun ~/.xarabot/runner/<tag>/src/cli/main.ts stop builder-1`,
+or `touch ~/.xarabot/STOP` for the whole host. Every PR it opens parks
+awaiting your approval. Approve it, then add it to the merge queue by hand.
+The lane records it `merged` at its next start.
+
+## While Epic 2 is built
+
+- **Advancing the runner.** A lane runs only the pinned `runner_version` (Story 1.19). When a Story merges whose code the lanes need:
+  1. On your own machine, tag that `main` commit: `git tag -a <new-tag> <sha> -m "Xarabot runner <new-tag>" && git push origin <new-tag>`.
+  2. In a Maintainer PR, set `runner_version: "<new-tag>"` in `.xarabot/config.yaml`.
+  3. Approve the PR and add it to the merge queue by hand.
+
+  At its next start, each lane sees the new version on `main`, installs `~/.xarabot/runner/<new-tag>/`, and exits without a claim. The start after that runs the new runner. A lane never switches versions mid-unit.
+- **The coordinator lane.** Install it only once `runner_version` includes Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done):
+
+  ```sh
+  XARABOT_MAX_BUILDERS=1 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install coordinator --repo xaravel/xarabot --role coordinator --owner edanisko --agent claude
+  ```
+
+  Then run the two printed `sudo` commands. Until 2.5 merges, you approve and enqueue parked PRs by hand, and the builder records them `merged`.
+- **Graph PRs.** Until Story 2.8 (the graph-change gate) merges, check every PR that changes `.xarabot/epics.yaml`, `epics.md` or `stories/` before approving it:
+
+  ```sh
+  gh pr checkout <n> && bun src/cli/main.ts graph check
+  # expected: exit 0
+  ```
+
+- **A rejected retro's go.** Until Story 4.6 adds `/xarabot go retro:<N>`, a `rejected` retro of Epic 2 or Epic 3 holds its dependents. Record the go by hand in `_bmad-output/implementation-artifacts/retro-gates.yaml` (`retro_gates_path`), in a Maintainer PR. Add a `go` with `ruling: maintainer-pr` to the Epic's existing `retro` entry (AR13):
+
+  ```yaml
+  schema_version: 1
+  epics:
+    "2":
+      retro:
+        verdict: rejected
+        unit: "retro:2"
+        recorded_at: "<the retro's recorded_at, unchanged>"
+        go:
+          by: edanisko
+          at: "<now, e.g. 2026-11-02T09:00:00Z>"
+          ruling: maintainer-pr
+  ```
+
+  Keep every other entry and item as it is. `go` is allowed only on a `rejected` verdict.
