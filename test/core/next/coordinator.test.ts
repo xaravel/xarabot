@@ -4,6 +4,9 @@ import {
   coordinatorGlobs,
   digestDue,
   doneOnMain,
+  GRAPH_PSEUDO_GLOB,
+  missingStatusEntries,
+  newestMergedReconcile,
   nextCoordinator,
   reconcileDue,
   type CoordinatorUnitSpec,
@@ -75,9 +78,13 @@ describe("next(coordinator): reconcile", () => {
       { records: [RECENT, storyRec("2.1", { state: "merged", pr: 7 })], status: { "2.1": "done" } },
       "unit reconcile:5",
     ],
-    ["work shown: the digest slot passed unposted", { records: [RECENT], coordinator: coordinator({ digest_posted_at: null }) }, "unit reconcile:5"],
-    ["work shown: the digest was last posted yesterday", { records: [RECENT], coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }) }, "unit reconcile:5"],
+    ["a passed digest slot, unposted, is no work until Story 4.2", { records: [RECENT], coordinator: coordinator({ digest_posted_at: null }) }, "idle"],
+    ["a digest last posted yesterday is no work until Story 4.2", { records: [RECENT], coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }) }, "idle"],
     ["under 10 min, no work: not due", { records: [reconciled(4, 9)] }, "idle"],
+    ["the last run is the newest merged one: a newer merging run does not count", { records: [reconciled(4, 12), coord("reconcile:5", { state: "merging", passed_sha: HEAD })] }, "unit reconcile:6"],
+    ["a newer merging run does not make an older recent run stale", { records: [RECENT, coord("reconcile:5", { state: "merging", passed_sha: HEAD, heartbeat_at: minutesBefore(40) })] }, "idle"],
+    ["no merged run, only a released one: due, numbered past it", { records: [coord("reconcile:7", { state: "released", heartbeat_at: minutesBefore(1) })] }, "unit reconcile:8"],
+    ["n is the highest number of any state, plus 1", { records: [reconciled(4, 12), coord("reconcile:9", { state: "parked", park: { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] } })] }, "unit reconcile:10"],
     ["exactly 10 min since the newest run: due", { records: [reconciled(4, 10)] }, "unit reconcile:5"],
     ["an older merged reconcile record is work (done on main)", { records: [reconciled(3, 20), RECENT] }, "unit reconcile:5"],
     ["the newest by number, not by name: reconcile:10 after reconcile:9", { records: [reconciled(10, 12)] }, "unit reconcile:11"],
@@ -116,18 +123,25 @@ describe("next(coordinator): reconcile", () => {
     expect(reconcileDue(snapshotOf(w)).due).toBe(false);
   });
 
-  test("a configured digest_time already passed (09:00), last posted at 08:00: due, naming the configured time", () => {
+  test("a configured digest_time already passed (09:00), last posted at 08:00: still not due (the digest is Story 4.2's)", () => {
     const w = world({ records: [RECENT], digestTime: "09:00" });
-    const o = next(snapshotOf(w), "coordinator");
-    expect(picked(o)).toBe("unit reconcile:5");
-    expect(o.kind === "coordinator" ? o.unit.why : "").toBe("the 09:00 UTC digest is due");
+    expect(picked(next(snapshotOf(w), "coordinator"))).toBe("idle");
+    expect(reconcileDue(snapshotOf(w)).due).toBe(false);
   });
 
-  test("reconcileDue reports the last run", () => {
+  test("reconcileDue reports the last run: the newest merged reconcile record", () => {
     const r = reconcileDue(snapshotOf(world({ records: [reconciled(4, 9)] })));
     expect(r.due).toBe(false);
     expect(r.last?.unit).toBe("reconcile:4");
     expect(reconcileDue(snapshotOf(world())).last).toBeNull();
+    const later = reconcileDue(snapshotOf(world({ records: [reconciled(4, 9), coord("reconcile:5", { state: "merging", passed_sha: HEAD })] })));
+    expect(later.last?.unit).toBe("reconcile:4");
+    expect(newestMergedReconcile(snapshotOf(world({ records: [coord("reconcile:5", { state: "released" })] })))).toBeNull();
+  });
+
+  test("no merged run: due, saying so", () => {
+    const o = pickC({ records: [coord("reconcile:2", { state: "merging", passed_sha: HEAD })] });
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.why] : null).toEqual(["reconcile:3", "no merged reconcile run on the ledger"]);
   });
 });
 
@@ -201,6 +215,36 @@ describe("next(coordinator): an open coordinator PR", () => {
   test("a builder's released record with an open PR is not a coordinator PR", () => {
     const o = pickC(base([storyRec("2.1", { state: "released", pr: 7 })], { "story:2.1": open(7) }));
     expect(o.kind).toBe("idle");
+  });
+
+  test.each([
+    ["released", { state: "released" }],
+    ["claimed and stale (a dead run)", { state: "claimed", heartbeat_at: minutesBefore(30) }],
+  ] as const)("a %s reconcile record with its PR open is never returned, and does not block", (_name, over) => {
+    const o = pickC(base([coord("reconcile:5", { pr: 9, ...over })], { "reconcile:5": open(9) }));
+    expect(o.kind).toBe("idle");
+    expect(reasonOf(o).startsWith("no coordinator unit due")).toBe(true);
+  });
+
+  test.each([
+    ["merging (queued)", { state: "merging", passed_sha: HEAD, heartbeat_at: minutesBefore(60) }],
+    ["claimed and live (a run in progress)", { state: "claimed" }],
+  ] as const)("a %s reconcile record with its PR open is never returned, but later positions wait", (_name, over) => {
+    const o = pickC(base([coord("reconcile:5", { pr: 9, ...over })], { "reconcile:5": open(9) }));
+    expect(o.kind).toBe("idle");
+    expect(reasonOf(o)).toContain("waiting on an open coordinator PR");
+    expect(reasonOf(o)).toContain(`reconcile:5 is ${over.state} with reconcile PR #9 open`);
+  });
+
+  test("a live reconcile PR does not hide a released planning PR at the same position", () => {
+    const o = pickC(
+      base(
+        [coord("reconcile:5", { state: "merging", passed_sha: HEAD, pr: 9 }), coord("retro:2", { state: "released", pr: 8 })],
+        { "reconcile:5": open(9), "retro:2": open(8) },
+      ),
+    );
+    expect(picked(o)).toBe("unit retro:2");
+    expect(o.kind === "coordinator" ? o.reasons.map((r) => r.subject) : []).toEqual(["reconcile:4", "reconcile:5"]);
   });
 });
 
@@ -311,11 +355,40 @@ describe("doneOnMain", () => {
     ["retro item unknown", "retro-item:epic-3-retro-item-1-z", false],
     ["checkpoint with its go", "checkpoint:2", true],
     ["checkpoint with none", "checkpoint:3", false],
-    ["planning (a merged recurring record)", "planning:status.1", true],
+    ["status planning (a merged recurring record)", "planning:status.1", true],
     ["an older reconcile", "reconcile:3", true],
     ["the newest reconcile", "reconcile:4", false],
   ] as const)("%s: %s → %p", (_name, unit, want) => {
     expect(doneOnMain(m(unit), snap)).toBe(want);
+  });
+
+  const graphUnit = coord("planning:graph.1", { state: "merged", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB] });
+  const statusOf = (keys: readonly string[]) => ["development_status:", ...keys.map((k) => `  ${k}: backlog`), ""].join("\n");
+  test.each([
+    ["every Epic and manifest key present", ["epic-1", "epic-2", "k-2.1"], true],
+    ["an Epic key missing", ["epic-1", "k-2.1"], false],
+    ["a manifest key missing", ["epic-1", "epic-2"], false],
+  ] as const)("graph planning, %s → %p", (_name, keys, want) => {
+    const s = snapshotOf(world({ files: { [STATUS]: statusOf(keys) } }));
+    expect(doneOnMain(graphUnit, s)).toBe(want);
+  });
+
+  test("missingStatusEntries: graph order, each Epic key before its Stories", () => {
+    const s = snapshotOf(world({ epics: { 1: [], 2: ["2", "1"], 3: ["1"] }, files: { [STATUS]: statusOf(["epic-1", "k-2.2"]) } }));
+    expect(missingStatusEntries(s)).toEqual([
+      { key: "epic-2", epic: 2 },
+      { key: "k-2.1", epic: 2 },
+      { key: "epic-3", epic: 3 },
+      { key: "k-3.1", epic: 3 },
+    ]);
+  });
+
+  test.each([
+    ["merged but not the newest merged", coord("reconcile:3", { state: "merged" }), true],
+    ["released", coord("reconcile:3", { state: "released" }), false],
+    ["merging", coord("reconcile:5", { state: "merging", passed_sha: HEAD }), false],
+  ] as const)("a reconcile record %s → %p", (_name, record, want) => {
+    expect(doneOnMain(record, snap)).toBe(want);
   });
 });
 

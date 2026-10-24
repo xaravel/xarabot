@@ -68,9 +68,14 @@ const ZERO_SHA = "0".repeat(40);
 
 /** The 🤖 comment on a PR parked for its owner's approval. */
 export function approvalComment(p: { readonly storyId: string; readonly paths: readonly string[] }): string {
-  const paths = p.paths.map((path) => sanitizeAgentText(path).replace(/\s+/g, " ")).join(", ");
+  return gateComment(`Story ${p.storyId}`, p.paths);
+}
+
+/** The approval gate's 🤖 comment for `subject` (`Story <id>`, or a coordinator unit). */
+export function gateComment(subject: string, gatedPaths: readonly string[]): string {
+  const paths = gatedPaths.map((path) => sanitizeAgentText(path).replace(/\s+/g, " ")).join(", ");
   return (
-    `🤖 Story ${sanitizeAgentText(p.storyId)}: this PR changes paths that need the owner's approval: ${paths}.\n\n` +
+    `🤖 ${sanitizeAgentText(subject)}: this PR changes paths that need the owner's approval: ${paths}.\n\n` +
     "It is parked awaiting approval and was not queued. The Maintainer approves it and queues it by hand.\n"
   );
 }

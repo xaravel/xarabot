@@ -714,6 +714,90 @@ export function deleteMerged(p: EditBase): LedgerEdit {
   });
 }
 
+// ---------------------------------------------------------------- reconcile records
+
+/** The writer is the coordinator lane and the unit a `reconcile:<n>` (an `invalid` unit kind otherwise). */
+function requireReconcileWriter(name: string, ctx: Ctx): Step<null> {
+  if (unitKind(ctx.unit) !== "reconcile") return bad(`${name}: ${ctx.unit} is not a reconcile unit`);
+  return requireCoordinator(ctx);
+}
+
+/**
+ * `merging → released`, no attempt counted: a disposable `reconcile` PR was
+ * ejected, dequeued, closed or refused by the queue. The record must be held
+ * by a coordinator lane at `generation`; its PR fields are kept.
+ */
+export function releaseReconcile(p: HeldParams): LedgerEdit {
+  return makeEdit("releaseReconcile", p, (ctx) => {
+    const w = requireReconcileWriter("releaseReconcile", ctx);
+    if (!w.ok) return w;
+    const rec = requireRecord(ctx);
+    if (!rec.ok) return rec;
+    const s = requireState(rec.value, ["merging"]);
+    if (!s.ok) return s;
+    const g = requireGeneration(rec.value, p.generation);
+    if (!g.ok) return g;
+    if (rec.value.lane !== "coordinator") return pre(`${ctx.unit} is held by lane ${rec.value.lane}, not a coordinator`);
+    return to("released", stamp(ctx, rec.value, { state: "released" }));
+  });
+}
+
+/** `claimed → released`, `attempts` + 1: a `reconcile` run that died (its record stale at `generation`, AD-7's crash row). */
+export function releaseDeadReconcile(p: HeldParams): LedgerEdit {
+  return makeEdit("releaseDeadReconcile", p, (ctx) => {
+    const w = requireReconcileWriter("releaseDeadReconcile", ctx);
+    if (!w.ok) return w;
+    const rec = requireStale(ctx, p.generation, ["claimed"]);
+    if (!rec.ok) return rec;
+    return to("released", stamp(ctx, rec.value, { state: "released", attempts: rec.value.attempts + 1 }));
+  });
+}
+
+/** `released → none`: a later `reconcile` run deletes a superseded `released` `reconcile:<n>` record at `generation`. */
+export function deleteReleasedReconcile(p: HeldParams): LedgerEdit {
+  return makeEdit("deleteReleasedReconcile", p, (ctx) => {
+    const w = requireReconcileWriter("deleteReleasedReconcile", ctx);
+    if (!w.ok) return w;
+    if (ctx.current === undefined) return ok(null);
+    const s = requireState(ctx.current, ["released"]);
+    if (!s.ok) return s;
+    const g = requireGeneration(ctx.current, p.generation);
+    if (!g.ok) return g;
+    return ok({ to: "none" });
+  });
+}
+
+/** The files of `files` with `commit` applied. */
+function applied(files: LedgerFiles, commit: LedgerCommit): Record<string, string> {
+  const out: Record<string, string> = { ...files };
+  for (const path of commit.deletes) delete out[path];
+  for (const [path, text] of Object.entries(commit.writes)) out[path] = text;
+  return out;
+}
+
+/**
+ * `edit` behind `fence`, as one commit: `fence` (a held edit of the writer's
+ * own unit, such as `heartbeat`) must apply to the tip, and `edit` then
+ * applies to the fenced files. The commit carries both changes under
+ * `edit`'s message. Either one's error is the result; when `edit` finds the
+ * tip already holding its target, nothing is written.
+ */
+export function fenced(fence: LedgerEdit, edit: LedgerEdit): LedgerEdit {
+  return (files) => {
+    const f = fence(files);
+    if (!f.ok) return f;
+    const e = edit(f.value === null ? files : applied(files, f.value));
+    if (!e.ok || e.value === null || f.value === null) return e;
+    const outer = f.value;
+    const inner = e.value;
+    const writes: Record<string, string> = { ...outer.writes };
+    for (const path of inner.deletes) delete writes[path];
+    Object.assign(writes, inner.writes);
+    const deletes = [...new Set([...outer.deletes.filter((d) => !Object.hasOwn(inner.writes, d)), ...inner.deletes])];
+    return ok({ message: inner.message, writes, deletes });
+  };
+}
+
 // ---------------------------------------------------------------- coordinator.json
 
 /** A `coordinator.json` edit's writer and time. `now` is the forge's server time. */

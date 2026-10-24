@@ -8,8 +8,10 @@ import {
   claimCoordinator,
   coordinatorClaimState,
   deleteMerged,
+  deleteReleasedReconcile,
   ejected,
   failAttempt,
+  fenced,
   finishRecurring,
   heartbeat,
   heldGlobs,
@@ -21,6 +23,8 @@ import {
   park,
   parkNew,
   release,
+  releaseDeadReconcile,
+  releaseReconcile,
   releaseStale,
   startMerging,
   STALE_AFTER_MS,
@@ -474,6 +478,96 @@ describe("keepCoordinator", () => {
     ["generation 0: invalid", COORD, 0, coordRec(COORD, T0), "invalid"],
   ] as const)("%s", (_name, who, generation, current, want) => {
     expectCoordinator(keepCoordinator({ by: who, now: NOW, generation }), coordTip(current), want, "keepCoordinator");
+  });
+});
+
+describe("reconcile record edits", () => {
+  const R = "reconcile:3";
+  const R_PATH = "units/reconcile__3.json";
+  /** A `reconcile:3` record held by `who`. */
+  const rr = (over: Partial<UnitRecord> = {}, who: LaneIdentity = COORD): UnitRecord =>
+    by(who, T0, { unit: R, globs: [], pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, ...over });
+  const at = (now: string, generation = 1) => ({ unit: R, by: COORD, now, generation });
+
+  type Want = UnitRecord | "deleted" | "null" | "invalid" | "precondition";
+  const cases: readonly (readonly [string, LedgerEdit, readonly UnitRecord[], Want, string])[] = [
+    // releaseReconcile: merging -> released, no attempt
+    ["releaseReconcile: merging, held by this coordinator", releaseReconcile(at(NOW, 2)), [rr({ state: "merging", generation: 2, passed_sha: SHA_A, attempts: 1 })], by(COORD, NOW, { unit: R, globs: [], state: "released", generation: 2, pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 1 }), "releaseReconcile"],
+    ["releaseReconcile: merging, held by another coordinator identity", releaseReconcile(at(NOW)), [rr({ state: "merging", passed_sha: SHA_A }, COORD_2)], by(COORD, NOW, { unit: R, globs: [], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A }), "releaseReconcile"],
+    ["releaseReconcile: a builder writer", releaseReconcile({ ...at(NOW), by: ALICE }), [rr({ state: "merging" })], "precondition", "releaseReconcile"],
+    ["releaseReconcile: a Story unit", releaseReconcile({ ...at(NOW), unit: U }), [rec({ state: "merging" })], "invalid", "releaseReconcile"],
+    ["releaseReconcile: the wrong generation", releaseReconcile(at(NOW, 2)), [rr({ state: "merging" })], "precondition", "releaseReconcile"],
+    ["releaseReconcile: claimed, not merging", releaseReconcile(at(NOW)), [rr()], "precondition", "releaseReconcile"],
+    ["releaseReconcile: a holder that is not a coordinator lane", releaseReconcile(at(NOW)), [rr({ state: "merging" }, ALICE)], "precondition", "releaseReconcile"],
+    ["releaseReconcile: no record", releaseReconcile(at(NOW)), [], "precondition", "releaseReconcile"],
+    // releaseDeadReconcile: stale claimed -> released, attempts + 1
+    ["releaseDeadReconcile: stale claimed", releaseDeadReconcile(at(LATE)), [rr({ attempts: 1 }, COORD_2)], by(COORD, LATE, { unit: R, globs: [], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, attempts: 2 }), "releaseDeadReconcile"],
+    ["releaseDeadReconcile: claimed but live", releaseDeadReconcile(at(NOW)), [rr()], "precondition", "releaseDeadReconcile"],
+    ["releaseDeadReconcile: stale merging", releaseDeadReconcile(at(LATE)), [rr({ state: "merging" })], "precondition", "releaseDeadReconcile"],
+    ["releaseDeadReconcile: the wrong generation", releaseDeadReconcile(at(LATE, 2)), [rr()], "precondition", "releaseDeadReconcile"],
+    ["releaseDeadReconcile: a builder writer", releaseDeadReconcile({ ...at(LATE), by: ALICE }), [rr()], "precondition", "releaseDeadReconcile"],
+    ["releaseDeadReconcile: a Story unit", releaseDeadReconcile({ ...at(LATE), unit: U }), [rec()], "invalid", "releaseDeadReconcile"],
+    // deleteReleasedReconcile: released -> none
+    ["deleteReleasedReconcile: released", deleteReleasedReconcile(at(NOW)), [rr({ state: "released" })], "deleted", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: already gone", deleteReleasedReconcile(at(NOW)), [], "null", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: merged", deleteReleasedReconcile(at(NOW)), [rr({ state: "merged" })], "precondition", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: parked", deleteReleasedReconcile(at(NOW)), [rr({ state: "parked", park: blocked("verification", "carol") })], "precondition", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: the wrong generation", deleteReleasedReconcile(at(NOW, 2)), [rr({ state: "released" })], "precondition", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: a builder writer", deleteReleasedReconcile({ ...at(NOW), by: ALICE }), [rr({ state: "released" })], "precondition", "deleteReleasedReconcile"],
+    ["deleteReleasedReconcile: a Story unit", deleteReleasedReconcile({ ...at(NOW), unit: U }), [rec({ state: "released" })], "invalid", "deleteReleasedReconcile"],
+  ];
+  test.each(cases)("%s", (_name, edit, records, want, name) => {
+    const r = edit(tip(records));
+    if (want === "invalid" || want === "precondition") {
+      expect(r.ok ? "ok" : r.error.kind).toBe(want);
+      return;
+    }
+    if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+    if (want === "null") {
+      expect(r.value).toBeNull();
+      return;
+    }
+    if (want === "deleted") {
+      expect(r.value).toEqual({ message: `ledger: ${name} ${R} [skip ci]`, writes: {}, deletes: [R_PATH] });
+      return;
+    }
+    expect(r.value).toEqual({ message: `ledger: ${name} ${R} [skip ci]`, writes: { [R_PATH]: serializeUnitRecord(want) }, deletes: [] });
+  });
+});
+
+describe("fenced", () => {
+  const own = by(COORD, T0, { unit: "reconcile:5", globs: [] });
+  const fence = (generation = 1) => heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation });
+  const ownPath = "units/reconcile__5.json";
+  const beaten = serializeUnitRecord({ ...own, heartbeat_at: NOW });
+
+  test("the fence and the item in one commit, under the item's message", () => {
+    const r = fenced(fence(), markMerged({ unit: U, by: COORD, now: NOW }))(tip([own, rec({ state: "parked", park: blocked("other") })]));
+    expect(r.ok && r.value).toEqual({
+      message: `ledger: markMerged ${U} [skip ci]`,
+      writes: { [ownPath]: beaten, [PATH]: serializeUnitRecord(by(COORD, NOW, { state: "merged" })) },
+      deletes: [],
+    });
+  });
+
+  test("a deleting item: the fence written, the item's record deleted", () => {
+    const r = fenced(fence(), deleteMerged({ unit: U, by: COORD, now: NOW }))(tip([own, rec({ state: "merged" })]));
+    expect(r.ok && r.value).toEqual({ message: `ledger: deleteMerged ${U} [skip ci]`, writes: { [ownPath]: beaten }, deletes: [PATH] });
+  });
+
+  test("a lost fence refuses the item", () => {
+    const r = fenced(fence(2), markMerged({ unit: U, by: COORD, now: NOW }))(tip([own, rec({ state: "parked", park: blocked("other") })]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+  });
+
+  test("a refused item writes nothing", () => {
+    const r = fenced(fence(), deleteMerged({ unit: U, by: COORD, now: NOW }))(tip([own, rec({ state: "released" })]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+  });
+
+  test("an item already done writes nothing, not even the fence", () => {
+    const r = fenced(fence(), deleteMerged({ unit: U, by: COORD, now: NOW }))(tip([own]));
+    expect(r.ok && r.value).toBeNull();
   });
 });
 

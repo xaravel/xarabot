@@ -19,6 +19,8 @@ import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
 import { createGitMerger } from "../lane/merger.ts";
 import { createPrStep } from "../lane/pr-step.ts";
+import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
+import { createReconcileStep } from "../lane/reconcile-step.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
 import { writeStop } from "../lane/stop.ts";
 import { createSleepWaiter } from "../lane/wait.ts";
@@ -265,15 +267,16 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   }
 
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
+  const fetch = connection.fetchShas(runnerGit);
   if (claimed !== null) {
-    // No coordinator step is wired before Story 2.5: every unit ends idle, unclaimed.
-    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: {}, waiter: createSleepWaiter({ store }) };
+    // Story 2.5 wires the reconcile step; planning, retro, retro-item and checkpoint units end idle, unclaimed, until their Stories.
+    const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo });
+    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile }, waiter: createSleepWaiter({ store }) };
     const result = await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps);
     out(`lane ${name}: ${result.outcome}`);
     return 0;
   }
 
-  const fetch = connection.fetchShas(runnerGit);
   const laneDeps: LaneDeps = {
     forge,
     agent,
