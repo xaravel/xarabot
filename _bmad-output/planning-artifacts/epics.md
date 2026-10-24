@@ -1302,6 +1302,33 @@ So that sprint status follows merges with no agent writing status, and merged le
 **When** a later `reconcile` runs
 **Then** a merged PR makes it `merged`, a still-queued PR leaves it unchanged, and an ejected or dequeued PR makes it `parked` (held), with no attempt counted.
 
+The Maintainer's decisions of 2026-10-24 (readiness R7 and this Story's intent gap):
+
+**Given** a `reconcile` PR, which holds only runner-written content
+**When** its CI passes
+**Then** it is exempt from `owner_approval_paths`: the runner re-checks the Standing Authority, fences, writes `merging` and enqueues it itself, giving the coordinator-held `merging` record above
+**And** the Standing Authority (`docs/maintainer/standing-authority.md`) names this exemption.
+
+**Given** an earlier `reconcile` PR that is still open (parked or queued)
+**When** a later `reconcile` run has work
+**Then** it does the ledger work but opens no new PR; it regenerates the open PR on fresh `main` only after a conflict or an ejection.
+
+**Given** a `reconcile` PR
+**When** it is opened
+**Then** the run holds its claim and polls CI as a builder does (Story 1.17); an unexpected failure parks it `blocked` (`verification`), the CI max wait parks it `ci-timeout`, and no agent fix is attempted.
+
+**Given** the coordinator lane
+**When** a round ends `idle`
+**Then** its trailing wait is 10 minutes, matching the due rule (Story 2.4); builders keep 30 minutes.
+
+**Given** Story 2.4's due rule
+**When** `reconcile` work is read from the snapshot
+**Then** a passed digest time is not work until Story 4.2 posts the digest and stamps `digest_posted_at`; Story 4.2 adds the condition back.
+
+**Given** earlier `reconcile:<n>` records that ended `released`
+**When** a later `reconcile` run finishes
+**Then** it deletes them, since it supersedes them; `parked` ones stay until their PR or inbox item is resolved; the due rule reads the newest `merged` `reconcile:<n>` record.
+
 ### Story 2.6: `reconcile` enqueues approved PRs
 
 As the Maintainer,
@@ -1840,6 +1867,10 @@ So that I rule on it in one sitting with no other per-item notices (FR9, AR24).
 **When** it runs
 **Then** the fake and GitHub adapters pass the `renderDigest` cases
 **And** `docs/maintainer/self-host.md` adds the Human Live Step of pinning the Maintainer's inbox issue once by hand.
+
+**Given** Story 2.4's `reconcile` due rule
+**When** this Story stamps `digest_posted_at` on each digest
+**Then** it adds back "the daily digest time passed with no digest posted" as `reconcile` work, which Story 2.5 left out until now; the due-rule case table gains its cases.
 
 ### Story 4.3: Batch routing of Maintainer-only retro items
 
