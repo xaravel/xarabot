@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
+import { COORDINATOR_PATH, serializeCoordinator, serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
 import {
   applyRuling,
   ATTEMPTS_CAP,
   ciFix,
   claim,
+  claimCoordinator,
+  coordinatorClaimState,
   deleteMerged,
   ejected,
   failAttempt,
@@ -13,6 +15,7 @@ import {
   heldGlobs,
   isStale,
   keepAlive,
+  keepCoordinator,
   loopback,
   markMerged,
   park,
@@ -25,7 +28,7 @@ import {
   takeOverStale,
   type LedgerEdit,
 } from "../../../src/core/ledger/edits.ts";
-import type { LaneIdentity, Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import type { CoordinatorRecord, LaneIdentity, Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import { ALICE, BOB, COORD, LATE, NOW, rec, SHA_A, SHA_B, SHA_C, SHA_D, T0, tip } from "./fixtures.ts";
 
 const U = "story:1.5";
@@ -387,5 +390,99 @@ describe("ledger edits", () => {
     const again = failAttempt({ ...held, generation: 2 })(reclaimed.value.writes);
     if (!again.ok || again.value === null) throw new Error("expected a commit");
     expect(JSON.parse(again.value.writes[PATH] as string)).toMatchObject({ state: "parked", attempts: 3, park: blocked("attempts-cap") });
+  });
+});
+
+// ---------------------------------------------------------------- coordinator.json
+
+/** A second coordinator identity on another host. */
+const COORD_2: LaneIdentity = { owner: "dave", host: "44444444-4444-4444-8444-444444444444", lane: "coordinator" };
+
+function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
+  return {
+    schema_version: 1,
+    owner: who.owner,
+    host: who.host,
+    lane: "coordinator",
+    generation: 1,
+    heartbeat_at: at,
+    digest_posted_at: null,
+    rulings_cursor: null,
+    ...over,
+  };
+}
+
+const coordTip = (c: CoordinatorRecord | null, records: readonly UnitRecord[] = []) =>
+  tip(records, c === null ? {} : { [COORDINATOR_PATH]: serializeCoordinator(c) });
+
+type CoordExpect = CoordinatorRecord | "precondition" | "invalid" | "stop";
+
+function expectCoordinator(edit: LedgerEdit, files: Record<string, string>, want: CoordExpect, name: string): void {
+  const r = edit(files);
+  if (typeof want === "string") {
+    expect(r.ok ? "ok" : r.error.kind).toBe(want);
+    return;
+  }
+  if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+  expect(r.value).toEqual({ message: `ledger: ${name} coordinator [skip ci]`, writes: { [COORDINATOR_PATH]: serializeCoordinator(want) }, deletes: [] });
+}
+
+describe("claimCoordinator", () => {
+  const cursor = { digest_posted_at: "2026-10-22T08:00:00Z", rulings_cursor: "ruling-17" };
+  test.each([
+    ["no record: generation 1, no digest time, no cursor", COORD, null, coordRec(COORD, NOW)],
+    ["same identity, live: re-stamped at the same generation", COORD, coordRec(COORD, T0, { generation: 3, ...cursor }), coordRec(COORD, NOW, { generation: 3, ...cursor })],
+    ["same identity, stale: re-stamped at the same generation, not a takeover", COORD, coordRec(COORD, "2026-10-22T08:00:00Z", { generation: 3, ...cursor }), coordRec(COORD, NOW, { generation: 3, ...cursor })],
+    ["another identity, stale (30 min): taken over at generation + 1, cursor kept", COORD_2, coordRec(COORD, "2026-10-22T09:40:00Z", { generation: 3, ...cursor }), coordRec(COORD_2, NOW, { generation: 4, ...cursor })],
+    ["another identity, live: refused", COORD_2, coordRec(COORD, "2026-10-22T09:40:01Z"), "precondition"],
+    ["the same owner and host on another lane name is another identity", { ...COORD, lane: "builder-1" }, null, "precondition"],
+    ["a builder lane: refused", ALICE, null, "precondition"],
+  ] as const)("%s", (_name, who, current, want) => {
+    expectCoordinator(claimCoordinator({ by: who, now: NOW }), coordTip(current), want, "claimCoordinator");
+  });
+
+  test("the refusal names the holder and its heartbeat, and the unit records are untouched", () => {
+    const r = claimCoordinator({ by: COORD_2, now: NOW })(coordTip(coordRec(COORD, T0), [rec()]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.message).toContain(`${COORD.owner}/${COORD.host}/coordinator`);
+      expect(r.error.message).toContain(T0);
+    }
+  });
+
+  test("an invalid now or writer is invalid", () => {
+    expect(claimCoordinator({ by: COORD, now: "yesterday" })({}).ok).toBe(false);
+    const r = claimCoordinator({ by: { ...COORD, host: "nope" }, now: NOW })({});
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+
+  test("a schema_version 2 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 1', '"schema_version": 2');
+    const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
+    expect(r.ok ? "ok" : r.error.kind).toBe("stop");
+  });
+});
+
+describe("keepCoordinator", () => {
+  test.each([
+    ["held at the generation: heartbeat_at only", COORD, 2, coordRec(COORD, T0, { generation: 2, rulings_cursor: "r" }), coordRec(COORD, NOW, { generation: 2, rulings_cursor: "r" })],
+    ["held but stale: still beats", COORD, 1, coordRec(COORD, "2026-10-22T08:00:00Z"), coordRec(COORD, NOW)],
+    ["the wrong generation: lost", COORD, 1, coordRec(COORD, T0, { generation: 2 }), "precondition"],
+    ["another identity: lost", COORD, 1, coordRec(COORD_2, T0), "precondition"],
+    ["no record: lost", COORD, 1, null, "precondition"],
+    ["a builder lane: refused", ALICE, 1, coordRec(COORD, T0), "precondition"],
+    ["generation 0: invalid", COORD, 0, coordRec(COORD, T0), "invalid"],
+  ] as const)("%s", (_name, who, generation, current, want) => {
+    expectCoordinator(keepCoordinator({ by: who, now: NOW, generation }), coordTip(current), want, "keepCoordinator");
+  });
+});
+
+describe("coordinatorClaimState", () => {
+  test.each([
+    ["no record", null, "missing"],
+    ["10 min old", coordRec(COORD, T0), "live"],
+    ["exactly 30 min old", coordRec(COORD, "2026-10-22T09:40:00Z"), "expired"],
+  ] as const)("%s → %s", (_name, record, want) => {
+    expect(coordinatorClaimState(record, NOW)).toBe(want);
   });
 });

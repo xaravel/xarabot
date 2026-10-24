@@ -36,3 +36,9 @@ export function compareStoryIds(a: string, b: string): number {
   const sb = mb[3] ?? "";
   return sa < sb ? -1 : sa > sb ? 1 : 0;
 }
+
+/** A Story id's join key, the rule `resolveGraph` uses: numeric Epic and Story parts, then the suffix (`2.01` → `2.1`). */
+export function storyKey(id: string): string {
+  const m = PARTS.exec(id);
+  return m === null ? id : `${Number(m[1])}.${Number(m[2])}${m[3] ?? ""}`;
+}

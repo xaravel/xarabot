@@ -87,10 +87,15 @@ export function alertMarker(condition: string, mainSha: GitSha): string {
   return `<!-- xarabot-alert ${encodeURIComponent(condition)} ${mainSha} -->`;
 }
 
+/** The builders' coordinator-claim alerts (Story 2.4), which stop nothing: condition → the claim's state. */
+const COORDINATOR_ALERTS: Readonly<Record<string, string>> = { "coordinator-missing": "missing", "coordinator-expired": "expired" };
+
 /** The body of the alert comment for (`condition`, `mainSha`) to `maintainer`. */
 export function alertBody(maintainer: string, condition: string, mainSha: GitSha): string {
   const shown = condition.replace(/`/g, "'").replace(/\r\n|\r|\n/g, " ");
-  return `🤖 @${maintainer} Xarabot alert: \`${shown}\` stops every lane (main \`${mainSha}\`).\n\n${alertMarker(condition, mainSha)}`;
+  const claim = Object.hasOwn(COORDINATOR_ALERTS, condition) ? COORDINATOR_ALERTS[condition] : undefined;
+  const what = claim === undefined ? " stops every lane" : `: the coordinator claim is ${claim}; builders keep going`;
+  return `🤖 @${maintainer} Xarabot alert: \`${shown}\`${what} (main \`${mainSha}\`).\n\n${alertMarker(condition, mainSha)}`;
 }
 
 /** The merge-queue state of one PR, by number. */

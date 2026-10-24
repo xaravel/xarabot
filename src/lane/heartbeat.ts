@@ -1,5 +1,6 @@
 import { HEARTBEAT_MS, HEARTBEAT_RETRY_MS, heartbeatRetryMs, wouldLapse } from "../core/lane/heartbeat.ts";
-import { keepAlive, release, STALE_AFTER_MS, type LedgerEdit } from "../core/ledger/edits.ts";
+import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
+import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import type { Forge } from "../ports/forge.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, writtenRecord } from "./lane-process.ts";
@@ -67,7 +68,43 @@ function message(e: unknown): string {
 }
 
 export function startHeartbeat(params: HeartbeatParams): Heartbeat {
-  const { forge, identity, unit, generation, clock } = params;
+  const { identity, unit, generation } = params;
+  return startKeeper({
+    ...params,
+    what: unit,
+    beat: (now) => keepAlive({ unit, by: identity, now, generation }),
+    release: {
+      edit: (now) => release({ unit, by: identity, now, generation }),
+      record: (commit) => writtenRecord(commit, unit),
+    },
+  });
+}
+
+/** The coordinator keeper's parameters: `HeartbeatParams` for `coordinator.json`, at the claim's generation. */
+export type CoordinatorHeartbeatParams = Omit<HeartbeatParams, "unit">;
+
+/**
+ * The `coordinator.json` keeper (FR4, AD-8): the unit keeper's timing and
+ * lapse rule, beating `keepCoordinator` at the claim's generation. It never
+ * releases: a lost claim aborts its signal with `lost`, and a heartbeat
+ * about to lapse aborts it with `lapsed`.
+ */
+export function startCoordinatorHeartbeat(params: CoordinatorHeartbeatParams): Heartbeat {
+  const { identity, generation } = params;
+  return startKeeper({ ...params, what: COORDINATOR_PATH, beat: (now) => keepCoordinator({ by: identity, now, generation }), release: null });
+}
+
+type KeeperParams = Omit<HeartbeatParams, "unit" | "identity"> & {
+  /** What the keeper keeps, for its log lines. */
+  readonly what: string;
+  /** One beat at forge time `now`; a `null` commit means the record moved on. */
+  readonly beat: (now: string) => LedgerEdit;
+  /** The release on a lapse and the record it wrote, or `null` for none (the end is `lapsed`). */
+  readonly release: { readonly edit: (now: string) => LedgerEdit; readonly record: (commit: LedgerCommit | null) => UnitRecord | null } | null;
+};
+
+function startKeeper(params: KeeperParams): Heartbeat {
+  const { forge, what, clock } = params;
   const everyMs = params.everyMs ?? HEARTBEAT_MS;
   const retryMs = params.retryMs ?? HEARTBEAT_RETRY_MS;
   const callTimeoutMs = params.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
@@ -104,14 +141,19 @@ export function startHeartbeat(params: HeartbeatParams): Heartbeat {
     }
   };
 
-  /** The keeper's lapse release: no attempt counted. */
+  /** The keeper's lapse release: no attempt counted. With no release, the end is `lapsed`. */
   const releaseUnit = async (why: string): Promise<void> => {
-    const r = await swap(release({ unit, by: identity, now: params.forgeNow(), generation }));
-    if (r.ok) {
-      finish({ kind: "released", message: `${unit} released: ${why}`, record: writtenRecord(r.value.commit, unit) });
+    const rel = params.release;
+    if (rel === null) {
+      finish({ kind: "lapsed", message: `${what} lapsed: ${why}` });
       return;
     }
-    finish({ kind: "lapsed", message: `${unit} lapsed: ${why}; the release failed: ${r.error.message}` });
+    const r = await swap(rel.edit(params.forgeNow()));
+    if (r.ok) {
+      finish({ kind: "released", message: `${what} released: ${why}`, record: rel.record(r.value.commit) });
+      return;
+    }
+    finish({ kind: "lapsed", message: `${what} lapsed: ${why}; the release failed: ${r.error.message}` });
   };
 
   const loop = async (): Promise<void> => {
@@ -123,10 +165,10 @@ export function startHeartbeat(params: HeartbeatParams): Heartbeat {
       if (stopping.signal.aborted) return;
       // The host time of this beat's stamp, taken before the swap: a slow swap never moves the baseline later.
       const at = clock();
-      const r = await swap(keepAlive({ unit, by: identity, now: params.forgeNow(), generation }));
+      const r = await swap(params.beat(params.forgeNow()));
       if (r.ok) {
         if (r.value.commit === null) {
-          finish({ kind: "moved-on", message: `${unit} moved on at generation ${generation}; the keeper stops` });
+          finish({ kind: "moved-on", message: `${what} moved on at generation ${params.generation}; the keeper stops` });
           return;
         }
         lastGood = at;
@@ -135,7 +177,7 @@ export function startHeartbeat(params: HeartbeatParams): Heartbeat {
       }
       const e = r.error;
       if (e.kind === "edit" && e.edit === "precondition") {
-        finish({ kind: "lost", message: `${unit} lost: ${e.message}` });
+        finish({ kind: "lost", message: `${what} lost: ${e.message}` });
         return;
       }
       if (stopping.signal.aborted) return;

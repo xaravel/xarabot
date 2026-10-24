@@ -433,13 +433,18 @@ The lane records it `merged` at its next start.
   3. Approve the PR and add it to the merge queue by hand.
 
   At its next start, each lane sees the new version on `main`, installs `~/.xarabot/runner/<new-tag>/`, and exits without a claim. The start after that runs the new runner. A lane never switches versions mid-unit.
-- **The coordinator lane.** Install it only once `runner_version` includes Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done):
+- **The coordinator lane.** Never install it while `runner_version` lacks Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done). A runner with 2.4 alone claims `coordinator.json` and then idles ("no reconcile step (Story 2.5)"). In this order:
+  1. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.
+  2. Advance `runner_version` to that tag in a Maintainer PR (Story 1.19), as in steps 2 and 3.
+  3. Install the lane. Its name must be `coordinator`: `lane install` refuses any other name for role `coordinator`, and refuses the name `coordinator` for a builder.
 
-  ```sh
-  XARABOT_MAX_BUILDERS=1 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install coordinator --repo xaravel/xarabot --role coordinator --owner edanisko --agent claude
-  ```
+     ```sh
+     XARABOT_MAX_BUILDERS=1 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install coordinator --repo xaravel/xarabot --role coordinator --owner edanisko --agent claude
+     ```
 
-  Then run the two printed `sudo` commands. Until 2.5 merges, you approve and enqueue parked PRs by hand, and the builder records them `merged`.
+     Then run the two printed `sudo` commands. Epic 2's retro, and so Epic 3, waits on this lane.
+
+  At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until Story 2.6 merges, keep adding approved PRs to the merge queue by hand.
 - **Graph PRs.** Until Story 2.8 (the graph-change gate) merges, check every PR that changes `.xarabot/epics.yaml`, `epics.md` or `stories/` before approving it:
 
   ```sh

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
-import { checkWrite, epicContextMatch, type WriteChange, type WriteRefusal, type WriteRules } from "../core/lane/write-check.ts";
+import { checkWrite, epicContextMatch, type CoordinatorWriteRules, type WriteChange, type WriteRefusal, type WriteRules } from "../core/lane/write-check.ts";
 import { err, ok } from "../core/result.ts";
 import { sanitizeAgentText } from "../core/sanitize.ts";
 import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, snapshotTree, type CloneResult } from "./clone.ts";
@@ -9,9 +9,10 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
 /**
  * Turns a finished session's working tree into one bot-authored commit,
  * three-way merged onto `origin/main` (AR16, FR13). The change is the
- * snapshot against `baseSha`. Epic context changes are reverted to
- * `baseSha`'s version, then the write check (FR18, AR31) runs on what is
- * left, before any temp commit; a refusal writes nothing. `merge-tree`
+ * snapshot against `baseSha`. Under builder rules, Epic context changes are
+ * reverted to `baseSha`'s version; then the write check (FR18, AR31), a
+ * builder's or the coordinator's, runs on what is left, before any temp
+ * commit; a refusal writes nothing. `merge-tree`
  * applies the change onto `ontoSha`. A conflict is returned, never resolved.
  */
 
@@ -25,8 +26,8 @@ export type CommitParams = {
   readonly bot: BotIdentity;
   /** The agent's commit message; sanitized before use. */
   readonly message: string;
-  /** The write check's rules, from the same fresh `main`. */
-  readonly rules: WriteRules;
+  /** The write check's rules, from the same fresh `main`: a builder's or the coordinator's. */
+  readonly rules: WriteRules | CoordinatorWriteRules;
   readonly signal: AbortSignal;
 };
 
@@ -95,10 +96,10 @@ async function revertPaths(gitDir: string, tree: string, changes: readonly RawCh
 }
 
 /** The write check's input: each changed path, with the own manifest's texts when it is a regular file on both sides. */
-async function writeChanges(gitDir: string, rules: WriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
+async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
   const out: WriteChange[] = [];
   for (const c of changes) {
-    if (c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
+    if (rules.role === "builder" && c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
       const before = await git(gitDir, ["cat-file", "blob", c.oldSha], { signal });
       if (!before.ok) return before;
       const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
@@ -144,8 +145,9 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
     return err("invalid", `commitSession: the working tree adds or changes a gitlink (embedded repository): ${links.join(", ")}`);
   }
 
-  // Epic context files are the coordinator's: a session's change to one is set back to `baseSha`'s version.
-  const contextChanges = diff.value.filter((c) => epicContextMatch(params.rules.epicContextPath, c.path));
+  // Epic context files are the coordinator's: a builder session's change to one is set back to `baseSha`'s version.
+  const rules = params.rules;
+  const contextChanges = rules.role === "builder" ? diff.value.filter((c) => epicContextMatch(rules.epicContextPath, c.path)) : [];
   const reverted = contextChanges.map((c) => c.path);
   let squash = tree.value;
   if (contextChanges.length > 0) {

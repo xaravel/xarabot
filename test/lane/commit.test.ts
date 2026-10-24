@@ -3,6 +3,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, wr
 import { dirname, join } from "node:path";
 import { runGit } from "../../src/adapters/forge/github/runner-git.ts";
 import { headRef, rebuildClone, saveWip, wipRef, type RebuildParams } from "../../src/lane/clone.ts";
+import { coordinatorWriteRules } from "../../src/core/lane/write-check.ts";
+import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
+import { CONFIG_DEFAULTS } from "../../src/core/schemas/config.ts";
 import { commitSession, type CommitParams } from "../../src/lane/commit.ts";
 import { BOT, BRANCH, cleanup, commit, EPIC_CONTEXT, files, IDENTITY, live, plainClone, rg, rules, setup, SPEC_PATH, STORY_FILE, tempDir, UNIT, value, type Repo } from "./git-fixture.ts";
 
@@ -339,6 +342,49 @@ describe("commitSession: the write check", () => {
       reverted: [],
     });
     await noHead(repo);
+  });
+
+  describe("coordinator rules", () => {
+    const config = { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } };
+    const statusUnit = coordinatorWriteRules({ config, globs: coordinatorGlobs({ kind: "planning", planning: "status" }, config), graphUnit: false });
+
+    test("a status unit's Epic context change is committed, not reverted", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, baseFiles);
+      value(await rebuildClone(rebuild(repo, base)));
+      const added = "_bmad-output/implementation-artifacts/epic-2-context.md";
+      write(repo, EPIC_CONTEXT, "# Epic 1 Context: recompiled\n");
+      write(repo, added, "# Epic 2 Context: new\n");
+      write(repo, SPRINT, "development_status:\n  epic-2: in-progress\n");
+      const r = value(await commitSession(session(repo, base, base, { rules: statusUnit })));
+      if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+      expect(r.reverted).toBeUndefined();
+      const out = await files(repo.gitDir, r.head_sha);
+      expect(out[EPIC_CONTEXT]).toBe("# Epic 1 Context: recompiled");
+      expect(out[added]).toBe("# Epic 2 Context: new");
+      expect(out[SPRINT]).toBe("development_status:\n  epic-2: in-progress");
+    });
+
+    test("a refused path writes nothing: outside the unit, a graph input, .xarabot", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, baseFiles);
+      value(await rebuildClone(rebuild(repo, base)));
+      write(repo, SPRINT, "development_status:\n  epic-2: in-progress\n");
+      write(repo, "src/a.ts", "SESSION\n");
+      write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: done"));
+      write(repo, ".xarabot/config.yaml", "schema_version: 1\n");
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
+        kind: "refused",
+        refusals: [
+          { path: ".xarabot/config.yaml", class: "xarabot" },
+          { path: SPRINT, class: "graph-and-status" },
+          { path: "src/a.ts", class: "outside-unit" },
+          { path: STORY_FILE, class: "graph-input" },
+        ],
+        reverted: [],
+      });
+      await noHead(repo);
+    });
   });
 });
 

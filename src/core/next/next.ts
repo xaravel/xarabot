@@ -4,10 +4,12 @@ import { resolveManifestGlobs } from "../manifests/parse-manifest.ts";
 import { describeIssues } from "../schemas/common.ts";
 import type { UnitRecord } from "../schemas/ledger.ts";
 import { LaneRole, SnapshotSchema, type Snapshot, type SnapshotManifest } from "../schemas/snapshot.ts";
-import { compareStoryIds } from "../story-id.ts";
+import { compareStoryIds, storyKey } from "../story-id.ts";
+import { nextCoordinator, type CoordinatorUnit } from "./coordinator.ts";
 import { epicContextPath } from "./snapshot.ts";
 
 export type ReasonCode =
+  | "reconcile-not-due"
   | "unmanifested"
   | "unclaimable"
   | "dependency-epic"
@@ -44,19 +46,20 @@ export type NextStory = {
 export type NextOutcome =
   | { readonly kind: "unit"; readonly story: NextStory; readonly reasons: readonly Reason[] }
   | { readonly kind: "park"; readonly park: "needs-approval"; readonly story: NextStory; readonly reasons: readonly Reason[] }
+  /** A coordinator unit; only the coordinator role gets one. */
+  | { readonly kind: "coordinator"; readonly unit: CoordinatorUnit; readonly reasons: readonly Reason[] }
   | { readonly kind: "idle"; readonly reason: string; readonly reasons: readonly Reason[] }
   | { readonly kind: "stop"; readonly reason: string };
+
+/** What a builder lane gets: never a coordinator unit. */
+export type BuilderOutcome = Exclude<NextOutcome, { readonly kind: "coordinator" }>;
+/** What the coordinator gets: never a Story. */
+export type CoordinatorOutcome = Exclude<NextOutcome, { readonly kind: "unit" | "park" }>;
 
 const NOTHING_LEFT = "no Story left to build";
 
 const storyUnit = (id: string) => `story:${id}`;
 const epicOf = (id: string) => Number(id.slice(0, id.indexOf(".")));
-
-/** A Story id's join key, the rule `resolveGraph` uses: numeric Epic and Story parts, then the suffix (`2.01` → `2.1`). */
-function storyKey(id: string): string {
-  const m = /^(\d+)\.(\d+)([a-z]?)$/.exec(id);
-  return m === null ? id : `${Number(m[1])}.${Number(m[2])}${m[3] ?? ""}`;
-}
 
 /**
  * The stale record a lane may take over: a `claimed` one, or a `merging` one
@@ -70,17 +73,26 @@ function takeOverOf(rec: UnitRecord | undefined, now: string): NextStory["take_o
   return null;
 }
 
-function stop(reason: string): NextOutcome {
+function stop(reason: string): { readonly kind: "stop"; readonly reason: string } {
   return { kind: "stop", reason };
 }
 
 /**
- * Picks a builder lane's next unit from one snapshot (FR2, AR14, AR28): the
- * lowest eligible Epic, then its lowest eligible Story. Returns the Story as
- * a `unit` (a stale `claimed` or builder-held `merging` record as a
- * `take_over`), an Infrastructure Story without a current approval as `park`,
- * `idle` with the reasons nothing is eligible, or `stop`. Pure; never throws.
+ * Picks a lane's next unit from one snapshot (FR2, FR4, AR14, AR28).
+ *
+ * A builder gets the lowest eligible Epic, then its lowest eligible Story:
+ * the Story as a `unit` (a stale `claimed` or builder-held `merging` record
+ * as a `take_over`), an Infrastructure Story without a current approval as
+ * `park`, `idle` with the reasons nothing is eligible, or `stop`.
+ *
+ * The coordinator gets a `coordinator` unit in AD-13's order
+ * (`nextCoordinator`), `idle`, or `stop`; never a Story.
+ *
+ * Pure; never throws.
  */
+export function next(snapshot: Snapshot, laneRole: "builder"): BuilderOutcome;
+export function next(snapshot: Snapshot, laneRole: "coordinator"): CoordinatorOutcome;
+export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome;
 export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
   const checked = SnapshotSchema.safeParse(snapshot);
   if (!checked.success) return stop(`invalid snapshot: ${describeIssues(checked.error)}`);
@@ -88,7 +100,12 @@ export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
   const role = LaneRole.safeParse(laneRole);
   if (!role.success) return stop(`unknown lane role "${String(laneRole)}"`);
   if (role.data !== snap.role) return stop(`lane role "${role.data}" differs from the snapshot's role "${snap.role}"`);
-  if (role.data === "coordinator") return stop("coordinator selection is not available yet (Epic 2)");
+  if (!snap.graph.ok) return stop(snap.graph.error.message);
+  if (role.data === "coordinator") return nextCoordinator(snap);
+  return nextBuilder(snap);
+}
+
+function nextBuilder(snap: Snapshot): BuilderOutcome {
   if (!snap.graph.ok) return stop(snap.graph.error.message);
   const graph = snap.graph.value;
   const { config } = snap;

@@ -2,15 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { AGENT_CONFIG_PATHS, MANDATORY_PROTECTED_PATHS } from "../../../src/core/config/protected-paths.ts";
 import {
   checkWrite,
+  COORDINATOR_WRITE_CLASSES,
+  coordinatorWriteRules,
   epicContextMatch,
   statusLineOnly,
   WRITE_CLASSES,
   writeRules,
+  type CoordinatorWriteClass,
+  type CoordinatorWriteRules,
   type WriteChange,
   type WriteClass,
   type WriteRefusal,
   type WriteRules,
 } from "../../../src/core/lane/write-check.ts";
+import { coordinatorGlobs, type CoordinatorUnitSpec } from "../../../src/core/next/coordinator.ts";
 import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
 import type { AdapterName } from "../../../src/core/schemas/policy.ts";
 
@@ -337,6 +342,7 @@ describe("write-check table coverage", () => {
 describe("writeRules", () => {
   test("takes the coordinator files, manifests dir, authority, policy paths and Epic context pattern from the config", () => {
     expect(RULES).toEqual({
+      role: "builder",
       coordinatorFiles: [SPRINT, RETRO, EPICS],
       manifestsDir: "stories",
       standingAuthorityPath: AUTHORITY,
@@ -409,5 +415,108 @@ describe("statusLineOnly", () => {
     ["an empty frontmatter is not a mapping", "---\n---\nBody\n", "---\n---\nBody\n", false],
   ] as const)("%s -> %p", (_name, before, after, want) => {
     expect(statusLineOnly(before, after)).toBe(want);
+  });
+});
+
+// ------------------------------------------------------------- coordinator
+
+const COORD_CONFIG = { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } };
+const STATUS_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "status" };
+const GRAPH_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "graph" };
+const CONTEXT_2 = "_bmad-output/implementation-artifacts/epic-2-context.md";
+
+/** The rules for a coordinator unit of `spec`. */
+const coordRules = (spec: CoordinatorUnitSpec): CoordinatorWriteRules =>
+  coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs(spec, COORD_CONFIG), graphUnit: spec.kind === "planning" && spec.planning === "graph" });
+
+type CoordCase = {
+  readonly name: string;
+  readonly unit: CoordinatorUnitSpec;
+  readonly changes: readonly string[];
+  readonly refused: readonly (readonly [string, CoordinatorWriteClass])[];
+};
+
+const COORD_CASES: readonly CoordCase[] = [
+  // A unit inside its own globs.
+  { name: "status planning writes the status files and an Epic context", unit: STATUS_UNIT, changes: [SPRINT, RETRO, CONTEXT_2], refused: [] },
+  { name: "graph planning writes the graph inputs", unit: GRAPH_UNIT, changes: [EPICS, ".xarabot/epics.yaml", "stories/2.4.md"], refused: [] },
+  { name: "a graph unit is allowed its inputs, case-folded", unit: GRAPH_UNIT, changes: ["_BMAD-output/planning-artifacts/Epics.md", ".XARABOT/epics.YAML"], refused: [] },
+  { name: "a retro writes its retro document", unit: { kind: "retro", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-2-retro-2026-10-24.md", RETRO], refused: [] },
+  { name: "a retro item writes its own globs", unit: { kind: "retro-item", globs: ["src/x/**"] }, changes: ["src/x/a.ts"], refused: [] },
+  // xarabot.
+  { name: "under .xarabot but epics.yaml: xarabot", unit: GRAPH_UNIT, changes: [".xarabot/config.yaml"], refused: [[".xarabot/config.yaml", "xarabot"]] },
+  { name: "xarabot comes first, case-folded", unit: { kind: "retro-item", globs: ["**"] }, changes: [".Xarabot/policy.yaml"], refused: [[".Xarabot/policy.yaml", "xarabot"]] },
+  // graph-input.
+  { name: "a status unit touching epics.md: graph-input", unit: STATUS_UNIT, changes: [EPICS], refused: [[EPICS, "graph-input"]] },
+  { name: "a retro item whose globs cover a manifest: graph-input", unit: { kind: "retro-item", globs: ["stories/**"] }, changes: ["stories/2.1.md"], refused: [["stories/2.1.md", "graph-input"]] },
+  { name: "a non-graph unit touching .xarabot/epics.yaml: graph-input", unit: STATUS_UNIT, changes: [".xarabot/epics.yaml"], refused: [[".xarabot/epics.yaml", "graph-input"]] },
+  { name: "graph-input is case-folded", unit: STATUS_UNIT, changes: ["Stories/2.1.MD"], refused: [["Stories/2.1.MD", "graph-input"]] },
+  // outside-unit.
+  { name: "a status unit writing src/a.ts: outside-unit", unit: STATUS_UNIT, changes: ["src/a.ts"], refused: [["src/a.ts", "outside-unit"]] },
+  { name: "reconcile holds nothing: outside-unit", unit: { kind: "reconcile" }, changes: ["README.md"], refused: [["README.md", "outside-unit"]] },
+  { name: "a checkpoint writing another Epic's context: outside-unit", unit: { kind: "checkpoint", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-3-context.md"], refused: [["_bmad-output/implementation-artifacts/epic-3-context.md", "outside-unit"]] },
+  { name: "a graph unit writing a status file: outside-unit", unit: GRAPH_UNIT, changes: [SPRINT], refused: [[SPRINT, "outside-unit"]] },
+  { name: "outside-unit is case-folded: the unit's own file in other case passes", unit: STATUS_UNIT, changes: ["_bmad-output/IMPLEMENTATION-artifacts/Sprint-Status.yaml"], refused: [] },
+  // graph-and-status.
+  {
+    name: "status files with no graph input in the diff: no graph-and-status",
+    unit: { kind: "retro-item", globs: ["_bmad-output/**"] },
+    changes: [SPRINT, RETRO, "_bmad-output/implementation-artifacts/notes.md"],
+    refused: [],
+  },
+  {
+    name: "graph-and-status: every graph input and status file left is refused",
+    unit: GRAPH_UNIT,
+    changes: [EPICS, "stories/2.4.md", SPRINT],
+    refused: [
+      ["_bmad-output/implementation-artifacts/sprint-status.yaml", "outside-unit"],
+      [EPICS, "graph-and-status"],
+      ["stories/2.4.md", "graph-and-status"],
+    ],
+  },
+  {
+    name: "graph-and-status in a status unit: the graph input is graph-input, the status files graph-and-status",
+    unit: STATUS_UNIT,
+    changes: [EPICS, SPRINT, RETRO, CONTEXT_2],
+    refused: [
+      [RETRO, "graph-and-status"],
+      [SPRINT, "graph-and-status"],
+      [EPICS, "graph-input"],
+    ],
+  },
+];
+
+describe("checkWrite (coordinator)", () => {
+  test.each(COORD_CASES.map((c) => [c.name, c] as const))("%s", (_name, c) => {
+    const got = checkWrite(coordRules(c.unit), c.changes.map((path) => ({ path })));
+    const want = c.refused.map(([path, cls]) => ({ path, class: cls }));
+    expect(got).toEqual([...want].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
+  });
+
+  test("a case refuses with every class", () => {
+    for (const cls of COORDINATOR_WRITE_CLASSES) {
+      const hit = COORD_CASES.some((c) => c.refused.some(([, x]) => x === cls));
+      expect([cls, hit]).toEqual([cls, true]);
+    }
+  });
+
+  test("graph-and-status needs both: a graph unit holding a status file glob", () => {
+    const rules = coordinatorWriteRules({ config: COORD_CONFIG, globs: [EPICS, SPRINT], graphUnit: true });
+    expect(checkWrite(rules, [{ path: EPICS }])).toEqual([]);
+    expect(checkWrite(rules, [{ path: SPRINT }])).toEqual([]);
+    expect(checkWrite(rules, [{ path: EPICS }, { path: SPRINT.toUpperCase() }])).toEqual([
+      { path: SPRINT.toUpperCase(), class: "graph-and-status" },
+      { path: EPICS, class: "graph-and-status" },
+    ]);
+  });
+
+  test("coordinatorWriteRules takes the graph inputs and status files from the config", () => {
+    expect(coordRules(STATUS_UNIT)).toEqual({
+      role: "coordinator",
+      globs: [SPRINT, RETRO, "_bmad-output/implementation-artifacts/epic-*-context.md"],
+      graphUnit: false,
+      graphInputs: [EPICS, ".xarabot/epics.yaml", "stories/*.md"],
+      statusFiles: [SPRINT, RETRO],
+    });
   });
 });

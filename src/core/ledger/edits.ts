@@ -3,6 +3,7 @@ import { globsOverlap, normalizeGlob } from "../manifests/globs.ts";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues, GitHubLogin, IsoDateTime, NonEmpty, SCHEMA_VERSION } from "../schemas/common.ts";
 import {
+  CoordinatorRecordSchema,
   GitSha,
   LaneIdentity,
   ParkReason,
@@ -10,11 +11,12 @@ import {
   unitKind,
   unitPath,
   UnitRecordSchema,
+  type CoordinatorRecord,
   type Park,
   type UnitRecord,
   type UnitState,
 } from "../schemas/ledger.ts";
-import { parseLedger, serializeUnitRecord, type Ledger } from "./codec.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord, type Ledger } from "./codec.ts";
 import { checkTransition } from "./transitions.ts";
 
 /**
@@ -147,7 +149,7 @@ function requireCoordinator(ctx: Ctx): Step<null> {
 }
 
 /** A record is stale once `now` (the forge's time) is `STALE_AFTER_MS` or more past its `heartbeat_at`. */
-export function isStale(rec: UnitRecord, now: string): boolean {
+export function isStale(rec: Pick<UnitRecord, "heartbeat_at">, now: string): boolean {
   return Date.parse(now) - Date.parse(rec.heartbeat_at) >= STALE_AFTER_MS;
 }
 
@@ -710,4 +712,97 @@ export function deleteMerged(p: EditBase): LedgerEdit {
     if (!s.ok) return s;
     return ok({ to: "none" });
   });
+}
+
+// ---------------------------------------------------------------- coordinator.json
+
+/** A `coordinator.json` edit's writer and time. `now` is the forge's server time. */
+export type CoordinatorEditBase = {
+  readonly by: LaneIdentity;
+  readonly now: string;
+};
+
+type CoordinatorCtx = {
+  readonly current: CoordinatorRecord | null;
+  readonly by: LaneIdentity;
+  readonly now: string;
+};
+
+/** The same `owner/host/lane`. */
+function sameHolder(rec: CoordinatorRecord, by: LaneIdentity): boolean {
+  return rec.owner === by.owner && rec.host === by.host && rec.lane === by.lane;
+}
+
+const holderOf = (rec: CoordinatorRecord) => `${rec.owner}/${rec.host}/${rec.lane}`;
+
+/** An edit of `coordinator.json` by the coordinator lane: the record to write, or an error. */
+function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx: CoordinatorCtx) => Step<CoordinatorRecord>): LedgerEdit {
+  return (files) => {
+    const ledger = parseLedger(files);
+    if (!ledger.ok) return ledger;
+    const params = check(name, BaseSchema, { by: base.by, now: base.now });
+    if (!params.ok) return params;
+    if (params.value.by.lane !== "coordinator") return pre(`${name}: only the coordinator lane may write ${COORDINATOR_PATH}`);
+    const next = body({ current: ledger.value.coordinator, by: params.value.by, now: params.value.now });
+    if (!next.ok) return next;
+    const record = check(`${name} result`, CoordinatorRecordSchema, next.value);
+    if (!record.ok) return record;
+    return ok({ message: `ledger: ${name} coordinator [skip ci]`, writes: { [COORDINATOR_PATH]: serializeCoordinator(record.value) }, deletes: [] });
+  };
+}
+
+/** The writer's record at `generation`, stamped `now`, keeping the current record's digest time and rulings cursor. */
+function coordinatorStamp(ctx: CoordinatorCtx, generation: number): CoordinatorRecord {
+  return {
+    schema_version: SCHEMA_VERSION,
+    owner: ctx.by.owner,
+    host: ctx.by.host,
+    lane: "coordinator",
+    generation,
+    heartbeat_at: ctx.now,
+    digest_posted_at: ctx.current?.digest_posted_at ?? null,
+    rulings_cursor: ctx.current?.rulings_cursor ?? null,
+  };
+}
+
+/**
+ * The coordinator claim (AD-8): with no record, generation 1; the writer's
+ * own record, live or stale, is re-stamped at the same generation (not a
+ * takeover); another identity's stale record is taken over at generation + 1,
+ * keeping `digest_posted_at` and `rulings_cursor`; another identity's live
+ * record is a precondition error naming its holder and heartbeat.
+ */
+export function claimCoordinator(p: CoordinatorEditBase): LedgerEdit {
+  return makeCoordinatorEdit("claimCoordinator", p, (ctx) => {
+    const rec = ctx.current;
+    if (rec === null) return ok(coordinatorStamp(ctx, 1));
+    if (sameHolder(rec, ctx.by)) return ok(coordinatorStamp(ctx, rec.generation));
+    if (isStale(rec, ctx.now)) return ok(coordinatorStamp(ctx, rec.generation + 1));
+    return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)} at generation ${rec.generation}, heartbeat ${rec.heartbeat_at}, still live at ${ctx.now}`);
+  });
+}
+
+export type KeepCoordinatorParams = CoordinatorEditBase & { readonly generation: number };
+
+/** The coordinator keeper's beat: stamps `heartbeat_at` only while the writer holds the record at `generation`. */
+export function keepCoordinator(p: KeepCoordinatorParams): LedgerEdit {
+  return makeCoordinatorEdit("keepCoordinator", p, (ctx) => {
+    const g = check("keepCoordinator generation", Generation, p.generation);
+    if (!g.ok) return g;
+    const rec = ctx.current;
+    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
+    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
+    if (rec.generation !== g.value) {
+      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
+    }
+    return ok({ ...rec, heartbeat_at: ctx.now });
+  });
+}
+
+export type CoordinatorClaimState = "live" | "missing" | "expired";
+
+/** The coordinator claim at `now` (the forge's time): live, missing, or expired (stale). */
+export function coordinatorClaimState(record: CoordinatorRecord | null, now: string): CoordinatorClaimState {
+  if (record === null) return "missing";
+  return isStale(record, now) ? "expired" : "live";
 }

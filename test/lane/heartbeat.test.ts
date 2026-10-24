@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
-import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
-import { startHeartbeat, type Heartbeat } from "../../src/lane/heartbeat.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { unitPath, type CoordinatorRecord, type UnitRecord } from "../../src/core/schemas/ledger.ts";
+import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "../../src/lane/heartbeat.ts";
 import type { Sleep } from "../../src/lane/ledger-cas.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
-import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { ALICE, BOB, COORD, rec, tip } from "../core/ledger/fixtures.ts";
 
 const MIN = 60_000;
 const UNIT = "story:1.5";
@@ -356,5 +356,136 @@ describe("startHeartbeat", () => {
     await w.keeper.stop();
     expect(w.swaps).toEqual([]);
     expect(w.keeper.end()).toBeNull();
+  });
+});
+
+describe("startCoordinatorHeartbeat", () => {
+  const claimRec = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
+    schema_version: 1,
+    owner: COORD.owner,
+    host: COORD.host,
+    lane: "coordinator",
+    generation: 2,
+    heartbeat_at: "2026-10-23T10:00:00Z",
+    digest_posted_at: "2026-10-23T08:00:00Z",
+    rulings_cursor: "r-1",
+    ...over,
+  });
+
+  type CoordWorld = {
+    readonly fake: FakeForge;
+    readonly keeper: Heartbeat;
+    readonly loopSleeps: number[];
+    readonly swaps: string[];
+    record(): Promise<CoordinatorRecord | null>;
+    beats(): number;
+  };
+
+  function coordWorld(o: { readonly holdAt?: number; readonly failing?: boolean; readonly onLoopSleep?: (i: number, fake: FakeForge) => void } = {}): CoordWorld {
+    const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", ledger: { [COORDINATOR_PATH]: serializeCoordinator(claimRec()) } });
+    let clock = T0;
+    const loopSleeps: number[] = [];
+    const swaps: string[] = [];
+    let loopSignal: AbortSignal | null = null;
+    const forge: Forge = {
+      ...fake.forge,
+      ledgerSwap: async (oldSha, commit, opts) => {
+        swaps.push(editName(commit.message));
+        if (o.failing === true) return { ok: false, error: transient };
+        return fake.forge.ledgerSwap(oldSha, commit, opts);
+      },
+    };
+    const sleep: Sleep = async (ms, signal) => {
+      loopSignal ??= signal;
+      if (signal !== loopSignal) {
+        clock += ms;
+        await tick();
+        return;
+      }
+      await tick();
+      const i = loopSleeps.length;
+      loopSleeps.push(ms);
+      if (o.holdAt !== undefined && i >= o.holdAt) return abortOf(signal);
+      clock += ms;
+      o.onLoopSleep?.(i, fake);
+    };
+    const keeper = startCoordinatorHeartbeat({
+      forge,
+      identity: COORD,
+      generation: 2,
+      clock: () => clock,
+      forgeNow: () => forgeIso(clock),
+      sleep,
+      random: () => 0,
+      log: () => {},
+    });
+    return {
+      fake,
+      keeper,
+      loopSleeps,
+      swaps,
+      async record() {
+        const s = await fake.forge.snapshot({ signal: AbortSignal.timeout(5000) });
+        if (!s.ok) throw new Error(s.error.message);
+        const l = parseLedger(s.value.ledger.files);
+        if (!l.ok) throw new Error(l.error.message);
+        return l.value.coordinator;
+      },
+      beats: () => fake.control.ledgerLog().filter((c) => c.message === "ledger: keepCoordinator coordinator [skip ci]").length,
+    };
+  }
+
+  const settleC = async (w: CoordWorld, holdAt?: number): Promise<void> => {
+    await until(() => w.keeper.end() !== null || (holdAt !== undefined && w.loopSleeps.length > holdAt));
+    await w.keeper.stop();
+  };
+
+  test("beats: keepCoordinator every 5 min stamps heartbeat_at only, at the same generation", async () => {
+    const w = coordWorld({ holdAt: 2 });
+    await settleC(w, 2);
+    expect(w.beats()).toBe(2);
+    expect(w.loopSleeps).toEqual([5 * MIN, 5 * MIN, 5 * MIN]);
+    expect(await w.record()).toEqual(claimRec({ heartbeat_at: forgeIso(T0 + 10 * MIN) }));
+    expect(w.keeper.end()).toBeNull();
+    expect(w.keeper.signal.aborted).toBe(false);
+  });
+
+  test.each([
+    ["another identity took it over", claimRec({ owner: "dave", host: "44444444-4444-4444-8444-444444444444", generation: 3 })],
+    ["the same identity at another generation", claimRec({ generation: 3 })],
+  ] as const)("lost: %s, so the signal aborts with lost and nothing is written", async (_name, foreign) => {
+    const w = coordWorld({
+      onLoopSleep: (i, fake) => {
+        if (i === 0) fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(foreign) }, deletes: [] });
+      },
+    });
+    await settleC(w);
+    expect(w.keeper.end()?.kind).toBe("lost");
+    expect(w.keeper.end()?.message).toContain("the coordinator claim is lost");
+    expect(w.keeper.signal.reason).toBe("lost");
+    expect(w.beats()).toBe(0);
+    expect(w.swaps).toEqual([]);
+    expect(await w.record()).toEqual(foreign);
+  });
+
+  test("lost: coordinator.json deleted", async () => {
+    const w = coordWorld({
+      onLoopSleep: (i, fake) => {
+        if (i === 0) fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: {}, deletes: [COORDINATOR_PATH] });
+      },
+    });
+    await settleC(w);
+    expect(w.keeper.end()?.kind).toBe("lost");
+  });
+
+  test("lapsed: failing beats until the next try could land past the stale age abort with lapsed; nothing is released", async () => {
+    const w = coordWorld({ failing: true });
+    await settleC(w);
+    const end = w.keeper.end();
+    expect(end?.kind).toBe("lapsed");
+    expect(w.keeper.signal.reason).toBe("lapsed");
+    expect(w.loopSleeps).toEqual([5 * MIN, ...Array.from({ length: 23 }, () => MIN)]);
+    expect(w.swaps.every((s) => s === "keepCoordinator")).toBe(true);
+    expect(await w.record()).toEqual(claimRec());
   });
 });

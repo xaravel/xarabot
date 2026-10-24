@@ -13,6 +13,7 @@ import {
 } from "../core/lane/waits.ts";
 import {
   claim,
+  coordinatorClaimState,
   failAttempt,
   markMerged,
   park,
@@ -32,7 +33,7 @@ import { err, ok } from "../core/result.ts";
 import type { Config } from "../core/schemas/config.ts";
 import type { Lane } from "../core/schemas/host.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
-import { unitPath, UnitRecordSchema, type LaneIdentity, type ParkReason, type UnitRecord, type UnitState } from "../core/schemas/ledger.ts";
+import { unitPath, UnitRecordSchema, type CoordinatorRecord, type LaneIdentity, type ParkReason, type UnitRecord, type UnitState } from "../core/schemas/ledger.ts";
 import { parseSessionResult, type BuildResult } from "../core/schemas/session-result.ts";
 import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgePr, type ForgeResult, type ForgeSnapshot, type QueueState } from "../ports/forge.ts";
@@ -72,6 +73,10 @@ import type { Workspace } from "./workspace.ts";
  * `merged`, still queued is taken over and only watched by the merge step,
  * anything else is `releaseStale`d. The keeper runs only for a unit this lane
  * then holds `claimed` or `merging`.
+ *
+ * After each snapshot, a missing or expired `coordinator.json` posts a
+ * best-effort `coordinator-missing` or `coordinator-expired` alert (Story
+ * 2.4); the builder goes on either way.
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
@@ -323,6 +328,21 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       // The alert is best effort; the lane stops either way.
     }
     throw new Halt("stop", `${condition}: ${reason}`);
+  };
+
+  /**
+   * A missing or expired coordinator claim (AD-8): one best-effort alert,
+   * deduplicated by the forge per (condition, `main` SHA). Its failure is
+   * ignored and the builder goes on.
+   */
+  const alertCoordinatorGone = async (coordinator: CoordinatorRecord | null, now: string, sha: string): Promise<void> => {
+    const state = coordinatorClaimState(coordinator, now);
+    if (state === "live") return;
+    try {
+      await forge.alert(`coordinator-${state}`, sha, deadline());
+    } catch {
+      // Best effort: a builder never stops for this alert.
+    }
   };
 
   /** One forge call under its own deadline; a lane-stop kind stops the lane. */
@@ -1007,6 +1027,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         if (assembled.error.kind === "stop") await laneStop("ledger-schema-version", assembled.error.message);
         throw new Halt("stop", `${assembled.error.kind}: ${assembled.error.message}`);
       }
+      await alertCoordinatorGone(assembled.value.ledger.coordinator, snap.now, snap.main.sha);
       const swept = new Map((await sweepMerged(assembled.value.ledger.units, snap.prs, snap.now)).map((r) => [r.unit, r]));
       // `next` sees the records the sweep wrote, so it never takes over a unit the sweep just marked merged.
       const units = assembled.value.ledger.units.map((r) => swept.get(r.unit) ?? r);

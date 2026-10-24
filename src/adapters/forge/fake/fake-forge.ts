@@ -34,6 +34,8 @@ export type FakeForgeOptions = {
   readonly main?: Readonly<Record<string, string>>;
   /** The number the first opened PR gets; default 1. */
   readonly firstPrNumber?: number;
+  /** The ledger root's files (path → JSON text); default none. */
+  readonly ledger?: Readonly<Record<string, string>>;
 };
 
 /** One commit on the ledger branch. `parent` is `null` for the empty root. */
@@ -133,7 +135,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
 
   const rootSha = newSha("ledger");
   let ledgerTip = rootSha;
-  let ledgerFiles: Record<string, string> = {};
+  let ledgerFiles: Record<string, string> = { ...options.ledger };
   const ledgerLog: FakeLedgerCommit[] = [{ sha: rootSha, parent: null, message: "root" }];
 
   let mainSha = newSha("main");

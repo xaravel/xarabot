@@ -2,13 +2,15 @@ import { AGENT_CONFIG_PATHS } from "../config/protected-paths.ts";
 import { parseYaml } from "../schemas/common.ts";
 import type { Config } from "../schemas/config.ts";
 import type { Policy } from "../schemas/policy.ts";
+import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
 
 /**
  * The 0.x write check (FR18, NFR20, AR31, AD-30): which paths a builder
  * session's own change may not touch. Every refused-class comparison is
  * case-folded, because the clone lives on a case-insensitive filesystem;
  * the exceptions compare exact paths, so folding only ever widens a
- * refusal. Pure.
+ * refusal. A coordinator session's change has its own rules
+ * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds. Pure.
  */
 
 /** The refused path classes, in reporting order: a path in several is reported as the first. */
@@ -19,6 +21,7 @@ export type WriteClass = (typeof WRITE_CLASSES)[number];
 const INFRASTRUCTURE_CLASSES: ReadonlySet<WriteClass> = new Set(["standing-authority", "github", "agent-config", "protected-path"]);
 
 export type WriteRules = {
+  readonly role: "builder";
   /** `sprint_status_path`, `retro_gates_path` and `epics_path`. */
   readonly coordinatorFiles: readonly string[];
   /** `manifests.dir`, or `null` when `manifests` is unset (no manifests). */
@@ -47,6 +50,7 @@ export type WriteRulesInput = {
 export function writeRules(input: WriteRulesInput): WriteRules {
   const { config, policy } = input;
   return {
+    role: "builder",
     coordinatorFiles: [config.sprint_status_path, config.retro_gates_path, config.epics_path],
     manifestsDir: config.manifests?.dir ?? null,
     standingAuthorityPath: config.standing_authority_path,
@@ -64,7 +68,45 @@ export type WriteChange = {
   readonly storyFile?: { readonly before: string; readonly after: string };
 };
 
-export type WriteRefusal = { readonly path: string; readonly class: WriteClass };
+export type WriteRefusal = { readonly path: string; readonly class: WriteClass | CoordinatorWriteClass };
+
+/**
+ * The coordinator's refused path classes (AD-13, AD-30), in reporting
+ * order: under `.xarabot/**` but `.xarabot/epics.yaml`; a graph input in a
+ * unit that is not graph planning; a path none of the unit's globs match;
+ * and, when the diff touches both a graph input and a status file, every
+ * graph input and status file the classes before left.
+ */
+export const COORDINATOR_WRITE_CLASSES = ["xarabot", "graph-input", "outside-unit", "graph-and-status"] as const;
+export type CoordinatorWriteClass = (typeof COORDINATOR_WRITE_CLASSES)[number];
+
+export type CoordinatorWriteRules = {
+  readonly role: "coordinator";
+  /** The globs the unit holds (`coordinatorGlobs`). */
+  readonly globs: readonly string[];
+  /** A graph planning unit, the only kind that may touch a graph input. */
+  readonly graphUnit: boolean;
+  /** `epics_path`, `.xarabot/epics.yaml` and `<manifests.dir>/*.md`. */
+  readonly graphInputs: readonly string[];
+  /** `sprint_status_path` and `retro_gates_path`. */
+  readonly statusFiles: readonly string[];
+};
+
+export type CoordinatorWriteRulesInput = {
+  readonly config: Pick<Config, "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests">;
+  readonly globs: readonly string[];
+  readonly graphUnit: boolean;
+};
+
+export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): CoordinatorWriteRules {
+  return {
+    role: "coordinator",
+    globs: [...input.globs],
+    graphUnit: input.graphUnit,
+    graphInputs: graphInputGlobs(input.config),
+    statusFiles: statusFiles(input.config),
+  };
+}
 
 const fold = (s: string): string => s.toLowerCase();
 
@@ -152,8 +194,35 @@ function classify(rules: WriteRules, path: string): WriteClass | null {
   return null;
 }
 
-/** The changes the rules refuse, in path order. */
-export function checkWrite(rules: WriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
+const byPath = (a: WriteRefusal, b: WriteRefusal): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+/** The changes the rules refuse, in path order: a builder's or the coordinator's, by `role`. */
+export function checkWrite(rules: WriteRules | CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
+  return rules.role === "coordinator" ? checkCoordinatorWrite(rules, changes) : checkBuilderWrite(rules, changes);
+}
+
+/** The first class in 1-3 of `COORDINATOR_WRITE_CLASSES` a folded path is in, or `null`. */
+function classifyCoordinator(rules: CoordinatorWriteRules, p: string): CoordinatorWriteClass | null {
+  if ((p === ".xarabot" || p.startsWith(".xarabot/")) && p !== ".xarabot/epics.yaml") return "xarabot";
+  if (!rules.graphUnit && matchesAny(rules.graphInputs, p)) return "graph-input";
+  if (!matchesAny(rules.globs, p)) return "outside-unit";
+  return null;
+}
+
+function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
+  const out: WriteRefusal[] = [];
+  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path) }));
+  const isGraph = (p: string) => matchesAny(rules.graphInputs, p);
+  const isStatus = (p: string) => rules.statusFiles.some((f) => fold(f) === p);
+  const both = folded.some((c) => isGraph(c.p)) && folded.some((c) => isStatus(c.p));
+  for (const { path, p } of folded) {
+    const cls = classifyCoordinator(rules, p) ?? (both && (isGraph(p) || isStatus(p)) ? "graph-and-status" : null);
+    if (cls !== null) out.push({ path, class: cls });
+  }
+  return out.sort(byPath);
+}
+
+function checkBuilderWrite(rules: WriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
   for (const change of changes) {
     const { path } = change;
@@ -164,5 +233,5 @@ export function checkWrite(rules: WriteRules, changes: readonly WriteChange[]): 
     if (rules.infrastructureApproved && INFRASTRUCTURE_CLASSES.has(cls)) continue;
     out.push({ path, class: cls });
   }
-  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return out.sort(byPath);
 }
