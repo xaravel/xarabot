@@ -5,3 +5,4 @@ standing_authority_path: docs/maintainer/standing-authority.md
 bootstrapped_epics: [1]
 manifests:
   dir: stories
+proxy_hosts: [registry.npmjs.org]
