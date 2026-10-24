@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { storySpecGlob } from "../core/config/story-spec-path.ts";
 import { checkBuildSpec, specMatches } from "../core/lane/build-check.ts";
+import { staleMergingAction } from "../core/lane/takeover.ts";
 import {
   RESULT_LINGER_MS,
   RESULT_POLL_MS,
@@ -10,7 +11,19 @@ import {
   trailingWaitMs,
   usageLimitSleepMs,
 } from "../core/lane/waits.ts";
-import { claim, failAttempt, markMerged, park, parkNew, release, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
+import {
+  claim,
+  failAttempt,
+  markMerged,
+  park,
+  parkNew,
+  release,
+  releaseStale,
+  takeOverStale,
+  type AdoptedPr,
+  type LedgerCommit,
+  type LedgerEdit,
+} from "../core/ledger/edits.ts";
 import { next, type NextStory } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { buildPrompt, type PromptMode, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -22,7 +35,7 @@ import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from 
 import { unitPath, UnitRecordSchema, type LaneIdentity, type ParkReason, type UnitRecord, type UnitState } from "../core/schemas/ledger.ts";
 import { parseSessionResult, type BuildResult } from "../core/schemas/session-result.ts";
 import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
-import { isLaneStopKind, type CallOpts, type Forge, type ForgePr, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import { isLaneStopKind, type CallOpts, type Forge, type ForgePr, type ForgeResult, type ForgeSnapshot, type QueueState } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
@@ -50,6 +63,15 @@ import type { Workspace } from "./workspace.ts";
  * record every 5 minutes (Story 2.1). When it loses the unit, or releases it
  * (or fails to) before the heartbeat lapses, it aborts the running session and
  * the lane abandons the unit: no further edit.
+ *
+ * A stale record `next` offers is taken over (Story 2.2), by the snapshot's
+ * `now`. A stale `claimed` record gets the claim's PR inspection: a merged PR
+ * marks it `merged`; else `takeOverStale` adopts an open PR (or starts from
+ * `main`) at `generation` + 1, parking at the attempts cap, and the session
+ * runs. A stale `merging` record goes by its PR's queue state: merged is
+ * `merged`, still queued is taken over and only watched by the merge step,
+ * anything else is `releaseStale`d. The keeper runs only for a unit this lane
+ * then holds `claimed` or `merging`.
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
@@ -453,8 +475,10 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
    * Before `next`: every parked or merging record whose PR the forge reports
    * merged (the Maintainer approved and queued it by hand, or the queue merged
    * it after its lane ended) is marked `merged`, with one journal record each.
+   * Returns the records it wrote, for `next` to see in place of the snapshot's.
    */
-  const sweepMerged = async (units: readonly UnitRecord[], prs: ForgeSnapshot["prs"], now: string): Promise<void> => {
+  const sweepMerged = async (units: readonly UnitRecord[], prs: ForgeSnapshot["prs"], now: string): Promise<UnitRecord[]> => {
+    const written: UnitRecord[] = [];
     for (const r of units) {
       if (r.state !== "parked" && r.state !== "merging") continue;
       const pr = prs[r.unit];
@@ -473,13 +497,20 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (swapped.record === null) continue;
       store.appendLog(logName, `== ${iso(clock())} sweep: marked merged ==\n`);
       journalUnit({ unit: r.unit, logName, startedMs, record: swapped.record, state: "merged", outcome: "progress", reason });
+      written.push(swapped.record);
     }
+    return written;
   };
 
   const settings: AgentSettings = { effort: lane.effort, ...(lane.model !== undefined ? { model: lane.model } : {}) };
 
-  /** The session and result handling for a claimed unit, under the unit budget. */
-  const work = async (t: UnitTrack, snap: ForgeSnapshot, config: Config, start: string): Promise<LaneOutcome> => {
+  /**
+   * The session and result handling for a claimed unit, under the unit
+   * budget, from a session at `start`; with `start` `null` (a stale `merging`
+   * takeover) no session runs and the merge step watches the queue. After an
+   * ejection the CI step and the merge step run as usual.
+   */
+  const work = async (t: UnitTrack, snap: ForgeSnapshot, config: Config, start: string | null): Promise<LaneOutcome> => {
     const story = t.story;
     const budget = AbortSignal.timeout(config.unit_budget_hours * HOUR_MS);
     const overBudget = () => `unit budget of ${config.unit_budget_hours} h passed`;
@@ -810,27 +841,6 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return ok(texts);
     };
 
-    const ran = await sessionAt(start, null);
-    if (!ran.ok) {
-      const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
-      if (stopped !== null) return stopAfterLimit(stopped);
-      return failUnit(t, ran.reason);
-    }
-    const { result, specPath } = ran;
-    const checked = checkBuildSpec(result.outcome, ran.specText);
-    if (!checked.ok) return failUnit(t, `${specPath}: ${checked.error.message}`);
-
-    if (result.outcome !== "done") {
-      const reason: ParkReason = result.outcome === "blocked" ? result.blocked.kind : "no-op";
-      t.reason = result.outcome === "blocked" ? `blocked ${result.blocked.kind}: ${result.blocked.text}` : "no-op";
-      const parked = await held(
-        t,
-        (now, gen) => park({ unit: story.unit, by: identity, now, generation: gen, kind: "blocked", reason }),
-        "park",
-      );
-      return parked ? "progress" : "failed";
-    }
-
     /** Records a step's output; the budget rule's `failed` when it released the unit, else `null`. */
     const settle = async (out: PrStepOutput, what: string): Promise<LaneOutcome | null> => {
       t.state = out.state;
@@ -852,17 +862,42 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return null;
     };
 
-    const record = t.record;
-    if (record === null) return failUnit(t, "no claimed record to hand to the PR step");
-    checkHeld(t);
-    let out: PrStepOutput;
-    try {
-      out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note, kind: "build" });
-    } catch (e) {
-      return failUnit(t, `PR step threw: ${message(e)}`);
-    }
-    const prEnd = await settle(out, "PR step");
-    if (prEnd !== null) return prEnd;
+    /** The build session at `start` and the PR step: the run's outcome, or the PR step's output for CI. */
+    const build = async (at: string): Promise<{ readonly end: LaneOutcome } | { readonly next: PrStepOutput }> => {
+      const ran = await sessionAt(at, null);
+      if (!ran.ok) {
+        const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+        if (stopped !== null) return { end: stopAfterLimit(stopped) };
+        return { end: await failUnit(t, ran.reason) };
+      }
+      const { result, specPath } = ran;
+      const checked = checkBuildSpec(result.outcome, ran.specText);
+      if (!checked.ok) return { end: await failUnit(t, `${specPath}: ${checked.error.message}`) };
+
+      if (result.outcome !== "done") {
+        const reason: ParkReason = result.outcome === "blocked" ? result.blocked.kind : "no-op";
+        t.reason = result.outcome === "blocked" ? `blocked ${result.blocked.kind}: ${result.blocked.text}` : "no-op";
+        const parked = await held(
+          t,
+          (now, gen) => park({ unit: story.unit, by: identity, now, generation: gen, kind: "blocked", reason }),
+          "park",
+        );
+        return { end: parked ? "progress" : "failed" };
+      }
+
+      const record = t.record;
+      if (record === null) return { end: await failUnit(t, "no claimed record to hand to the PR step") };
+      checkHeld(t);
+      let out: PrStepOutput;
+      try {
+        out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note, kind: "build" });
+      } catch (e) {
+        return { end: await failUnit(t, `PR step threw: ${message(e)}`) };
+      }
+      const prEnd = await settle(out, "PR step");
+      if (prEnd !== null) return { end: prEnd };
+      return { next: out };
+    };
 
     const ciStep = deps.ciStep;
     const mergeStep = deps.mergeStep;
@@ -871,7 +906,38 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const r = t.record;
       return o.outcome === "progress" && o.state === "claimed" && r !== null && r.pr !== null ? r : null;
     };
-    let last: PrStepOutput = out;
+
+    /** The merge step on `record`: the run's outcome, or the step's output after an ejection (CI runs again). */
+    const mergeRound = async (step: MergeStep, record: UnitRecord): Promise<{ readonly end: LaneOutcome } | { readonly next: PrStepOutput }> => {
+      let merged: Awaited<ReturnType<MergeStep>>;
+      try {
+        merged = await step({ unit: story, record, signal: budget, log: note });
+      } catch (e) {
+        return { end: await failUnit(t, `merge step threw: ${message(e)}`) };
+      }
+      const mergeEnd = await settle(merged, "merge step");
+      if (mergeEnd !== null) return { end: mergeEnd };
+      if (merged.ejected !== true) return { end: merged.outcome };
+      note("ejected from the merge queue: CI again on fresh main");
+      return { next: merged };
+    };
+
+    let first: { readonly end: LaneOutcome } | { readonly next: PrStepOutput };
+    if (start === null) {
+      // Watch mode: a stale `merging` takeover goes straight to the merge step, which only watches the queue.
+      const record = t.record;
+      if (record === null) return failUnit(t, "no merging record to watch");
+      if (mergeStep === undefined) {
+        addReason(t, "no merge step to watch the queue");
+        return "progress";
+      }
+      checkHeld(t);
+      first = await mergeRound(mergeStep, record);
+    } else {
+      first = await build(start);
+    }
+    if ("end" in first) return first.end;
+    let last: PrStepOutput = first.next;
     for (;;) {
       const withPr = claimedWithPr(last);
       if (ciStep === undefined || withPr === null) return last.outcome;
@@ -880,7 +946,6 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         ci = await ciStep({
           unit: story,
           record: withPr,
-          specPath,
           clone: layout.clone,
           signal: budget,
           log: note,
@@ -903,17 +968,9 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (ciEnd !== null) return ciEnd;
       const passed = claimedWithPr(ci);
       if (mergeStep === undefined || passed === null) return ci.outcome;
-      let merged: Awaited<ReturnType<MergeStep>>;
-      try {
-        merged = await mergeStep({ unit: story, record: passed, signal: budget, log: note });
-      } catch (e) {
-        return failUnit(t, `merge step threw: ${message(e)}`);
-      }
-      const mergeEnd = await settle(merged, "merge step");
-      if (mergeEnd !== null) return mergeEnd;
-      if (merged.ejected !== true) return merged.outcome;
-      note("ejected from the merge queue: CI again on fresh main");
-      last = merged;
+      const merged = await mergeRound(mergeStep, passed);
+      if ("end" in merged) return merged.end;
+      last = merged.next;
     }
   };
 
@@ -950,9 +1007,12 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         if (assembled.error.kind === "stop") await laneStop("ledger-schema-version", assembled.error.message);
         throw new Halt("stop", `${assembled.error.kind}: ${assembled.error.message}`);
       }
-      await sweepMerged(assembled.value.ledger.units, snap.prs, snap.now);
+      const swept = new Map((await sweepMerged(assembled.value.ledger.units, snap.prs, snap.now)).map((r) => [r.unit, r]));
+      // `next` sees the records the sweep wrote, so it never takes over a unit the sweep just marked merged.
+      const units = assembled.value.ledger.units.map((r) => swept.get(r.unit) ?? r);
+      const view = swept.size === 0 ? assembled.value : { ...assembled.value, ledger: { ...assembled.value.ledger, units } };
       const config = assembled.value.config;
-      const picked = next(assembled.value, "builder");
+      const picked = next(view, "builder");
       if (picked.kind === "stop") throw new Halt("stop", `next: ${picked.reason}`);
       if (picked.kind === "idle") {
         const span = store.appendJournal({
@@ -973,7 +1033,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         startedMs: roundStart,
         logName: logFileName(story.unit, roundStart),
         record: null,
-        state: assembled.value.ledger.units.find((r) => r.unit === story.unit)?.state ?? null,
+        state: units.find((r) => r.unit === story.unit)?.state ?? null,
         sessions: 0,
         tokens: null,
         cost: null,
@@ -996,42 +1056,15 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         return "progress";
       }
 
-      const branch = `${config.branches.story}${story.story_id}`;
-      const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
-      if (!listed.ok) throw new Halt("failed", `listPrsByBranch ${listed.error.kind}: ${listed.error.message}`);
-      const decided = decidePr(listed.value);
-      const claimBase = {
-        unit: story.unit,
-        by: identity,
-        now: snap.now,
-        globs: story.globs,
-        expectGeneration: story.expect_generation,
-        manifestSha: story.infrastructure ? story.manifest_sha : null,
-      };
-      const edit =
-        decided.kind === "open"
-          ? claim({
-              ...claimBase,
-              adoptPr: { pr: decided.pr.number, pr_owner: identity.owner, head_sha: decided.pr.head_sha, base_sha: snap.main.sha },
-            })
-          : decided.kind === "merged"
-            ? claim(claimBase)
-            : claim({ ...claimBase, baseSha: snap.main.sha });
-      const claimed = await swap(edit, story.unit);
-      if (claimed.kind === "lost") {
-        note(`claim lost: ${claimed.message}`);
-        continue;
-      }
-      if (claimed.kind === "failed") throw new Halt("failed", `claim: ${claimed.message}`);
-      t.record = claimed.record;
-      t.state = claimed.record?.state ?? "claimed";
-      note(`claimed at generation ${t.record?.generation ?? "unknown"}${decided.kind === "none" ? "" : ` (PR #${decided.pr.number} ${decided.kind})`}`);
-      if (t.record !== null) {
+      /** The heartbeat keeper, for a unit this lane now holds `claimed` or `merging`. */
+      const keep = (): void => {
+        const held = t.record;
+        if (held === null || (held.state !== "claimed" && held.state !== "merging")) return;
         keeper = startHeartbeat({
           forge,
           identity,
           unit: story.unit,
-          generation: t.record.generation,
+          generation: held.generation,
           clock,
           forgeNow: estimatedNow,
           claimedMs: claimNowAt,
@@ -1042,17 +1075,118 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
           ...(deps.random !== undefined ? { random: deps.random } : {}),
           log: note,
         });
-      }
+      };
 
-      if (decided.kind === "merged") {
-        t.reason = `PR #${decided.pr.number} merged`;
-        const r = await swap(markMerged({ unit: story.unit, by: identity, now: await forgeNow() }), story.unit);
+      /** `markMerged` (any lane may write it, AD-3), then the run ends `progress`. */
+      const markedMerged = async (pr: number, now: string): Promise<LaneOutcome> => {
+        t.reason = `PR #${pr} merged`;
+        const r = await swap(markMerged({ unit: story.unit, by: identity, now }), story.unit);
         if (r.kind !== "ok") throw new Halt("failed", `markMerged: ${r.message}`);
         if (r.record !== null) t.record = r.record;
         t.state = "merged";
         note("marked merged");
         return "progress";
+      };
+
+      /** A takeover's swap; `null` when another lane won it (the next round runs). */
+      const takeOver = async (edit: LedgerEdit, what: string): Promise<UnitRecord | null> => {
+        const r = await swap(edit, story.unit);
+        if (r.kind === "lost") {
+          note(`${what} lost: ${r.message}`);
+          return null;
+        }
+        if (r.kind === "failed") throw new Halt("failed", `${what}: ${r.message}`);
+        t.record = r.record;
+        t.state = r.record?.state ?? null;
+        note(`${what}: ${t.state ?? "unknown"} at generation ${t.record?.generation ?? "unknown"}`);
+        return r.record;
+      };
+
+      if (story.take_over !== null && story.expect_generation === null) {
+        throw new Halt("failed", `next: a takeover of ${story.unit} with no generation`);
       }
+      const generation = story.expect_generation ?? 0;
+
+      if (story.take_over === "merging") {
+        // A stale builder-held `merging` record: its PR's queue state decides (AR10).
+        const stale = units.find((r) => r.unit === story.unit);
+        const prNumber = stale?.pr ?? null;
+        let q: QueueState | "not-found" = "not-found";
+        if (prNumber !== null) {
+          const r = await call("queueState", (o) => forge.queueState(prNumber, o));
+          if (r.ok) q = r.value;
+          else if (r.error.kind !== "not-found") throw new Halt("failed", `queueState ${r.error.kind}: ${r.error.message}`);
+        }
+        const action = staleMergingAction(q);
+        const seen = q === "not-found" ? "not found" : `${q.state}${q.queued ? ", queued" : ", not queued"}`;
+        note(`stale merging at generation ${generation}: PR #${prNumber ?? "none"} ${seen}: ${action}`);
+        if (action === "merged") return await markedMerged(prNumber as number, snap.now);
+        if (action === "release") {
+          const released = await takeOver(releaseStale({ unit: story.unit, by: identity, now: snap.now, generation }), "releaseStale");
+          if (released === null) continue;
+          t.reason = `stale merging PR #${prNumber ?? "none"} ${seen}: released`;
+          return "progress";
+        }
+        const queued = q as QueueState;
+        const adoptPr: AdoptedPr = {
+          pr: prNumber as number,
+          pr_owner: stale?.pr_owner ?? identity.owner,
+          head_sha: queued.head_sha,
+          base_sha: stale?.base_sha ?? snap.main.sha,
+        };
+        const taken = await takeOver(
+          takeOverStale({ unit: story.unit, by: identity, now: snap.now, generation, stillQueued: true, adoptPr }),
+          "takeOverStale",
+        );
+        if (taken === null) continue;
+        keep();
+        return await work(t, snap, config, null);
+      }
+
+      const branch = `${config.branches.story}${story.story_id}`;
+      const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
+      if (!listed.ok) throw new Halt("failed", `listPrsByBranch ${listed.error.kind}: ${listed.error.message}`);
+      const decided = decidePr(listed.value);
+      const adoptPr: AdoptedPr | null =
+        decided.kind === "open" ? { pr: decided.pr.number, pr_owner: identity.owner, head_sha: decided.pr.head_sha, base_sha: snap.main.sha } : null;
+      const prFields = adoptPr !== null ? { adoptPr } : decided.kind === "none" ? { baseSha: snap.main.sha } : {};
+      const prNote = decided.kind === "none" ? "" : ` (PR #${decided.pr.number} ${decided.kind})`;
+
+      if (story.take_over === "claimed") {
+        // A stale `claimed` record: a merged PR needs no takeover; else a claim of the record (AD-9).
+        if (decided.kind === "merged") return await markedMerged(decided.pr.number, snap.now);
+        const taken = await takeOver(
+          takeOverStale({ unit: story.unit, by: identity, now: snap.now, generation, globs: story.globs, ...prFields }),
+          `takeOverStale${prNote}`,
+        );
+        if (taken === null) continue;
+        if (taken.state === "parked") {
+          t.reason = `stale takeover parked blocked attempts-cap after ${taken.attempts} attempts`;
+          return "progress";
+        }
+      } else {
+        const edit = claim({
+          unit: story.unit,
+          by: identity,
+          now: snap.now,
+          globs: story.globs,
+          expectGeneration: story.expect_generation,
+          manifestSha: story.infrastructure ? story.manifest_sha : null,
+          ...prFields,
+        });
+        const claimed = await swap(edit, story.unit);
+        if (claimed.kind === "lost") {
+          note(`claim lost: ${claimed.message}`);
+          continue;
+        }
+        if (claimed.kind === "failed") throw new Halt("failed", `claim: ${claimed.message}`);
+        t.record = claimed.record;
+        t.state = claimed.record?.state ?? "claimed";
+        note(`claimed at generation ${t.record?.generation ?? "unknown"}${prNote}`);
+      }
+      keep();
+
+      if (decided.kind === "merged") return await markedMerged(decided.pr.number, await forgeNow());
       const start = decided.kind === "open" ? decided.pr.head_sha : snap.main.sha;
       return await work(t, snap, config, start);
     }

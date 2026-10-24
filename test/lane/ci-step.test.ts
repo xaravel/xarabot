@@ -89,6 +89,7 @@ const STORY: NextStory = {
   globs: ["src/s0/**"],
   infrastructure: false,
   expect_generation: null,
+  take_over: null,
 };
 
 function buildResult(outcome: BuildResult["outcome"] = "done"): BuildResult {
@@ -244,7 +245,6 @@ async function world(o: WorldOpts = {}): Promise<World> {
       createCiStep({ forge: spied.forge, merger, identity: ALICE, repo: "xaravel/xarabot", now: c.now, sleep: c.sleep, random: () => 0, ...deps })({
         unit: STORY,
         record,
-        specPath: `${SPEC_DIR}/spec-1-1-first.md`,
         clone: "/nonexistent/clone",
         signal: AbortSignal.timeout(60_000),
         log: (t) => logs.push(t),

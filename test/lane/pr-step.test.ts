@@ -67,6 +67,7 @@ const STORY: NextStory = {
   globs: ["src/s0/**"],
   infrastructure: false,
   expect_generation: null,
+  take_over: null,
 };
 
 function result(over: Partial<Pick<BuildResult, "summary" | "body" | "denied_actions">> = {}): BuildResult {

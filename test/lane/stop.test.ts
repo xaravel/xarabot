@@ -201,6 +201,29 @@ describe("releaseHeld", () => {
     expect((await units(fake)).get("story:1.6")?.state).toBe("merging");
   });
 
+  test("the fence before the dequeue: another lane takes the record at generation + 1 first, so no dequeue and no release", async () => {
+    const fake = createFakeForge({ now: "2026-10-22T10:40:00Z", main: { "README.md": "x\n" } });
+    const prNumber = await openQueuedPr(fake, "story/1.6");
+    const mine = rec({ unit: "story:1.6", state: "merging", pr: prNumber, pr_owner: "alice", passed_sha: "a".repeat(40) });
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", deletes: [], writes: tip([mine]) });
+    const theirs: UnitRecord = { ...mine, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2, heartbeat_at: "2026-10-22T10:40:00Z" };
+    let taken = false;
+    fake.control.beforeSwap(() => {
+      if (taken) return;
+      taken = true;
+      fake.control.writeForeignLedger({ message: "ledger: takeOverStale story:1.6 [skip ci]", deletes: [], writes: tip([theirs]) });
+    });
+    const r = await releaseHeld({ forge: fake.forge, identity: ALICE, callTimeoutMs: 5000 });
+    fake.control.beforeSwap(null);
+    expect(r.released).toEqual([]);
+    expect(r.failed).toHaveLength(1);
+    expect(r.failed[0]?.unit).toBe("story:1.6");
+    expect(r.failed[0]?.message).toStartWith("dequeue fence ");
+    expect(fake.control.queue()).toEqual([prNumber]);
+    expect((await units(fake)).get("story:1.6")).toEqual(theirs);
+    expect(fake.control.ledgerLog().map((c) => c.message)).toEqual(["root", "seed [skip ci]", "ledger: takeOverStale story:1.6 [skip ci]"]);
+  });
+
   test("a failed snapshot is reported with no unit", async () => {
     const fake = createFakeForge({ now: "2026-10-22T10:10:00Z", main: { "README.md": "x\n" } });
     fake.control.injectError("snapshot", { kind: "auth", message: "bad key" });

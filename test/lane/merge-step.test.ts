@@ -72,6 +72,7 @@ const STORY: NextStory = {
   globs: ["src/s0/**"],
   infrastructure: false,
   expect_generation: null,
+  take_over: null,
 };
 
 /** Called inside the step's sleep: `i` counts sleeps from 0. */
@@ -394,6 +395,54 @@ describe("enqueue", () => {
 });
 
 // -------------------------------------------------------------- watch
+
+describe("a merging record (a stale takeover): watch only", () => {
+  /**
+   * A world whose record is already `merging` at generation 2 and whose PR is
+   * queued at its head; the record's `passed_sha` is `passed` (default the head).
+   */
+  async function merging(onSleep: OnSleep, gate: Partial<WorldOpts> = {}, passed?: string): Promise<{ w: World; record: UnitRecord }> {
+    const w = await world({ ...gate, onSleep, record: { state: "merging", generation: 2, attempts: 1 } });
+    const record: UnitRecord = { ...w.record, passed_sha: passed ?? w.head };
+    w.fake.control.writeForeignLedger({ message: "seed passed [skip ci]", writes: tip([record]), deletes: [] });
+    await w.fake.forge.enqueue(w.pr, w.head, opts());
+    return { w, record };
+  }
+
+  test("no gate, fence, startMerging or enqueue: the queue is watched until it merges the PR", async () => {
+    const { w, record } = await merging(mergeAtFirst, { ownerPaths: ["**"] });
+    const out = await w.run({ record });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    expect(w.diffs).toEqual([]);
+    expect(w.events).toEqual(["queueState", "queueState", "ledgerSwap markMerged"]);
+    expect(w.fake.control.comments(w.pr)).toEqual([]);
+    expect((await w.ledger())?.state).toBe("merged");
+  });
+
+  test("ejected while watched: fence and dequeue, then claimed with attempts + 1 and ejected", async () => {
+    const { w, record } = await merging((i, _ms, ww) => void (i === 0 && ww.fake.control.eject(ww.pr)));
+    const out = await w.run({ record });
+    expect([out.outcome, out.state, out.ejected]).toEqual(["progress", "claimed", true]);
+    expect(w.events).not.toContain("enqueue");
+    expect(w.events).not.toContain("ledgerSwap startMerging");
+    dequeueBefore(w.events, "ejected");
+    expect(await w.ledger()).toMatchObject({ state: "claimed", attempts: 2, generation: 2, owner: "alice" });
+  });
+
+  test("queued at a head other than its passed_sha: fenced, dequeued and released with attempts + 1, never watched to merged", async () => {
+    const passed = "a".repeat(40);
+    const { w, record } = await merging(mergeAtFirst, {}, passed);
+    const out = await w.run({ record });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain(passed);
+    expect(out.reason).toContain(w.head);
+    expect(w.fake.control.queue()).toEqual([]);
+    dequeueBefore(w.events, "failAttempt");
+    expect(w.events).not.toContain("ledgerSwap markMerged");
+    expect(w.events).not.toContain("enqueue");
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 2, generation: 2 });
+  });
+});
 
 describe("watching the queue", () => {
   test("ejected: dequeue, then claimed with attempts + 1 and ejected", async () => {

@@ -1,4 +1,4 @@
-import { heldGlobs } from "../ledger/edits.ts";
+import { heldGlobs, isStale } from "../ledger/edits.ts";
 import { globsOverlap } from "../manifests/globs.ts";
 import { resolveManifestGlobs } from "../manifests/parse-manifest.ts";
 import { describeIssues } from "../schemas/common.ts";
@@ -32,8 +32,13 @@ export type NextStory = {
   readonly manifest_sha: string;
   readonly globs: readonly string[];
   readonly infrastructure: boolean;
-  /** The released record's generation, or `null` when the Story has no record. */
+  /** The released or taken-over record's generation, or `null` when the Story has no record. */
   readonly expect_generation: number | null;
+  /**
+   * The stale record the lane takes over (FR3, AR7): a `claimed` record, or a
+   * builder-held `merging` one; `null` for a claim of no record or a released one.
+   */
+  readonly take_over: "claimed" | "merging" | null;
 };
 
 export type NextOutcome =
@@ -53,6 +58,18 @@ function storyKey(id: string): string {
   return m === null ? id : `${Number(m[1])}.${Number(m[2])}${m[3] ?? ""}`;
 }
 
+/**
+ * The stale record a lane may take over: a `claimed` one, or a `merging` one
+ * a builder holds, once the snapshot's `now` is 30 min or more past its
+ * heartbeat. `parked` records never expire.
+ */
+function takeOverOf(rec: UnitRecord | undefined, now: string): NextStory["take_over"] {
+  if (rec === undefined || !isStale(rec, now)) return null;
+  if (rec.state === "claimed") return "claimed";
+  if (rec.state === "merging" && rec.lane !== "coordinator") return "merging";
+  return null;
+}
+
 function stop(reason: string): NextOutcome {
   return { kind: "stop", reason };
 }
@@ -60,7 +77,8 @@ function stop(reason: string): NextOutcome {
 /**
  * Picks a builder lane's next unit from one snapshot (FR2, AR14, AR28): the
  * lowest eligible Epic, then its lowest eligible Story. Returns the Story as
- * a `unit`, an Infrastructure Story without a current approval as `park`,
+ * a `unit` (a stale `claimed` or builder-held `merging` record as a
+ * `take_over`), an Infrastructure Story without a current approval as `park`,
  * `idle` with the reasons nothing is eligible, or `stop`. Pure; never throws.
  */
 export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
@@ -182,8 +200,15 @@ export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
       const before = reasons.length;
 
       const rec = records.get(unit);
-      if (rec !== undefined && rec.state !== "released") {
+      const takeOver = takeOverOf(rec, snap.now);
+      if (rec !== undefined && rec.state !== "released" && takeOver === null) {
         reasons.push({ subject: unit, code: "record-state", message: `${unit} is ${rec.state}` });
+      } else if (takeOver !== null && m.infrastructure && rec?.approval?.manifest_sha !== m.sha) {
+        reasons.push({
+          subject: unit,
+          code: "record-state",
+          message: `${unit} is ${takeOver} and stale, but has no approval for manifest ${m.sha}`,
+        });
       }
 
       const globs = globsOf.get(id);
@@ -227,6 +252,7 @@ export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
     return { kind: "idle", reason: reasons.length === 0 ? NOTHING_LEFT : reasons.map((r) => r.message).join("; "), reasons };
   }
   const rec = records.get(storyUnit(chosen.story_id));
+  const takeOver = takeOverOf(rec, snap.now);
   const story: NextStory = {
     unit: storyUnit(chosen.story_id),
     story_id: chosen.story_id,
@@ -237,9 +263,11 @@ export function next(snapshot: Snapshot, laneRole: LaneRole): NextOutcome {
     manifest_sha: chosen.sha,
     globs: globsOf.get(chosen.story_id) ?? [],
     infrastructure: chosen.infrastructure,
-    expect_generation: rec?.state === "released" ? rec.generation : null,
+    expect_generation: rec !== undefined && (rec.state === "released" || takeOver !== null) ? rec.generation : null,
+    take_over: takeOver,
   };
-  if (chosen.infrastructure && rec?.approval?.manifest_sha !== chosen.sha) {
+  // A takeover's approval was checked in the loop: it never parks.
+  if (takeOver === null && chosen.infrastructure && rec?.approval?.manifest_sha !== chosen.sha) {
     return { kind: "park", park: "needs-approval", story, reasons };
   }
   return { kind: "unit", story, reasons };

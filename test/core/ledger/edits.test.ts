@@ -11,6 +11,7 @@ import {
   finishRecurring,
   heartbeat,
   heldGlobs,
+  isStale,
   keepAlive,
   loopback,
   markMerged,
@@ -150,6 +151,62 @@ const CASES: readonly Case[] = [
   ["takeOverStale merging, not asserted queued", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }), [rec({ state: "merging" })], "precondition"],
   ["takeOverStale merging under the coordinator", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, stillQueued: true }), [by(COORD, T0, { state: "merging" })], "precondition"],
   ["takeOverStale released", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }), [rec({ state: "released" })], "precondition"],
+  ["takeOverStale parked, heartbeat long gone", takeOverStale({ unit: U, by: BOB, now: "2031-01-01T00:00:00Z", generation: 1 }), [rec({ state: "parked", park: blocked("other") })], "precondition"],
+  ["takeOverStale merged", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }), [rec({ state: "merged" })], "precondition"],
+  ["takeOverStale with no record", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }), [], "precondition"],
+  // takeOverStale claimed: the claim's globs, PR fields and cleared review SHAs
+  [
+    "takeOverStale claimed with re-resolved globs",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, globs: ["./src/x/**", "src/y.ts"] }),
+    [rec()],
+    by(BOB, LATE, { generation: 2, attempts: 1, globs: ["src/x/**", "src/y.ts"] }),
+  ],
+  [
+    "takeOverStale claimed adopting the open PR",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, adoptPr: { pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
+    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["claude"], loopbacks: 1 })],
+    by(BOB, LATE, { generation: 2, attempts: 1, pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B, builder_providers: ["claude"], loopbacks: 1 }),
+  ],
+  [
+    "takeOverStale claimed with no open PR starts from main",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, baseSha: SHA_B }),
+    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A })],
+    by(BOB, LATE, { generation: 2, attempts: 1, base_sha: SHA_B }),
+  ],
+  [
+    "takeOverStale claimed, 3rd attempt adopting a PR",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, adoptPr: { pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
+    [rec({ attempts: 2 })],
+    by(BOB, LATE, { generation: 2, attempts: 3, pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B, state: "parked", park: blocked("attempts-cap", "bob") }),
+  ],
+  ["takeOverStale claimed, globs overlap a claimed unit", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, globs: ["src/a/**"] }), [rec(), rec({ unit: "story:1.6", globs: ["src/a/x.ts"] })], "precondition"],
+  ["takeOverStale claimed, its own globs overlap a merging unit", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }), [rec(), rec({ unit: "story:1.6", state: "merging", globs: ["SRC/Core/**"] })], "precondition"],
+  ["takeOverStale claimed, globs overlap a parked unit's held paths", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, globs: ["src/a/**"] }), [rec(), rec({ unit: "story:1.6", state: "parked", globs: [], park: awaiting(["src/a/x.ts"]) })], "precondition"],
+  [
+    "takeOverStale claimed beside a released unit",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, globs: ["src/a/**"] }),
+    [rec(), rec({ unit: "story:1.6", state: "released", globs: ["src/a/**"] })],
+    by(BOB, LATE, { generation: 2, attempts: 1, globs: ["src/a/**"] }),
+  ],
+  ["takeOverStale with a bad glob", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, globs: ["../x"] }), [rec()], "invalid"],
+  ["takeOverStale with a bad base SHA", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, baseSha: "main" }), [rec()], "invalid"],
+  ["takeOverStale with a bad adopted PR", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, adoptPr: { pr: 0, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }), [rec()], "invalid"],
+  [
+    "takeOverStale with both a base SHA and an adopted PR",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, baseSha: SHA_B, adoptPr: { pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
+    [rec()],
+    "invalid",
+  ],
+  // takeOverStale merging: PR, SHAs and globs kept, head_sha from the queue
+  [
+    "takeOverStale merging, still queued at a new head",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, stillQueued: true, adoptPr: { pr: 7, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
+    [rec({ state: "merging", pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, passed_sha: SHA_A, attempts: 1 })],
+    by(BOB, LATE, { state: "merging", generation: 2, attempts: 1, pr: 7, pr_owner: "alice", head_sha: SHA_D, base_sha: SHA_A, passed_sha: SHA_A }),
+  ],
+  ["takeOverStale merging, another PR", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, stillQueued: true, adoptPr: { pr: 8, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }), [rec({ state: "merging", pr: 7 })], "precondition"],
+  ["takeOverStale merging with globs", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, stillQueued: true, globs: ["src/x/**"] }), [rec({ state: "merging", pr: 7 })], "precondition"],
+  ["takeOverStale merging with a base SHA", takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, stillQueued: true, baseSha: SHA_B }), [rec({ state: "merging", pr: 7 })], "precondition"],
   // startMerging
   ["startMerging", startMerging(held), [rec({ pr: 7, passed_sha: SHA_A })], by(ALICE, NOW, { state: "merging", pr: 7, passed_sha: SHA_A })],
   ["startMerging without passed_sha", startMerging(held), [rec({ pr: 7 })], "precondition"],
@@ -286,6 +343,16 @@ describe("ledger edits", () => {
       expect(heldGlobs(record)).toEqual(expected);
     });
   }
+
+  test.each([
+    ["10 min old", NOW, false],
+    ["1 ms short of 30 min", "2026-10-22T10:29:59.999Z", false],
+    ["exactly 30 min", LATE, true],
+    ["a year old", "2027-10-22T10:00:00Z", true],
+    ["stamped after now (skew)", "2026-10-22T09:00:00Z", false],
+  ] as const)("isStale: a heartbeat at T0, now %s → %p", (_name, now, stale) => {
+    expect(isStale(rec(), now)).toBe(stale);
+  });
 
   test("caps", () => {
     expect(ATTEMPTS_CAP).toBe(3);
