@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAppCredentials } from "../../../../src/adapters/forge/github/credentials.ts";
-import { createGitHubForge, EMPTY_TREE, LEDGER_ROOT_MESSAGE, type SnapshotPart } from "../../../../src/adapters/forge/github/github-forge.ts";
+import { BLOBS_PER_QUERY, createGitHubForge, EMPTY_TREE, LEDGER_ROOT_MESSAGE, type SnapshotPart } from "../../../../src/adapters/forge/github/github-forge.ts";
 import { serializeUnitRecord } from "../../../../src/core/ledger/codec.ts";
 import { unitPath } from "../../../../src/core/schemas/ledger.ts";
 import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgeResult } from "../../../../src/ports/forge.ts";
@@ -96,10 +96,10 @@ describe("snapshot", () => {
     const order = [
       at("GET /git/ref/heads/xarabot/claims"),
       at(`GET /git/trees/${ledgerTree}`),
-      calls.findIndex((c) => c.startsWith("GET /git/blobs/")),
+      calls.indexOf("POST /graphql"),
       at("GET /git/ref/heads/main"),
       at(`GET /git/trees/${mainTree}`),
-      calls.findLastIndex((c) => c.startsWith("GET /git/blobs/")),
+      calls.lastIndexOf("POST /graphql"),
       at("GET /pulls/7"),
     ];
     expect(order.every((i) => i >= 0)).toBe(true);
@@ -122,7 +122,54 @@ describe("snapshot", () => {
     expect(s.main.tree).toEqual(["a.md", "dir/b.txt", "dir/deep/c.md"]);
     expect(s.main.files).toEqual({ "a.md": "hello\n" });
     expect(s.main.blob_shas["a.md"]).toBe("ce013625030ba8dba906f756967f9e9ca394464a");
-    expect(apiCalls(gh).filter((c) => c.startsWith("GET /git/blobs/"))).toEqual(["GET /git/blobs/ce013625030ba8dba906f756967f9e9ca394464a"]);
+    const calls = apiCalls(gh);
+    expect(calls.filter((c) => c === "POST /graphql")).toHaveLength(1);
+    expect(calls.filter((c) => c.startsWith("GET /git/blobs/"))).toEqual([]);
+  });
+
+  test("blobs are read BLOBS_PER_QUERY per GraphQL request, each distinct blob once, never one request per file", async () => {
+    const { gh, forge } = setup();
+    const files: Record<string, string> = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`docs/${i}.md`, `file ${i}\n`]));
+    files["docs/copy.md"] = "file 0\n";
+    gh.control.setMain(files);
+    value(await forge.snapshot(live()));
+    gh.control.clearLog();
+    const s = value(await forge.snapshot({ ...live(), read: () => true }));
+    expect(s.main.files).toEqual(files);
+    const calls = apiCalls(gh);
+    expect(calls.filter((c) => c === "POST /graphql")).toHaveLength(Math.ceil(250 / BLOBS_PER_QUERY));
+    expect(calls.filter((c) => c.startsWith("GET /git/blobs/"))).toEqual([]);
+  });
+
+  test("a blob GraphQL reports truncated or binary is read over REST instead", async () => {
+    const { privateKey, publicKey } = testKeys();
+    const gh = createFakeGitHub({ publicKey });
+    const forge = createGitHubForge({
+      repo: { owner: "acme", name: "widgets" },
+      credentials: { app: { id: 4242, slug: "alice-xarabot" }, key: privateKey },
+      fetch: async (url, init) => {
+        const r = await gh.fetch(url, init);
+        if (!String(url).endsWith("/graphql")) return r;
+        const body = (await r.json()) as { data: { repository: Record<string, Record<string, unknown> | null> } };
+        const b0 = body.data.repository["b0"];
+        if (b0 !== null && b0 !== undefined) body.data.repository["b0"] = { ...b0, text: "cut", isTruncated: true };
+        return new Response(JSON.stringify(body), { status: r.status, headers: r.headers });
+      },
+      apiUrl: gh.control.apiUrl,
+      now: gh.control.clock,
+    });
+    gh.control.setMain({ "a.md": "whole text\n", "b.md": "other\n" });
+    const s = value(await forge.snapshot({ ...live(), read: () => true }));
+    expect(s.main.files).toEqual({ "a.md": "whole text\n", "b.md": "other\n" });
+    expect(apiCalls(gh).filter((c) => c.startsWith("GET /git/blobs/"))).toHaveLength(1);
+  });
+
+  test("GraphQL errors on the blob read fail the snapshot as transient", async () => {
+    const { gh, forge } = setup();
+    gh.control.setMain({ "a.md": "x", "b.md": "y" });
+    value(await forge.snapshot(live()));
+    gh.control.inject("POST", /\/graphql$/, { status: 200, body: { errors: [{ type: "INTERNAL", message: "Something went wrong" }] } });
+    expect(kind(await forge.snapshot({ ...live(), read: () => true }))).toBe("transient");
   });
 
   test("a truncated tree is transient", async () => {

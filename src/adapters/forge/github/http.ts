@@ -63,6 +63,8 @@ export const GITHUB_OPERATIONS = {
   listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read", notFoundOn: 422 },
   getCombinedStatus: { name: "getCombinedStatus", method: "GET", permission: "statuses: read", notFoundOn: 422 },
   pullQueueState: { name: "pullQueueState", method: "POST", permission: "pull_requests: write" },
+  /** Blob texts by object id, many per request, over GraphQL. */
+  readBlobs: { name: "readBlobs", method: "POST", permission: "contents: write" },
   enqueuePullRequest: { name: "enqueuePullRequest", method: "POST", permission: "contents: write" },
   dequeuePullRequest: { name: "dequeuePullRequest", method: "POST", permission: "contents: write" },
   listIssues: { name: "listIssues", method: "GET", permission: "issues: write" },
