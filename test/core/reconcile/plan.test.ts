@@ -50,12 +50,12 @@ function shape(p: ReconcilePlan) {
     deleteReleased: p.deleteReleased.map((t) => t.unit),
     deleteMerged: p.deleteMerged,
     status: p.status.kind,
-    openPr: p.openPr?.unit ?? null,
+    openPrs: p.openPrs.map((o) => o.unit),
     supersededMerged: p.supersededMerged,
   };
 }
 
-const EMPTY: ReturnType<typeof shape> = { markMerged: [], checkQueue: [], releaseDead: [], deleteReleased: [], deleteMerged: [], status: "none", openPr: null, supersededMerged: ["reconcile:4"] };
+const EMPTY: ReturnType<typeof shape> = { markMerged: [], checkQueue: [], releaseDead: [], deleteReleased: [], deleteMerged: [], status: "none", openPrs: [], supersededMerged: ["reconcile:4"] };
 
 describe("planReconcile: the matrix", () => {
   test("Story merged: marked merged; the status set to done", () => {
@@ -84,13 +84,13 @@ describe("planReconcile: the matrix", () => {
   test("Earlier PR open: the ledger work only; the open reconcile PR is named", () => {
     const parked = coord("reconcile:3", { state: "parked", pr: 3, park: { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] } });
     const p = plan({ records: [parked, storyRec("2.1", { state: "parked", pr: 7 })], prs: { "reconcile:3": open(3), "story:2.1": merged(7) }, status: { "2.1": "backlog" } });
-    expect(shape(p)).toEqual({ ...EMPTY, markMerged: ["story:2.1"], status: "edit", openPr: "reconcile:3" });
-    expect(p.openPr).toEqual({ unit: "reconcile:3", pr: 3 });
+    expect(shape(p)).toEqual({ ...EMPTY, markMerged: ["story:2.1"], status: "edit", openPrs: ["reconcile:3"] });
+    expect(p.openPrs).toEqual([{ unit: "reconcile:3", pr: 3 }]);
   });
 
   test("Earlier PR queued: its queue is checked; it is the open reconcile PR", () => {
     const p = plan({ records: [coord("reconcile:3", { state: "merging", pr: 3, head_sha: HEAD, passed_sha: HEAD })], prs: { "reconcile:3": open(3) } });
-    expect(shape(p)).toEqual({ ...EMPTY, checkQueue: ["reconcile:3"], openPr: "reconcile:3" });
+    expect(shape(p)).toEqual({ ...EMPTY, checkQueue: ["reconcile:3"], openPrs: ["reconcile:3"] });
     expect(p.checkQueue[0]).toEqual({ unit: "reconcile:3", generation: 1, pr: 3, pr_state: "open", head_sha: HEAD });
   });
 
@@ -111,17 +111,27 @@ describe("planReconcile: the matrix", () => {
   test("Earlier PR ejected (open, not queued): checked like a queued one; no new PR this run", () => {
     const p = plan({ records: [coord("reconcile:3", { state: "merging", pr: 3, passed_sha: HEAD })], prs: { "reconcile:3": open(3) } });
     expect(shape(p).checkQueue).toEqual(["reconcile:3"]);
-    expect(p.openPr?.unit).toBe("reconcile:3");
+    expect(p.openPrs.map((o) => o.unit)).toEqual(["reconcile:3"]);
   });
 
   test.each([
-    ["with its PR open", { "reconcile:3": open(3) }, "open", "reconcile:3"],
-    ["with its PR closed", { "reconcile:3": closed(3) }, "closed", null],
-    ["with no PR", {}, null, null],
-  ] as const)("Released record %s: deleted (its PR closed first when open)", (_name, prs, state, openUnit) => {
+    ["with its PR open", { "reconcile:3": open(3) }, "open", ["reconcile:3"]],
+    ["with its PR closed", { "reconcile:3": closed(3) }, "closed", []],
+    ["with no PR", {}, null, []],
+  ] as const)("Released record %s: deleted (its PR closed first when open)", (_name, prs, state, openUnits) => {
     const p = plan({ records: [coord("reconcile:3", { state: "released", pr: state === null ? null : 3 })], prs });
-    expect(shape(p)).toEqual({ ...EMPTY, deleteReleased: ["reconcile:3"], openPr: openUnit });
+    expect(shape(p)).toEqual({ ...EMPTY, deleteReleased: ["reconcile:3"], openPrs: [...openUnits] });
     expect(p.deleteReleased[0]?.pr_state).toBe(state);
+  });
+
+  test("every other reconcile record with an open PR is listed, in ledger order", () => {
+    const parked = coord("reconcile:2", { state: "parked", pr: 2, park: { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] } });
+    const merging = coord("reconcile:3", { state: "merging", pr: 3, head_sha: HEAD, passed_sha: HEAD });
+    const p = plan({ records: [parked, merging, storyRec("2.1", { state: "claimed", pr: 9 })], prs: { "reconcile:2": open(2), "reconcile:3": open(3), "story:2.1": open(9) } });
+    expect(p.openPrs).toEqual([
+      { unit: "reconcile:2", pr: 2 },
+      { unit: "reconcile:3", pr: 3 },
+    ]);
   });
 
   test("Dead run: a stale claimed reconcile record is released", () => {

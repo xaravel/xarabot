@@ -149,6 +149,7 @@ async function world(
         record,
         result: result(),
         specPath: `${SPEC_DIR}/spec-1-1-first.md`,
+        superseded: [],
         clone: "/nonexistent/clone",
         signal: AbortSignal.timeout(60_000),
         log: (t) => logs.push(t),
@@ -186,6 +187,28 @@ describe("prText and statusComment", () => {
     expect(statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: ["git push", "@bob rm", "two\nlines"] })).toBe(
       "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions:\n- git push\n- bob rm\n- two lines\n",
     );
+  });
+
+  test("prText redacts secrets and token shapes, and caps the title and body", () => {
+    const t = prText({ story_id: "1.1", title: "x".repeat(300) }, { summary: `S ghp_${"a".repeat(36)}`, body: `key s3cr3t-value ${"y".repeat(70_000)}` }, ["s3cr3t-value"]);
+    expect(t.title.length).toBe(256);
+    expect(t.body.length).toBe(65_536);
+    expect(t.body.startsWith("S [REDACTED]\n\nkey [REDACTED] y")).toBe(true);
+    expect(t.body.endsWith("\n\n[truncated by xarabot]")).toBe(true);
+  });
+
+  test("the status comment redacts secrets and is capped at the comment limit", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    const c = statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: ["cat tok-12345", "z".repeat(70_000)], secrets: ["tok-12345"] });
+    expect(c).toContain("- cat [REDACTED]");
+    expect(c.length).toBeLessThanOrEqual(65_536);
+    // A secret holding a newline or a double space is redacted before whitespace collapses.
+    for (const secret of ["line-one\nline-two", "word  word-xyz"]) {
+      const d = statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: [`echo ${secret} done`], secrets: [secret] });
+      expect(d).toContain("- echo [REDACTED] done");
+      expect(d).not.toContain(secret.replace(/\s+/g, " "));
+    }
+    expect(c.endsWith("\n\n[truncated by xarabot]")).toBe(true);
   });
 
   test("line breaks collapse before sanitizing, and actions that sanitize to nothing are skipped", () => {
@@ -461,9 +484,64 @@ describe("createPrStep", () => {
       protectedPaths: [],
       epicContextPath: `${SPEC_DIR}/epic-<N>-context.md`,
       specPath: `${SPEC_DIR}/spec-1-1-first.md`,
+      superseded: [],
       storyFile: "stories/1.1.md",
       infrastructureApproved: false,
     });
+  });
+
+  test("a re-run's superseded specs reach the rules, and their revert is noted as a superseded spec", async () => {
+    const w = await world();
+    const old = `${SPEC_DIR}/spec-1-1-old.md`;
+    const context = `${SPEC_DIR}/epic-1-context.md`;
+    const requests: CommitRequest[] = [];
+    const committer: Committer = {
+      commit: async (r) => {
+        requests.push(r);
+        return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: w.fake.control.makeCommit(), reverted: [context, old] });
+      },
+    };
+    const out = await w.run({ superseded: [old] }, { committer });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    const rules = requests[0]?.rules;
+    expect(rules?.role === "builder" ? rules.superseded : undefined).toEqual([old]);
+    expect(w.logs).toContain(`PR step: write-check: reverted ${old} (superseded spec)`);
+    expect(w.logs).toContain(`PR step: write-check: reverted ${context} (Epic context)`);
+  });
+
+  test("the lane's credential is redacted from the PR title and body and the comment, and handed to the commit", async () => {
+    const secret = "cred-0123456789-abcdefghij";
+    const token = `sk-ant-oat01-${"A".repeat(40)}`;
+    const w = await world();
+    const out = await w.run(
+      {
+        unit: { ...STORY, title: `Story with ${secret}` },
+        result: result({ summary: `Did it with ${secret}`, body: `Body holds ${secret} and ${token}.`, denied_actions: [`cat ${secret}`] }),
+      },
+      { secrets: [secret] },
+    );
+    expect(out.outcome).toBe("progress");
+    expect(w.committer.requests[0]?.secrets).toEqual([secret]);
+    const pr = (await prs(w.fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    const comment = w.fake.control.comments(pr.number).join("\n");
+    for (const text of [pr.title, pr.body, comment]) {
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain(token);
+      expect(text).toContain("[REDACTED]");
+    }
+  });
+
+  test("a huge body is capped at 65,536 and ends with the marker; a long title at 256", async () => {
+    const w = await world();
+    const out = await w.run({ unit: { ...STORY, title: "t".repeat(400) }, result: result({ body: "b".repeat(70_000) }) });
+    expect(out.outcome).toBe("progress");
+    const pr = (await prs(w.fake))[0];
+    if (pr === undefined) throw new Error("no PR");
+    expect(pr.body.length).toBeLessThanOrEqual(65_536);
+    expect(pr.body.endsWith("\n\n[truncated by xarabot]")).toBe(true);
+    expect(pr.title.length).toBeLessThanOrEqual(256);
+    expect(pr.title.endsWith("[truncated by xarabot]")).toBe(true);
   });
 
   describe("Infrastructure approval on the fresh snapshot", () => {

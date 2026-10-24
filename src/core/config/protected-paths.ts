@@ -6,7 +6,9 @@ export const AGENT_CONFIG_PATHS: readonly string[] = [
   "**/.pi/**",
   "**/.mcp.json",
   "**/AGENTS.md",
+  "**/AGENTS.override.md",
   "**/CLAUDE.md",
+  "**/CLAUDE.local.md",
 ];
 
 /** Protected Paths every repo has; a policy can add to them, never remove (AR22). */

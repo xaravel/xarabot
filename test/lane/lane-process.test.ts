@@ -13,6 +13,7 @@ import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { createCiStep } from "../../src/lane/ci-step.ts";
 import { createMergeStep } from "../../src/lane/merge-step.ts";
 import { defaultSleep, type Sleep } from "../../src/lane/ledger-cas.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
@@ -590,7 +591,7 @@ describe("runLaneProcess", () => {
     expect(h.prSteps).toHaveLength(0);
     const rec = h.unitRecord();
     expect(rec).toMatchObject({ outcome: "failed", state: "released", result: "done" });
-    expect(rec.reason).toContain("frontmatter status");
+    expect(rec.reason).toContain(`${SPEC_DIR}/spec-1-1-first.md "in-review"`);
   });
 
   test.each([
@@ -626,7 +627,7 @@ describe("runLaneProcess", () => {
       ],
     });
     expect((await h.run()).outcome).toBe("failed");
-    expect(h.unitRecord().reason).toContain("not a regular file");
+    expect(h.unitRecord().reason).toContain(`${SPEC_DIR}/spec-1-1-first.md (unreadable)`);
   });
 
   test("blocked: parked blocked with the result's kind and no globs held", async () => {
@@ -645,6 +646,104 @@ describe("runLaneProcess", () => {
     expect((await h.run()).outcome).toBe("progress");
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "no-op" } });
     expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", result: "no-op" });
+  });
+
+  test("a re-run's done: the blocked spec beside the new done one is superseded and the PR step gets both", async () => {
+    const h = harness({
+      behaviors: [
+        ({ profile }) => {
+          // The first run's blocked spec, as main holds it, and the re-run's new done spec.
+          writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, specText("blocked"));
+          writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-rerun.md`, specText("done"));
+          writeFileSync(profile.resultPath, buildResult("done"));
+        },
+      ],
+    });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(h.prSteps).toHaveLength(1);
+    expect(h.prSteps[0]).toMatchObject({ specPath: `${SPEC_DIR}/spec-1-1-rerun.md`, superseded: [`${SPEC_DIR}/spec-1-1-first.md`] });
+    expect(readFileSync(h.unitRecord().log, "utf8")).toContain(`spec: ${SPEC_DIR}/spec-1-1-rerun.md supersedes ${SPEC_DIR}/spec-1-1-first.md`);
+  });
+
+  test.each([
+    ["two done specs", ["done", "done"]],
+    ["one blocked spec only", ["blocked"]],
+    ["a done spec beside a draft", ["done", "draft"]],
+  ] as const)("a done result with %s is a failed attempt", async (_name, statuses) => {
+    const h = harness({
+      behaviors: [
+        ({ profile }) => {
+          statuses.forEach((s, i) => writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-v${i}.md`, specText(s)));
+          writeFileSync(profile.resultPath, buildResult("done"));
+        },
+      ],
+    });
+    expect((await h.run()).outcome).toBe("failed");
+    expect(h.prSteps).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain('needs exactly one "done" spec');
+  });
+
+  test.each([
+    ["zero", []],
+    ["two", ["spec-1-1-first.md", "spec-1-1-again.md"]],
+  ] as const)("blocked with %s matching specs: parked with its kind, no cross-check", async (_n, names) => {
+    const h = harness({
+      behaviors: [
+        ({ profile }) => {
+          for (const name of names) writeIn(profile.clone, `${SPEC_DIR}/${name}`, specText("done"));
+          writeFileSync(profile.resultPath, buildResult("blocked"));
+        },
+      ],
+    });
+    expect((await h.run()).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "intent-gap" }, attempts: 0 });
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", result: "blocked" });
+  });
+
+  test("blocked with one spec that says done: the cross-check misses, a failed attempt", async () => {
+    const h = harness({ behaviors: [finishes("blocked", "done")] });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain("frontmatter status");
+  });
+
+  test("a blocked park after a session: the journal's wip_ref and the log name refs/wip/<unit-file-id>; nothing is pushed", async () => {
+    const h = harness({ behaviors: [finishes("blocked")] });
+    // Every forge call the run makes, by operation.
+    const calls: string[] = [];
+    const forge = Object.fromEntries(
+      Object.entries(h.fake.forge).map(([name, fn]) => [name, (...args: unknown[]) => (calls.push(name), (fn as (...a: unknown[]) => unknown)(...args))]),
+    ) as unknown as Forge;
+    expect((await h.run({ forge })).outcome).toBe("progress");
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ state: "parked", wip_ref: "refs/wip/story__1.1" });
+    expect(readFileSync(rec.log, "utf8")).toContain("wip: if the session changed any file, its work is saved as refs/wip/story__1.1 in runner.git when the lane next rebuilds its clone");
+    expect(calls).toContain("ledgerSwap");
+    expect(calls).not.toContain("pushBranch");
+    expect(calls).not.toContain("openPr");
+  });
+
+  test("no wip_ref without a blocked park after a session: done, a failed attempt, needs-approval", async () => {
+    const done = harness({ behaviors: [finishes("done")] });
+    await done.run();
+    expect(done.unitRecord().wip_ref).toBeUndefined();
+    const failed = harness({ behaviors: [finishes("done", "in-review")] });
+    await failed.run();
+    expect(failed.unitRecord().wip_ref).toBeUndefined();
+    const infra = harness({ stories: [{ id: "1.1", slug: "first", infra: true }] });
+    await infra.run();
+    expect(infra.unitRecord()).toMatchObject({ state: "parked", sessions: 0 });
+    expect(infra.unitRecord().wip_ref).toBeUndefined();
+  });
+
+  test("the run after a release claims at generation + 1 and prepares the clone fresh at main", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    foreignRecords(h.fake, [rec({ unit: "story:1.1", state: "released", generation: 1, attempts: 0, globs: ["src/s0/**"] })]);
+    const main = await mainSha(h.fake);
+    expect((await h.run()).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", generation: 2 });
+    expect(h.prepares).toEqual([expect.objectContaining({ unit: "story:1.1", start: main, generation: 2, fetch: [main] })]);
   });
 
   test("an unapproved Infrastructure Story parks needs-approval with no session", async () => {
@@ -1104,6 +1203,78 @@ describe("runLaneProcess waits and limits", () => {
     expect(sessionError).toContain("STOP during a usage-limit sleep");
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
     expect(h.unitRecord()).toMatchObject({ outcome: "stop", state: "released", attempts: 0 });
+  });
+
+  describe("the CI session's spec pick, through the real CI step", () => {
+    const HEAD = "c".repeat(40);
+    /** The real CI step: main merges in up to date, CI fails on HEAD, so a CI-fix session runs through `input.session`. */
+    const ciStepFor = (h: Harness) =>
+      createCiStep({
+        forge: h.fake.forge,
+        merger: { merge: async () => ok({ kind: "up-to-date" as const }) },
+        identity: IDENTITY,
+        repo: LANE.repo,
+        sleep: async () => {},
+        random: () => 0,
+      });
+    /** The build's PR step records PR #7 at HEAD; a fix's PR step ends the CI step. */
+    const prStepFor = (h: Harness): LaneDeps["prStep"] => async (input) => {
+      h.prSteps.push(input);
+      if (input.kind === "fix") return { outcome: "failed", state: "claimed", reason: "stub: fix recorded" };
+      return { outcome: "progress", state: "claimed", record: { ...input.record, pr: 7, head_sha: HEAD } };
+    };
+
+    test("a done fix with a blocked spec beside the done one: the PR step gets kind fix and the blocked spec superseded", async () => {
+      const h = harness({
+        behaviors: [
+          finishes("done"),
+          ({ profile }) => {
+            writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, specText("blocked"));
+            writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-rerun.md`, specText("done"));
+            writeFileSync(profile.resultPath, buildResult("done"));
+          },
+        ],
+      });
+      h.fake.control.setChecks(HEAD, [{ name: "test", status: "completed", conclusion: "failure" }]);
+      await h.run({ prStep: prStepFor(h), ciStep: ciStepFor(h) });
+      expect(h.runs).toHaveLength(2);
+      expect(h.prSteps).toHaveLength(2);
+      expect(h.prSteps[1]).toMatchObject({ kind: "fix", specPath: `${SPEC_DIR}/spec-1-1-rerun.md`, superseded: [`${SPEC_DIR}/spec-1-1-first.md`] });
+    });
+
+    test("a blocked fix with no spec match parks with its kind instead of failing on the spec", async () => {
+      const h = harness({
+        behaviors: [
+          finishes("done"),
+          ({ profile }) => {
+            writeFileSync(profile.resultPath, buildResult("blocked"));
+          },
+        ],
+      });
+      h.fake.control.setChecks(HEAD, [{ name: "test", status: "completed", conclusion: "failure" }]);
+      expect((await h.run({ prStep: prStepFor(h), ciStep: ciStepFor(h) })).outcome).toBe("progress");
+      expect(h.prSteps).toHaveLength(1);
+      expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "intent-gap" }, attempts: 0 });
+      const rec = h.unitRecord();
+      expect(rec.reason ?? "").not.toContain("spec:");
+      expect(rec).toMatchObject({ state: "parked", wip_ref: "refs/wip/story__1.1" });
+    });
+  });
+
+  test("a write-check park from the PR step after a session: the journal's wip_ref and the log line", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const r = await h.run({
+      prStep: async (input) => ({
+        outcome: "progress",
+        state: "parked",
+        record: { ...input.record, state: "parked", park: { kind: "blocked", reason: "write-check", inbox_owner: "alice", globs_held: [] } },
+        reason: "write-check: refused CLAUDE.md (agent-config)",
+      }),
+    });
+    expect(r.outcome).toBe("progress");
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ state: "parked", sessions: 1, wip_ref: "refs/wip/story__1.1" });
+    expect(readFileSync(rec.log, "utf8")).toContain("wip: if the session changed any file, its work is saved as refs/wip/story__1.1");
   });
 
   test("with the sleep waiter, wait.pid names a live sleep during the trailing wait and is gone after", async () => {

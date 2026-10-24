@@ -41,8 +41,8 @@ export type Placeholder = (typeof PLACEHOLDERS)[number];
 
 const RESULT_FIELDS = `The other fields:
 
-- \`summary\`: one line saying what you did.
-- \`body\`: a description of the change for a reviewer.
+- \`summary\`: one line saying what the change does (it becomes the commit title).
+- \`body\`: a description of the change for a reviewer: never this session, the runner, the working tree or how the skill ran.
 - \`verification\`: each command or manual check you ran, with its outcome.
 - \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
 

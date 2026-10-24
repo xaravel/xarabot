@@ -3,7 +3,7 @@ import { pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ATTEMPTS_CAP, ejected, failAttempt, heartbeat, markMerged, park, startMerging, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
-import { sanitizeAgentText } from "../core/sanitize.ts";
+import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { DiffPaths } from "./diff-paths.ts";
@@ -71,12 +71,13 @@ export function approvalComment(p: { readonly storyId: string; readonly paths: r
   return gateComment(`Story ${p.storyId}`, p.paths);
 }
 
-/** The approval gate's 🤖 comment for `subject` (`Story <id>`, or a coordinator unit). */
+/** The approval gate's 🤖 comment for `subject` (`Story <id>`, or a coordinator unit), capped at the comment limit. */
 export function gateComment(subject: string, gatedPaths: readonly string[]): string {
   const paths = gatedPaths.map((path) => sanitizeAgentText(path).replace(/\s+/g, " ")).join(", ");
-  return (
+  return capText(
     `🤖 ${sanitizeAgentText(subject)}: this PR changes paths that need the owner's approval: ${paths}.\n\n` +
-    "It is parked awaiting approval and was not queued. The Maintainer approves it and queues it by hand.\n"
+      "It is parked awaiting approval and was not queued. The Maintainer approves it and queues it by hand.\n",
+    FORGE_TEXT_LIMITS.comment,
   );
 }
 

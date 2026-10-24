@@ -71,6 +71,14 @@ describe("first build", () => {
   test("result section forbids no-op (AR42: build-auto never yields it)", () => {
     expect(resultSection(p)).toContain("`bmad-build-auto` has no `no-op` outcome, so never report `no-op` after it.");
   });
+  test("summary and body describe the change, never the session (every mode)", () => {
+    for (const mode of MODES) {
+      const r = resultSection(build({ mode }));
+      expect(r).toContain("- `summary`: one line saying what the change does (it becomes the commit title).");
+      expect(r).toContain("- `body`: a description of the change for a reviewer: never this session, the runner, the working tree or how the skill ran.");
+      expect(r).not.toContain("what you did");
+    }
+  });
   test("a Story id with a suffix", () => {
     const q = build({ unit: { kind: "story", id: "1.17a", sprint_key: "1-17a-approval-gate" } });
     expect(q).toContain("Build Story 1.17a (`1-17a-approval-gate`)");

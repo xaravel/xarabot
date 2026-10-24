@@ -59,6 +59,12 @@ export const UnitJournalRecordSchema = z.strictObject({
   reason: z.string().nullable(),
   /** The unit's log file, an absolute path under the lane's `logs/`. */
   log: NonEmpty,
+  /**
+   * A unit parked `blocked` after a session: the host-only ref its work is
+   * saved under (`refs/wip/<unit-file-id>`), if the session changed any
+   * file, when the lane next rebuilds its clone; never pushed.
+   */
+  wip_ref: NonEmpty.optional(),
 });
 
 export const SpanJournalRecordSchema = z.strictObject({

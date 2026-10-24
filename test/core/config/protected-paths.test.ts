@@ -12,7 +12,9 @@ const MANDATORY_WITH_AUTH = [
   "**/.pi/**",
   "**/.mcp.json",
   "**/AGENTS.md",
+  "**/AGENTS.override.md",
   "**/CLAUDE.md",
+  "**/CLAUDE.local.md",
 ];
 
 describe("effectiveProtectedPaths", () => {
