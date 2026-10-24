@@ -67,6 +67,7 @@ describe("journal records", () => {
     ["a non-ISO time", u({ started_at: "yesterday" }), false],
     ["an empty log path", u({ log: "" }), false],
     ["an idle span", SPAN, true],
+    ["a usage-limit span", s({ span: "usage-limit", reason: "usage limit; reset unknown" }), true],
     ["a span of another kind", s({ span: "waiting" }), false],
     ["a span with an empty reason", s({ reason: "" }), false],
     ["a span with an extra field", s({ unit: "story:1.1" }), false],

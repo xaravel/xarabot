@@ -21,7 +21,7 @@ import {
   type RegenerateRequest,
 } from "../../src/lane/ci-step.ts";
 import type { Committer } from "../../src/lane/committer.ts";
-import { CI_FIX_LOG, runLaneProcess, type PrStepInput, type PrStepOutput } from "../../src/lane/lane-process.ts";
+import { CI_FIX_LOG, runLaneProcess, type PrStepInput, type PrStepOutput, type SessionLimits } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { MergeOutcome, MergeRequest, Merger } from "../../src/lane/merger.ts";
 import { createPrStep } from "../../src/lane/pr-step.ts";
@@ -584,6 +584,9 @@ type EndToEndOpts = {
   readonly merges?: (MergeOutcome | "error")[];
   /** The lockfile command's exit code; default 0. */
   readonly lockExit?: number;
+  /** The lockfile command waits for its signal instead of exiting. */
+  readonly lockHangs?: boolean;
+  readonly limits?: SessionLimits;
   /** The CI step's poll sleep; default the virtual clock's. */
   readonly ciSleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 };
@@ -613,9 +616,16 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
   };
   const sandbox: Sandbox = {
-    async run(spec, profile) {
+    async run(spec, profile, signal) {
       const logPath = join(profile.tempDir, CI_FIX_LOG);
       runs.push({ unit: (spec as LaunchSpec & { unit?: AgentUnit }).unit, spec, ciLog: existsSync(logPath) ? readFileSync(logPath, "utf8") : null });
+      if (spec.argv[0] === "bun" && o.lockHangs === true) {
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve());
+        });
+        return ok({ pid: 998, exitCode: null, signal: "SIGTERM", startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
+      }
       if (spec.argv[0] === "bun") {
         writeIn(profile.clone, "bun.lock", "lock regenerated\n");
         return ok({ pid: 998, exitCode: o.lockExit ?? 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "installed\n", stderr: "" });
@@ -653,6 +663,8 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
     pid: 12345,
     sleep: async () => {},
     random: () => 0,
+    waiter: { wait: async () => ({ end: "elapsed" as const }) },
+    ...(o.limits === undefined ? {} : { limits: o.limits }),
   });
   const path = join(laneDir, "journal.jsonl");
   const records = existsSync(path)
@@ -756,6 +768,19 @@ describe("runLaneProcess with createCiStep", () => {
     expect(e.prepares.map((p) => p.start).slice(1)).toEqual([candidate, candidate]);
     expect(e.runs[2]?.ciLog).toContain("- bun.lock");
     expect(e.record).toMatchObject({ state: "claimed", ci_fixes: 1 });
+  });
+
+  test("a lockfile command past the session limit is killed: a conflict session runs instead", async () => {
+    const candidate = "c".repeat(40);
+    const e = await endToEnd([[success("test")]], {
+      main: { lockfileCommand: ["bun", "install"] },
+      merges: [{ kind: "lockfile", candidate_sha: candidate, paths: ["bun.lock"] }, { kind: "up-to-date" }],
+      lockHangs: true,
+      limits: { sessionMs: 30 },
+    });
+    expect(e.runs.map((r) => r.spec.argv[0])).toEqual(["stub-agent", "bun", "stub-agent"]);
+    expect(e.merger.requests.every((r) => r.lockfiles === undefined)).toBe(true);
+    expect(readFileSync(e.journal.log, "utf8")).toContain(`the lockfile command ran past ${30 / 3_600_000} h`);
   });
 
   test("the budget passes mid-poll: the lane releases the unit with attempts 1 and a budget reason", async () => {

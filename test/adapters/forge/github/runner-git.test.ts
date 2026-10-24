@@ -248,11 +248,13 @@ describe("the adapter source", () => {
     expect(Number(line) - 1).toBeLessThan(end);
   });
 
-  test("src/lane/ never spawns: its git goes through runGit", () => {
+  test("src/lane/ never spawns git: its git goes through runGit", () => {
     const dir = join(import.meta.dir, "../../../../src/lane");
+    // The only spawns in src/lane/: `ps` in the process table and the wait's `sleep` (Story 1.18).
+    const NON_GIT = new Set(["processes.ts", "wait.ts"]);
     const hits: string[] = [];
     for (const file of readdirSync(dir, { recursive: true }) as string[]) {
-      if (!file.endsWith(".ts")) continue;
+      if (!file.endsWith(".ts") || NON_GIT.has(file)) continue;
       readFileSync(join(dir, file), "utf8")
         .split("\n")
         .forEach((line, i) => {

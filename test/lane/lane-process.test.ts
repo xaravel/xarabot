@@ -13,6 +13,8 @@ import type { ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
+import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import { BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
@@ -122,7 +124,9 @@ type Harness = {
   readonly runs: RunCall[];
   readonly prepares: PrepareParams[];
   readonly prSteps: PrStepInput[];
-  readonly seen: { agentPid: string | null; tmpClean: boolean | null };
+  readonly seen: { agentPid: string | null; tmpClean: boolean | null; lanePid: string | null };
+  /** Every wait the stub waiter was asked for, in order. */
+  readonly waits: WaitParams[];
   run(over?: Partial<LaneDeps>): Promise<{ outcome: string }>;
   ledger(): Promise<Map<string, UnitRecord>>;
   journal(): JournalRecord[];
@@ -137,6 +141,12 @@ type HarnessOpts = MainOpts & {
   /** The cost `parseUsage` reports per run; default 0.5, an estimate. */
   readonly costs?: readonly ({ usd: number; estimate: boolean } | null)[];
   readonly prOutcome?: { outcome: "progress" | "failed" | "stop" | "idle"; state: UnitRecord["state"] | null };
+  /** The usage limit `parseUsage` reports per run; default none. */
+  readonly usageLimits?: readonly ({ resetAt: number | null } | null)[];
+  /** How each stub wait ends, in order; default `elapsed`. */
+  readonly waitEnds?: readonly WaitEnd[];
+  /** Calls each wait's `onTick` this many times before it ends. */
+  readonly ticks?: number;
 };
 
 function harness(o: HarnessOpts = {}): Harness {
@@ -148,7 +158,8 @@ function harness(o: HarnessOpts = {}): Harness {
   const runs: RunCall[] = [];
   const prepares: PrepareParams[] = [];
   const prSteps: PrStepInput[] = [];
-  const seen: Harness["seen"] = { agentPid: null, tmpClean: null };
+  const seen: Harness["seen"] = { agentPid: null, tmpClean: null, lanePid: null };
+  const waits: WaitParams[] = [];
   const sessionId = o.sessionId === undefined ? SESSION_ID : o.sessionId;
   let usageCalls = 0;
 
@@ -168,13 +179,16 @@ function harness(o: HarnessOpts = {}): Harness {
         // The unit rides along for the assertions.
         unit,
       } as LaunchSpec),
-    parseUsage: () => ({
-      sessionId,
-      model: "reported-model",
-      tokens: { input: 100, output: 20, cacheRead: 5, cacheCreation: 1 },
-      cost: o.costs === undefined ? { usd: 0.5, estimate: true } : (o.costs[usageCalls++] ?? null),
-      usageLimit: null,
-    }),
+    parseUsage: () => {
+      const i = usageCalls++;
+      return {
+        sessionId,
+        model: "reported-model",
+        tokens: { input: 100, output: 20, cacheRead: 5, cacheCreation: 1 },
+        cost: o.costs === undefined ? { usd: 0.5, estimate: true } : (o.costs[i] ?? null),
+        usageLimit: o.usageLimits?.[i] ?? null,
+      };
+    },
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
   };
@@ -234,6 +248,18 @@ function harness(o: HarnessOpts = {}): Harness {
     now: () => T0 + 1000 * tick++,
     sleep: async () => {},
     random: () => 0,
+    waiter: {
+      async wait(p) {
+        const n = waits.length;
+        waits.push(p);
+        if (n === 0) {
+          const lanePid = join(laneDir, "lane.pid");
+          seen.lanePid = existsSync(lanePid) ? readFileSync(lanePid, "utf8") : null;
+        }
+        for (let i = 0; i < (o.ticks ?? 0); i += 1) await p.onTick?.();
+        return { end: o.waitEnds?.[n] ?? "elapsed" };
+      },
+    },
     ...over,
   });
 
@@ -245,6 +271,7 @@ function harness(o: HarnessOpts = {}): Harness {
     prepares,
     prSteps,
     seen,
+    waits,
     run: (over = {}) => runLaneProcess(deps(over)),
     async ledger() {
       const s = await fake.forge.snapshot({ signal: AbortSignal.timeout(5000) });
@@ -315,7 +342,8 @@ describe("runLaneProcess", () => {
     const h = harness({ behaviors: [finishes("done")] });
     const r = await h.run();
     expect(r.outcome).toBe("progress");
-    expect(readFileSync(join(h.laneDir, "lane.pid"), "utf8")).toBe("12345\n");
+    expect(h.seen.lanePid).toMatch(/^12345\n[A-Za-z0-9._-]+\n$/);
+    expect(existsSync(join(h.laneDir, "lane.pid"))).toBe(false);
     expect(h.fake.control.trace().slice(0, 3)).toEqual(["ledger", "main", "prs"]);
     const log = h.fake.control.ledgerLog();
     expect(log[1]?.message).toBe("ledger: claim story:1.1 [skip ci]");
@@ -415,7 +443,7 @@ describe("runLaneProcess", () => {
     const r = await h.run();
     expect(r.outcome).toBe("progress");
     expect(h.seen.tmpClean).toBe(true);
-    expect(h.seen.agentPid).toBe("999\n");
+    expect(h.seen.agentPid).toBe("999\nstub-agent\n");
     expect(existsSync(join(h.laneDir, "agent.pid"))).toBe(false);
 
     expect(h.runs).toHaveLength(1);
@@ -785,5 +813,257 @@ describe("runLaneProcess", () => {
     await h.run();
     expect(h.runs).toHaveLength(2);
     expect(h.unitRecord().cost).toEqual(expected);
+  });
+});
+
+// ---------------------------------------------------------- Story 1.18
+
+describe("runLaneProcess waits and limits", () => {
+  const MIN = 60_000;
+
+  test.each([
+    ["progress", { behaviors: [finishes("done")] }, [MIN]],
+    ["idle", { done: ["1.1", "1.2", "1.3"] }, [30 * MIN]],
+    ["failed", {}, [15 * MIN]],
+    ["stop", { noAuthority: true }, []],
+  ] as const)("trailing wait after %s", async (outcome, opts, ms) => {
+    const h = harness(opts);
+    expect((await h.run()).outcome).toBe(outcome);
+    expect(h.waits.map((w) => w.ms)).toEqual([...ms]);
+    expect(h.waits.every((w) => w.signal === undefined && w.onTick === undefined)).toBe(true);
+    expect(existsSync(join(h.laneDir, "lane.pid"))).toBe(false);
+  });
+
+  test("lane.pid records LaneDeps.command", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    await h.run({ command: "xarabot-lane" });
+    expect(h.seen.lanePid).toBe("12345\nxarabot-lane\n");
+  });
+
+  test("a failed trailing wait is written to stderr, the outcome stays", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.join(" "));
+    try {
+      const r = await h.run({ waiter: { wait: async () => ({ end: "failed", message: "no sleep" }) } });
+      expect(r.outcome).toBe("progress");
+    } finally {
+      console.error = original;
+    }
+    expect(lines).toEqual(["lane wait failed: no sleep"]);
+  });
+
+  /** A run that waits for its signal, then ends on SIGTERM. */
+  const hangs: Behavior = ({ signal }) =>
+    new Promise<Partial<SandboxRun>>((resolve) => {
+      if (signal.aborted) return resolve({ exitCode: null, signal: "SIGTERM" });
+      signal.addEventListener("abort", () => resolve({ exitCode: null, signal: "SIGTERM" }));
+    });
+
+  test("session limit: a run that never ends is killed and is a failed attempt, no resume", async () => {
+    const h = harness({ behaviors: [hangs] });
+    const r = await h.run({ limits: { sessionMs: 30 } });
+    expect(r.outcome).toBe("failed");
+    expect(h.runs).toHaveLength(1);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain(`agent session ran past ${30 / 3_600_000} h`);
+    expect(h.waits.map((w) => w.ms)).toEqual([15 * MIN]);
+  });
+
+  test("result linger: a run that stays after its result is killed and the result used", async () => {
+    let killed = false;
+    const h = harness({
+      behaviors: [
+        async (ctx) => {
+          await finishes("done")(ctx);
+          const end = await hangs(ctx);
+          killed = true;
+          return end;
+        },
+      ],
+    });
+    const r = await h.run({ limits: { resultLingerMs: 30, resultPollMs: 5 } });
+    expect(killed).toBe(true);
+    expect(r.outcome).toBe("progress");
+    expect(h.prSteps).toHaveLength(1);
+  });
+
+  test("usage limit: sleeps to the reset plus 2 min, journals one span, then runs the session again", async () => {
+    const h = harness({ usageLimits: [{ resetAt: T0 + MIN }], behaviors: [() => {}, finishes("done")] });
+    const r = await h.run({ now: () => T0 });
+    expect(r.outcome).toBe("progress");
+    expect(h.waits[0]).toMatchObject({ ms: 3 * MIN, tickMs: 5 * MIN });
+    expect(h.waits[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(h.runs.map((x) => x.unit.kind)).toEqual(["fresh", "fresh"]);
+    expect(h.prepares).toHaveLength(2);
+    expect(h.prepares[1]?.start).toBe(h.prepares[0]?.start as string);
+    expect(h.prSteps).toHaveLength(1);
+    expect(h.journal().filter((x) => x.type === "span")).toEqual([
+      {
+        schema_version: 1,
+        type: "span",
+        span: "usage-limit",
+        reason: "usage limit; reset 2026-10-23T10:01:00.000Z",
+        started_at: "2026-10-23T10:00:00.000Z",
+        ended_at: "2026-10-23T10:00:00.000Z",
+      },
+    ]);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", sessions: 2 });
+  });
+
+  test("the usage-limit span ends at the clock read after the wait", async () => {
+    let clockMs = T0;
+    let waitStartedMs = 0;
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")] });
+    await h.run({
+      now: () => clockMs,
+      waiter: {
+        async wait(p) {
+          if (p.onTick !== undefined) {
+            waitStartedMs = clockMs;
+            clockMs += p.ms;
+          }
+          return { end: "elapsed" };
+        },
+      },
+    });
+    const span = h.journal().find((x) => x.type === "span");
+    expect(span).toMatchObject({ started_at: new Date(waitStartedMs).toISOString(), ended_at: new Date(waitStartedMs + 15 * MIN).toISOString() });
+    expect(Date.parse(span?.ended_at ?? "")).toBeGreaterThan(Date.parse(span?.started_at ?? ""));
+  });
+
+  test("usage limit on the resume is treated like the fresh run", async () => {
+    const h = harness({ usageLimits: [null, { resetAt: null }], behaviors: [() => {}, () => {}, finishes("done")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(h.runs.map((x) => x.unit.kind)).toEqual(["fresh", "resume", "fresh"]);
+    expect(h.waits[0]?.ms).toBe(15 * MIN);
+  });
+
+  test.each([
+    ["unparsed", null, 15 * MIN],
+    ["capped", T0 + 20 * 60 * MIN, 8 * 60 * MIN],
+    ["already past", T0 - 10 * MIN, 0],
+  ] as const)("usage limit %s", async (_name, resetAt, ms) => {
+    const h = harness({ usageLimits: [{ resetAt }], behaviors: [() => {}, finishes("done")] });
+    await h.run({ now: () => T0 });
+    expect(h.waits[0]?.ms).toBe(ms);
+    const span = h.journal().find((x) => x.type === "span");
+    expect(span?.reason).toBe(`usage limit; reset ${resetAt === null ? "unknown" : new Date(resetAt).toISOString()}`);
+  });
+
+  test("usage limit and a result: the result counts, no sleep", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [finishes("done")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(h.waits.map((w) => w.ms)).toEqual([MIN]);
+  });
+
+  test("each tick of a usage-limit sleep heartbeats the claim", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")], ticks: 2 });
+    expect((await h.run()).outcome).toBe("progress");
+    const beats = h.fake.control.ledgerLog().filter((c) => c.message.includes("heartbeat"));
+    expect(beats).toHaveLength(2);
+  });
+
+  test("a failed heartbeat is logged and the sleep goes on", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")], ticks: 1 });
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 2) foreignRecords(h.fake, [rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 9 })]);
+    });
+    const r = await h.run();
+    expect(h.waits).toHaveLength(2);
+    expect(r.outcome).toBeDefined();
+    expect(readFileSync(h.unitRecord().log, "utf8")).toContain("heartbeat failed");
+  });
+
+  test("usage limit then STOP: released with no attempt, outcome stop", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], waitEnds: ["stopped"] });
+    expect((await h.run()).outcome).toBe("stop");
+    expect(h.runs).toHaveLength(1);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "stop", state: "released", attempts: 0 });
+    expect(rec.reason).toContain("STOP during a usage-limit sleep");
+    expect(h.waits).toHaveLength(1);
+  });
+
+  test("usage limit then the budget: a failed attempt", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], waitEnds: ["aborted"] });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain("budget");
+  });
+
+  test("usage limit then a failed sleep: a failed attempt naming the waiter's message", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }] });
+    let n = 0;
+    const r = await h.run({ waiter: { wait: async () => (n++ === 0 ? { end: "failed", message: "spawn sleep ENOENT" } : { end: "elapsed" }) } });
+    expect(r.outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain("spawn sleep ENOENT");
+  });
+
+  test("usage limit woken: the session starts again", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], waitEnds: ["woken"], behaviors: [() => {}, finishes("done")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(h.runs).toHaveLength(2);
+  });
+
+  test("a CI step that throws after a usage-limit STOP in its session: outcome stop, released, no attempt", async () => {
+    const h = harness({ usageLimits: [null, { resetAt: null }], waitEnds: ["stopped"], behaviors: [finishes("done")] });
+    const r = await h.run({
+      prStep: async (input) => ({ outcome: "progress", state: "claimed", record: { ...input.record, pr: 7 } }),
+      ciStep: async (input) => {
+        await input.session({ start: input.record.base_sha ?? "", logText: "CI failed\n" });
+        throw new Error("CI step blew up");
+      },
+    });
+    expect(r.outcome).toBe("stop");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "stop", state: "released", attempts: 0 });
+    expect(rec.reason).toContain("STOP during a usage-limit sleep");
+  });
+
+  test("a CI-fix session limited, then STOP: released with no attempt, outcome stop", async () => {
+    const h = harness({ usageLimits: [null, { resetAt: null }], waitEnds: ["stopped"], behaviors: [finishes("done")] });
+    let sessionError = "";
+    const r = await h.run({
+      prStep: async (input) => ({ outcome: "progress", state: "claimed", record: { ...input.record, pr: 7 } }),
+      ciStep: async (input) => {
+        const ran = await input.session({ start: input.record.base_sha ?? "", logText: "CI failed\n" });
+        if (!ran.ok) sessionError = ran.error.message;
+        return { outcome: "failed", state: "claimed", reason: "CI fix session failed" };
+      },
+    });
+    expect(r.outcome).toBe("stop");
+    expect(sessionError).toContain("STOP during a usage-limit sleep");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
+    expect(h.unitRecord()).toMatchObject({ outcome: "stop", state: "released", attempts: 0 });
+  });
+
+  test("with the sleep waiter, wait.pid names a live sleep during the trailing wait and is gone after", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const store = createFsLaneStore({ laneDir: h.laneDir, hostStop: h.hostStop });
+    const real = createSleepWaiter({ store, pollMs: 20 });
+    const table = createPsProcessTable();
+    const asked: number[] = [];
+    let during: { command: string; args: string | null } = { command: "", args: null };
+    const r = await h.run({
+      waiter: {
+        async wait(p) {
+          asked.push(p.ms);
+          const pending = real.wait({ ...p, ms: 400 });
+          await Bun.sleep(150);
+          const file = readPidFile(join(h.laneDir, "wait.pid"));
+          if (file !== null) during = { command: file.command, args: table.inspect(file.pid)?.args ?? null };
+          return pending;
+        },
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(asked).toEqual([MIN]);
+    expect(during).toEqual({ command: "sleep", args: expect.stringMatching(/^(\S*\/)?sleep 0\.4$/) });
+    expect(existsSync(join(h.laneDir, "wait.pid"))).toBe(false);
   });
 });

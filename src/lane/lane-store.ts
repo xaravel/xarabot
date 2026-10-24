@@ -90,10 +90,11 @@ export function createFsLaneStore(params: FsLaneStoreParams): LaneStore {
       }
     },
 
-    writePid(name, pid) {
+    writePid(name, pid, command) {
       if (!known(name)) return err("invalid", `writePid: unknown PID file ${JSON.stringify(name)}`);
       if (!Number.isSafeInteger(pid) || pid < 1) return err("invalid", `writePid: ${pid} is not a PID`);
-      return write(pidPath(name), `${pid}\n`, false);
+      if (!PLAIN_NAME.test(command)) return err("invalid", `writePid: ${JSON.stringify(command)} is not a plain command name`);
+      return write(pidPath(name), `${pid}\n${command}\n`, false);
     },
 
     clearPid(name) {

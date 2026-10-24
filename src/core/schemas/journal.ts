@@ -6,7 +6,7 @@ import { AdapterName } from "./policy.ts";
 
 /**
  * The lane journal, `journal.jsonl` (AR25, AR28): one JSON line per unit a
- * lane process handled, plus idle spans. Timings come from the host clock;
+ * lane process handled, plus idle and usage-limit spans. Timings come from the host clock;
  * model and effort are the lane's configured values, never what the agent
  * reported.
  */
@@ -64,8 +64,8 @@ export const UnitJournalRecordSchema = z.strictObject({
 export const SpanJournalRecordSchema = z.strictObject({
   schema_version: SchemaVersion,
   type: z.literal("span"),
-  span: z.literal("idle"),
-  /** `next`'s idle reason. */
+  span: z.enum(["idle", "usage-limit"]),
+  /** `next`'s idle reason, or the usage limit and its reset. */
   reason: NonEmpty,
   started_at: IsoDateTime,
   ended_at: IsoDateTime,

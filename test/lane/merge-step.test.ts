@@ -587,6 +587,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     now,
     sleep: async () => {},
     random: () => 0,
+    waiter: { wait: async () => ({ end: "elapsed" as const }) },
   });
   const path = join(laneDir, "journal.jsonl");
   const journal = existsSync(path)
