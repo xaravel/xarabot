@@ -18,7 +18,7 @@ import {
 } from "../core/ledger/edits.ts";
 import { reconcileNumber } from "../core/next/coordinator.ts";
 import { planReconcile, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
-import { sanitizeAgentText } from "../core/sanitize.ts";
+import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, ParkReason, UnitRecord } from "../core/schemas/ledger.ts";
 import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
@@ -34,12 +34,14 @@ import type { ReconcileCommitter } from "./reconcile-commit.ts";
  * work, each item one swap fenced on its own unit: records whose PR merged
  * become `merged`; earlier `reconcile` runs are checked (a queued PR is left,
  * an ejected, dequeued or closed one is closed and its record released with
- * no attempt, a dead run's record released with an attempt, a released one's
- * PR closed and its record deleted); `merged` records done on `main` are
+ * no attempt, a dead run's record released with an attempt, a released
+ * one's record deleted; before a dead or released record is touched, every
+ * open PR on its branch is closed, found by listing the branch, so an orphan
+ * PR no record carries is closed too); `merged` records done on `main` are
  * deleted.
  *
  * With no status change, no `sprint-status.yaml`, or another `reconcile` PR
- * open, the run finishes `merged` with no PR and the older `merged`
+ * open that the ledger work did not close or settle, the run finishes `merged` with no PR and the older `merged`
  * `reconcile` records are deleted. Otherwise it commits the edited file onto
  * the snapshot's `main`, pushes `<branches.xarabot>reconcile-<n>` as a new
  * branch, opens the PR, polls its checks, re-checks the Standing Authority on
@@ -88,7 +90,7 @@ export function reconcileBranch(xarabotPrefix: string, unit: string): string {
 /** The commit message, PR title and PR body for the changes in `summary`. */
 export function reconcilePrText(unit: string, path: string, summary: readonly string[]): { readonly message: string; readonly title: string; readonly body: string } {
   const lines = summary.map((s) => `- ${sanitizeAgentText(s).replace(/\s+/g, " ").trim()}`);
-  const title = `${unit}: sprint status for merged units`;
+  const title = capText(`${unit}: sprint status for merged units`, FORGE_TEXT_LIMITS.title);
   const body = [
     `🤖 ${unit}: runner-written by reconcile, with no agent session.`,
     "",
@@ -99,7 +101,7 @@ export function reconcilePrText(unit: string, path: string, summary: readonly st
     "The Standing Authority exempts reconcile PRs from owner approval: the runner queues this PR once its checks pass, unless a Protected Path gates it.",
     "",
   ].join("\n");
-  return { message: `${title}\n\n${lines.join("\n")}\n`, title, body };
+  return { message: `${title}\n\n${lines.join("\n")}\n`, title, body: capText(body, FORGE_TEXT_LIMITS.body) };
 }
 
 export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
@@ -289,20 +291,39 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       }
     };
 
-    const closeIfOpen = (t: PlanTarget): Promise<boolean> => {
-      const pr = t.pr;
-      if (pr === null || t.pr_state !== "open") return Promise.resolve(true);
-      return prChange("closePr", pr, (o) => forge.closePr(pr, o));
+    /**
+     * Before a dead or released record is released or deleted: every open PR
+     * on its branch closed, each by a fenced PR change, plus the record's own
+     * PR when the snapshot shows it open and the listing missed it. A unit
+     * whose open PRs were all closed joins `settled`. `false` (a listing failure or a
+     * failed close) leaves the record for a later run.
+     */
+    const closeBranchPrs = async (t: PlanTarget, settled: Set<string>): Promise<boolean> => {
+      const branch = reconcileBranch(snapshot.config.branches.xarabot, t.unit);
+      const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
+      if (!listed.ok) {
+        reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}; ${t.unit} left for a later run`);
+        note(`listPrsByBranch ${branch} failed: ${describeError(listed.error)}`);
+        return false;
+      }
+      const open = listed.value.filter((p) => p.state === "open").map((p) => p.number);
+      if (t.pr !== null && t.pr_state === "open" && !open.includes(t.pr)) open.push(t.pr);
+      for (const pr of open) {
+        if (!(await prChange("closePr", pr, (o) => forge.closePr(pr, o)))) return false;
+      }
+      // Settled only once every close succeeded: one still open keeps stopping a new PR.
+      if (open.length > 0) settled.add(t.unit);
+      return true;
     };
 
     const release = (t: PlanTarget): Promise<boolean> =>
       item(`releaseReconcile ${t.unit}`, releaseReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
 
-    /** 2. An earlier run's `merging` record: left while queued at its head, else closed and released. */
-    const checkQueue = async (t: PlanTarget): Promise<void> => {
+    /** 2. An earlier run's `merging` record: left while queued at its head, else closed and released; either ending joins `settled`. */
+    const checkQueue = async (t: PlanTarget, settled: Set<string>): Promise<void> => {
       const pr = t.pr;
       if (pr === null) {
-        await release(t);
+        if (await release(t)) settled.add(t.unit);
         return;
       }
       const q = await call("queueState", (o) => forge.queueState(pr, o));
@@ -323,23 +344,35 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           return;
         }
         if (s.state === "open" && s.queued && !(await prChange("dequeue", pr, (o) => forge.dequeue(pr, o)))) return;
-        if (s.state === "open" && !(await prChange("closePr", pr, (o) => forge.closePr(pr, o)))) return;
+        if (s.state === "open") {
+          if (!(await prChange("closePr", pr, (o) => forge.closePr(pr, o)))) return;
+          settled.add(t.unit);
+        }
       }
-      await release(t);
+      if (await release(t)) settled.add(t.unit);
     };
 
-    const ledgerWork = async (plan: ReconcilePlan): Promise<void> => {
+    /**
+     * The ledger work. Returns the settled units: those whose PR it closed or
+     * whose record it released or deleted, whose open PR no longer stops a new
+     * one.
+     */
+    const ledgerWork = async (plan: ReconcilePlan): Promise<ReadonlySet<string>> => {
+      const settled = new Set<string>();
       for (const u of plan.markMerged) await item(`markMerged ${u}`, markMerged({ unit: u, by: identity, now: forgeNow() }));
-      for (const t of plan.checkQueue) await checkQueue(t);
+      for (const t of plan.checkQueue) await checkQueue(t, settled);
       for (const t of plan.releaseDead) {
-        if (!(await closeIfOpen(t))) continue;
-        await item(`releaseDeadReconcile ${t.unit}`, releaseDeadReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        if (!(await closeBranchPrs(t, settled))) continue;
+        const done = await item(`releaseDeadReconcile ${t.unit}`, releaseDeadReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        if (done) settled.add(t.unit);
       }
       for (const t of plan.deleteReleased) {
-        if (!(await closeIfOpen(t))) continue;
-        await item(`deleteReleasedReconcile ${t.unit}`, deleteReleasedReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        if (!(await closeBranchPrs(t, settled))) continue;
+        const done = await item(`deleteReleasedReconcile ${t.unit}`, deleteReleasedReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        if (done) settled.add(t.unit);
       }
       for (const u of plan.deleteMerged) await item(`deleteMerged ${u}`, deleteMerged({ unit: u, by: identity, now: forgeNow() }));
+      return settled;
     };
 
     // ------------------------------------------------------------ ending
@@ -515,9 +548,11 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         `plan: ${plan.markMerged.length} to mark merged, ${plan.checkQueue.length} merging, ${plan.releaseDead.length} dead, ` +
           `${plan.deleteReleased.length} released, ${plan.deleteMerged.length} done on main; status ${plan.status.kind}`,
       );
-      await ledgerWork(plan);
+      const settled = await ledgerWork(plan);
 
-      if (plan.openPr !== null) return await finish(plan, `${plan.openPr.unit}'s PR #${plan.openPr.pr} is open: no new reconcile PR this run`);
+      // A PR the ledger work closed, or whose record it released or deleted, no longer stops a new one.
+      const open = plan.openPrs.find((o) => !settled.has(o.unit));
+      if (open !== undefined) return await finish(plan, `${open.unit}'s PR #${open.pr} is open: no new reconcile PR this run`);
       const status = plan.status;
       switch (status.kind) {
         case "none":

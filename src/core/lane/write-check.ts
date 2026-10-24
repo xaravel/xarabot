@@ -33,6 +33,12 @@ export type WriteRules = {
   readonly epicContextPath: string;
   /** The unit's spec file: excepted, exact path. */
   readonly specPath: string;
+  /**
+   * The Story's `blocked` spec files a re-run's `done` spec supersedes, exact
+   * paths: the commit sets each back to the base's version, so the squash
+   * never holds a change to one.
+   */
+  readonly superseded: readonly string[];
   /** The unit's own manifest: its frontmatter `status:` line is excepted, exact path. */
   readonly storyFile: string;
   /** An approved Infrastructure Story: its Protected Paths are excepted. */
@@ -43,6 +49,8 @@ export type WriteRulesInput = {
   readonly config: Pick<Config, "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests" | "standing_authority_path" | "epic_context_path">;
   readonly policy: Pick<Policy, "protected_paths">;
   readonly specPath: string;
+  /** Default none. */
+  readonly superseded?: readonly string[];
   readonly storyFile: string;
   readonly infrastructureApproved: boolean;
 };
@@ -57,6 +65,7 @@ export function writeRules(input: WriteRulesInput): WriteRules {
     protectedPaths: [...policy.protected_paths],
     epicContextPath: config.epic_context_path,
     specPath: input.specPath,
+    superseded: [...(input.superseded ?? [])],
     storyFile: input.storyFile,
     infrastructureApproved: input.infrastructureApproved,
   };
@@ -65,6 +74,12 @@ export function writeRules(input: WriteRulesInput): WriteRules {
 /** One path the session changed. `storyFile` holds the own manifest's two texts, given only when it is a regular file on both sides. */
 export type WriteChange = {
   readonly path: string;
+  /**
+   * The new side's git mode (`100644`, `100755`, `120000`, `160000`), or
+   * `000000` when the path is deleted. The coordinator's rules refuse a
+   * status file or graph input with any mode but `100644`, or none.
+   */
+  readonly mode?: string;
   readonly storyFile?: { readonly before: string; readonly after: string };
 };
 
@@ -74,10 +89,11 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * The coordinator's refused path classes (AD-13, AD-30), in reporting
  * order: under `.xarabot/**` but `.xarabot/epics.yaml`; a graph input in a
  * unit that is not graph planning; a path none of the unit's globs match;
- * and, when the diff touches both a graph input and a status file, every
- * graph input and status file the classes before left.
+ * when the diff touches both a graph input and a status file, every graph
+ * input and status file the classes before left; and a status file or graph
+ * input left whose new mode is not `100644` (a deleted one has none).
  */
-export const COORDINATOR_WRITE_CLASSES = ["xarabot", "graph-input", "outside-unit", "graph-and-status"] as const;
+export const COORDINATOR_WRITE_CLASSES = ["xarabot", "graph-input", "outside-unit", "graph-and-status", "mode"] as const;
 export type CoordinatorWriteClass = (typeof COORDINATOR_WRITE_CLASSES)[number];
 
 export type CoordinatorWriteRules = {
@@ -108,7 +124,8 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
   };
 }
 
-const fold = (s: string): string => s.toLowerCase();
+/** Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with `s` and `k`. */
+const fold = (s: string): string => s.toUpperCase().toLowerCase();
 
 /** The agent config folder names, folded: a path ending in one is agent config whatever it is. */
 const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set([".agents", ".claude", ".codex", ".pi"]);
@@ -209,14 +226,18 @@ function classifyCoordinator(rules: CoordinatorWriteRules, p: string): Coordinat
   return null;
 }
 
+/** The only git mode a status file or graph input may have under coordinator rules. */
+const REGULAR_MODE = "100644";
+
 function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
-  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path) }));
+  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode }));
   const isGraph = (p: string) => matchesAny(rules.graphInputs, p);
   const isStatus = (p: string) => rules.statusFiles.some((f) => fold(f) === p);
   const both = folded.some((c) => isGraph(c.p)) && folded.some((c) => isStatus(c.p));
-  for (const { path, p } of folded) {
-    const cls = classifyCoordinator(rules, p) ?? (both && (isGraph(p) || isStatus(p)) ? "graph-and-status" : null);
+  for (const { path, p, mode } of folded) {
+    const kept = isGraph(p) || isStatus(p);
+    const cls = classifyCoordinator(rules, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
     if (cls !== null) out.push({ path, class: cls });
   }
   return out.sort(byPath);

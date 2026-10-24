@@ -8,7 +8,7 @@ import type { NextStory } from "../../src/core/next/next.ts";
 import { err, ok } from "../../src/core/result.ts";
 import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { DiffPaths, DiffPathsRequest } from "../../src/lane/diff-paths.ts";
-import { approvalComment, createMergeStep, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
+import { approvalComment, createMergeStep, gateComment, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
 import type { Forge } from "../../src/ports/forge.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
@@ -208,6 +208,12 @@ describe("approvalComment", () => {
     const text = approvalComment({ storyId: "1.1", paths: ["@someone/fixes #3.md"] });
     expect(text).not.toContain("@someone");
     expect(text).not.toMatch(/fixes #3/i);
+  });
+
+  test("is capped at the comment limit", () => {
+    const text = gateComment("Unit reconcile:5", Array.from({ length: 5000 }, (_, i) => `src/${i}/${"p".repeat(20)}.ts`));
+    expect(text.length).toBe(65_536);
+    expect(text.endsWith("\n\n[truncated by xarabot]")).toBe(true);
   });
 });
 

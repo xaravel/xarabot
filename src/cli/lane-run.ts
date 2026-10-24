@@ -40,8 +40,10 @@ import { githubConnect, type Connect } from "./lane-connection.ts";
  * adapters and run one `runLaneProcess`. A coordinator lane skips the
  * builder limit, and its last start check claims `coordinator.json`
  * (AD-8); it then runs one `runCoordinatorProcess`. Every refusal or failure
- * after the STOP check, apart from a version switch, is a failed start:
- * three in a row write the lane's `STOP` and post an alert.
+ * after the STOP check, apart from a version switch and the role and
+ * lane-name check (a static `host.yaml` error), is a failed start: three in
+ * a row write the lane's `STOP` and post an alert. The PR step redacts the
+ * vendor credential read at start from the text it sends to the forge.
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -169,8 +171,10 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   };
 
   // The coordinator's identity is `<owner>/<host>/coordinator` (AD-8): a host.yaml from before Story 2.4, or edited by hand, may break that.
+  // Like the other static host.yaml errors, it is not a failed start: no count, no STOP, no alert.
   if ((lane.role === "coordinator") !== (name === COORDINATOR_LANE)) {
-    return failedStart(`lane ${name} has role ${lane.role}: a coordinator lane must be named ${COORDINATOR_LANE}, and only a coordinator lane may have that name`);
+    say(`lane ${name} has role ${lane.role}: a coordinator lane must be named ${COORDINATOR_LANE}, and only a coordinator lane may have that name`);
+    return 1;
   }
 
   // 3. Credentials, the snapshot and config.yaml.
@@ -283,7 +287,13 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     sandbox: createMacSandbox({ launchingEnv: deps.env }),
     store,
     workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-    prStep: createPrStep({ forge, committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }), identity, repo: lane.repo }),
+    prStep: createPrStep({
+      forge,
+      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+      identity,
+      repo: lane.repo,
+      secrets: [credential.value],
+    }),
     ciStep: createCiStep({ forge, merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo }),
     mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), identity, repo: lane.repo }),
     laneDir,

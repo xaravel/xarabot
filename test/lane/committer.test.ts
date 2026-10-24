@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { err, ok, type Result } from "../../src/core/result.ts";
-import { rebuildClone, type RebuildParams } from "../../src/lane/clone.ts";
+import { headRef, rebuildClone, type RebuildParams } from "../../src/lane/clone.ts";
 import { createGitCommitter } from "../../src/lane/committer.ts";
 import type { FetchShas } from "../../src/lane/workspace.ts";
 import { BOT, BRANCH, cleanup, commit, files, live, rg, rules, setup, UNIT, value, type Repo } from "./git-fixture.ts";
@@ -50,6 +50,20 @@ describe("createGitCommitter", () => {
     expect(await rg(repo.gitDir, ["log", "-1", "--format=%an <%ae>|%cn <%ce>", r.head_sha])).toBe(`${BOT.name} <${BOT.email}>|${BOT.name} <${BOT.email}>`);
     expect(await rg(repo.gitDir, ["log", "-1", "--format=%B", r.head_sha])).toBe("1.15: Did it");
     expect(await files(repo.gitDir, r.head_sha)).toEqual({ a: "a1\nSESSION\na3", b: "b1\nMAIN\nb3" });
+  });
+
+  test("forwards secrets to the commit: the message on the head ref has them redacted", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { a: "a\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    writeFileSync(join(repo.clone, "a"), "SESSION\n");
+    const secret = "lane-cred-0123456789";
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: base, message: `1.15: used ${secret}\n`, secrets: [secret], rules: rules(), ...live() }));
+    if (r.kind !== "committed") throw new Error(r.kind);
+    const body = await rg(repo.gitDir, ["log", "-1", "--format=%B", headRef(UNIT)]);
+    expect(body).toBe("1.15: used [REDACTED]");
+    expect(body).not.toContain(secret);
   });
 
   test("fetches ontoSha only when runner.git lacks it", async () => {

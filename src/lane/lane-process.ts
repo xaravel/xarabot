@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { storySpecGlob } from "../core/config/story-spec-path.ts";
-import { checkBuildSpec, specMatches } from "../core/lane/build-check.ts";
+import { checkBuildSpec, pickSpec, specMatches, type SpecMatch } from "../core/lane/build-check.ts";
 import { staleMergingAction } from "../core/lane/takeover.ts";
 import {
   RESULT_LINGER_MS,
@@ -41,6 +41,7 @@ import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
 import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
+import { wipRef } from "./clone.ts";
 import { startHeartbeat, type Heartbeat } from "./heartbeat.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
@@ -77,6 +78,13 @@ import type { Workspace } from "./workspace.ts";
  * After each snapshot, a missing or expired `coordinator.json` posts a
  * best-effort `coordinator-missing` or `coordinator-expired` alert (Story
  * 2.4); the builder goes on either way.
+ *
+ * The spec file is picked by status (`pickSpec`, Story 2.5a): a re-run's
+ * `done` spec supersedes the Story's `blocked` ones, which the PR step drops
+ * from the squash. A run that ends parked `blocked` after a session names
+ * its wip ref (`refs/wip/<unit-file-id>`, never pushed) in the unit log and
+ * the journal's `wip_ref`; if the session changed any file, the ref is
+ * written when the lane next rebuilds its clone.
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
@@ -92,6 +100,8 @@ export type PrStepInput = {
   readonly result: BuildResult;
   /** The spec file's repo-relative path in the clone. */
   readonly specPath: string;
+  /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
+  readonly superseded: readonly string[];
   readonly clone: string;
   /** The unit budget's signal. */
   readonly signal: AbortSignal;
@@ -457,6 +467,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     readonly cost?: JournalCost | null;
     readonly sessions?: number;
     readonly result?: BuildResult | null;
+    /** The wip ref a `blocked` park's work is saved under. */
+    readonly wipRef?: string | null;
   };
 
   /** Appends one unit journal record, after flushing the unit's log. */
@@ -487,6 +499,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       denied_actions: [...(e.result?.denied_actions ?? [])],
       reason: e.reason,
       log: logged.ok ? logged.value : join(layout.logs, e.logName),
+      ...(e.wipRef !== undefined && e.wipRef !== null ? { wip_ref: e.wipRef } : {}),
     };
     reportStore(store.appendJournal(record), "journal");
   };
@@ -659,8 +672,15 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       }
     };
 
+    /** A session's result and its spec pick: `specPath` and `specText` are `null` when no spec is cross-checked. */
     type Ran =
-      | { readonly ok: true; readonly result: BuildResult; readonly specPath: string; readonly specText: string }
+      | {
+          readonly ok: true;
+          readonly result: BuildResult;
+          readonly specPath: string | null;
+          readonly specText: string | null;
+          readonly superseded: readonly string[];
+        }
       | { readonly ok: false; readonly reason: string };
 
     type Runs = { readonly text: string | null; readonly limit: NonNullable<AgentUsage["usageLimit"]> | null } | { readonly fail: string };
@@ -776,8 +796,9 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     /**
      * One builder session at `at`: prepare, prompt, run with the one resume,
-     * parse the build result, then the single spec match. With `ciLog` the
-     * session runs in `ci-fix` mode, its log in `tmp/ci-fix-log.md`.
+     * parse the build result, then the spec pick by status (`pickSpec`). With
+     * `ciLog` the session runs in `ci-fix` mode, its log in
+     * `tmp/ci-fix-log.md`, and only a `done` result picks a spec.
      */
     const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
       const fail = (reason: string): Ran => ({ ok: false, reason });
@@ -800,33 +821,36 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (ciLog === null) t.result = result;
       note(`result: ${result.outcome}`);
 
+      // A CI session's `blocked` or `no-op` result parks as it is: only a `done` fix needs a spec file.
+      if (ciLog !== null && result.outcome !== "done") return { ok: true, result, specPath: null, specText: null, superseded: [] };
       const glob = storySpecGlob(config.story_spec_path, story.story_id);
       if (!glob.ok) return fail(`spec: ${glob.error.message}`);
-      let matches: string[];
+      let paths: string[];
       try {
-        matches = specMatches(glob.value, listWorkingTree(layout.clone));
+        paths = specMatches(glob.value, listWorkingTree(layout.clone));
       } catch (e) {
         return fail(`spec: cannot list the clone: ${message(e)}`);
       }
-      if (matches.length !== 1) {
-        return fail(`spec: ${matches.length} files match ${glob.value}${matches.length > 0 ? ` (${matches.join(", ")})` : ""}, expected exactly one`);
-      }
-      const specPath = matches[0] as string;
-      let specText: string | null;
-      try {
-        specText = readRegular(join(layout.clone, specPath));
-      } catch (e) {
-        return fail(`spec: cannot read ${specPath}: ${message(e)}`);
-      }
-      if (specText === null) return fail(`spec: ${specPath} is not a regular file`);
-      return { ok: true, result, specPath, specText };
+      const matches: SpecMatch[] = paths.map((path) => {
+        try {
+          return { path, text: readRegular(join(layout.clone, path)) };
+        } catch {
+          return { path, text: null };
+        }
+      });
+      const picked = pickSpec(result.outcome, matches);
+      if (!picked.ok) return fail(`${picked.error.message} (glob ${glob.value})`);
+      const { spec, superseded } = picked.value;
+      if (spec === null) note(`spec: ${paths.length} files match ${glob.value}: no cross-check for a blocked result`);
+      if (superseded.length > 0) note(`spec: ${spec?.path ?? "none"} supersedes ${superseded.join(", ")}`);
+      return { ok: true, result, specPath: spec?.path ?? null, specText: spec?.text ?? null, superseded };
     };
 
-    /** The CI step's fix and conflict sessions: no spec status cross-check. */
+    /** The CI step's fix and conflict sessions: no spec status cross-check; a `done` fix picks its spec file. */
     const ciSession: CiSession = async ({ start: at, logText }) => {
       const ran = await sessionAt(at, logText);
       if (!ran.ok) return err("session", ran.reason);
-      return ok({ result: ran.result, specPath: ran.specPath });
+      return ok({ result: ran.result, specPath: ran.specPath, superseded: ran.superseded });
     };
 
     /** The lockfile command under the agent's own launch spec, `argv` replaced and no stdin. */
@@ -890,9 +914,12 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         if (stopped !== null) return { end: stopAfterLimit(stopped) };
         return { end: await failUnit(t, ran.reason) };
       }
-      const { result, specPath } = ran;
-      const checked = checkBuildSpec(result.outcome, ran.specText);
-      if (!checked.ok) return { end: await failUnit(t, `${specPath}: ${checked.error.message}`) };
+      const { result, specPath, superseded } = ran;
+      // A `blocked` result with 0 or 2+ matches has no spec to cross-check, and parks all the same.
+      if (specPath !== null && ran.specText !== null) {
+        const checked = checkBuildSpec(result.outcome, ran.specText);
+        if (!checked.ok) return { end: await failUnit(t, `${specPath}: ${checked.error.message}`) };
+      }
 
       if (result.outcome !== "done") {
         const reason: ParkReason = result.outcome === "blocked" ? result.blocked.kind : "no-op";
@@ -905,12 +932,13 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         return { end: parked ? "progress" : "failed" };
       }
 
+      if (specPath === null) return { end: await failUnit(t, "spec: a done result with no spec file") };
       const record = t.record;
       if (record === null) return { end: await failUnit(t, "no claimed record to hand to the PR step") };
       checkHeld(t);
       let out: PrStepOutput;
       try {
-        out = await deps.prStep({ unit: story, record, result, specPath, clone: layout.clone, signal: budget, log: note, kind: "build" });
+        out = await deps.prStep({ unit: story, record, result, specPath, superseded, clone: layout.clone, signal: budget, log: note, kind: "build" });
       } catch (e) {
         return { end: await failUnit(t, `PR step threw: ${message(e)}`) };
       }
@@ -1247,6 +1275,10 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     const t = unit as UnitTrack | null;
     if (t !== null) {
       note(`outcome ${outcome}`);
+      // A blocked park after a session: the work stays on this host only, saved when the lane next rebuilds its clone.
+      const parkedBlocked = t.sessions > 0 && t.state === "parked" && t.record?.state === "parked" && t.record.park?.kind === "blocked";
+      const wip = parkedBlocked ? wipRef(t.story.unit) : null;
+      if (wip !== null) note(`wip: if the session changed any file, its work is saved as ${wip} in runner.git when the lane next rebuilds its clone; it is never pushed`);
       journalUnit({
         unit: t.story.unit,
         logName: t.logName,
@@ -1259,6 +1291,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         cost: t.cost,
         sessions: t.sessions,
         result: t.result,
+        wipRef: wip,
       });
     }
     reportStore(store.writeOutcome(outcome), "outcome");
