@@ -409,12 +409,16 @@ describe("xarabot lane run: a coordinator lane", () => {
   test.each([
     ["a builder lane named coordinator", hostYaml({ lanes: [{ name: "coordinator" }] }), "coordinator", "lane coordinator has role builder"],
     ["a coordinator lane under another name", hostYaml({ lanes: [{ name: "builder-1", role: "coordinator" }] }), "builder-1", "lane builder-1 has role coordinator"],
-  ] as const)("%s: a failed start before the forge connect, nothing claimed", async (_name, host, lane, why) => {
-    const r = await laneRunWith({ host }, [REPO, lane]);
+  ] as const)("%s: exit 1 before the forge connect, not counted as a failed start: no STOP, no alert, nothing claimed", async (_name, host, lane, why) => {
+    // Two failed starts before: a counted third would write STOP and post the alert.
+    const r = await laneRunWith({ host, failedStarts: 2 }, [REPO, lane]);
     expect(r.code).toBe(1);
     expect(r.err.join("\n")).toContain(why);
     expect(r.err.join("\n")).toContain("a coordinator lane must be named coordinator");
-    expect(r.failedStarts()).toBe("1\n");
+    expect(r.err.join("\n")).not.toContain("start refused");
+    expect(r.failedStarts()).toBe("2\n");
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(false);
+    expect(r.fake.control.alerts()).toEqual([]);
     expect(r.record.connects).toBe(0);
     expect(r.starts).toEqual([]);
     expect(r.coordinatorStarts).toEqual([]);

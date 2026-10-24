@@ -1,10 +1,67 @@
 /**
  * The sanitizer for agent text bound for the forge (AR16): an agent's
- * `summary` or `body` loses attribution trailers, "Generated with" markers,
- * a final trailer block and closing keywords with their references, and each
- * @mention loses its `@`. Pure and total; text with none of these comes back
+ * `summary` or `body` first has credentials redacted (the given secrets and
+ * token-shaped strings, each replaced by `[REDACTED]`), then loses
+ * attribution trailers, "Generated with" markers, a final trailer block and
+ * closing keywords with their references, and each @mention loses its `@`.
+ * Last, with `max`, text longer than `max` UTF-16 code units is cut and ends
+ * with a marker. Pure and total; text with none of these comes back
  * byte-identical.
  */
+
+/** What a redacted credential becomes. */
+export const REDACTED = "[REDACTED]";
+
+/** What ends a text `capText` cut. */
+export const TRUNCATION_MARKER = "\n\n[truncated by xarabot]";
+
+/** The forge's text limits, kept below GitHub's own (UTF-16 code units). */
+export const FORGE_TEXT_LIMITS = { title: 256, body: 65_536, comment: 65_536 } as const;
+
+export type SanitizeOpts = {
+  /** Exact credentials to redact; each is trimmed, and an empty one is ignored. */
+  readonly secrets?: readonly string[];
+  /** The longest the result may be, in UTF-16 code units. */
+  readonly max?: number;
+};
+
+/** Token-shaped strings, always redacted: a PEM private key, `sk-…`, GitHub, AWS, Slack, JWT, npm, GitLab, Google API and Stripe live keys. */
+const TOKEN_SHAPES: readonly RegExp[] = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
+  /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}/g,
+  /(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}/g,
+  /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9_-])xox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g,
+  /(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}/g,
+  /(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
+  /(?<![A-Za-z0-9_])(?:sk|rk)_live_[A-Za-z0-9]{10,}/g,
+];
+
+/** `text` with every given secret (longest first) and every token-shaped string replaced by `[REDACTED]`. */
+export function redactSecrets(text: string, secrets: readonly string[] = []): string {
+  let out = text;
+  const exact = [...new Set(secrets.map((s) => s.trim()).filter((s) => s !== ""))].sort((a, b) => b.length - a.length);
+  for (const secret of exact) out = out.split(secret).join(REDACTED);
+  for (const shape of TOKEN_SHAPES) out = out.replace(shape, REDACTED);
+  return out;
+}
+
+/**
+ * `text` when it is at most `max` UTF-16 code units long; else cut, never
+ * inside a surrogate pair, and ended with `TRUNCATION_MARKER`, the whole at
+ * most `max` long.
+ */
+export function capText(text: string, max: number): string {
+  if (!(text.length > max)) return text;
+  const limit = Math.max(0, Math.floor(max));
+  let keep = Math.max(0, limit - TRUNCATION_MARKER.length);
+  const last = keep > 0 ? text.charCodeAt(keep - 1) : 0;
+  if (last >= 0xd800 && last <= 0xdbff) keep -= 1;
+  return `${text.slice(0, keep)}${TRUNCATION_MARKER}`.slice(0, limit);
+}
 
 const ATTRIBUTION =
   /^\s*(?:co-authored-by|signed-off-by|acked-by|reviewed-by|tested-by|reported-by|suggested-by|helped-by|assisted-by|generated-by|cc)\s*:/i;
@@ -41,10 +98,12 @@ function dropTrailerBlock(lines: string[]): boolean {
   return true;
 }
 
-export function sanitizeAgentText(text: string): string {
+export function sanitizeAgentText(text: string, opts: SanitizeOpts = {}): string {
+  // Redaction runs first, on the whole text, so no later rule can split a credential.
+  const redacted = redactSecrets(text, opts.secrets);
   let removed = false;
   const lines: string[] = [];
-  for (const line of text.split("\n")) {
+  for (const line of redacted.split("\n")) {
     if (ATTRIBUTION.test(line) || GENERATED_WITH.test(line)) {
       removed = true;
       continue;
@@ -69,5 +128,6 @@ export function sanitizeAgentText(text: string): string {
   if (removed) {
     while (lines.length > 0 && BLANK.test(lines[lines.length - 1] as string)) lines.pop();
   }
-  return lines.join("\n");
+  const out = lines.join("\n");
+  return opts.max === undefined ? out : capText(out, opts.max);
 }

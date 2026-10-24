@@ -20,6 +20,8 @@ export type CommitRequest = {
   readonly ontoSha: string;
   /** The agent's message; `commitSession` sanitizes it. */
   readonly message: string;
+  /** Credentials the message's sanitizing redacts; default none. */
+  readonly secrets?: readonly string[];
   /** The write check's rules, built from the same fresh `main`: a builder's or the coordinator's. */
   readonly rules: WriteRules | CoordinatorWriteRules;
   readonly signal: AbortSignal;
@@ -71,7 +73,7 @@ export function createGitCommitter(params: GitCommitterParams): Committer {
     if (base.value.code !== 0) return failed(args, base.value);
     const baseSha = base.value.stdout.trim();
 
-    return commitSession({ gitDir, clone, baseSha, ontoSha, bot, message: r.message, rules: r.rules, signal });
+    return commitSession({ gitDir, clone, baseSha, ontoSha, bot, message: r.message, ...(r.secrets !== undefined ? { secrets: r.secrets } : {}), rules: r.rules, signal });
   };
 
   return {

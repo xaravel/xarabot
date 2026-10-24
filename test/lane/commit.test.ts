@@ -282,6 +282,70 @@ describe("commitSession: the write check", () => {
     });
   });
 
+  test("a re-run: the superseded blocked spec is dropped from the squash and the Epic context reverted; the new done spec is committed", async () => {
+    const repo = await setup();
+    const old = "_bmad-output/implementation-artifacts/spec-1-15-first-try.md";
+    const blocked = "---\nstatus: blocked\n---\n\n## Auto Run Result\n\nStatus: blocked\n";
+    // main holds the blocked spec from the first run; a policy Protected Path covers it, so a change to it would be refused.
+    const base = await commit(repo.gitDir, { ...baseFiles, [old]: blocked });
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, old, `${blocked}\nSuperseded by the re-run.\n`);
+    write(repo, SPEC_PATH, "---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done\n");
+    write(repo, EPIC_CONTEXT, "# Epic 1 Context: mine\n");
+    write(repo, "src/a.ts", "SESSION\n");
+    const rerun = rules({ superseded: [old], protectedPaths: [old] });
+    const r = value(await commitSession(session(repo, base, base, { rules: rerun })));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(r.reverted).toEqual([EPIC_CONTEXT, old]);
+    const out = await files(repo.gitDir, r.head_sha);
+    expect(out[old]).toBe(blocked.trimEnd());
+    expect(out[SPEC_PATH]).toBe("---\nstatus: done\n---\n\n## Auto Run Result\n\nStatus: done");
+    expect(out[EPIC_CONTEXT]).toBe("# Epic 1 Context: One");
+    expect(out["src/a.ts"]).toBe("SESSION");
+    // The commit holds no change to the blocked spec.
+    expect(await rg(repo.gitDir, ["diff-tree", "-r", "--name-only", "--no-commit-id", base, r.head_sha])).toBe(["src/a.ts", SPEC_PATH].sort().join("\n"));
+  });
+
+  test("a superseded spec main does not have is removed; a deleted one is restored", async () => {
+    const repo = await setup();
+    const onMain = "_bmad-output/implementation-artifacts/spec-1-15-on-main.md";
+    const added = "_bmad-output/implementation-artifacts/spec-1-15-added.md";
+    const base = await commit(repo.gitDir, { ...baseFiles, [onMain]: "---\nstatus: blocked\n---\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    rmSync(join(repo.clone, onMain));
+    write(repo, added, "---\nstatus: blocked\n---\n");
+    write(repo, "src/a.ts", "SESSION\n");
+    const r = value(await commitSession(session(repo, base, base, { rules: rules({ superseded: [onMain, added] }) })));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect([...(r.reverted ?? [])].sort()).toEqual([added, onMain].sort());
+    const out = await files(repo.gitDir, r.head_sha);
+    expect(out[onMain]).toBe("---\nstatus: blocked\n---");
+    expect(out[added]).toBeUndefined();
+  });
+
+  test("a superseded path is matched exactly, never case-folded", async () => {
+    const repo = await setup();
+    const old = "_bmad-output/implementation-artifacts/spec-1-15-old.md";
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, old, "---\nstatus: blocked\n---\n");
+    const r = value(await commitSession(session(repo, base, base, { rules: rules({ superseded: [old.toUpperCase()] }) })));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(r.reverted).toBeUndefined();
+    expect((await files(repo.gitDir, r.head_sha))[old]).toBe("---\nstatus: blocked\n---");
+  });
+
+  test("the commit message has the given secrets and token shapes redacted", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, "src/a.ts", "SESSION\n");
+    const token = `ghp_${"z".repeat(36)}`;
+    const r = value(await commitSession(session(repo, base, base, { message: `1.15: used cred-xyz-123 and ${token}\n`, secrets: ["cred-xyz-123"] })));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(await rg(repo.gitDir, ["log", "-1", "--format=%B", r.head_sha])).toBe("1.15: used [REDACTED] and [REDACTED]");
+  });
+
   test("an approved Infrastructure Story commits .github and agent config, never .xarabot", async () => {
     const repo = await setup();
     const base = await commit(repo.gitDir, { ...baseFiles, ".xarabot/policy.yaml": "schema_version: 1\n" });
@@ -381,6 +445,32 @@ describe("commitSession: the write check", () => {
           { path: "src/a.ts", class: "outside-unit" },
           { path: STORY_FILE, class: "graph-input" },
         ],
+        reverted: [],
+      });
+      await noHead(repo);
+    });
+
+    test("each change carries its new mode: a status file made executable, a symlink or deleted is refused mode", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, baseFiles);
+      value(await rebuildClone(rebuild(repo, base)));
+      chmodSync(join(repo.clone, SPRINT), 0o755);
+      rmSync(join(repo.clone, RETRO));
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
+        kind: "refused",
+        refusals: [
+          { path: RETRO, class: "mode" },
+          { path: SPRINT, class: "mode" },
+        ],
+        reverted: [],
+      });
+      chmodSync(join(repo.clone, SPRINT), 0o644);
+      write(repo, RETRO, "verdicts: {}\n");
+      rmSync(join(repo.clone, SPRINT));
+      symlinkSync("retro-gates.yaml", join(repo.clone, SPRINT));
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
+        kind: "refused",
+        refusals: [{ path: SPRINT, class: "mode" }],
         reverted: [],
       });
       await noHead(repo);

@@ -5,7 +5,7 @@ import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ciFix, failAttempt, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import type { Result } from "../core/result.ts";
-import { sanitizeAgentText } from "../core/sanitize.ts";
+import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, ParkReason, UnitRecord } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
@@ -35,8 +35,10 @@ export type CiSessionRequest = {
 
 export type CiSessionDone = {
   readonly result: BuildResult;
-  /** The spec file's repo-relative path in the clone. */
-  readonly specPath: string;
+  /** The spec file's repo-relative path in the clone; `null` for a `blocked` or `no-op` result, which needs none. */
+  readonly specPath: string | null;
+  /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
+  readonly superseded: readonly string[];
 };
 
 /** One builder session in `ci-fix` mode; a failure is a failed attempt. Never throws. */
@@ -138,10 +140,13 @@ export function conflictLogText(p: {
   return `${lines.join("\n")}\n`;
 }
 
-/** The 🤖 comment after `main` was merged into the PR. */
+/** The 🤖 comment after `main` was merged into the PR, capped at the comment limit. */
 export function mergeComment(p: { readonly storyId: string; readonly mainSha: string; readonly headSha: string; readonly resolved: readonly string[] }): string {
   const resolved = p.resolved.length === 0 ? "" : ` Resolved: ${p.resolved.map((r) => sanitizeAgentText(r)).join(", ")}.`;
-  return `🤖 Story ${sanitizeAgentText(p.storyId)}: merged main ${p.mainSha.slice(0, 7)} into the PR as ${p.headSha.slice(0, 7)}.${resolved}\n`;
+  return capText(
+    `🤖 Story ${sanitizeAgentText(p.storyId)}: merged main ${p.mainSha.slice(0, 7)} into the PR as ${p.headSha.slice(0, 7)}.${resolved}\n`,
+    FORGE_TEXT_LIMITS.comment,
+  );
 }
 
 /** Ends the step with `out`. */
@@ -356,13 +361,14 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       }
       aborted();
       if (!ran.ok) return await failed(`${what} session ${ran.error.kind}: ${ran.error.message}`);
-      const { result, specPath } = ran.value;
+      const { result, specPath, superseded } = ran.value;
       note(`${what} result: ${result.outcome}`);
       if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`);
       if (result.outcome === "no-op") return await parkBlocked("no-op", `${what}: no-op`);
+      if (specPath === null) return await failed(`${what} session: a done result with no spec file`);
       let out: PrStepOutput;
       try {
-        out = await input.prStep({ unit: story, record, result, specPath, clone: input.clone, signal: input.signal, log: input.log, kind: "fix" });
+        out = await input.prStep({ unit: story, record, result, specPath, superseded, clone: input.clone, signal: input.signal, log: input.log, kind: "fix" });
       } catch (e) {
         return await failed(`PR step threw: ${message(e)}`);
       }

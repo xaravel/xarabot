@@ -189,6 +189,26 @@ const CLAUDE_CASES: readonly Case[] = [
   { name: "a nested policy glob", covers: ["protected-path"], changes: [p("certs/a/server.pem")], refused: [no("certs/a/server.pem", "protected-path")] },
   { name: "case-folded Protected Path", covers: ["protected-path"], changes: [p("Secrets/Key"), p("x.PEM")], refused: [no("Secrets/Key", "protected-path"), no("x.PEM", "protected-path")] },
 
+  // Full case folding (toUpperCase().toLowerCase(), as APFS folds): `ſ` folds to `s`, `K` (Kelvin) to `k`.
+  { name: "full fold: ſ in the sprint status", covers: ["coordinator-file"], changes: [p(SPRINT.replace("sprint", "ſprint"))], refused: [no(SPRINT.replace("sprint", "ſprint"), "coordinator-file")] },
+  { name: "full fold: ſ under .xarabot", covers: ["xarabot"], changes: [p(".XARABOT/epicſ.yaml")], refused: [no(".XARABOT/epicſ.yaml", "xarabot")] },
+  { name: "full fold: ſ in the manifests dir", covers: ["manifest"], changes: [p("ſtories/1.1.md")], refused: [no("ſtories/1.1.md", "manifest")] },
+  { name: "full fold: ſ in the Standing Authority", covers: ["standing-authority"], changes: [p("docſ/ſtanding-authority.md")], refused: [no("docſ/ſtanding-authority.md", "standing-authority")] },
+  { name: "full fold: ſ under .github", covers: ["github"], changes: [p(".GITHUB/workflowſ/ci.yml")], refused: [no(".GITHUB/workflowſ/ci.yml", "github")] },
+  {
+    name: "full fold: .mcp.jſon, AGENTſ.md and AGENTſ.override.md",
+    covers: ["agent-config"],
+    changes: [p(".mcp.jſon"), p("pkg/AGENTſ.md"), p("AGENTſ.override.md")],
+    refused: [no(".mcp.jſon", "agent-config"), no("AGENTſ.override.md", "agent-config"), no("pkg/AGENTſ.md", "agent-config")],
+  },
+  { name: "full fold: ſ and K in a Protected Path", covers: ["protected-path"], changes: [p("ſecretſ/Key")], refused: [no("ſecretſ/Key", "protected-path")] },
+  {
+    name: "AGENTS.override.md and CLAUDE.local.md at any depth are agent config",
+    covers: ["agent-config"],
+    changes: [p("AGENTS.override.md"), p("pkg/CLAUDE.local.md")],
+    refused: [no("AGENTS.override.md", "agent-config"), no("pkg/CLAUDE.local.md", "agent-config")],
+  },
+
   // Several at once: only the refused paths, in path order.
   {
     name: "a session that edits src, adds .claude/settings.json and changes the sprint status",
@@ -349,16 +369,40 @@ describe("writeRules", () => {
       protectedPaths: ["secrets/**", "**/*.pem"],
       epicContextPath: CONFIG_DEFAULTS.epic_context_path,
       specPath: SPEC,
+      superseded: [],
       storyFile: STORY,
       infrastructureApproved: false,
     });
+  });
+
+  test("carries a re-run's superseded spec files", () => {
+    const old = "_bmad-output/implementation-artifacts/spec-2-3-old.md";
+    const config = {
+      sprint_status_path: SPRINT,
+      retro_gates_path: RETRO,
+      epics_path: EPICS,
+      manifests: { dir: "stories" },
+      standing_authority_path: AUTHORITY,
+      epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+    };
+    expect(writeRules({ config, policy: { protected_paths: [] }, specPath: SPEC, superseded: [old], storyFile: STORY, infrastructureApproved: false }).superseded).toEqual([old]);
   });
 });
 
 describe("AGENT_CONFIG_PATHS", () => {
   test("the mandatory Protected Paths are .xarabot, .github, then the agent config globs, in order", () => {
     expect(MANDATORY_PROTECTED_PATHS).toEqual([".xarabot/**", ".github/**", ...AGENT_CONFIG_PATHS]);
-    expect(AGENT_CONFIG_PATHS).toEqual(["**/.agents/**", "**/.claude/**", "**/.codex/**", "**/.pi/**", "**/.mcp.json", "**/AGENTS.md", "**/CLAUDE.md"]);
+    expect(AGENT_CONFIG_PATHS).toEqual([
+      "**/.agents/**",
+      "**/.claude/**",
+      "**/.codex/**",
+      "**/.pi/**",
+      "**/.mcp.json",
+      "**/AGENTS.md",
+      "**/AGENTS.override.md",
+      "**/CLAUDE.md",
+      "**/CLAUDE.local.md",
+    ]);
   });
 });
 
@@ -432,7 +476,8 @@ const coordRules = (spec: CoordinatorUnitSpec): CoordinatorWriteRules =>
 type CoordCase = {
   readonly name: string;
   readonly unit: CoordinatorUnitSpec;
-  readonly changes: readonly string[];
+  /** A bare path is a regular file, mode `100644`. */
+  readonly changes: readonly (string | WriteChange)[];
   readonly refused: readonly (readonly [string, CoordinatorWriteClass])[];
 };
 
@@ -484,11 +529,37 @@ const COORD_CASES: readonly CoordCase[] = [
       [EPICS, "graph-input"],
     ],
   },
+  // mode: a status file or graph input must stay a regular file, `100644`.
+  { name: "mode: a status file made executable", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100755" }], refused: [[SPRINT, "mode"]] },
+  { name: "mode: a status file made a symlink", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "120000" }], refused: [[SPRINT, "mode"]] },
+  { name: "mode: a status file made a gitlink", unit: STATUS_UNIT, changes: [{ path: RETRO, mode: "160000" }], refused: [[RETRO, "mode"]] },
+  { name: "mode: a status file deleted has no mode", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "000000" }], refused: [[SPRINT, "mode"]] },
+  { name: "mode: a change with no mode is refused", unit: STATUS_UNIT, changes: [{ path: SPRINT }], refused: [[SPRINT, "mode"]] },
+  { name: "mode: 100644 passes", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100644" }, { path: RETRO, mode: "100644" }], refused: [] },
+  { name: "mode: a graph input made executable", unit: GRAPH_UNIT, changes: [{ path: "stories/2.4.md", mode: "100755" }], refused: [["stories/2.4.md", "mode"]] },
+  { name: "mode: only status files and graph inputs are checked", unit: STATUS_UNIT, changes: [{ path: CONTEXT_2, mode: "100755" }], refused: [] },
+  { name: "mode: an earlier class is reported first", unit: STATUS_UNIT, changes: [{ path: EPICS, mode: "120000" }], refused: [[EPICS, "graph-input"]] },
+  // Full case folding: `ſ` folds to `s`.
+  { name: "full fold: .xarabot/epicſ.yaml is epics.yaml for a graph unit", unit: GRAPH_UNIT, changes: [".XARABOT/epicſ.yaml"], refused: [] },
+  { name: "full fold: xarabot", unit: GRAPH_UNIT, changes: [".xarabot/ſettings.yaml"], refused: [[".xarabot/ſettings.yaml", "xarabot"]] },
+  { name: "full fold: graph-input", unit: STATUS_UNIT, changes: ["ſtories/2.1.md"], refused: [["ſtories/2.1.md", "graph-input"]] },
+  { name: "full fold: the unit's own file with ſ passes", unit: STATUS_UNIT, changes: [SPRINT.replace("sprint-status", "ſprint-ſtatus")], refused: [] },
+  { name: "full fold: outside-unit", unit: { kind: "retro-item", globs: ["src/**"] }, changes: ["ſrc/a.ts", "lib/ſ.ts"], refused: [["lib/ſ.ts", "outside-unit"]] },
+  {
+    name: "full fold: graph-and-status in a status unit",
+    unit: STATUS_UNIT,
+    changes: [EPICS.replace("epics", "epicſ"), SPRINT.replace("sprint", "ſprint")],
+    refused: [
+      [EPICS.replace("epics", "epicſ"), "graph-input"],
+      [SPRINT.replace("sprint", "ſprint"), "graph-and-status"],
+    ],
+  },
+  { name: "full fold: mode", unit: STATUS_UNIT, changes: [{ path: SPRINT.replace("sprint", "ſprint"), mode: "100755" }], refused: [[SPRINT.replace("sprint", "ſprint"), "mode"]] },
 ];
 
 describe("checkWrite (coordinator)", () => {
   test.each(COORD_CASES.map((c) => [c.name, c] as const))("%s", (_name, c) => {
-    const got = checkWrite(coordRules(c.unit), c.changes.map((path) => ({ path })));
+    const got = checkWrite(coordRules(c.unit), c.changes.map((x) => (typeof x === "string" ? { path: x, mode: "100644" } : x)));
     const want = c.refused.map(([path, cls]) => ({ path, class: cls }));
     expect(got).toEqual([...want].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
   });
@@ -502,9 +573,10 @@ describe("checkWrite (coordinator)", () => {
 
   test("graph-and-status needs both: a graph unit holding a status file glob", () => {
     const rules = coordinatorWriteRules({ config: COORD_CONFIG, globs: [EPICS, SPRINT], graphUnit: true });
-    expect(checkWrite(rules, [{ path: EPICS }])).toEqual([]);
-    expect(checkWrite(rules, [{ path: SPRINT }])).toEqual([]);
-    expect(checkWrite(rules, [{ path: EPICS }, { path: SPRINT.toUpperCase() }])).toEqual([
+    const r = (path: string): WriteChange => ({ path, mode: "100644" });
+    expect(checkWrite(rules, [r(EPICS)])).toEqual([]);
+    expect(checkWrite(rules, [r(SPRINT)])).toEqual([]);
+    expect(checkWrite(rules, [r(EPICS), r(SPRINT.toUpperCase())])).toEqual([
       { path: SPRINT.toUpperCase(), class: "graph-and-status" },
       { path: EPICS, class: "graph-and-status" },
     ]);

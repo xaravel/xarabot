@@ -2,7 +2,7 @@ import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { writeRules } from "../core/lane/write-check.ts";
 import { failAttempt, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
-import { sanitizeAgentText } from "../core/sanitize.ts";
+import { capText, FORGE_TEXT_LIMITS, redactSecrets, sanitizeAgentText } from "../core/sanitize.ts";
 import { unitPath, UnitRecordSchema, type LaneIdentity, type UnitRecord } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
@@ -17,7 +17,10 @@ import { swapLedger, type Sleep } from "./ledger-cas.ts";
  * refusal parks the unit `blocked` `write-check` and pushes nothing), a
  * fencing heartbeat, a leased push, a second fence and the PR opened (or the
  * adopted one updated), the record's `pr` and SHAs, and one 🤖 status
- * comment. It never throws.
+ * comment. The lane's credential and token-shaped strings are redacted from
+ * the commit message, the PR text and the comment, each capped at the
+ * forge's limits; superseded spec files are dropped from the squash. It
+ * never throws.
  */
 
 export type PrStepDeps = {
@@ -33,14 +36,27 @@ export type PrStepDeps = {
   readonly now?: () => number;
   readonly sleep?: Sleep;
   readonly random?: () => number;
+  /**
+   * The lane's credentials (the vendor credential `lane run` reads at start),
+   * redacted from the commit message, the PR title and body and the status
+   * comment; default none.
+   */
+  readonly secrets?: readonly string[];
 };
 
 const ZERO_SHA = "0".repeat(40);
 
-/** The PR title and body: both sanitized. */
-export function prText(story: Pick<NextStory, "story_id" | "title">, result: Pick<BuildResult, "summary" | "body">): { readonly title: string; readonly body: string } {
+/** The PR title and body: both sanitized, with `secrets` redacted, and capped at the forge's limits. */
+export function prText(
+  story: Pick<NextStory, "story_id" | "title">,
+  result: Pick<BuildResult, "summary" | "body">,
+  secrets: readonly string[] = [],
+): { readonly title: string; readonly body: string } {
   const body = result.body.trim() === "" ? result.summary : `${result.summary}\n\n${result.body}`;
-  return { title: sanitizeAgentText(`Story ${story.story_id}: ${story.title}`), body: sanitizeAgentText(body) };
+  return {
+    title: sanitizeAgentText(`Story ${story.story_id}: ${story.title}`, { secrets, max: FORGE_TEXT_LIMITS.title }),
+    body: sanitizeAgentText(body, { secrets, max: FORGE_TEXT_LIMITS.body }),
+  };
 }
 
 export type StatusCommentParams = {
@@ -48,19 +64,27 @@ export type StatusCommentParams = {
   readonly headSha: string;
   readonly lane: string;
   readonly deniedActions: readonly string[];
+  /** Redacted from every part; default none. */
+  readonly secrets?: readonly string[];
 };
 
-/** The 🤖 status comment: the Story, the short head SHA, the lane, then the denied actions, each sanitized onto one line. */
+/**
+ * The 🤖 status comment: the Story, the short head SHA, the lane, then the
+ * denied actions, each sanitized onto one line; capped at the comment limit.
+ */
 export function statusComment(p: StatusCommentParams): string {
-  const lines = [`🤖 Story ${sanitizeAgentText(p.storyId)}: pushed ${p.headSha.slice(0, 7)} from lane ${sanitizeAgentText(p.lane)}.`, ""];
-  const actions = p.deniedActions.map((a) => sanitizeAgentText(a.replace(/\s+/g, " ").trim()).trim()).filter((a) => a !== "");
+  const secrets = p.secrets ?? [];
+  const clean = (s: string): string => sanitizeAgentText(s, { secrets });
+  const lines = [`🤖 Story ${clean(p.storyId)}: pushed ${p.headSha.slice(0, 7)} from lane ${clean(p.lane)}.`, ""];
+  // Secrets are redacted before whitespace collapses, so a secret holding whitespace still matches exactly.
+  const actions = p.deniedActions.map((a) => clean(redactSecrets(a, secrets).replace(/\s+/g, " ").trim()).trim()).filter((a) => a !== "");
   if (actions.length === 0) {
     lines.push("Denied actions: none.");
   } else {
     lines.push("Denied actions:");
     for (const action of actions) lines.push(`- ${action}`);
   }
-  return `${lines.join("\n")}\n`;
+  return capText(`${lines.join("\n")}\n`, FORGE_TEXT_LIMITS.comment);
 }
 
 /** Ends the step with `out`. */
@@ -103,6 +127,7 @@ export function infrastructureApproved(story: Pick<NextStory, "unit" | "infrastr
 
 export function createPrStep(deps: PrStepDeps): PrStep {
   const { forge, committer, identity } = deps;
+  const secrets = deps.secrets ?? [];
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
@@ -235,6 +260,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
         config: config.value.repo.config,
         policy: config.value.repo.policy,
         specPath: input.specPath,
+        superseded: input.superseded,
         storyFile: story.manifest_path,
         infrastructureApproved: infrastructureApproved(story, snap),
       });
@@ -247,6 +273,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
           unit,
           ontoSha: onto,
           message: `${story.story_id}: ${result.summary}`,
+          secrets,
           rules,
           signal: AbortSignal.any([input.signal, commitTimeout]),
         });
@@ -256,7 +283,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       if (!committed.ok) return await failed(`commit ${committed.error.kind}: ${committed.error.message}`);
       const c = committed.value;
       if (c.kind === "conflict") return await failed(`commit conflict onto ${onto}: ${c.paths.join(", ")}`);
-      for (const path of c.reverted ?? []) note(`write-check: reverted ${shown(path)} (Epic context)`);
+      for (const path of c.reverted ?? []) note(`write-check: reverted ${shown(path)} (${rules.superseded.includes(path) ? "superseded spec" : "Epic context"})`);
       if (c.kind === "refused") {
         for (const r of c.refusals) note(`write-check: refused ${shown(r.path)} (${r.class})`);
         reasons.push(`write-check: refused ${c.refusals.map((r) => `${shown(r.path)} (${r.class})`).join(", ")}`);
@@ -288,7 +315,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       note(`pushed ${c.head_sha} to ${branch}`);
 
       // 6. Open the PR, or update the adopted one; a fix leaves the PR's text as it is.
-      const text = prText(story, result);
+      const text = prText(story, result, secrets);
       const adopted = input.record.pr;
       let pr: number;
       if (adopted !== null && input.kind === "fix") {
@@ -310,7 +337,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       await beat("record", { pr, pr_owner: identity.owner, head_sha: c.head_sha, base_sha: c.base_sha });
 
       // 8. The status comment.
-      const body = statusComment({ storyId: story.story_id, headSha: c.head_sha, lane: identity.lane, deniedActions: result.denied_actions });
+      const body = statusComment({ storyId: story.story_id, headSha: c.head_sha, lane: identity.lane, deniedActions: result.denied_actions, secrets });
       const commented = await call("comment", (o) => forge.comment(pr, body, o));
       if (!commented.ok) {
         reasons.push(`status comment on PR #${pr} failed: ${commented.error.kind}: ${commented.error.message}`);

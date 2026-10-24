@@ -38,17 +38,20 @@ export type ReconcilePlan = {
   readonly markMerged: readonly string[];
   /** 2. Coordinator-held `merging` `reconcile` records whose PR has not merged: their queue is checked. */
   readonly checkQueue: readonly PlanTarget[];
-  /** 3. Stale `claimed` `reconcile` records: their open PR closed, then released with an attempt. */
+  /** 3. Stale `claimed` `reconcile` records: the open PRs on their branch closed, then released with an attempt. */
   readonly releaseDead: readonly PlanTarget[];
-  /** 4. `released` `reconcile` records: their open PR closed, then deleted. */
+  /** 4. `released` `reconcile` records: the open PRs on their branch closed, then deleted. */
   readonly deleteReleased: readonly PlanTarget[];
   /** 5. `merged` records (as of this run) whose unit is done on `main`. */
   readonly deleteMerged: readonly string[];
   /** `sprint_status_path`. */
   readonly path: string;
   readonly status: StatusPlan;
-  /** Another `reconcile` record whose PR the snapshot shows open: no new PR this run. */
-  readonly openPr: { readonly unit: string; readonly pr: number } | null;
+  /**
+   * Every other `reconcile` record whose PR the snapshot shows open. Those
+   * the ledger work leaves open stop a new PR this run.
+   */
+  readonly openPrs: readonly { readonly unit: string; readonly pr: number }[];
   /** The other `merged` `reconcile` records left after step 5, deleted once this run finishes `merged`. */
   readonly supersededMerged: readonly string[];
 };
@@ -141,8 +144,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
   const deleted = new Set(deleteMerged);
   const supersededMerged = mergedNow.filter((r) => isReconcile(r) && !deleted.has(r.unit)).map((r) => r.unit);
 
-  const open = others.find((r) => isReconcile(r) && prOf(r)?.state === "open");
-  const openPr = open === undefined ? null : { unit: open.unit, pr: (prOf(open) as PrState).number };
+  const openPrs = others.filter((r) => isReconcile(r) && prOf(r)?.state === "open").map((r) => ({ unit: r.unit, pr: (prOf(r) as PrState).number }));
 
   const path = snapshot.config.sprint_status_path;
   const { changes, summary } = statusChanges(effective, unit);
@@ -154,5 +156,5 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     status = edited.ok ? { kind: "edit", changes, text: edited.value, summary } : { kind: "invalid", changes, message: edited.error.message };
   }
 
-  return { markMerged, checkQueue, releaseDead, deleteReleased, deleteMerged, path, status, openPr, supersededMerged };
+  return { markMerged, checkQueue, releaseDead, deleteReleased, deleteMerged, path, status, openPrs, supersededMerged };
 }

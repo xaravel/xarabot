@@ -241,6 +241,13 @@ describe("reconcile texts", () => {
     expect(t.body).toContain("the runner queues this PR once its checks pass, unless a Protected Path gates it.");
     expect(t.message.startsWith(`${t.title}\n\n- 1-1-first: backlog -> done\n`)).toBe(true);
   });
+
+  test("the PR body and title are capped at the forge's limits", () => {
+    const t = reconcilePrText(`reconcile:${"9".repeat(300)}`, STATUS, Array.from({ length: 3000 }, (_, i) => `k-${i}-${"x".repeat(20)}: backlog -> done`));
+    expect(t.title.length).toBe(256);
+    expect(t.body.length).toBe(65_536);
+    expect(t.body.endsWith("\n\n[truncated by xarabot]")).toBe(true);
+  });
 });
 
 // ------------------------------------------------------------------ the matrix
@@ -356,7 +363,7 @@ describe("createReconcileStep: the matrix", () => {
     expect([...(await f.ledger()).keys()]).toEqual([U]);
   });
 
-  test("Earlier PR ejected: the PR is closed, the record released with attempts unchanged; no new PR this run", async () => {
+  test("Earlier PR ejected (just closed): the PR is closed, the record released with attempts unchanged; it no longer stops this run's own PR", async () => {
     let r3 = { number: 0, head: "" };
     const f = await setup({}, async (fake) => {
       r3 = await prOn(fake, "xarabot/reconcile-3");
@@ -364,10 +371,26 @@ describe("createReconcileStep: the matrix", () => {
       return [coord("reconcile:3", { state: "merging", pr: r3.number, head_sha: r3.head, passed_sha: r3.head, attempts: 1 }), rec({ unit: "story:1.1", globs: [], state: "released", pr: story })];
     });
     const out = await f.run();
-    expect(out.state).toBe("merged");
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
     expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", attempts: 1, pr: r3.number, owner: COORD.owner });
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
     expect(f.events.slice(0, 5)).toEqual(["ledgerSwap markMerged story:1.1", "queueState", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseReconcile reconcile:3"]);
+    expect(f.commits).toHaveLength(1);
+    expect(await prOnBranch(f, BRANCH)).toMatchObject({ state: "open", head_sha: f.head });
+  });
+
+  test("an open PR the ledger work could not close still stops a new PR", async () => {
+    let r3 = { number: 0, head: "" };
+    const f = await setup({}, async (fake) => {
+      r3 = await prOn(fake, "xarabot/reconcile-3");
+      const story = (await prOn(fake, "story/1.1", true)).number;
+      return [coord("reconcile:3", { state: "merging", pr: r3.number, head_sha: r3.head, passed_sha: r3.head }), rec({ unit: "story:1.1", globs: [], state: "released", pr: story })];
+    });
+    f.fake.control.injectError("closePr", { kind: "transient", message: "502" });
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(out.reason).toContain(`reconcile:3's PR #${r3.number} is open: no new reconcile PR this run`);
+    expect(await stateOf(f, "reconcile:3")).toBe("merging");
     expect(f.commits).toEqual([]);
     expect(await prOnBranch(f, BRANCH)).toBeNull();
   });
@@ -453,6 +476,106 @@ describe("createReconcileStep: the matrix", () => {
     await f.run();
     expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", attempts: 1 });
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
+  });
+
+  test.each([
+    ["a released record", "released", "deleteReleasedReconcile"],
+    ["a dead run's record", "claimed", "releaseDeadReconcile"],
+  ] as const)("Orphan PR: %s with no pr, a PR open on its branch: found by listing the branch, closed, then the record acted on", async (_name, state, edit) => {
+    let orphan = 0;
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      orphan = (await prOn(fake, "xarabot/reconcile-3")).number;
+      return [coord("reconcile:3", { state, pr: null, heartbeat_at: minutesBefore(30) })];
+    });
+    await f.run();
+    expect((await prOnBranch(f, "xarabot/reconcile-3"))).toMatchObject({ number: orphan, state: "closed" });
+    expect(f.events.slice(0, 4)).toEqual(["listPrsByBranch", "ledgerSwap heartbeat reconcile:5", "closePr", `ledgerSwap ${edit} reconcile:3`]);
+    if (state === "released") expect((await f.ledger()).has("reconcile:3")).toBe(false);
+    else expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("Orphan PR: every open PR on the branch is closed, plus the record's own open PR the listing missed", async () => {
+    const prs: number[] = [];
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      prs.push((await prOn(fake, "xarabot/reconcile-3")).number);
+      prs.push((await prOn(fake, "xarabot/elsewhere")).number);
+      return [coord("reconcile:3", { state: "released", pr: prs[1] as number })];
+    });
+    await f.run();
+    expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
+    expect((await prOnBranch(f, "xarabot/elsewhere"))?.state).toBe("closed");
+    expect(f.events.filter((e) => e === "closePr")).toHaveLength(2);
+    expect((await f.ledger()).has("reconcile:3")).toBe(false);
+  });
+
+  test.each([
+    ["a released record", "released"],
+    ["a dead run's record", "claimed"],
+  ] as const)("Orphan PR: a listing failure leaves %s for a later run", async (_name, state) => {
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      await prOn(fake, "xarabot/reconcile-3");
+      return [coord("reconcile:3", { state, pr: null, heartbeat_at: minutesBefore(30) })];
+    });
+    const before = (await f.ledger()).get("reconcile:3");
+    f.fake.control.injectError("listPrsByBranch", { kind: "transient", message: "502" });
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(out.reason).toContain("listPrsByBranch xarabot/reconcile-3 transient: 502; reconcile:3 left for a later run");
+    expect((await f.ledger()).get("reconcile:3")).toEqual(before);
+    expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("open");
+    expect(f.events).not.toContain("closePr");
+  });
+
+  test("Orphan PR: a failed close leaves the record for a later run", async () => {
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      await prOn(fake, "xarabot/reconcile-3");
+      return [coord("reconcile:3", { state: "released", pr: null })];
+    });
+    f.fake.control.injectError("closePr", { kind: "transient", message: "502" });
+    const out = await f.run();
+    expect(out.reason).toContain("left for a later run");
+    expect(await stateOf(f, "reconcile:3")).toBe("released");
+    expect(swaps(f.events)).not.toContain("deleteReleasedReconcile reconcile:3");
+  });
+
+  test("Orphan PR: two open PRs for one target, the second close fails: the target is left and its open PR stops a new PR", async () => {
+    const nums: number[] = [];
+    const f = await setup({}, async (fake) => {
+      const story = (await prOn(fake, "story/1.1", true)).number;
+      // The fake allows one open PR per branch: the second is the record's own open PR, which the listing misses.
+      nums.push((await prOn(fake, "xarabot/reconcile-3")).number);
+      nums.push((await prOn(fake, "xarabot/elsewhere")).number);
+      return [rec({ unit: "story:1.1", globs: [], state: "released", pr: story }), coord("reconcile:3", { state: "released", pr: nums[1] as number })];
+    });
+    let closes = 0;
+    const forge: Forge = {
+      ...f.fake.forge,
+      closePr: (pr, o) => {
+        closes += 1;
+        if (closes === 2) return Promise.resolve({ ok: false as const, error: { kind: "transient" as const, message: "502" } });
+        return f.fake.forge.closePr(pr, o);
+      },
+    };
+    const out = await f.run({ forge });
+    expect(closes).toBe(2);
+    expect(out.state).toBe("merged");
+    expect(out.reason).toContain("left for a later run");
+    expect(out.reason).toContain(`reconcile:3's PR #${nums[1]} is open: no new reconcile PR this run`);
+    expect(await stateOf(f, "reconcile:3")).toBe("released");
+    expect(f.commits).toEqual([]);
+    expect(await prOnBranch(f, BRANCH)).toBeNull();
+  });
+
+  test("a released record whose orphan PR the run closed no longer stops this run's own PR", async () => {
+    const f = await setup({}, async (fake) => {
+      const story = (await prOn(fake, "story/1.1", true)).number;
+      const r3 = (await prOn(fake, "xarabot/reconcile-3")).number;
+      return [rec({ unit: "story:1.1", globs: [], state: "released", pr: story }), coord("reconcile:3", { state: "released", pr: r3 })];
+    });
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect((await f.ledger()).has("reconcile:3")).toBe(false);
+    expect(await prOnBranch(f, BRANCH)).toMatchObject({ state: "open" });
   });
 
   test.each([

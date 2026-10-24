@@ -23,6 +23,63 @@ export function expectedSpecStatus(outcome: BuildResult["outcome"]): SpecStatus 
   return outcome === "blocked" ? "blocked" : "done";
 }
 
+/** One file matching `story_spec_path` in the clone; `text` is `null` when it cannot be read. */
+export type SpecMatch = { readonly path: string; readonly text: string | null };
+
+/**
+ * The pick: the spec file `checkBuildSpec` runs on (`null`: no cross-check),
+ * and the `blocked` matches a `done` spec supersedes, dropped from the squash.
+ */
+export type SpecPick = {
+  readonly spec: { readonly path: string; readonly text: string } | null;
+  readonly superseded: readonly string[];
+};
+
+/** A spec's frontmatter `status`, or `null` when it has none or cannot be read or parsed. */
+export function specStatus(text: string | null): string | null {
+  if (text === null) return null;
+  const split = splitFrontmatter("spec", text);
+  if (!split.ok) return null;
+  const yaml = parseYaml("spec", split.value.yaml);
+  if (!yaml.ok) return null;
+  const fm = yaml.value;
+  if (fm === null || typeof fm !== "object" || Array.isArray(fm)) return null;
+  const status = (fm as Record<string, unknown>)["status"];
+  return typeof status === "string" ? status : null;
+}
+
+/**
+ * Picks the spec file among `matches` by status. For `done` and `no-op`,
+ * exactly one match must be `done` and every other `blocked`: that one is the
+ * spec, the others superseded; anything else is `invalid`. For `blocked`,
+ * one match is the spec (`invalid` when it cannot be read), and 0 or 2+
+ * matches give no spec and no failure.
+ */
+export function pickSpec(outcome: BuildResult["outcome"], matches: readonly SpecMatch[]): Result<SpecPick, "invalid"> {
+  if (outcome === "blocked") {
+    if (matches.length !== 1) return ok({ spec: null, superseded: [] });
+    const only = matches[0] as SpecMatch;
+    if (only.text === null) return err("invalid", `spec: ${only.path} cannot be read`);
+    return ok({ spec: { path: only.path, text: only.text }, superseded: [] });
+  }
+  const statuses = matches.map((m) => ({ match: m, status: specStatus(m.text) }));
+  const done = statuses.filter((s) => s.status === "done");
+  const others = statuses.filter((s) => s.status !== "done");
+  const stray = others.filter((s) => s.status !== "blocked");
+  if (done.length !== 1 || stray.length > 0) {
+    const shown = statuses
+      .map((s) => `${s.match.path} ${s.match.text === null ? "(unreadable)" : s.status === null ? "(no status)" : JSON.stringify(s.status)}`)
+      .join(", ");
+    return err(
+      "invalid",
+      `spec: a ${outcome} result needs exactly one "done" spec, every other match "blocked"; ${matches.length} files match${matches.length > 0 ? ` (${shown})` : ""}`,
+    );
+  }
+  // A `done` status was read from the text, so it is there.
+  const spec = (done[0] as (typeof done)[number]).match;
+  return ok({ spec: { path: spec.path, text: spec.text as string }, superseded: others.map((s) => s.match.path) });
+}
+
 const RESULT_HEADING = "## Auto Run Result";
 /** A heading that ends the `## Auto Run Result` section: level 1 or 2. */
 const SECTION_END = /^#{1,2}(?:\s|$)/;

@@ -9,8 +9,9 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
 /**
  * Turns a finished session's working tree into one bot-authored commit,
  * three-way merged onto `origin/main` (AR16, FR13). The change is the
- * snapshot against `baseSha`. Under builder rules, Epic context changes are
- * reverted to `baseSha`'s version; then the write check (FR18, AR31), a
+ * snapshot against `baseSha`. Under builder rules, changes to Epic context
+ * files and to superseded spec files are reverted to `baseSha`'s version
+ * (an added one removed); then the write check (FR18, AR31), a
  * builder's or the coordinator's, runs on what is left, before any temp
  * commit; a refusal writes nothing. `merge-tree`
  * applies the change onto `ontoSha`. A conflict is returned, never resolved.
@@ -26,6 +27,8 @@ export type CommitParams = {
   readonly bot: BotIdentity;
   /** The agent's commit message; sanitized before use. */
   readonly message: string;
+  /** Credentials the message's sanitizing redacts; default none. */
+  readonly secrets?: readonly string[];
   /** The write check's rules, from the same fresh `main`: a builder's or the coordinator's. */
   readonly rules: WriteRules | CoordinatorWriteRules;
   readonly signal: AbortSignal;
@@ -95,7 +98,7 @@ async function revertPaths(gitDir: string, tree: string, changes: readonly RawCh
   }
 }
 
-/** The write check's input: each changed path, with the own manifest's texts when it is a regular file on both sides. */
+/** The write check's input: each changed path and its new mode, with the own manifest's texts when it is a regular file on both sides. */
 async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
   const out: WriteChange[] = [];
   for (const c of changes) {
@@ -104,9 +107,9 @@ async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWrite
       if (!before.ok) return before;
       const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
       if (!after.ok) return after;
-      out.push({ path: c.path, storyFile: { before: before.value, after: after.value } });
+      out.push({ path: c.path, mode: c.newMode, storyFile: { before: before.value, after: after.value } });
     } else {
-      out.push({ path: c.path });
+      out.push({ path: c.path, mode: c.newMode });
     }
   }
   return ok(out);
@@ -133,7 +136,7 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
   if (!ancestor.ok) return ancestor;
   if (ancestor.value.code === 1) return err("invalid", `commitSession: baseSha ${baseSha} is not the session's start ${start} or an ancestor of it`);
   if (ancestor.value.code !== 0) return failed(ancestorArgs, ancestor.value);
-  const message = sanitizeAgentText(params.message);
+  const message = sanitizeAgentText(params.message, { secrets: params.secrets ?? [] });
   if (message.trim() === "") return err("invalid", "commitSession: the commit message is empty after sanitizing");
 
   const tree = await snapshotTree(gitDir, clone, start, signal);
@@ -145,9 +148,11 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
     return err("invalid", `commitSession: the working tree adds or changes a gitlink (embedded repository): ${links.join(", ")}`);
   }
 
-  // Epic context files are the coordinator's: a builder session's change to one is set back to `baseSha`'s version.
+  // Epic context files are the coordinator's, and a superseded spec stays as `main` has it:
+  // a builder session's change to one is set back to `baseSha`'s version.
   const rules = params.rules;
-  const contextChanges = rules.role === "builder" ? diff.value.filter((c) => epicContextMatch(rules.epicContextPath, c.path)) : [];
+  const contextChanges =
+    rules.role === "builder" ? diff.value.filter((c) => rules.superseded.includes(c.path) || epicContextMatch(rules.epicContextPath, c.path)) : [];
   const reverted = contextChanges.map((c) => c.path);
   let squash = tree.value;
   if (contextChanges.length > 0) {

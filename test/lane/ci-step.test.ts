@@ -14,6 +14,7 @@ import {
   ciLogText,
   conflictLogText,
   createCiStep,
+  mergeComment,
   type CiSessionDone,
   type CiSessionRequest,
   type CiStepDeps,
@@ -222,7 +223,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
   const sessions: CiSessionRequest[] = [];
   const regenerations: RegenerateRequest[] = [];
   const prSteps: PrStepInput[] = [];
-  const replies = [...(o.sessions ?? [ok({ result: buildResult(), specPath: `${SPEC_DIR}/spec-1-1-first.md` })])];
+  const replies = [...(o.sessions ?? [ok({ result: buildResult(), specPath: `${SPEC_DIR}/spec-1-1-first.md`, superseded: [] })])];
   const logs: string[] = [];
   const realPrStep = createPrStep({ forge: spied.forge, committer: committer(fake), identity: ALICE, repo: "xaravel/xarabot", sleep: async () => {}, random: () => 0 });
   const scratch = o.scratch ?? join(tempDir(), "scratch");
@@ -292,6 +293,12 @@ describe("ciLogText and conflictLogText", () => {
     expect(text).toContain("conflict markers");
     expect(text).toContain("- src/a.ts\n- src/b.ts\n");
     expect(text).not.toContain("lockfiles conflicted");
+  });
+
+  test("the merge comment is capped at the comment limit", () => {
+    const text = mergeComment({ storyId: "1.1", mainSha: "m".repeat(40), headSha: "h".repeat(40), resolved: Array.from({ length: 5000 }, (_, i) => `path/${i}/${"r".repeat(20)}`) });
+    expect(text.length).toBe(65_536);
+    expect(text.endsWith("\n\n[truncated by xarabot]")).toBe(true);
   });
 
   test("lockfiles are listed apart: main's version, no markers, regenerate them", () => {
@@ -503,15 +510,35 @@ describe("createCiStep", () => {
   });
 
   test("fix blocked: parked blocked verification", async () => {
-    const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("blocked"), specPath: "x.md" })] });
+    const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("blocked"), specPath: null, superseded: [] })] });
     const out = await w.run();
     expect(out).toMatchObject({ outcome: "progress", state: "parked" });
     expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "verification" } });
     expect(w.prSteps).toEqual([]);
   });
 
+  test("a done fix hands its spec and superseded specs to the PR step", async () => {
+    const old = `${SPEC_DIR}/spec-1-1-old.md`;
+    const w = await world({
+      checks: [[failure("lint")], [success("lint")]],
+      sessions: [ok({ result: buildResult(), specPath: `${SPEC_DIR}/spec-1-1-first.md`, superseded: [old] })],
+    });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.prSteps).toHaveLength(1);
+    expect(w.prSteps[0]).toMatchObject({ kind: "fix", specPath: `${SPEC_DIR}/spec-1-1-first.md`, superseded: [old] });
+  });
+
+  test("a done fix with no spec file is a failed attempt, with no PR step", async () => {
+    const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult(), specPath: null, superseded: [] })] });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("no spec file");
+    expect(w.prSteps).toEqual([]);
+  });
+
   test("fix no-op: parked blocked no-op", async () => {
-    const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("no-op"), specPath: "x.md" })] });
+    const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("no-op"), specPath: null, superseded: [] })] });
     const out = await w.run();
     expect(out).toMatchObject({ outcome: "progress", state: "parked" });
     expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "no-op" } });
