@@ -1,0 +1,8 @@
+schema_version: 1
+steps:
+  - id: github-settings
+    text: Change GitHub repository settings, rulesets, secrets, or the App's permissions or installations.
+  - id: ci-workflow
+    text: Write or change anything under .github/, including the CI workflow.
+  - id: npm-publish
+    text: Publish to npm or handle publish credentials.
