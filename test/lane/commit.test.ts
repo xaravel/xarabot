@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { runGit } from "../../src/adapters/forge/github/runner-git.ts";
 import { headRef, rebuildClone, saveWip, wipRef, type RebuildParams } from "../../src/lane/clone.ts";
 import { commitSession, type CommitParams } from "../../src/lane/commit.ts";
-import { BOT, BRANCH, cleanup, commit, files, IDENTITY, live, plainClone, rg, setup, tempDir, UNIT, value, type Repo } from "./git-fixture.ts";
+import { BOT, BRANCH, cleanup, commit, EPIC_CONTEXT, files, IDENTITY, live, plainClone, rg, rules, setup, SPEC_PATH, STORY_FILE, tempDir, UNIT, value, type Repo } from "./git-fixture.ts";
 
 afterEach(cleanup);
 
@@ -13,7 +13,7 @@ function rebuild(repo: Repo, sha: string, over: Partial<RebuildParams> = {}): Re
 }
 
 function session(repo: Repo, baseSha: string, ontoSha: string, over: Partial<CommitParams> = {}): CommitParams {
-  return { gitDir: repo.gitDir, clone: repo.clone, baseSha, ontoSha, bot: BOT, message: "Story 1.15: clone\n", ...live(), ...over };
+  return { gitDir: repo.gitDir, clone: repo.clone, baseSha, ontoSha, bot: BOT, message: "Story 1.15: clone\n", rules: rules(), ...live(), ...over };
 }
 
 function kind(r: { ok: boolean; error?: { kind: string } }): string {
@@ -147,6 +147,198 @@ describe("commitSession", () => {
     expect(kind(await commitSession(session(repo, base, "f".repeat(40))))).toBe("missing-object");
     value(await saveWip({ gitDir: repo.gitDir, clone: repo.clone, ...live() }));
     expect(kind(await commitSession(session(repo, base, base)))).toBe("no-session");
+  });
+});
+
+describe("commitSession: the write check", () => {
+  const MANIFEST = '---\nstory_id: "1.15"\nepic: 1\nstatus: ready\nglobs: ["src/**"]\n---\n\nBody.\n';
+  const SPRINT = "_bmad-output/implementation-artifacts/sprint-status.yaml";
+  const RETRO = "_bmad-output/implementation-artifacts/retro-gates.yaml";
+  const write = (repo: Repo, path: string, text: string) => {
+    mkdirSync(dirname(join(repo.clone, path)), { recursive: true });
+    writeFileSync(join(repo.clone, path), text);
+  };
+  const baseFiles = {
+    "src/a.ts": "a\n",
+    "CLAUDE.md": "rules\n",
+    ".github/workflows/ci.yml": "on: push\n",
+    [STORY_FILE]: MANIFEST,
+    "stories/1.1.md": MANIFEST.replace('"1.15"', '"1.1"'),
+    [SPEC_PATH]: "---\nstatus: ready\n---\n",
+    [EPIC_CONTEXT]: "# Epic 1 Context: One\n",
+    [SPRINT]: "development_status: {}\n",
+    [RETRO]: "verdicts: {}\n",
+  };
+  const noHead = async (repo: Repo) => expect(await rg(repo.gitDir, ["for-each-ref", "refs/xarabot/head/"])).toBe("");
+
+  test("refused: nested agent config, CLAUDE.md and .github, in path order; nothing written to the head ref", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, "src/a.ts", "SESSION\n");
+    write(repo, "pkg/.claude/settings.json", "{}\n");
+    write(repo, "CLAUDE.md", "mine\n");
+    write(repo, ".github/workflows/ci.yml", "on: pull_request\n");
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [
+        { path: ".github/workflows/ci.yml", class: "github" },
+        { path: "CLAUDE.md", class: "agent-config" },
+        { path: "pkg/.claude/settings.json", class: "agent-config" },
+      ],
+      reverted: [],
+    });
+    await noHead(repo);
+  });
+
+  test("refused: a delete and a rename count, as a delete plus an add", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    rmSync(join(repo.clone, SPRINT));
+    rmSync(join(repo.clone, "stories/1.1.md"));
+    write(repo, "stories/1.1-moved.txt", MANIFEST);
+    const r = value(await commitSession(session(repo, base, base)));
+    expect(r).toEqual({
+      kind: "refused",
+      refusals: [
+        { path: SPRINT, class: "coordinator-file" },
+        { path: "stories/1.1.md", class: "manifest" },
+      ],
+      reverted: [],
+    });
+    await noHead(repo);
+  });
+
+  test("the own spec, the own manifest's status line and src are committed", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, SPEC_PATH, "---\nstatus: done\n---\n");
+    write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: done"));
+    write(repo, "src/a.ts", "SESSION\n");
+    const r = value(await commitSession(session(repo, base, base)));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(r.reverted).toBeUndefined();
+    const out = await files(repo.gitDir, r.head_sha);
+    expect(out[SPEC_PATH]).toBe("---\nstatus: done\n---");
+    expect(out[STORY_FILE]).toBe(MANIFEST.replace("status: ready", "status: done").trimEnd());
+    expect(out["src/a.ts"]).toBe("SESSION");
+  });
+
+  test("the own manifest: a non-status edit is refused; an executable bit loses the exception", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, STORY_FILE, MANIFEST.replace('globs: ["src/**"]', 'globs: ["**"]'));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({ kind: "refused", refusals: [{ path: STORY_FILE, class: "manifest" }], reverted: [] });
+    write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: done"));
+    chmodSync(join(repo.clone, STORY_FILE), 0o755);
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({ kind: "refused", refusals: [{ path: STORY_FILE, class: "manifest" }], reverted: [] });
+    await noHead(repo);
+  });
+
+  test("Epic context: an edit is set back to base and an added one removed, with the rest committed", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    const added = "_bmad-output/implementation-artifacts/epic-2-context.md";
+    write(repo, EPIC_CONTEXT, "# Epic 1 Context: mine\n");
+    write(repo, added, "# Epic 2 Context: new\n");
+    write(repo, "src/a.ts", "SESSION\n");
+    const r = value(await commitSession(session(repo, base, base)));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(r.reverted).toEqual([EPIC_CONTEXT, added]);
+    const out = await files(repo.gitDir, r.head_sha);
+    expect(out[EPIC_CONTEXT]).toBe("# Epic 1 Context: One");
+    expect(out[added]).toBeUndefined();
+    expect(out["src/a.ts"]).toBe("SESSION");
+  });
+
+  test("Epic context: the revert alone leaves an empty commit; a deleted one is restored", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, EPIC_CONTEXT, "# Epic 1 Context: mine\n");
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({ kind: "empty", reverted: [EPIC_CONTEXT] });
+    rmSync(join(repo.clone, EPIC_CONTEXT));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({ kind: "empty", reverted: [EPIC_CONTEXT] });
+    await noHead(repo);
+  });
+
+  test("Epic context reverts are reported with a refusal too", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, EPIC_CONTEXT, "# Epic 1 Context: mine\n");
+    write(repo, RETRO, "verdicts:\n  \"1\": accepted\n");
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [{ path: RETRO, class: "coordinator-file" }],
+      reverted: [EPIC_CONTEXT],
+    });
+  });
+
+  test("an approved Infrastructure Story commits .github and agent config, never .xarabot", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { ...baseFiles, ".xarabot/policy.yaml": "schema_version: 1\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, ".github/workflows/ci.yml", "on: pull_request\n");
+    write(repo, "CLAUDE.md", "mine\n");
+    const infra = rules({ infrastructureApproved: true });
+    const r = value(await commitSession(session(repo, base, base, { rules: infra })));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect((await files(repo.gitDir, r.head_sha))[".github/workflows/ci.yml"]).toBe("on: pull_request");
+    write(repo, ".xarabot/policy.yaml", "schema_version: 1\nprotected_paths: []\n");
+    expect(value(await commitSession(session(repo, base, base, { rules: infra })))).toEqual({
+      kind: "refused",
+      refusals: [{ path: ".xarabot/policy.yaml", class: "xarabot" }],
+      reverted: [],
+    });
+  });
+
+  test("a .claude symlink to an unprotected folder is refused as agent-config", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, "src/conf/settings.json", "{}\n");
+    symlinkSync("src/conf", join(repo.clone, ".claude"));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [{ path: ".claude", class: "agent-config" }],
+      reverted: [],
+    });
+    await noHead(repo);
+  });
+
+  test("an Epic context file replaced by a directory: the check and the commit see the same squashed tree", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    rmSync(join(repo.clone, EPIC_CONTEXT));
+    write(repo, `${EPIC_CONTEXT}/CLAUDE.md`, "planted\n");
+    const r = value(await commitSession(session(repo, base, base)));
+    // The revert restores the file, which drops the directory's files from the squash: nothing is left to check or commit.
+    expect(r).toEqual({ kind: "empty", reverted: [EPIC_CONTEXT] });
+    await noHead(repo);
+  });
+
+  test.each([
+    ["a retro verdict", "verdicts:\n  \"1\": rejected\nitems: {}\ngo: {}\n"],
+    ["a retro item", "verdicts:\n  \"1\": accepted\nitems:\n  \"1\": [done]\ngo: {}\n"],
+    ["a checkpoint go", "verdicts:\n  \"1\": accepted\nitems: {}\ngo:\n  \"1\": true\n"],
+  ])("retro-gates.yaml: %s changed -> refused coordinator-file", async (_name, text) => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { ...baseFiles, [RETRO]: "verdicts:\n  \"1\": accepted\nitems: {}\ngo: {}\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, RETRO, text);
+    write(repo, "src/a.ts", "SESSION\n");
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [{ path: RETRO, class: "coordinator-file" }],
+      reverted: [],
+    });
+    await noHead(repo);
   });
 });
 

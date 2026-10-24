@@ -1,4 +1,5 @@
 import type { BotIdentity } from "../core/bot-identity.ts";
+import type { WriteRules } from "../core/lane/write-check.ts";
 import { err, type Result } from "../core/result.ts";
 import { failed, gitRun, needCommit, readMarker } from "./clone.ts";
 import { commitSession, type CommitOutcome } from "./commit.ts";
@@ -9,7 +10,8 @@ import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
  * against the fake forge, whose SHAs are not real git objects. The git
  * committer fetches `ontoSha` only when `runner.git` lacks it, measures the
  * session's change from `merge-base(start, ontoSha)` and makes the one
- * bot-authored commit through `commitSession`.
+ * bot-authored commit through `commitSession`, whose write check sees only
+ * that change, so `main`'s own changes never trip it.
  */
 
 export type CommitRequest = {
@@ -18,6 +20,8 @@ export type CommitRequest = {
   readonly ontoSha: string;
   /** The agent's message; `commitSession` sanitizes it. */
   readonly message: string;
+  /** The write check's rules, built from the same fresh `main`. */
+  readonly rules: WriteRules;
   readonly signal: AbortSignal;
 };
 
@@ -67,7 +71,7 @@ export function createGitCommitter(params: GitCommitterParams): Committer {
     if (base.value.code !== 0) return failed(args, base.value);
     const baseSha = base.value.stdout.trim();
 
-    return commitSession({ gitDir, clone, baseSha, ontoSha, bot, message: r.message, signal });
+    return commitSession({ gitDir, clone, baseSha, ontoSha, bot, message: r.message, rules: r.rules, signal });
   };
 
   return {

@@ -1,5 +1,7 @@
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
+import { checkWrite, epicContextMatch, type WriteChange, type WriteRefusal, type WriteRules } from "../core/lane/write-check.ts";
 import { err, ok } from "../core/result.ts";
 import { sanitizeAgentText } from "../core/sanitize.ts";
 import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, snapshotTree, type CloneResult } from "./clone.ts";
@@ -7,8 +9,10 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
 /**
  * Turns a finished session's working tree into one bot-authored commit,
  * three-way merged onto `origin/main` (AR16, FR13). The change is the
- * snapshot against `baseSha`; `merge-tree` applies it onto `ontoSha`. A
- * conflict is returned, never resolved.
+ * snapshot against `baseSha`. Epic context changes are reverted to
+ * `baseSha`'s version, then the write check (FR18, AR31) runs on what is
+ * left, before any temp commit; a refusal writes nothing. `merge-tree`
+ * applies the change onto `ontoSha`. A conflict is returned, never resolved.
  */
 
 export type CommitParams = {
@@ -21,26 +25,88 @@ export type CommitParams = {
   readonly bot: BotIdentity;
   /** The agent's commit message; sanitized before use. */
   readonly message: string;
+  /** The write check's rules, from the same fresh `main`. */
+  readonly rules: WriteRules;
   readonly signal: AbortSignal;
 };
 
 export type CommitOutcome =
-  | { readonly kind: "committed"; readonly base_sha: string; readonly head_sha: string }
+  | { readonly kind: "committed"; readonly base_sha: string; readonly head_sha: string; readonly reverted?: readonly string[] }
   | { readonly kind: "conflict"; readonly paths: readonly string[] }
-  | { readonly kind: "empty" };
+  | { readonly kind: "empty"; readonly reverted?: readonly string[] }
+  /** The write check refused the change: nothing is committed. */
+  | { readonly kind: "refused"; readonly refusals: readonly WriteRefusal[]; readonly reverted: readonly string[] };
 
 const GITLINK = "160000";
+const REGULAR = "100644";
+const ABSENT = "000000";
 
-/** The paths `tree` adds or changes as a gitlink against `base`. */
-async function gitlinks(gitDir: string, base: string, tree: string, signal: AbortSignal): Promise<CloneResult<string[]>> {
+/** One `diff-tree --raw` entry. */
+type RawChange = {
+  readonly oldMode: string;
+  readonly newMode: string;
+  readonly oldSha: string;
+  readonly newSha: string;
+  readonly status: string;
+  readonly path: string;
+};
+
+/** Every path `tree` changes against `base`; a rename is a delete plus an add. */
+async function rawDiff(gitDir: string, base: string, tree: string, signal: AbortSignal): Promise<CloneResult<RawChange[]>> {
   const r = await git(gitDir, ["diff-tree", "-r", "-z", "--no-renames", "--raw", base, tree], { signal });
   if (!r.ok) return r;
   const parts = r.value.split("\0");
-  const out: string[] = [];
+  const out: RawChange[] = [];
   for (let i = 0; i + 1 < parts.length; i += 2) {
-    const meta = (parts[i] as string).split(" ");
-    const path = parts[i + 1] as string;
-    if (meta[1] === GITLINK && !(meta[4] ?? "").startsWith("D")) out.push(path);
+    const [oldMode = "", newMode = "", oldSha = "", newSha = "", status = ""] = (parts[i] as string).split(" ");
+    out.push({ oldMode: oldMode.replace(/^:/, ""), newMode, oldSha, newSha, status, path: parts[i + 1] as string });
+  }
+  return ok(out);
+}
+
+/** The paths a raw diff adds or changes as a gitlink (embedded repository). */
+function gitlinks(changes: readonly RawChange[]): string[] {
+  return changes.filter((c) => c.newMode === GITLINK && !c.status.startsWith("D")).map((c) => c.path);
+}
+
+/** `tree` with each of `changes` set back to its old side: restored, or removed when it was added. */
+async function revertPaths(gitDir: string, tree: string, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<string>> {
+  let tmp: string;
+  try {
+    tmp = mkdtempSync(join(gitDir, "xarabot-revert-"));
+  } catch (e) {
+    return err("git", `revert: cannot create a temp index in ${gitDir}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const indexFile = join(tmp, "index");
+  try {
+    const seeded = await git(gitDir, ["read-tree", tree], { signal, indexFile });
+    if (!seeded.ok) return seeded;
+    const info = changes
+      .map((c) => (c.oldMode === ABSENT ? `0 ${"0".repeat(c.oldSha.length)}\t${c.path}\0` : `${c.oldMode} ${c.oldSha}\t${c.path}\0`))
+      .join("");
+    const updated = await git(gitDir, ["update-index", "-z", "--index-info"], { signal, indexFile, stdin: info });
+    if (!updated.ok) return updated;
+    const written = await git(gitDir, ["write-tree"], { signal, indexFile });
+    if (!written.ok) return written;
+    return ok(written.value.trim());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** The write check's input: each changed path, with the own manifest's texts when it is a regular file on both sides. */
+async function writeChanges(gitDir: string, rules: WriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
+  const out: WriteChange[] = [];
+  for (const c of changes) {
+    if (c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
+      const before = await git(gitDir, ["cat-file", "blob", c.oldSha], { signal });
+      if (!before.ok) return before;
+      const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
+      if (!after.ok) return after;
+      out.push({ path: c.path, storyFile: { before: before.value, after: after.value } });
+    } else {
+      out.push({ path: c.path });
+    }
   }
   return ok(out);
 }
@@ -71,13 +137,37 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
 
   const tree = await snapshotTree(gitDir, clone, start, signal);
   if (!tree.ok) return tree;
-  const links = await gitlinks(gitDir, baseSha, tree.value, signal);
-  if (!links.ok) return links;
-  if (links.value.length > 0) {
-    return err("invalid", `commitSession: the working tree adds or changes a gitlink (embedded repository): ${links.value.join(", ")}`);
+  const diff = await rawDiff(gitDir, baseSha, tree.value, signal);
+  if (!diff.ok) return diff;
+  const links = gitlinks(diff.value);
+  if (links.length > 0) {
+    return err("invalid", `commitSession: the working tree adds or changes a gitlink (embedded repository): ${links.join(", ")}`);
   }
 
-  const temp = await git(gitDir, ["commit-tree", tree.value, "-p", baseSha], { signal, identity: RUNNER_IDENTITY, stdin: "session snapshot\n" });
+  // Epic context files are the coordinator's: a session's change to one is set back to `baseSha`'s version.
+  const contextChanges = diff.value.filter((c) => epicContextMatch(params.rules.epicContextPath, c.path));
+  const reverted = contextChanges.map((c) => c.path);
+  let squash = tree.value;
+  if (contextChanges.length > 0) {
+    const r = await revertPaths(gitDir, tree.value, contextChanges, signal);
+    if (!r.ok) return r;
+    squash = r.value;
+  }
+  const extra = reverted.length > 0 ? { reverted } : {};
+
+  // The write check, on the tree that is squashed: the session's own change with the reverts applied.
+  let own = diff.value;
+  if (squash !== tree.value) {
+    const again = await rawDiff(gitDir, baseSha, squash, signal);
+    if (!again.ok) return again;
+    own = again.value;
+  }
+  const changes = await writeChanges(gitDir, params.rules, own, signal);
+  if (!changes.ok) return changes;
+  const refusals = checkWrite(params.rules, changes.value);
+  if (refusals.length > 0) return ok({ kind: "refused", refusals, reverted });
+
+  const temp = await git(gitDir, ["commit-tree", squash, "-p", baseSha], { signal, identity: RUNNER_IDENTITY, stdin: "session snapshot\n" });
   if (!temp.ok) return temp;
   const mergeArgs = [
     "merge-tree",
@@ -100,7 +190,7 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
 
   const ontoTree = await git(gitDir, ["rev-parse", `${ontoSha}^{tree}`], { signal });
   if (!ontoTree.ok) return ontoTree;
-  if (mergedTree.trim() === ontoTree.value.trim()) return ok({ kind: "empty" });
+  if (mergedTree.trim() === ontoTree.value.trim()) return ok({ kind: "empty", ...extra });
 
   const head = await git(gitDir, ["commit-tree", mergedTree.trim(), "-p", ontoSha], {
     signal,
@@ -111,5 +201,5 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
   const headSha = head.value.trim();
   const set = await git(gitDir, ["update-ref", headRef(unit), headSha], { signal });
   if (!set.ok) return set;
-  return ok({ kind: "committed", base_sha: ontoSha, head_sha: headSha });
+  return ok({ kind: "committed", base_sha: ontoSha, head_sha: headSha, ...extra });
 }

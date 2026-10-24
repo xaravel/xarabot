@@ -5,7 +5,7 @@ import { err, ok, type Result } from "../../src/core/result.ts";
 import { rebuildClone, type RebuildParams } from "../../src/lane/clone.ts";
 import { createGitCommitter } from "../../src/lane/committer.ts";
 import type { FetchShas } from "../../src/lane/workspace.ts";
-import { BOT, BRANCH, cleanup, commit, files, live, rg, setup, UNIT, value, type Repo } from "./git-fixture.ts";
+import { BOT, BRANCH, cleanup, commit, files, live, rg, rules, setup, UNIT, value, type Repo } from "./git-fixture.ts";
 
 afterEach(cleanup);
 
@@ -42,7 +42,7 @@ describe("createGitCommitter", () => {
     writeFileSync(join(repo.clone, "a"), "a1\nSESSION\na3\n");
     const f = noFetch();
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: f.fetch });
-    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it\n\nCo-Authored-By: X <x@y>\n", ...live() }));
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it\n\nCo-Authored-By: X <x@y>\n", rules: rules(), ...live() }));
     if (r.kind !== "committed") throw new Error(r.kind);
     expect(f.calls).toEqual([]);
     expect(r.base_sha).toBe(onto);
@@ -69,13 +69,13 @@ describe("createGitCommitter", () => {
       return plainFetch(repo.gitDir, other.gitDir, "refs/x/onto");
     };
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch });
-    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it", ...live() }));
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: Did it", rules: rules(), ...live() }));
     if (r.kind !== "committed") throw new Error(r.kind);
     expect(calls).toEqual([[onto]]);
     expect(await files(repo.gitDir, r.head_sha)).toEqual({ a: "SESSION", b: "MAIN" });
 
     // A second commit finds ontoSha present and fetches nothing.
-    value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: again", ...live() }));
+    value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: again", rules: rules(), ...live() }));
     expect(calls).toEqual([[onto]]);
   });
 
@@ -86,7 +86,7 @@ describe("createGitCommitter", () => {
     const f = noFetch();
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: f.fetch });
     const missing = "e".repeat(40);
-    const r = await committer.commit({ unit: UNIT, ontoSha: missing, message: "m", ...live() });
+    const r = await committer.commit({ unit: UNIT, ontoSha: missing, message: "m", rules: rules(), ...live() });
     expect(r.ok ? "ok" : r.error.kind).toBe("fetch");
     expect(f.calls).toEqual([[missing]]);
   });
@@ -99,7 +99,7 @@ describe("createGitCommitter", () => {
     value(await rebuildClone(rebuild(repo, head)));
     writeFileSync(join(repo.clone, "c"), "SESSION\n");
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
-    const r = value(await committer.commit({ unit: UNIT, ontoSha: m1, message: "1.15: more", ...live() }));
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: m1, message: "1.15: more", rules: rules(), ...live() }));
     if (r.kind !== "committed") throw new Error(r.kind);
     expect(r.base_sha).toBe(m1);
     expect(await rg(repo.gitDir, ["log", "-1", "--format=%P", r.head_sha])).toBe(m1);
@@ -112,7 +112,7 @@ describe("createGitCommitter", () => {
     value(await rebuildClone(rebuild(repo, base, { unit: "story:9.9", branch: "story/9.9" })));
     writeFileSync(join(repo.clone, "a"), "b\n");
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
-    const r = await committer.commit({ unit: UNIT, ontoSha: base, message: "m", ...live() });
+    const r = await committer.commit({ unit: UNIT, ontoSha: base, message: "m", rules: rules(), ...live() });
     expect(r.ok ? "ok" : r.error.kind).toBe("no-session");
     expect(await rg(repo.gitDir, ["for-each-ref", "refs/xarabot/head/"])).toBe("");
   });
@@ -123,7 +123,44 @@ describe("createGitCommitter", () => {
     const unrelated = await commit(repo.gitDir, { z: "z\n" });
     value(await rebuildClone(rebuild(repo, base)));
     const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
-    const r = await committer.commit({ unit: UNIT, ontoSha: unrelated, message: "m", ...live() });
+    const r = await committer.commit({ unit: UNIT, ontoSha: unrelated, message: "m", rules: rules(), ...live() });
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+});
+
+describe("createGitCommitter: the write check", () => {
+  const CI = ".github/workflows/ci.yml";
+  const RETRO = "_bmad-output/implementation-artifacts/retro-gates.yaml";
+  const SPRINT = "_bmad-output/implementation-artifacts/sprint-status.yaml";
+
+  test("main changed .github, retro-gates.yaml and sprint status after the start: a session that edited src commits, carrying main's versions", async () => {
+    const repo = await setup();
+    const start = { "src/a.ts": "a\n", [CI]: "on: push\n", [RETRO]: "verdicts: {}\n", [SPRINT]: "development_status: {}\n" };
+    const base = await commit(repo.gitDir, start);
+    const onto = await commit(repo.gitDir, { ...start, [CI]: "on: merge_group\n", [RETRO]: 'verdicts:\n  "1": accepted\n', [SPRINT]: "development_status:\n  epic-1: done\n" }, [base]);
+    value(await rebuildClone(rebuild(repo, base)));
+    writeFileSync(join(repo.clone, "src/a.ts"), "SESSION\n");
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: onto, message: "1.15: src", rules: rules(), ...live() }));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(await files(repo.gitDir, r.head_sha)).toEqual({
+      "src/a.ts": "SESSION",
+      [CI]: "on: merge_group",
+      [RETRO]: 'verdicts:\n  "1": accepted',
+      [SPRINT]: "development_status:\n  epic-1: done",
+    });
+  });
+
+  test("the request's rules reach the check: refused without approval, committed with it", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, { "src/a.ts": "a\n", [CI]: "on: push\n" });
+    value(await rebuildClone(rebuild(repo, base)));
+    writeFileSync(join(repo.clone, CI), "on: pull_request\n");
+    const committer = createGitCommitter({ gitDir: repo.gitDir, clone: repo.clone, bot: BOT, fetch: noFetch().fetch });
+    const refused = value(await committer.commit({ unit: UNIT, ontoSha: base, message: "1.15: ci", rules: rules(), ...live() }));
+    expect(refused).toEqual({ kind: "refused", refusals: [{ path: CI, class: "github" }], reverted: [] });
+    expect(await rg(repo.gitDir, ["for-each-ref", "refs/xarabot/head/"])).toBe("");
+    const r = value(await committer.commit({ unit: UNIT, ontoSha: base, message: "1.15: ci", rules: rules({ infrastructureApproved: true }), ...live() }));
+    expect(r.kind).toBe("committed");
   });
 });

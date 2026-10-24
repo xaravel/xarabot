@@ -87,6 +87,16 @@ function spied(forge: Forge): { forge: Forge; calls: ForgeOperation[] } {
   return { forge: out as Forge, calls };
 }
 
+/** A write-check refusal of an agent config path and the sprint status, with an Epic context revert. */
+const REFUSED: CommitOutcome = {
+  kind: "refused",
+  refusals: [
+    { path: ".claude/settings.json", class: "agent-config" },
+    { path: `${SPEC_DIR}/sprint-status.yaml`, class: "coordinator-file" },
+  ],
+  reverted: [`${SPEC_DIR}/epic-1-context.md`],
+};
+
 type StubCommitter = Committer & { readonly requests: CommitRequest[] };
 
 /** A committer returning `outcome`; `committed` gets a fresh head on `ontoSha`. */
@@ -352,6 +362,151 @@ describe("createPrStep", () => {
     expect(await w.ledger()).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "no-op" }, attempts: 0 });
   });
 
+  test("write check refused: parked blocked write-check, no push, no PR, each path in the log and the reason", async () => {
+    const w = await world({ commit: REFUSED });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(w.calls.filter((c) => c === "pushBranch" || c === "openPr" || c === "updatePr" || c === "comment")).toEqual([]);
+    expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "write-check" }, attempts: 0, pr: null });
+    expect(w.logs).toContain("PR step: write-check: refused .claude/settings.json (agent-config)");
+    expect(w.logs).toContain(`PR step: write-check: refused ${SPEC_DIR}/sprint-status.yaml (coordinator-file)`);
+    expect(w.logs).toContain(`PR step: write-check: reverted ${SPEC_DIR}/epic-1-context.md (Epic context)`);
+    expect(out.reason).toContain(`write-check: refused .claude/settings.json (agent-config), ${SPEC_DIR}/sprint-status.yaml (coordinator-file)`);
+    expect(w.fake.control.alerts()).toEqual([]);
+  });
+
+  test("a refused path with a line break is quoted in the log", async () => {
+    const w = await world({ commit: { kind: "refused", refusals: [{ path: "CLAUDE.md\nPR step: fake", class: "agent-config" }], reverted: [] } });
+    await w.run();
+    expect(w.logs).toContain('PR step: write-check: refused "CLAUDE.md\\nPR step: fake" (agent-config)');
+  });
+
+  test("line-separator and bidi characters in a refused path are quoted and escaped in the log", async () => {
+    const w = await world({
+      commit: {
+        kind: "refused",
+        refusals: [
+          { path: "a\u2028b.md", class: "protected-path" },
+          { path: "CLAUDE\u202edm.md", class: "agent-config" },
+        ],
+        reverted: [],
+      },
+    });
+    await w.run();
+    expect(w.logs).toContain('PR step: write-check: refused "a\\u2028b.md" (protected-path)');
+    expect(w.logs).toContain('PR step: write-check: refused "CLAUDE\\u202edm.md" (agent-config)');
+    expect(w.logs.some((l) => /[\u2028\u202e]/.test(l))).toBe(false);
+  });
+
+  test("a CI fix (kind fix) refused: parked write-check, no push, no updatePr, no comment", async () => {
+    const w = await world({ commit: REFUSED });
+    const h0 = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: h0 }, opts())).ok).toBe(true);
+    const opened = await w.fake.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const withPr = rec({ unit: UNIT, globs: ["src/s0/**"], pr: opened.value.number, pr_owner: "alice", head_sha: h0, base_sha: w.main });
+    w.fake.control.writeForeignLedger({ message: "pr [skip ci]", writes: tip([withPr]), deletes: [] });
+    const calls = w.calls.length;
+    const out = await w.run({ record: withPr, kind: "fix" });
+    expect(out).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(w.calls.slice(calls).filter((c) => c === "pushBranch" || c === "updatePr" || c === "openPr" || c === "comment")).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "write-check" }, head_sha: h0 });
+    expect((await prs(w.fake))[0]?.head_sha).toBe(h0);
+    expect(w.fake.control.comments(opened.value.number)).toEqual([]);
+  });
+
+  test("a committed outcome with an Epic context revert: the revert is noted, then push and PR as usual", async () => {
+    const w = await world();
+    const path = `${SPEC_DIR}/epic-1-context.md`;
+    const committer: Committer = {
+      commit: async (r) => ok({ kind: "committed", base_sha: r.ontoSha, head_sha: w.fake.control.makeCommit(), reverted: [path] }),
+    };
+    const out = await w.run({}, { committer });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.logs).toContain(`PR step: write-check: reverted ${path} (Epic context)`);
+    expect(w.calls.filter((c) => c === "pushBranch" || c === "openPr")).toEqual(["pushBranch", "openPr"]);
+    expect(await prs(w.fake)).toHaveLength(1);
+  });
+
+  test("refused, but the unit was lost before the park: failed, no ledger write by this lane, no push", async () => {
+    const w = await world({ commit: REFUSED });
+    const theirs = rec({ unit: UNIT, globs: ["src/s0/**"], generation: 2, owner: BOB.owner, host: BOB.host, lane: BOB.lane });
+    w.fake.control.writeForeignLedger({ message: "takeover [skip ci]", writes: tip([theirs]), deletes: [] });
+    const before = w.fake.control.ledgerLog().length;
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: null });
+    expect(out.reason).toContain("park: unit lost");
+    expect(w.fake.control.ledgerLog()).toHaveLength(before);
+    expect(w.calls).not.toContain("pushBranch");
+    expect(await w.ledger()).toEqual(theirs);
+  });
+
+  test("Epic context reverts are noted; a revert-only commit parks no-op as before", async () => {
+    const w = await world({ commit: { kind: "empty", reverted: [`${SPEC_DIR}/epic-1-context.md`] } });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(w.logs).toContain(`PR step: write-check: reverted ${SPEC_DIR}/epic-1-context.md (Epic context)`);
+    expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "no-op" } });
+  });
+
+  test("the commit request carries the rules from fresh main: coordinator files, manifests, authority, spec and Story file", async () => {
+    const w = await world();
+    await w.run();
+    expect(w.committer.requests[0]?.rules).toEqual({
+      coordinatorFiles: [`${SPEC_DIR}/sprint-status.yaml`, `${SPEC_DIR}/retro-gates.yaml`, "_bmad-output/planning-artifacts/epics.md"],
+      manifestsDir: "stories",
+      standingAuthorityPath: AUTHORITY,
+      protectedPaths: [],
+      epicContextPath: `${SPEC_DIR}/epic-<N>-context.md`,
+      specPath: `${SPEC_DIR}/spec-1-1-first.md`,
+      storyFile: "stories/1.1.md",
+      infrastructureApproved: false,
+    });
+  });
+
+  describe("Infrastructure approval on the fresh snapshot", () => {
+    const manifestSha = async (w: World): Promise<string> => {
+      const s = await w.fake.forge.snapshot(opts());
+      if (!s.ok) throw new Error(s.error.message);
+      return s.value.main.blob_shas["stories/1.1.md"] as string;
+    };
+    const approvedRun = async (o: { readonly infrastructure: boolean; readonly approval: "match" | "other" | "none"; readonly mainMoved?: boolean }) => {
+      const probe = await world();
+      const sha = await manifestSha(probe);
+      const approval = o.approval === "none" ? null : { by: "edanisko", manifest_sha: o.approval === "match" ? sha : "e".repeat(40) };
+      const w = await world({ record: { approval } });
+      if (o.mainMoved === true) {
+        const files = mainFiles();
+        files["stories/1.1.md"] = `${files["stories/1.1.md"] as string}\nEdited on main.\n`;
+        w.fake.control.setMain(files);
+      }
+      await w.run({ unit: { ...STORY, infrastructure: o.infrastructure, manifest_sha: sha } });
+      return w.committer.requests[0]?.rules.infrastructureApproved;
+    };
+
+    test("approved: Infrastructure, the record's approval and main's manifest all match", async () => {
+      expect(await approvedRun({ infrastructure: true, approval: "match" })).toBe(true);
+    });
+    test("not Infrastructure: never approved", async () => {
+      expect(await approvedRun({ infrastructure: false, approval: "match" })).toBe(false);
+    });
+    test("no approval, or one for another manifest SHA: not approved", async () => {
+      expect(await approvedRun({ infrastructure: true, approval: "none" })).toBe(false);
+      expect(await approvedRun({ infrastructure: true, approval: "other" })).toBe(false);
+    });
+    test("stale: the manifest changed on main since the approval", async () => {
+      expect(await approvedRun({ infrastructure: true, approval: "match", mainMoved: true })).toBe(false);
+    });
+  });
+
+  test("a config that does not load stops before the commit", async () => {
+    const w = await world({ authority: "missing" });
+    const out = await w.run();
+    expect(out.outcome).toBe("stop");
+    expect(w.committer.requests).toHaveLength(0);
+  });
+
   test("lost claim: another lane bumped the generation, so no push and no ledger edit", async () => {
     const w = await world();
     const theirs = rec({ unit: UNIT, globs: ["src/s0/**"], generation: 2, owner: BOB.owner, host: BOB.host, lane: BOB.lane });
@@ -538,6 +693,8 @@ type EndToEndHooks = {
   readonly before?: (fake: FakeForge) => Promise<void> | void;
   /** Runs inside the session, after the claim and before the PR step. */
   readonly during?: (fake: FakeForge) => void;
+  /** The stub committer's outcome; default a fresh commit. */
+  readonly commit?: CommitOutcome;
 };
 
 async function endToEnd(
@@ -587,7 +744,7 @@ async function endToEnd(
   };
   const prStep = createPrStep({
     forge: fake.forge,
-    committer: stubCommitter(fake),
+    committer: stubCommitter(fake, hooks.commit),
     identity: ALICE,
     repo: LANE.repo,
     sleep: async () => {},
@@ -640,6 +797,19 @@ describe("runLaneProcess with createPrStep", () => {
     expect(journal).toMatchObject({ outcome: "failed", state: "released", attempts: 1 });
     expect(journal.reason).toContain("pushBranch conflict");
     expect(await prs(fake)).toEqual([]);
+  });
+
+  test("a write-check refusal: the journal and unit log name each path; parked write-check, nothing pushed", async () => {
+    const { fake, journal, outcome } = await endToEnd([], { commit: REFUSED });
+    expect(outcome).toBe("progress");
+    expect(journal).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(journal.reason).toContain(".claude/settings.json (agent-config)");
+    expect(journal.reason).toContain(`${SPEC_DIR}/sprint-status.yaml (coordinator-file)`);
+    const log = readFileSync(journal.log, "utf8");
+    expect(log).toContain("write-check: refused .claude/settings.json (agent-config)");
+    expect(log).toContain(`write-check: refused ${SPEC_DIR}/sprint-status.yaml (coordinator-file)`);
+    expect(await prs(fake)).toEqual([]);
+    expect(await ledgerRecord(fake)).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "write-check" }, pr: null, head_sha: null });
   });
 
   test("the Standing Authority removed after the claim: stop, no PR, the record still claimed", async () => {

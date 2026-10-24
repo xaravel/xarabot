@@ -1,0 +1,413 @@
+import { describe, expect, test } from "bun:test";
+import { AGENT_CONFIG_PATHS, MANDATORY_PROTECTED_PATHS } from "../../../src/core/config/protected-paths.ts";
+import {
+  checkWrite,
+  epicContextMatch,
+  statusLineOnly,
+  WRITE_CLASSES,
+  writeRules,
+  type WriteChange,
+  type WriteClass,
+  type WriteRefusal,
+  type WriteRules,
+} from "../../../src/core/lane/write-check.ts";
+import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
+import type { AdapterName } from "../../../src/core/schemas/policy.ts";
+
+// ------------------------------------------------------------------ rules
+
+const SPRINT = CONFIG_DEFAULTS.sprint_status_path;
+const RETRO = CONFIG_DEFAULTS.retro_gates_path;
+const EPICS = CONFIG_DEFAULTS.epics_path;
+const AUTHORITY = "docs/standing-authority.md";
+const SPEC = "_bmad-output/implementation-artifacts/spec-2-3-x.md";
+const STORY = "stories/2.3.md";
+
+const RULES: WriteRules = writeRules({
+  config: {
+    sprint_status_path: SPRINT,
+    retro_gates_path: RETRO,
+    epics_path: EPICS,
+    manifests: { dir: "stories" },
+    standing_authority_path: AUTHORITY,
+    epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+  },
+  policy: { protected_paths: ["secrets/**", "**/*.pem"] },
+  specPath: SPEC,
+  storyFile: STORY,
+  infrastructureApproved: false,
+});
+
+const manifest = (lines: readonly string[], body = "Body.\n") => `---\n${lines.join("\n")}\n---\n\n${body}`;
+const M = ['story_id: "2.3"', "epic: 2", "title: The write check", "status: ready", 'globs: ["src/**"]'];
+const M0 = manifest(M);
+const withStatus = (s: string) => manifest(M.map((l) => (l.startsWith("status:") ? `status: ${s}` : l)));
+
+// ------------------------------------------------------------------ table
+
+/** The exceptions, as coverage tags. */
+const EXCEPTIONS = ["own-spec", "own-manifest-status", "infrastructure"] as const;
+type Tag = WriteClass | (typeof EXCEPTIONS)[number];
+
+type Case = {
+  readonly name: string;
+  readonly covers: readonly Tag[];
+  readonly rules?: Partial<WriteRules>;
+  readonly changes: readonly WriteChange[];
+  readonly refused: readonly WriteRefusal[];
+};
+
+const p = (path: string, storyFile?: { before: string; after: string }): WriteChange => (storyFile === undefined ? { path } : { path, storyFile });
+const no = (path: string, cls: WriteClass): WriteRefusal => ({ path, class: cls });
+
+const CLAUDE_CASES: readonly Case[] = [
+  // Ordinary.
+  { name: "an ordinary source edit", covers: [], changes: [p("src/a.ts")], refused: [] },
+  { name: "no change at all", covers: [], changes: [], refused: [] },
+
+  // coordinator-file.
+  { name: "sprint status modified", covers: ["coordinator-file"], changes: [p(SPRINT)], refused: [no(SPRINT, "coordinator-file")] },
+  { name: "epics.md deleted", covers: ["coordinator-file"], changes: [p(EPICS)], refused: [no(EPICS, "coordinator-file")] },
+  { name: "retro-gates.yaml (any verdict, item or go change; see the git cases)", covers: ["coordinator-file"], changes: [p(RETRO)], refused: [no(RETRO, "coordinator-file")] },
+  {
+    name: "case-folded sprint status",
+    covers: ["coordinator-file"],
+    changes: [p("_BMAD-output/implementation-artifacts/Sprint-Status.yaml")],
+    refused: [no("_BMAD-output/implementation-artifacts/Sprint-Status.yaml", "coordinator-file")],
+  },
+  {
+    name: "a coordinator file inside .xarabot is reported as coordinator-file",
+    covers: ["coordinator-file"],
+    rules: { coordinatorFiles: [".xarabot/sprint-status.yaml", RETRO, EPICS] },
+    changes: [p(".xarabot/sprint-status.yaml")],
+    refused: [no(".xarabot/sprint-status.yaml", "coordinator-file")],
+  },
+
+  // xarabot.
+  { name: ".xarabot/policy.yaml modified", covers: ["xarabot"], changes: [p(".xarabot/policy.yaml")], refused: [no(".xarabot/policy.yaml", "xarabot")] },
+  { name: ".xarabot nested add", covers: ["xarabot"], changes: [p(".xarabot/prompts/x.md")], refused: [no(".xarabot/prompts/x.md", "xarabot")] },
+  { name: "case-folded .Xarabot", covers: ["xarabot"], changes: [p(".Xarabot/config.yaml")], refused: [no(".Xarabot/config.yaml", "xarabot")] },
+  { name: "a file named .xarabot-notes is not .xarabot/**", covers: [], changes: [p(".xarabot-notes")], refused: [] },
+  { name: "a bare .xarabot entry (file or symlink)", covers: ["xarabot"], changes: [p(".xarabot"), p(".XARABOT")], refused: [no(".XARABOT", "xarabot"), no(".xarabot", "xarabot")] },
+  { name: "a nested bare .xarabot is not .xarabot/**", covers: [], changes: [p("docs/.xarabot")], refused: [] },
+  { name: "a bare .github entry (file or symlink)", covers: ["github"], changes: [p(".github"), p(".GitHub")], refused: [no(".GitHub", "github"), no(".github", "github")] },
+  {
+    name: "bare agent config folder names, top-level and nested (a file or symlink there)",
+    covers: ["agent-config"],
+    changes: [p(".claude"), p("pkg/.agents"), p("a/b/.codex"), p(".pi"), p("x/.Claude")],
+    refused: [
+      no(".claude", "agent-config"),
+      no(".pi", "agent-config"),
+      no("a/b/.codex", "agent-config"),
+      no("pkg/.agents", "agent-config"),
+      no("x/.Claude", "agent-config"),
+    ],
+  },
+  { name: "names that only contain an agent config folder name are not agent config", covers: [], changes: [p("docs/.claude-notes"), p("x.pi")], refused: [] },
+
+  // manifest.
+  { name: "another Story's manifest", covers: ["manifest"], changes: [p("stories/1.1.md")], refused: [no("stories/1.1.md", "manifest")] },
+  { name: "a new manifest added", covers: ["manifest"], changes: [p("stories/9.9.md")], refused: [no("stories/9.9.md", "manifest")] },
+  { name: "case-folded manifest", covers: ["manifest"], changes: [p("Stories/2.4.MD")], refused: [no("Stories/2.4.MD", "manifest")] },
+  { name: "a nested .md under the manifests dir is not a manifest", covers: [], changes: [p("stories/old/1.1.md")], refused: [] },
+  { name: "a non-.md file in the manifests dir is not a manifest", covers: [], changes: [p("stories/notes.txt")], refused: [] },
+  { name: "no manifests config: no manifests", covers: [], rules: { manifestsDir: null }, changes: [p("stories/1.1.md")], refused: [] },
+
+  // standing-authority.
+  { name: "the Standing Authority file", covers: ["standing-authority"], changes: [p(AUTHORITY)], refused: [no(AUTHORITY, "standing-authority")] },
+  {
+    name: "case-folded Standing Authority",
+    covers: ["standing-authority"],
+    changes: [p("Docs/Standing-Authority.md")],
+    refused: [no("Docs/Standing-Authority.md", "standing-authority")],
+  },
+  {
+    name: "a Standing Authority inside .github is reported as standing-authority",
+    covers: ["standing-authority"],
+    rules: { standingAuthorityPath: ".github/AUTHORITY.md" },
+    changes: [p(".github/AUTHORITY.md")],
+    refused: [no(".github/AUTHORITY.md", "standing-authority")],
+  },
+
+  // github.
+  { name: "a workflow modified", covers: ["github"], changes: [p(".github/workflows/ci.yml")], refused: [no(".github/workflows/ci.yml", "github")] },
+  { name: "case-folded .GitHub", covers: ["github"], changes: [p(".GitHub/workflows/x.yml")], refused: [no(".GitHub/workflows/x.yml", "github")] },
+  { name: "a nested .github is not .github/**", covers: [], changes: [p("docs/.github/x.yml")], refused: [] },
+
+  // agent-config.
+  {
+    name: "nested .claude added and CLAUDE.md edited",
+    covers: ["agent-config"],
+    changes: [p("pkg/.claude/settings.json"), p("CLAUDE.md")],
+    refused: [no("CLAUDE.md", "agent-config"), no("pkg/.claude/settings.json", "agent-config")],
+  },
+  {
+    name: "every agent config glob, top-level and nested",
+    covers: ["agent-config"],
+    changes: [
+      p(".agents/skills/x/SKILL.md"),
+      p("a/.codex/config.toml"),
+      p("x/y/.pi/settings.json"),
+      p(".mcp.json"),
+      p("pkg/.mcp.json"),
+      p("AGENTS.md"),
+      p("a/b/AGENTS.md"),
+      p(".claude/settings.json"),
+    ],
+    refused: [
+      no(".agents/skills/x/SKILL.md", "agent-config"),
+      no(".claude/settings.json", "agent-config"),
+      no(".mcp.json", "agent-config"),
+      no("AGENTS.md", "agent-config"),
+      no("a/.codex/config.toml", "agent-config"),
+      no("a/b/AGENTS.md", "agent-config"),
+      no("pkg/.mcp.json", "agent-config"),
+      no("x/y/.pi/settings.json", "agent-config"),
+    ],
+  },
+  {
+    name: "case-folded agent config",
+    covers: ["agent-config"],
+    changes: [p("Claude.md"), p("PKG/.Claude/x.json"), p("docs/agents.MD")],
+    refused: [no("Claude.md", "agent-config"), no("PKG/.Claude/x.json", "agent-config"), no("docs/agents.MD", "agent-config")],
+  },
+  {
+    name: "agent config under a policy Protected Path is reported as agent-config",
+    covers: ["agent-config"],
+    rules: { protectedPaths: ["src/**"] },
+    changes: [p("src/CLAUDE.md")],
+    refused: [no("src/CLAUDE.md", "agent-config")],
+  },
+
+  // protected-path.
+  { name: "a policy Protected Path", covers: ["protected-path"], changes: [p("secrets/key")], refused: [no("secrets/key", "protected-path")] },
+  { name: "a nested policy glob", covers: ["protected-path"], changes: [p("certs/a/server.pem")], refused: [no("certs/a/server.pem", "protected-path")] },
+  { name: "case-folded Protected Path", covers: ["protected-path"], changes: [p("Secrets/Key"), p("x.PEM")], refused: [no("Secrets/Key", "protected-path"), no("x.PEM", "protected-path")] },
+
+  // Several at once: only the refused paths, in path order.
+  {
+    name: "a session that edits src, adds .claude/settings.json and changes the sprint status",
+    covers: ["agent-config", "coordinator-file"],
+    changes: [p("src/a.ts"), p(SPRINT), p(".claude/settings.json")],
+    refused: [no(".claude/settings.json", "agent-config"), no(SPRINT, "coordinator-file")],
+  },
+
+  // Exception: the own spec file, exact path.
+  { name: "the own spec file", covers: ["own-spec"], rules: { protectedPaths: ["_bmad-output/**"] }, changes: [p(SPEC)], refused: [] },
+  {
+    name: "own spec: another Story's spec is not excepted",
+    covers: ["own-spec"],
+    rules: { protectedPaths: ["_bmad-output/**"] },
+    changes: [p("_bmad-output/implementation-artifacts/spec-2-4-y.md")],
+    refused: [no("_bmad-output/implementation-artifacts/spec-2-4-y.md", "protected-path")],
+  },
+  {
+    name: "own spec: a case variant of the spec path is not excepted",
+    covers: ["own-spec"],
+    rules: { protectedPaths: ["_bmad-output/**"] },
+    changes: [p("_BMAD-output/implementation-artifacts/spec-2-3-x.md")],
+    refused: [no("_BMAD-output/implementation-artifacts/spec-2-3-x.md", "protected-path")],
+  },
+
+  // Exception: the own manifest's status line.
+  { name: "own manifest: only the status line changes", covers: ["own-manifest-status"], changes: [p(STORY, { before: M0, after: withStatus("done") })], refused: [] },
+  {
+    name: "own manifest: a status line added where there was none",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: manifest(M.filter((l) => !l.startsWith("status:"))), after: M0 })],
+    refused: [],
+  },
+  {
+    name: "own manifest: the status line removed",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: manifest(M.filter((l) => !l.startsWith("status:"))) })],
+    refused: [],
+  },
+  {
+    name: "own manifest: the globs line changes",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: manifest(M.map((l) => (l.startsWith("globs:") ? 'globs: ["**"]' : l))) })],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: "own manifest: a title added next to the status",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: manifest([...M, "title2: x"]) })],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: "own manifest: two status lines",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: manifest([...M, "status: done"]) })],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: "own manifest: a body edit",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: manifest(M, "Body.\nstatus: done\n") })],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: "own manifest: no texts (not a regular file on both sides, or deleted)",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY)],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: "own manifest: another Story's manifest with a status-only change",
+    covers: ["own-manifest-status"],
+    changes: [p("stories/1.1.md", { before: M0, after: withStatus("done") })],
+    refused: [no("stories/1.1.md", "manifest")],
+  },
+  {
+    name: "own manifest: a case variant of its path",
+    covers: ["own-manifest-status"],
+    changes: [p("Stories/2.3.md", { before: M0, after: withStatus("done") })],
+    refused: [no("Stories/2.3.md", "manifest")],
+  },
+
+  // Exception: an approved Infrastructure Story.
+  {
+    name: "Infrastructure approved: .github, agent config, the Standing Authority and Protected Paths",
+    covers: ["infrastructure"],
+    rules: { infrastructureApproved: true },
+    changes: [p(".github/workflows/ci.yml"), p("CLAUDE.md"), p(".claude/settings.json"), p(AUTHORITY), p("secrets/key")],
+    refused: [],
+  },
+  {
+    name: "Infrastructure approved never covers .xarabot",
+    covers: ["infrastructure"],
+    rules: { infrastructureApproved: true },
+    changes: [p(".xarabot/policy.yaml")],
+    refused: [no(".xarabot/policy.yaml", "xarabot")],
+  },
+  {
+    name: "Infrastructure approved never covers manifests",
+    covers: ["infrastructure"],
+    rules: { infrastructureApproved: true },
+    changes: [p("stories/1.1.md"), p(STORY, { before: M0, after: manifest([...M, "infrastructure: true"]) })],
+    refused: [no("stories/1.1.md", "manifest"), no(STORY, "manifest")],
+  },
+  {
+    name: "Infrastructure approved never covers coordinator files",
+    covers: ["infrastructure"],
+    rules: { infrastructureApproved: true },
+    changes: [p(SPRINT), p(RETRO), p(EPICS)],
+    refused: [no(RETRO, "coordinator-file"), no(SPRINT, "coordinator-file"), no(EPICS, "coordinator-file")],
+  },
+  {
+    name: "Infrastructure not approved: .github is refused",
+    covers: ["infrastructure"],
+    rules: { infrastructureApproved: false },
+    changes: [p(".github/workflows/ci.yml")],
+    refused: [no(".github/workflows/ci.yml", "github")],
+  },
+];
+
+/** The write-check table, per adapter; Epic 3 fills the other adapters. */
+const TABLE: Partial<Record<AdapterName, readonly Case[]>> = {
+  claude: CLAUDE_CASES,
+};
+
+for (const [adapter, cases] of Object.entries(TABLE)) {
+  describe(`checkWrite (${adapter})`, () => {
+    test.each((cases ?? []).map((c) => [c.name, c] as const))("%s", (_name, c) => {
+      expect(checkWrite({ ...RULES, ...c.rules }, c.changes)).toEqual([...c.refused]);
+    });
+  });
+}
+
+describe("write-check table coverage", () => {
+  test.each(Object.keys(TABLE))("%s: a refusing case for every class, and an excepted and a limit case for every exception", (adapter) => {
+    const cases = TABLE[adapter as AdapterName] ?? [];
+    for (const cls of WRITE_CLASSES) {
+      const hit = cases.some((c) => c.covers.includes(cls) && c.refused.some((r) => r.class === cls));
+      expect([cls, hit]).toEqual([cls, true]);
+    }
+    for (const ex of EXCEPTIONS) {
+      const tagged = cases.filter((c) => c.covers.includes(ex));
+      expect([ex, tagged.some((c) => c.refused.length === 0)]).toEqual([ex, true]);
+      expect([ex, tagged.some((c) => c.refused.length > 0)]).toEqual([ex, true]);
+    }
+  });
+});
+
+// ------------------------------------------------------------- the parts
+
+describe("writeRules", () => {
+  test("takes the coordinator files, manifests dir, authority, policy paths and Epic context pattern from the config", () => {
+    expect(RULES).toEqual({
+      coordinatorFiles: [SPRINT, RETRO, EPICS],
+      manifestsDir: "stories",
+      standingAuthorityPath: AUTHORITY,
+      protectedPaths: ["secrets/**", "**/*.pem"],
+      epicContextPath: CONFIG_DEFAULTS.epic_context_path,
+      specPath: SPEC,
+      storyFile: STORY,
+      infrastructureApproved: false,
+    });
+  });
+});
+
+describe("AGENT_CONFIG_PATHS", () => {
+  test("the mandatory Protected Paths are .xarabot, .github, then the agent config globs, in order", () => {
+    expect(MANDATORY_PROTECTED_PATHS).toEqual([".xarabot/**", ".github/**", ...AGENT_CONFIG_PATHS]);
+    expect(AGENT_CONFIG_PATHS).toEqual(["**/.agents/**", "**/.claude/**", "**/.codex/**", "**/.pi/**", "**/.mcp.json", "**/AGENTS.md", "**/CLAUDE.md"]);
+  });
+});
+
+describe("epicContextMatch", () => {
+  const pattern = CONFIG_DEFAULTS.epic_context_path;
+  const dir = "_bmad-output/implementation-artifacts";
+  test.each([
+    [`${dir}/epic-2-context.md`, true],
+    [`${dir}/epic-12-context.md`, true],
+    [`${dir}/EPIC-2-Context.md`, true],
+    [`${dir}/epic-0-context.md`, false],
+    [`${dir}/epic-02-context.md`, false],
+    [`${dir}/epic-x-context.md`, false],
+    [`${dir}/epic--context.md`, false],
+    [`${dir}/epic-2-context.md.bak`, false],
+    [`${dir}/old/epic-2-context.md`, false],
+    [`x/${dir}/epic-2-context.md`, false],
+  ] as const)("%s -> %p", (path, want) => {
+    expect(epicContextMatch(pattern, path)).toBe(want);
+  });
+
+  test("every <N> must be the same number; regex characters in the pattern are literal", () => {
+    expect(epicContextMatch("docs/epic-<N>/context-<N>.md", "docs/epic-2/context-2.md")).toBe(true);
+    expect(epicContextMatch("docs/epic-<N>/context-<N>.md", "docs/epic-2/context-3.md")).toBe(false);
+    expect(epicContextMatch("a.b/(epic)-<N>+.md", "a.b/(epic)-1+.md")).toBe(true);
+    expect(epicContextMatch("a.b/(epic)-<N>+.md", "aXb/(epic)-1+.md")).toBe(false);
+    expect(epicContextMatch("no-placeholder.md", "no-placeholder.md")).toBe(false);
+  });
+});
+
+describe("statusLineOnly", () => {
+  test.each([
+    ["the status value changes", M0, withStatus("done"), true],
+    ["nothing changes", M0, M0, true],
+    ["a status line added", manifest(["a: 1"]), manifest(["a: 1", "status: done"]), true],
+    ["the status line moves", manifest(["status: ready", "a: 1"]), manifest(["a: 1", "status: done"]), true],
+    ["another field changes", M0, manifest(M.map((l) => (l === "epic: 2" ? "epic: 3" : l))), false],
+    ["a field added", M0, manifest([...M, "x: 1"]), false],
+    ["two status lines after", M0, manifest([...M, "status: done"]), false],
+    ["two status lines before", manifest([...M, "status: done"]), M0, false],
+    ["an indented status line is not top-level", manifest(["a:", "  status: x"]), manifest(["a:", "  status: y"]), false],
+    ["a status line in the body", manifest(["a: 1"], "status: x\n"), manifest(["a: 1"], "status: y\n"), false],
+    ["no frontmatter: a status line is body", "status: x\n", "status: y\n", false],
+    ["no closing ---: not frontmatter", "---\nstatus: x\n", "---\nstatus: y\n", false],
+    ["the frontmatter removed", M0, "Body.\n", false],
+    ["a statusx: line is not a status line", manifest(["statusx: a"]), manifest(["statusx: b"]), false],
+    ["a lone CR in the status line adds a key", M0, manifest(M.map((l) => (l.startsWith("status:") ? "status: done\rinfrastructure: true" : l))), false],
+    ["a lone CR in the status line before", manifest(M.map((l) => (l.startsWith("status:") ? "status: x\ry: 1" : l))), M0, false],
+    ["a trailing CR on the status line is fine", M0, manifest(M.map((l) => (l.startsWith("status:") ? "status: done\r" : l))), true],
+    ["an indented line after an added status line becomes its continuation", manifest(["a: x", "  b"]), manifest(["a: x", "status: s", "  b"]), false],
+    ["an indented line after a moved status line changes another field", manifest(["title: a", "status: s", "  b"]), manifest(["status: s", "title: a", "  b"]), false],
+    ["an unclosed quote in the status value", M0, manifest(M.map((l) => (l.startsWith("status:") ? 'status: "done' : l))), false],
+    ["a non-string status value", M0, manifest(M.map((l) => (l.startsWith("status:") ? "status: [done]" : l))), false],
+    ["an empty frontmatter is not a mapping", "---\n---\nBody\n", "---\n---\nBody\n", false],
+  ] as const)("%s -> %p", (_name, before, after, want) => {
+    expect(statusLineOnly(before, after)).toBe(want);
+  });
+});

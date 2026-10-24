@@ -2,6 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { openRunnerGit, runGit } from "../../src/adapters/forge/github/runner-git.ts";
+import { writeRules, type WriteRules } from "../../src/core/lane/write-check.ts";
+import { CONFIG_DEFAULTS } from "../../src/core/schemas/config.ts";
 
 /** Temp `runner.git`s and clones for the lane git tests, against real git. */
 
@@ -11,6 +13,32 @@ export const UNIT = "story:1.15";
 export const BRANCH = "story/1.15";
 
 export const live = (): { signal: AbortSignal } => ({ signal: AbortSignal.timeout(30_000) });
+
+/** The default config paths, manifests in `stories/`, Story 1.15's spec and manifest. */
+export const SPEC_PATH = "_bmad-output/implementation-artifacts/spec-1-15-clone.md";
+export const STORY_FILE = "stories/1.15.md";
+export const EPIC_CONTEXT = "_bmad-output/implementation-artifacts/epic-1-context.md";
+
+/** Write-check rules; with no override they refuse nothing the older cases write. */
+export function rules(over: Partial<WriteRules> = {}): WriteRules {
+  return {
+    ...writeRules({
+      config: {
+        sprint_status_path: CONFIG_DEFAULTS.sprint_status_path,
+        retro_gates_path: CONFIG_DEFAULTS.retro_gates_path,
+        epics_path: CONFIG_DEFAULTS.epics_path,
+        manifests: { dir: "stories" },
+        standing_authority_path: "docs/standing-authority.md",
+        epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+      },
+      policy: { protected_paths: [] },
+      specPath: SPEC_PATH,
+      storyFile: STORY_FILE,
+      infrastructureApproved: false,
+    }),
+    ...over,
+  };
+}
 
 const dirs: string[] = [];
 /** Removes every temp folder made so far; call from `afterEach`. */

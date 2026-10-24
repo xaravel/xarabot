@@ -1,8 +1,9 @@
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
+import { writeRules } from "../core/lane/write-check.ts";
 import { failAttempt, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import { sanitizeAgentText } from "../core/sanitize.ts";
-import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
+import { unitPath, UnitRecordSchema, type LaneIdentity, type UnitRecord } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { Committer } from "./committer.ts";
@@ -10,11 +11,13 @@ import { DEFAULT_CALL_TIMEOUT_MS, readsPath, writtenRecord, type PrStep, type Pr
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 
 /**
- * The PR step after a `done` result (FR6, FR13, FR22, NFR10, AR7, AR16, AR21,
- * AR44): one fresh snapshot, the bot commit onto its `main`, the Standing
- * Authority re-check on that `main`, a fencing heartbeat, a leased push, a
- * second fence and the PR opened (or the adopted one updated), the record's
- * `pr` and SHAs, and one 🤖 status comment. It never throws.
+ * The PR step after a `done` result (FR6, FR13, FR18, FR22, NFR10, AR7, AR16,
+ * AR21, AR31, AR44): one fresh snapshot, the Standing Authority re-check on
+ * its `main`, the bot commit onto that `main` behind the write check (a
+ * refusal parks the unit `blocked` `write-check` and pushes nothing), a
+ * fencing heartbeat, a leased push, a second fence and the PR opened (or the
+ * adopted one updated), the record's `pr` and SHAs, and one 🤖 status
+ * comment. It never throws.
  */
 
 export type PrStepDeps = {
@@ -67,6 +70,35 @@ class End {
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Control, line-separator and bidi characters: a path holding one is quoted in the log. */
+// oxlint-disable-next-line no-control-regex
+const UNSAFE = /[\u0000-\u001f\u007f\u0085\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+
+/** A path for a log line: as it is, or quoted with every unsafe character escaped. */
+export function shown(path: string): string {
+  if (!UNSAFE.test(path)) return path;
+  return JSON.stringify(path).replace(new RegExp(UNSAFE.source, "g"), (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
+ * An approved Infrastructure Story on the fresh snapshot: the Story is
+ * Infrastructure, its ledger record's approval names `manifest_sha`, and the
+ * manifest on `main` still has that blob SHA.
+ */
+export function infrastructureApproved(story: Pick<NextStory, "unit" | "infrastructure" | "manifest_path" | "manifest_sha">, snap: ForgeSnapshot): boolean {
+  if (!story.infrastructure) return false;
+  const text = snap.ledger.files[unitPath(story.unit)];
+  if (text === undefined) return false;
+  let approval: string | undefined;
+  try {
+    const parsed = UnitRecordSchema.safeParse(JSON.parse(text));
+    approval = parsed.success ? parsed.data.approval?.manifest_sha : undefined;
+  } catch {
+    return false;
+  }
+  return approval === story.manifest_sha && snap.main.blob_shas[story.manifest_path] === story.manifest_sha;
 }
 
 export function createPrStep(deps: PrStepDeps): PrStep {
@@ -192,7 +224,22 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       ontoSha = onto;
       note(`fresh main ${onto}`);
 
-      // 2. Commit.
+      // 2. Standing Authority re-check on this `main`; the write check's rules come from it too.
+      const config = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+      if (!config.ok) {
+        reasons.push(`config ${config.error.kind}: ${config.error.message}`);
+        note(`stop: config ${config.error.kind}: ${config.error.message}`);
+        throw end("stop", record.state);
+      }
+      const rules = writeRules({
+        config: config.value.repo.config,
+        policy: config.value.repo.policy,
+        specPath: input.specPath,
+        storyFile: story.manifest_path,
+        infrastructureApproved: infrastructureApproved(story, snap),
+      });
+
+      // 3. Commit, behind the write check.
       const commitTimeout = AbortSignal.timeout(callTimeoutMs);
       let committed: Awaited<ReturnType<Committer["commit"]>>;
       try {
@@ -200,6 +247,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
           unit,
           ontoSha: onto,
           message: `${story.story_id}: ${result.summary}`,
+          rules,
           signal: AbortSignal.any([input.signal, commitTimeout]),
         });
       } catch (e) {
@@ -208,6 +256,16 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       if (!committed.ok) return await failed(`commit ${committed.error.kind}: ${committed.error.message}`);
       const c = committed.value;
       if (c.kind === "conflict") return await failed(`commit conflict onto ${onto}: ${c.paths.join(", ")}`);
+      for (const path of c.reverted ?? []) note(`write-check: reverted ${shown(path)} (Epic context)`);
+      if (c.kind === "refused") {
+        for (const r of c.refusals) note(`write-check: refused ${shown(r.path)} (${r.class})`);
+        reasons.push(`write-check: refused ${c.refusals.map((r) => `${shown(r.path)} (${r.class})`).join(", ")}`);
+        note("write check refused: parking write-check");
+        const r = await swap(park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "write-check" }));
+        if (r.kind === "lost") lost("park", r.message);
+        if (r.kind === "failed") await failed(`park: ${r.message}`);
+        throw end("progress", record.state);
+      }
       if (c.kind === "empty") {
         reasons.push("no-op: the commit onto main is empty");
         note("commit empty: parking no-op");
@@ -218,14 +276,6 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       }
       note(`committed ${c.head_sha} onto ${c.base_sha}`);
       await overBudget();
-
-      // 3. Standing Authority re-check on the same `main`.
-      const config = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-      if (!config.ok) {
-        reasons.push(`config ${config.error.kind}: ${config.error.message}`);
-        note(`stop: config ${config.error.kind}: ${config.error.message}`);
-        throw end("stop", record.state);
-      }
 
       // 4. Fence.
       await beat("fence");
