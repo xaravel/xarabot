@@ -373,6 +373,19 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       const m = typeof id === "string" ? /^PR_(\d+)$/.exec(id) : null;
       return m === null || !pulls.has(Number(m[1])) ? undefined : Number(m[1]);
     };
+    if (/\.\.\. on Blob\b/.test(query)) {
+      if (vars["owner"] !== owner || vars["name"] !== name) {
+        return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: `Could not resolve to a Repository with the name '${String(vars["owner"])}/${String(vars["name"])}'.` }] });
+      }
+      const repository: Record<string, unknown> = {};
+      for (const [key, sha] of Object.entries(vars)) {
+        const m = /^o(\d+)$/.exec(key);
+        if (m === null) continue;
+        const bytes = typeof sha === "string" ? blobs.get(sha) : undefined;
+        repository[`b${m[1]}`] = bytes === undefined ? null : { text: new TextDecoder().decode(bytes), isTruncated: false, isBinary: false };
+      }
+      return json(200, { data: { repository } });
+    }
     if (/\benqueuePullRequest\b/.test(query)) {
       const n = byNode(vars["pullRequestId"]);
       if (n === undefined) return gqlError("NOT_FOUND", `Could not resolve to a node with the global id of '${String(vars["pullRequestId"])}'`);

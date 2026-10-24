@@ -63,8 +63,15 @@ export const DEFAULT_GIT_URL = "https://github.com";
 /** A list is read 100 entries a page, at most this many pages. */
 export const MAX_PAGES = 50;
 const PER_PAGE = 100;
-/** Blob reads a snapshot keeps in flight at once. */
-export const BLOB_READS_IN_FLIGHT = 8;
+/** Blobs read per GraphQL request. */
+export const BLOBS_PER_QUERY = 100;
+
+/** The GraphQL query reading `n` blobs by object id, as aliases `b0`… from variables `$o0`…. */
+function blobsQuery(n: number): string {
+  const vars = Array.from({ length: n }, (_, i) => `$o${i}: GitObjectID!`).join(", ");
+  const fields = Array.from({ length: n }, (_, i) => `b${i}: object(oid: $o${i}) { ... on Blob { text isTruncated isBinary } }`).join(" ");
+  return `query($owner: String!, $name: String!, ${vars}) { repository(owner: $owner, name: $name) { ${fields} } }`;
+}
 /** Check conclusions that are not failures. */
 const PASSING_CONCLUSIONS: readonly string[] = ["success", "neutral", "skipped"];
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -308,24 +315,42 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
   }
 
   /**
-   * Reads the blobs of `entries`, keyed by path, at most `BLOB_READS_IN_FLIGHT`
-   * at a time: GitHub answers a burst of parallel requests with a secondary
-   * rate limit. The first failure stops further reads.
+   * Reads the blobs of `entries`, keyed by path: one GraphQL request per
+   * `BLOBS_PER_QUERY` distinct blobs, never one request per file, which GitHub
+   * answers with a secondary rate limit. A blob GraphQL leaves out (truncated,
+   * binary or missing) is read over REST, one at a time.
    */
   async function readBlobs(ctx: Ctx, entries: readonly TreeEntry[]): Promise<ForgeResult<Record<string, string>>> {
-    const files: Record<string, string> = {};
-    let next = 0;
-    let failed: ForgeResult<never> | null = null;
-    const worker = async (): Promise<void> => {
-      while (failed === null && next < entries.length) {
-        const e = entries[next++] as TreeEntry;
-        const r = await readBlob(ctx, e.sha);
-        if (!r.ok) failed ??= r;
-        else files[e.path] = r.value;
+    const op = GITHUB_OPERATIONS.readBlobs;
+    const shas = [...new Set(entries.map((e) => e.sha))];
+    const texts = new Map<string, string>();
+    for (let start = 0; start < shas.length; start += BLOBS_PER_QUERY) {
+      const chunk = shas.slice(start, start + BLOBS_PER_QUERY);
+      const variables: Record<string, string> = { owner, name };
+      chunk.forEach((sha, i) => (variables[`o${i}`] = sha));
+      const r = await graphql(ctx, op, blobsQuery(chunk.length), variables);
+      if (!r.ok) return r;
+      if (r.value.errors.length > 0) return redacted(mapGraphqlErrors(op, r.value.errors, "transient"));
+      const repository = asObj(r.value.data?.["repository"]);
+      if (repository === undefined) return malformed(op, "no repository");
+      for (const [i, sha] of chunk.entries()) {
+        const blob = asObj(repository[`b${i}`]);
+        const text = blob?.["text"];
+        if (typeof text === "string" && blob?.["isTruncated"] !== true && blob?.["isBinary"] !== true) texts.set(sha, text);
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(BLOB_READS_IN_FLIGHT, entries.length) }, worker));
-    return failed ?? forgeOk(files);
+    }
+    const files: Record<string, string> = {};
+    for (const e of entries) {
+      let text = texts.get(e.sha);
+      if (text === undefined) {
+        const r = await readBlob(ctx, e.sha);
+        if (!r.ok) return r;
+        text = r.value;
+        texts.set(e.sha, text);
+      }
+      files[e.path] = text;
+    }
+    return forgeOk(files);
   }
 
   /** Creates the ledger branch at an empty root commit; a racing creator is `conflict`. */
