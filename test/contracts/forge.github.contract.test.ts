@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadAppCredentials, type AppCredentials } from "../../src/adapters/forge/github/credentials.ts";
 import { createGitHubForge, type SnapshotPart } from "../../src/adapters/forge/github/github-forge.ts";
 import { GITHUB_OPERATIONS, isSuccess, request, SWAP_CONFLICT_STATUS, type Operation } from "../../src/adapters/forge/github/http.ts";
 import { openRunnerGit, runGit, type GitIdentity } from "../../src/adapters/forge/github/runner-git.ts";
@@ -10,7 +9,7 @@ import { createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
 import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgePr, type ForgeResult, type GitSha } from "../../src/ports/forge.ts";
 import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
-import { isLive } from "../support/live.ts";
+import { cleanupScratch, LIVE_LOGIN, liveCredentials, liveGithubEnabled, liveRepo, prefixed } from "../support/live-github.ts";
 import { forgeContract, type ForgeFixture } from "./forge.contract.ts";
 
 /** The operations the GitHub adapter implements: all of them (Stories 1.8 to 1.10). */
@@ -102,57 +101,8 @@ forgeContract({
 
 // ------------------------------------------------------------ live
 
-const LIVE_REPO = process.env.XARABOT_LIVE_GITHUB_REPO ?? "";
-const LIVE_LOGIN = process.env.XARABOT_LIVE_GITHUB_LOGIN ?? "";
-const liveEnabled = isLive && LIVE_REPO !== "" && LIVE_LOGIN !== "";
-
-/** Test-only: deletes a scratch ledger branch. Not part of the adapter. */
-const DELETE_REF: Operation = { name: "deleteRef (live test cleanup)", method: "DELETE", permission: "contents: write" };
-
-function liveRepo(): { owner: string; name: string } {
-  const [owner, name] = LIVE_REPO.split("/");
-  if (owner === undefined || name === undefined || owner === "" || name === "") {
-    throw new Error("XARABOT_LIVE_GITHUB_REPO must be owner/name");
-  }
-  return { owner, name };
-}
-
-async function liveCredentials(): Promise<AppCredentials> {
-  const r = await loadAppCredentials({ login: LIVE_LOGIN, env: process.env });
-  if (!r.ok) throw new Error(r.error.message);
-  return r.value;
-}
-
 /** Test-only: lists a PR's comments. Not part of the adapter. */
 const LIST_COMMENTS: Operation = { name: "listComments (live test)", method: "GET", permission: "pull_requests: write" };
-
-const encodePath = (branch: string): string => branch.split("/").map(encodeURIComponent).join("/");
-
-/**
- * Wraps a forge so every branch a case names gets `prefix`, and maps the
- * branches in its results back. `touched` collects the real branch names.
- * Every `alert` condition gets the prefix too, so dedupe never crosses runs.
- */
-function prefixed(forge: Forge, prefix: string, touched: Set<string>): Forge {
-  const to = (branch: string): string => {
-    touched.add(`${prefix}${branch}`);
-    return `${prefix}${branch}`;
-  };
-  const back = (pr: ForgePr): ForgePr => ({ ...pr, branch: pr.branch.startsWith(prefix) ? pr.branch.slice(prefix.length) : pr.branch });
-  const mapPr = (r: ForgeResult<ForgePr>): ForgeResult<ForgePr> => (r.ok ? { ok: true, value: back(r.value) } : r);
-  return {
-    ...forge,
-    pushBranch: (lease, opts) => forge.pushBranch({ ...lease, branch: to(lease.branch) }, opts),
-    openPr: async (req, opts) => mapPr(await forge.openPr({ ...req, branch: to(req.branch) }, opts)),
-    updatePr: async (pr, req, opts) => mapPr(await forge.updatePr(pr, req, opts)),
-    closePr: async (pr, opts) => mapPr(await forge.closePr(pr, opts)),
-    listPrsByBranch: async (branch, opts) => {
-      const r = await forge.listPrsByBranch(to(branch), opts);
-      return r.ok ? { ok: true, value: r.value.map(back) } : r;
-    },
-    alert: (condition, mainSha, opts) => forge.alert(`${prefix}${condition}`, mainSha, opts),
-  };
-}
 
 /**
  * A live scratch area: a ledger branch, a `runner.git`, a forge whose unit
@@ -207,29 +157,18 @@ async function liveScratch(): Promise<{
   };
 
   const cleanup = async () => {
-    const problems: string[] = [];
-    for (const b of touched) {
-      const listed = await inner.listPrsByBranch(b, { signal: signal() });
-      if (listed.ok) {
-        for (const pr of listed.value.filter((p) => p.state === "open")) {
-          const closed = await inner.closePr(pr.number, { signal: signal() });
-          if (!closed.ok) problems.push(`close #${pr.number}: ${closed.error.kind}`);
-        }
-      } else problems.push(`list ${b}: ${listed.error.kind}`);
-      const r = await raw(DELETE_REF, `/git/refs/heads/${encodePath(b)}`);
-      if (!isSuccess(r.status) && r.status !== 404 && r.status !== 422) problems.push(`delete ${b}: ${r.status}`);
+    try {
+      await cleanupScratch({ forge: inner, raw, touched, ledgerBranch: branch, signal });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    const r = await raw(DELETE_REF, `/git/refs/heads/${encodePath(branch)}`);
-    if (!isSuccess(r.status) && r.status !== 404 && r.status !== 422) problems.push(`delete ${branch}: ${r.status}`);
-    rmSync(dir, { recursive: true, force: true });
-    if (problems.length > 0) throw new Error(`live cleanup: ${problems.join("; ")}`);
   };
   return { branch, forge, raw, makeCommit, cleanup, trace };
 }
 
 forgeContract({
   name: "github (live)",
-  enabled: liveEnabled,
+  enabled: liveGithubEnabled,
   operations: IMPLEMENTED,
   controls: ["makeCommit", "comments", "writeForeignLedger", "trace"],
   make: async (): Promise<ForgeFixture> => {
@@ -256,7 +195,7 @@ forgeContract({
   },
 });
 
-test.skipIf(!liveEnabled)("live: a stale PATCH git/refs answers SWAP_CONFLICT_STATUS", async () => {
+test.skipIf(!liveGithubEnabled)("live: a stale PATCH git/refs answers SWAP_CONFLICT_STATUS", async () => {
   const s = await liveScratch();
   try {
     const t0 = must(await s.forge.snapshot({ signal: signal() })).ledger.tip;
@@ -275,7 +214,7 @@ test.skipIf(!liveEnabled)("live: a stale PATCH git/refs answers SWAP_CONFLICT_ST
   }
 });
 
-test.skipIf(!liveEnabled)(
+test.skipIf(!liveGithubEnabled)(
   "live AR38: enqueue at the head is ok or conflict, never forbidden",
   async () => {
     const s = await liveScratch();
@@ -297,7 +236,7 @@ test.skipIf(!liveEnabled)(
   120_000,
 );
 
-test.skipIf(!liveEnabled)("live: checks reads a pushed commit", async () => {
+test.skipIf(!liveGithubEnabled)("live: checks reads a pushed commit", async () => {
   const s = await liveScratch();
   try {
     const sha = await s.makeCommit();

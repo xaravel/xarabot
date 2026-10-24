@@ -317,10 +317,31 @@ describe("network proxy", () => {
 
   sandboxTest("TCP to another host-local port and HTTPS to a GitHub IP with --noproxy both fail", async () => {
     let accepted = 0;
-    const other = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open: () => void (accepted += 1), data: () => {} } });
+    let probeAccepted: () => void = () => {};
+    const probed = new Promise<void>((resolve) => {
+      probeAccepted = resolve;
+    });
+    const other = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open: () => {
+          accepted += 1;
+          probeAccepted();
+        },
+        data: () => {},
+      },
+    });
     try {
       // The host itself can connect, so a failure below is the sandbox's doing.
       expect(await refusesConnections(other.port)).toBe(false);
+      // The server's accept of the probe can land after the client's connect resolves: wait for it before resetting.
+      await Promise.race([
+        probed,
+        Bun.sleep(5000).then(() => {
+          throw new Error("probe was never accepted");
+        }),
+      ]);
       accepted = 0;
       const r = await sh(
         `curl -sS --max-time 5 telnet://127.0.0.1:${other.port} </dev/null; echo local=$?; curl -sSk --max-time 10 --noproxy '*' https://140.82.112.3/ >/dev/null; echo github=$?`,
