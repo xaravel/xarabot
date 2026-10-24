@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "unit": "story:2.3",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "builder-1",
+  "generation": 1,
+  "globs": [
+    "bun.lock",
+    "docs/**",
+    "package.json",
+    "src/**",
+    "test/**"
+  ],
+  "heartbeat_at": "2026-10-24T09:02:04Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "767a31f475c89d01c593214bbd56bad50d16ebd3",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "approved_sha": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
