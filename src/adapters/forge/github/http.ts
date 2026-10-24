@@ -71,6 +71,8 @@ export const GITHUB_OPERATIONS = {
   createIssueComment: { name: "createIssueComment", method: "POST", permission: "issues: write" },
   getJobLogs: { name: "getJobLogs", method: "GET", permission: "actions: read" },
   downloadLog: { name: "downloadLog", method: "GET", permission: "none" },
+  /** A public user, such as the bot account `<slug>[bot]`; sent with no token. */
+  getUser: { name: "getUser", method: "GET", permission: "none" },
 } as const satisfies Readonly<Record<string, Operation>>;
 
 /**

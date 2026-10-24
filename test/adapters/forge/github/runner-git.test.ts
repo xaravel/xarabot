@@ -250,8 +250,9 @@ describe("the adapter source", () => {
 
   test("src/lane/ never spawns git: its git goes through runGit", () => {
     const dir = join(import.meta.dir, "../../../../src/lane");
-    // The only spawns in src/lane/: `ps` in the process table and the wait's `sleep` (Story 1.18).
-    const NON_GIT = new Set(["processes.ts", "wait.ts"]);
+    // The only spawns in src/lane/: `ps` in the process table, the wait's `sleep` (Story 1.18)
+    // and the runner install's `bun install` (Story 1.19), whose git still goes through runGit.
+    const NON_GIT = new Set(["processes.ts", "wait.ts", "runner-install.ts"]);
     const hits: string[] = [];
     for (const file of readdirSync(dir, { recursive: true }) as string[]) {
       if (!file.endsWith(".ts") || NON_GIT.has(file)) continue;
