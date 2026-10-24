@@ -228,8 +228,8 @@ describe("startHeartbeat", () => {
 
   test.each([
     ["transient", transient],
-    ["auth (a lane-stop kind)", { kind: "auth", message: "bad token" } as ForgeError],
     ["not-fast-forward", { kind: "not-fast-forward", message: "nope" } as ForgeError],
+    ["rejected (neither lane-stop nor back-off)", { kind: "rejected", message: "422" } as ForgeError],
   ] as const)("a %s beat failure is logged and retried after 60 s, then beats go on", async (_name, error) => {
     const w = world({
       holdAt: 2,
@@ -246,14 +246,42 @@ describe("startHeartbeat", () => {
     expect(w.logs.some((l) => l.includes("beat failed") && l.includes("retrying in 60000 ms"))).toBe(true);
   });
 
-  test("an edit stop (an unknown schema_version on the tip) is a failed beat, never a throw", async () => {
-    const w = world({ holdAt: 1 });
+  test.each(["auth", "forbidden", "uninstalled"] as const)(
+    "a forge %s beat failure ends the keeper with stop forge-<kind>: the signal aborts, nothing is released",
+    async (kind) => {
+      const w = world();
+      w.fail({ kind, message: "nope" } as ForgeError);
+      await settle(w);
+      const end = w.keeper.end();
+      expect(end).toMatchObject({ kind: "stop", condition: `forge-${kind}` });
+      expect(end?.message).toContain(kind);
+      expect(w.keeper.signal.aborted).toBe(true);
+      expect(w.keeper.signal.reason).toBe("stop");
+      expect(w.loopSleeps).toEqual([5 * MIN]);
+      expect(w.swaps).toEqual(["keepAlive"]);
+      expect(await w.record()).toEqual(rec());
+    },
+  );
+
+  test("a forge auth on the swap's snapshot ends the keeper with stop forge-auth too", async () => {
+    const w = world();
+    w.fake.control.injectError("snapshot", { kind: "auth", message: "bad token" });
+    await settle(w);
+    expect(w.keeper.end()).toMatchObject({ kind: "stop", condition: "forge-auth" });
+    expect(w.keeper.signal.reason).toBe("stop");
+    expect(w.swaps).toEqual([]);
+  });
+
+  test("an edit stop (an unknown schema_version on the tip) ends the keeper with stop ledger-schema-version, never a throw", async () => {
+    const w = world();
     const v2 = serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 1', '"schema_version": 2');
     w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__9.9.json": v2 }, deletes: [] });
-    await settle(w, 1);
-    expect(w.loopSleeps).toEqual([5 * MIN, MIN]);
-    expect(w.keeper.end()).toBeNull();
-    expect(w.logs.some((l) => l.includes("beat failed: edit stop"))).toBe(true);
+    await settle(w);
+    expect(w.keeper.end()).toMatchObject({ kind: "stop", condition: "ledger-schema-version" });
+    expect(w.keeper.signal.reason).toBe("stop");
+    expect(w.loopSleeps).toEqual([5 * MIN]);
+    expect(w.swaps).toEqual([]);
+    expect(w.logs.some((l) => l.includes("the lane stops"))).toBe(true);
   });
 
   test("a rate-limited beat waits its retry_after when longer than 60 s", async () => {
@@ -486,6 +514,15 @@ describe("startCoordinatorHeartbeat", () => {
     expect(w.keeper.signal.reason).toBe("lapsed");
     expect(w.loopSleeps).toEqual([5 * MIN, ...Array.from({ length: 23 }, () => MIN)]);
     expect(w.swaps.every((s) => s === "keepCoordinator")).toBe(true);
+    expect(await w.record()).toEqual(claimRec());
+  });
+
+  test("a forge auth beat ends the coordinator keeper with stop forge-auth", async () => {
+    const w = coordWorld();
+    w.fake.control.injectError("snapshot", { kind: "auth", message: "bad token" });
+    await settleC(w);
+    expect(w.keeper.end()).toMatchObject({ kind: "stop", condition: "forge-auth" });
+    expect(w.keeper.signal.reason).toBe("stop");
     expect(await w.record()).toEqual(claimRec());
   });
 });

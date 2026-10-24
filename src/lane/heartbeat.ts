@@ -2,7 +2,7 @@ import { HEARTBEAT_MS, HEARTBEAT_RETRY_MS, heartbeatRetryMs, wouldLapse } from "
 import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
 import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
-import type { Forge } from "../ports/forge.ts";
+import { isLaneStopKind, type Forge } from "../ports/forge.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, writtenRecord } from "./lane-process.ts";
 import { defaultSleep, swapLedger, type Sleep, type SwapLedgerOutcome } from "./ledger-cas.ts";
 
@@ -16,6 +16,11 @@ import { defaultSleep, swapLedger, type Sleep, type SwapLedgerOutcome } from "./
  *   the keeper stops quietly, with no abort and no write.
  * - The record lost (another holder, another generation, no record): it
  *   aborts its signal with `lost` and writes nothing more.
+ * - A beat whose swap fails with a forge lane-stop kind (`auth`, `forbidden`,
+ *   `uninstalled`) or with the edit error `stop` (an unknown ledger
+ *   `schema_version`): it aborts its signal with `stop`, naming the alert
+ *   `condition` (`forge-<kind>` or `ledger-schema-version`), and writes
+ *   nothing more. The lane stops; the record is left as it is.
  * - A failed beat retries after `retryMs`, or the forge's `retry_after` when
  *   longer. When the next try could land at or past the stale age since the
  *   last good beat, it releases the unit (no attempt counted) and aborts with
@@ -28,6 +33,8 @@ export type KeeperEnd =
   | { readonly kind: "lost"; readonly message: string }
   | { readonly kind: "released"; readonly message: string; readonly record: UnitRecord | null }
   | { readonly kind: "lapsed"; readonly message: string }
+  /** A beat met a lane-stop condition: `condition` is `forge-<kind>` or `ledger-schema-version`. */
+  | { readonly kind: "stop"; readonly condition: string; readonly message: string }
   /** The lane's own steps moved the record on; the signal is not aborted. */
   | { readonly kind: "moved-on"; readonly message: string };
 
@@ -55,7 +62,7 @@ export type HeartbeatParams = {
 };
 
 export type Heartbeat = {
-  /** Aborted (with the end's kind as its reason) when the unit is lost, released or lapsed. */
+  /** Aborted (with the end's kind as its reason) when the unit is lost, released or lapsed, or the lane stops. */
   readonly signal: AbortSignal;
   /** How the keeper ended, or `null` while it runs or after a plain `stop()`. */
   end(): KeeperEnd | null;
@@ -178,6 +185,14 @@ function startKeeper(params: KeeperParams): Heartbeat {
       const e = r.error;
       if (e.kind === "edit" && e.edit === "precondition") {
         finish({ kind: "lost", message: `${what} lost: ${e.message}` });
+        return;
+      }
+      if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) {
+        finish({ kind: "stop", condition: `forge-${e.forge.kind}`, message: `${what}: beat failed: forge ${e.forge.kind}: ${e.message}; the lane stops` });
+        return;
+      }
+      if (e.kind === "edit" && e.edit === "stop") {
+        finish({ kind: "stop", condition: "ledger-schema-version", message: `${what}: beat failed: ${e.message}; the lane stops` });
         return;
       }
       if (stopping.signal.aborted) return;

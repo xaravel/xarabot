@@ -4,8 +4,9 @@ import { graphCheck } from "./graph-check.ts";
 import { LANE_USAGE, laneCommand } from "./lane-commands.ts";
 import { LANE_INSTALL_USAGE, laneInstall } from "./lane-install.ts";
 import { LANE_RUN_USAGE, laneRun } from "./lane-run.ts";
+import { RULE_USAGE, ruleCommand } from "./rule.ts";
 
-const USAGE = `usage: xarabot [--version] | xarabot graph check | ${LANE_USAGE} | ${LANE_INSTALL_USAGE} | ${LANE_RUN_USAGE}`;
+const USAGE = `usage: xarabot [--version] | xarabot graph check | ${LANE_USAGE} | ${LANE_INSTALL_USAGE} | ${LANE_RUN_USAGE} | ${RULE_USAGE}`;
 
 export async function main(args: readonly string[]): Promise<number> {
   if (args.length === 0 || (args.length === 1 && args[0] === "--version")) {
@@ -23,6 +24,9 @@ export async function main(args: readonly string[]): Promise<number> {
   }
   if (args[0] === "lane" && args[1] === "run") {
     return laneRun(args.slice(2), { env: process.env });
+  }
+  if (args[0] === "rule") {
+    return ruleCommand(args.slice(1), { env: process.env });
   }
   console.error(USAGE);
   return 1;

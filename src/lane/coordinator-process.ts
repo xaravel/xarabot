@@ -161,6 +161,9 @@ class Halt extends Error {
   }
 }
 
+/** A host or lane STOP marker ends the run: the operator's choice, never a lane stop. */
+class MarkerStop extends Halt {}
+
 type Track = {
   readonly unit: CoordinatorUnit;
   readonly startedMs: number;
@@ -233,8 +236,8 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   const checkStop = (): void => {
     const s = store.stopMarkers();
     if (!s.ok) throw new Halt("stop", `STOP markers unreadable, stopping: ${s.error.message}`);
-    if (s.value.host) throw new Halt("stop", "host STOP marker present");
-    if (s.value.lane) throw new Halt("stop", "lane STOP marker present");
+    if (s.value.host) throw new MarkerStop("stop", "host STOP marker present");
+    if (s.value.lane) throw new MarkerStop("stop", "lane STOP marker present");
   };
 
   /** One ledger edit through the CAS loop under its own deadline. */
@@ -268,17 +271,26 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   let coordinatorKeeper: Heartbeat | null = null;
   let unitKeeper: Heartbeat | null = null;
 
-  /** Throws `failed` once the `coordinator.json` keeper lost the claim or let it lapse. */
-  const checkClaim = (): void => {
+  /**
+   * Throws `failed` once the `coordinator.json` keeper lost the claim or let it
+   * lapse. A keeper that met a lane-stop condition stops the lane instead.
+   */
+  const checkClaim = async (): Promise<void> => {
     const end = coordinatorKeeper?.end() ?? null;
     if (end === null || end.kind === "moved-on") return;
+    if (end.kind === "stop") await laneStop(end.condition, `heartbeat: ${end.message}`);
     throw new Halt("failed", `coordinator claim: ${end.message}`);
   };
 
-  /** Throws `failed` once the unit keeper lost or released the unit; the state follows the keeper's end. */
-  const checkUnit = (t: Track): void => {
+  /**
+   * Throws `failed` once the unit keeper lost or released the unit; the state
+   * follows the keeper's end. A keeper that met a lane-stop condition stops
+   * the lane instead, the record left as it is.
+   */
+  const checkUnit = async (t: Track): Promise<void> => {
     const end = unitKeeper?.end() ?? null;
     if (end === null || end.kind === "moved-on") return;
+    if (end.kind === "stop") await laneStop(end.condition, `heartbeat: ${end.message}`);
     if (end.kind === "released") {
       if (end.record !== null) t.record = end.record;
       t.state = "released";
@@ -316,7 +328,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     for (let round = 1; round <= MAX_CLAIM_ROUNDS; round += 1) {
       track = null;
       checkStop();
-      checkClaim();
+      await checkClaim();
       const roundStart = clock();
       const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
       if (!snapped.ok) throw new Halt("failed", `snapshot ${snapped.error.kind}: ${snapped.error.message}`);
@@ -405,7 +417,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       }
 
       unitKeeper = startHeartbeat({ ...keeperOpts, forge, identity, unit: u.unit, generation: record.generation, claimedMs: claimNowAt });
-      checkClaim();
+      await checkClaim();
       const signal = AbortSignal.any([unitKeeper.signal, coordinatorKeeper.signal]);
       let out: PrStepOutput;
       try {
@@ -418,8 +430,8 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       if (out.record !== undefined) t.record = out.record;
       if (out.reason !== undefined) addReason(t, out.reason);
       note(`${u.kind} step: ${out.outcome} (${out.state ?? "unknown"})`);
-      checkUnit(t);
-      checkClaim();
+      await checkUnit(t);
+      await checkClaim();
       if (out.state === "merging") {
         // A coordinator-held merging record has no heartbeat (AD-6): later reconcile runs check it.
         await unitKeeper.stop();
@@ -432,6 +444,10 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   };
 
   let outcome: LaneOutcome;
+  /** The run ended on a host or lane STOP marker. */
+  let markerStop = false;
+  /** The reason of the `Halt` that ended the run, if one did. */
+  let haltReason: string | null = null;
   try {
     outcome = await body();
   } catch (e) {
@@ -439,6 +455,8 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     const t = track as Track | null;
     if (e instanceof Halt) {
       outcome = e.outcome;
+      haltReason = e.reason;
+      if (e instanceof MarkerStop) markerStop = true;
       if (t !== null) addReason(t, e.reason);
       else note(e.reason);
     } else if (t !== null) {
@@ -448,6 +466,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
         t.state = null;
         if (inner instanceof Halt) {
           outcome = inner.outcome;
+          haltReason = inner.reason;
           addReason(t, inner.reason);
         }
       }
@@ -510,5 +529,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     await (coordinatorKeeper as Heartbeat | null)?.stop();
   }
   reportStore(store.clearPid("lane"), "lane.pid");
-  return { outcome };
+  if (outcome !== "stop" || markerStop) return { outcome };
+  const t = track as Track | null;
+  return { outcome, laneStop: haltReason ?? t?.reason ?? "the run ended stop" };
 }

@@ -30,10 +30,14 @@ describe("mapHttpError", () => {
     [500, {}, {}, "transient"],
     [502, {}, {}, "transient"],
     [503, {}, {}, "transient"],
-    [409, {}, { message: "Git Repository is empty." }, "forbidden"],
-    [422, {}, { message: "Validation Failed" }, "forbidden"],
-    [400, {}, {}, "forbidden"],
-    [429, {}, {}, "forbidden"],
+    [409, {}, { message: "Git Repository is empty." }, "rejected"],
+    [422, {}, { message: "Validation Failed" }, "rejected"],
+    [400, {}, {}, "rejected"],
+    [429, {}, {}, "rejected"],
+    [410, {}, {}, "rejected"],
+    [451, {}, {}, "rejected"],
+    [403, {}, {}, "forbidden"],
+    [301, {}, {}, "forbidden"],
   ] as const)("%d %p %p is %s", (status, headers, body, kind) => {
     expect(mapHttpError(GET_REF, reply(status, headers, body)).error.kind).toBe(kind);
   });
@@ -73,14 +77,14 @@ describe("mapHttpError", () => {
     expect(e.kind === "rate-limited" ? e.retry_after : -1).toBe(60);
   });
 
-  test("another status carries the status and GitHub's message", () => {
-    expect(mapHttpError(GET_REF, reply(418, {}, { message: "I'm a teapot" })).error).toEqual({ kind: "forbidden", message: "getRef: 418 I'm a teapot" });
+  test("an unmapped 4xx is rejected and carries the status and GitHub's message", () => {
+    expect(mapHttpError(GET_REF, reply(418, {}, { message: "I'm a teapot" })).error).toEqual({ kind: "rejected", message: "getRef: 418 I'm a teapot" });
   });
 
   test("non-fast-forward: PATCH git/refs 422 is conflict; 409 is not", () => {
     expect(SWAP_CONFLICT_STATUS).toBe(422);
     expect(mapHttpError(GITHUB_OPERATIONS.updateRef, reply(422, {}, { message: "Update is not a fast forward" })).error.kind).toBe("conflict");
-    expect(mapHttpError(GITHUB_OPERATIONS.updateRef, reply(409)).error.kind).toBe("forbidden");
+    expect(mapHttpError(GITHUB_OPERATIONS.updateRef, reply(409)).error.kind).toBe("rejected");
   });
 
   test("POST git/refs 422 is conflict", () => {
@@ -88,7 +92,7 @@ describe("mapHttpError", () => {
   });
 
   test("the overrides apply to their operation only", () => {
-    expect(mapHttpError(GITHUB_OPERATIONS.createCommit, reply(422)).error.kind).toBe("forbidden");
+    expect(mapHttpError(GITHUB_OPERATIONS.createCommit, reply(422)).error.kind).toBe("rejected");
   });
 
   test("notFoundOn maps its status to not-found; other statuses keep their kind", () => {
@@ -98,8 +102,8 @@ describe("mapHttpError", () => {
       message: "listCheckRuns: 422 No commit found for SHA: x",
     });
     expect(mapHttpError(GITHUB_OPERATIONS.getCombinedStatus, reply(422)).error.kind).toBe("not-found");
-    expect(mapHttpError(checks, reply(409)).error.kind).toBe("forbidden");
-    expect(mapHttpError(GITHUB_OPERATIONS.getCommit, reply(422)).error.kind).toBe("forbidden");
+    expect(mapHttpError(checks, reply(409)).error.kind).toBe("rejected");
+    expect(mapHttpError(GITHUB_OPERATIONS.getCommit, reply(422)).error.kind).toBe("rejected");
   });
 
   test("a 403 that is not a rate limit names the operation's permission", () => {
@@ -108,8 +112,8 @@ describe("mapHttpError", () => {
       message: "listCheckRuns: 403 Resource not accessible by integration (needs checks: read)",
     });
     expect(mapHttpError(GET_REF, reply(403)).error).toEqual({ kind: "forbidden", message: "getRef: 403 (needs contents: write)" });
-    // Other forbidden statuses keep their message as it was.
-    expect(mapHttpError(GET_REF, reply(400)).error).toEqual({ kind: "forbidden", message: "getRef: 400" });
+    // An unmapped 4xx is rejected and keeps its message as it was.
+    expect(mapHttpError(GET_REF, reply(400)).error).toEqual({ kind: "rejected", message: "getRef: 400" });
   });
 });
 

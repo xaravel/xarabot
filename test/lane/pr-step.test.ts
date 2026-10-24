@@ -17,7 +17,7 @@ import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPrStep, prText, statusComment, type PrStepDeps } from "../../src/lane/pr-step.ts";
 import type { Workspace } from "../../src/lane/workspace.ts";
 import type { Agent } from "../../src/ports/agent.ts";
-import type { Forge, ForgeError, ForgeOperation } from "../../src/ports/forge.ts";
+import { FORGE_ERROR_KINDS, isLaneStopKind, type Forge, type ForgeError, type ForgeOperation } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
@@ -675,13 +675,37 @@ describe("createPrStep", () => {
     ]);
   });
 
-  test.each(["auth", "forbidden", "uninstalled"] as const)("forge %s on pushBranch: alert forge-<kind> on fresh main and stop", async (kind) => {
+  test.each(FORGE_ERROR_KINDS.filter(isLaneStopKind))("forge %s on pushBranch: alert forge-<kind> on fresh main and stop", async (kind) => {
     const w = await world();
     w.fake.control.injectError("pushBranch", { kind, message: "nope" } as ForgeError);
     const out = await w.run();
     expect(out).toMatchObject({ outcome: "stop", state: "claimed" });
     expect(w.fake.control.alerts()).toEqual([{ condition: `forge-${kind}`, main_sha: w.main }]);
     expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "claimed", attempts: 0 });
+  });
+
+  test.each(FORGE_ERROR_KINDS.filter((k) => !isLaneStopKind(k)))("forge %s on pushBranch: a failed attempt, released, attempts + 1, no alert", async (kind) => {
+    const w = await world();
+    const error = (kind === "rate-limited" ? { kind, message: "slow", retry_after: 1 } : { kind, message: "nope" }) as ForgeError;
+    w.fake.control.injectError("pushBranch", error);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain(`pushBranch ${kind}`);
+    expect(w.fake.control.alerts()).toEqual([]);
+    expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("a push a repository rule refuses is rejected: a failed attempt, released, attempts + 1", async () => {
+    const w = await world();
+    w.fake.control.refusePushes(BRANCH);
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("pushBranch rejected");
+    expect(w.fake.control.alerts()).toEqual([]);
+    expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
   });
 
   test("forge auth on the snapshot: alert with 40 zeros and stop", async () => {

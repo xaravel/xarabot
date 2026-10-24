@@ -293,9 +293,53 @@ const CASES: readonly Case[] = [
   ],
   ["applyRuling approve on a blocked park", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve", manifestSha: SHA_A }), [rec({ state: "parked", park: blocked("other") })], "precondition"],
   ["applyRuling approve without a manifest_sha", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve" }), [rec({ state: "parked", park: needs })], "invalid"],
-  ["applyRuling by a builder", applyRuling({ ...base, generation: 1, ruling: "release" }), [rec({ state: "parked", park: needs })], "precondition"],
+  [
+    "applyRuling by a builder",
+    applyRuling({ unit: U, by: BOB, now: NOW, generation: 1, ruling: "release" }),
+    [rec({ state: "parked", park: blocked("other"), attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["claude"] })],
+    by(BOB, NOW, { state: "released", builder_providers: ["claude"] }),
+  ],
+  ...(
+    [
+      ["blocked", blocked("write-check")],
+      ["awaiting-approval", awaiting(["src/a.ts"])],
+      ["needs-approval", needs],
+    ] as const
+  ).map(
+    ([name, park]): Case => [
+      `applyRuling rebuild from ${name}`,
+      applyRuling({ unit: U, by: BOB, now: NOW, generation: 2, ruling: "rebuild" }),
+      [
+        rec({
+          state: "parked",
+          generation: 2,
+          park,
+          attempts: 2,
+          loopbacks: 1,
+          ci_fixes: 1,
+          reviewed_sha: SHA_A,
+          passed_sha: SHA_B,
+          approved_sha: SHA_D,
+          builder_providers: ["claude"],
+          pr: 7,
+        }),
+      ],
+      by(BOB, NOW, { state: "released", generation: 2, pr: 7 }),
+    ],
+  ),
   ["applyRuling wrong generation", applyRuling({ unit: U, by: COORD, now: NOW, generation: 2, ruling: "release" }), [rec({ state: "parked", park: needs })], "precondition"],
-  ["applyRuling on a claimed unit", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "release" }), [rec()], "precondition"],
+  ...(["claimed", "merging", "released", "merged"] as const).flatMap((state) =>
+    (["release", "rebuild"] as const).map(
+      (ruling): Case => [
+        `applyRuling ${ruling} on a ${state} unit`,
+        applyRuling({ unit: U, by: BOB, now: NOW, generation: 1, ruling }),
+        [rec({ state })],
+        "precondition",
+      ],
+    ),
+  ),
+  ["applyRuling release with no record", applyRuling({ unit: U, by: BOB, now: NOW, generation: 1, ruling: "release" }), [], "precondition"],
+  ["applyRuling rebuild with no record", applyRuling({ unit: U, by: BOB, now: NOW, generation: 1, ruling: "rebuild" }), [], "precondition"],
   // deleteMerged
   ["deleteMerged", deleteMerged({ unit: U, by: COORD, now: NOW }), [rec({ state: "merged" })], "deleted"],
   ["deleteMerged already gone", deleteMerged({ unit: U, by: COORD, now: NOW }), [], "null"],

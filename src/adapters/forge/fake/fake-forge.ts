@@ -62,6 +62,8 @@ export type FakeForgeControl = {
   setCiLog(sha: GitSha, check: string, log: string): void;
   /** The next call of `operation` returns `error` and changes nothing. */
   injectError(operation: ForgeOperation, error: ForgeError): void;
+  /** Later pushes to `branch` are `rejected`, as a repository rule refuses them, and move nothing. */
+  refusePushes(branch: string): void;
   /** Runs `hook` before every swap's compare-and-set; `null` removes it. */
   beforeSwap(hook: BeforeSwapHook | null): void;
   /** Merges the PR at the head of the queue onto `main`; `null` when the queue is empty. */
@@ -151,6 +153,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const queue: number[] = [];
   const alerts: FakeAlert[] = [];
   const injected = new Map<ForgeOperation, ForgeError>();
+  const refused = new Set<string>();
   let hook: BeforeSwapHook | null = null;
   let swaps = 0;
   const trace: string[] = [];
@@ -249,6 +252,9 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     pushBranch: (lease, opts) =>
       call("pushBranch", opts, () => {
         if (RESERVED_BRANCHES.includes(lease.branch)) return forgeErr("forbidden", `pushBranch: ${lease.branch} is protected`);
+        if (refused.has(lease.branch)) {
+          return forgeErr("rejected", `pushBranch: ${lease.branch}: [remote rejected] (push declined due to repository rule violations)`);
+        }
         if (!SHA_PATTERN.test(lease.sha)) return forgeErr("not-found", `pushBranch: no commit ${lease.sha}`);
         const head = branches.get(lease.branch) ?? null;
         if (head !== lease.expected_sha) {
@@ -402,6 +408,9 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     },
     injectError(operation, error) {
       injected.set(operation, error);
+    },
+    refusePushes(branch) {
+      refused.add(branch);
     },
     beforeSwap(h) {
       hook = h;

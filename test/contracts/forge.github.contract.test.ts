@@ -38,7 +38,7 @@ function signal(): AbortSignal {
 forgeContract({
   name: "github (emulator)",
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace"],
+  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes"],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -54,6 +54,7 @@ forgeContract({
           for (const [branch, sha] of Object.entries(refs)) gh.control.setBranch(branch, sha);
         },
       });
+      const remote = server;
       const gitDir = must(await openRunnerGit(join(dir, "lane"), { signal: signal() }));
       const trace: SnapshotPart[] = [];
       const forge = createGitHubForge({
@@ -85,6 +86,8 @@ forgeContract({
           queue: () => gh.control.queue(),
           mergeQueueHead: () => gh.control.mergeQueueHead(),
           trace: () => [...trace],
+          // A pre-receive hook in the git server's bare repo refuses the listed refs.
+          refusePushes: (branch) => remote.refuse(branch),
         },
         cleanup: async () => {
           await server?.stop();

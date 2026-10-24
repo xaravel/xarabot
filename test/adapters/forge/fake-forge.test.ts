@@ -128,6 +128,20 @@ describe("fake forge", () => {
     }
   });
 
+  test("refusePushes: later pushes to that branch are rejected and move nothing; others still push", async () => {
+    const { forge, control } = createFakeForge();
+    const a = control.makeCommit();
+    value(await forge.pushBranch({ branch: "story/2.9", expected_sha: null, sha: a }, live()));
+    value(await forge.openPr({ branch: "story/2.9", base: "main", title: "T", body: "B" }, live()));
+    control.refusePushes("story/2.9");
+    const b = control.makeCommit();
+    const r = await forge.pushBranch({ branch: "story/2.9", expected_sha: a, sha: b }, live());
+    expect(r.ok ? "ok" : r.error.kind).toBe("rejected");
+    const prs = value(await forge.listPrsByBranch("story/2.9", live()));
+    expect(prs.map((p) => p.head_sha)).toEqual([a]);
+    expect(value(await forge.pushBranch({ branch: "story/2.8", expected_sha: null, sha: b }, live()))).toEqual({ sha: b });
+  });
+
   test("the queue merges head first, moves main and keeps the branch", async () => {
     const { forge, control } = createFakeForge();
     const open = async (branch: string) => {

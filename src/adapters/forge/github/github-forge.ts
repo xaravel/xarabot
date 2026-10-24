@@ -203,7 +203,7 @@ export function mapPushResult(lease: PushLease, run: GitRun): ForgeResult<{ read
     }
     if (flag === "!") {
       if (/stale info|fetch first|non-fast-forward/.test(summary)) return forgeErr("conflict", `${what}: ${summary}`);
-      if (/remote rejected/.test(summary)) return forgeErr(/lock/i.test(summary) ? "transient" : "forbidden", `${what}: ${summary}`);
+      if (/remote rejected/.test(summary)) return forgeErr(/lock/i.test(summary) ? "transient" : "rejected", `${what}: ${summary}`);
       return forgeErr("transient", `${what}: ${summary}`);
     }
     return forgeErr("transient", `${what}: unexpected ref status ${JSON.stringify(flag)}: ${summary}`);

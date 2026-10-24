@@ -36,7 +36,7 @@ export type SwapLedgerErrorKind = "edit" | "forge" | "exhausted" | "deadline";
 export type SwapLedgerError =
   /** The edit failed against the tip; the caller runs `next` again. */
   | { readonly kind: "edit"; readonly message: string; readonly tries: number; readonly edit: LedgerEditErrorKind }
-  /** A forge error that is not retried here (`not-fast-forward`, `auth`, `forbidden`, `uninstalled`, `not-found`). */
+  /** A forge error that is not retried here (`not-fast-forward`, `auth`, `forbidden`, `uninstalled`, `not-found`, `rejected`). */
   | { readonly kind: "forge"; readonly message: string; readonly tries: number; readonly forge: ForgeError }
   | { readonly kind: "exhausted"; readonly message: string; readonly tries: number; readonly last: ForgeError }
   | { readonly kind: "deadline"; readonly message: string; readonly tries: number };

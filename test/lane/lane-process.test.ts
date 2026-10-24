@@ -132,7 +132,7 @@ type Harness = {
   readonly seen: { agentPid: string | null; tmpClean: boolean | null; lanePid: string | null };
   /** Every wait the stub waiter was asked for, in order. */
   readonly waits: WaitParams[];
-  run(over?: Partial<LaneDeps>): Promise<{ outcome: string }>;
+  run(over?: Partial<LaneDeps>): Promise<{ outcome: string; laneStop?: string }>;
   ledger(): Promise<Map<string, UnitRecord>>;
   journal(): JournalRecord[];
   unitRecord(): UnitJournalRecord;
@@ -388,7 +388,10 @@ describe("runLaneProcess", () => {
     const path = which === "host" ? h.hostStop : join(h.laneDir, "STOP");
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "");
-    expect((await h.run()).outcome).toBe("stop");
+    const r = await h.run();
+    expect(r.outcome).toBe("stop");
+    // A STOP marker is the operator's choice, never a lane stop.
+    expect(r.laneStop).toBeUndefined();
     expect(h.fake.control.trace()).toEqual([]);
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     expect(h.journal()).toEqual([]);
@@ -410,6 +413,7 @@ describe("runLaneProcess", () => {
       },
     });
     expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toBeUndefined();
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     const rec = h.unitRecord();
     expect(rec).toMatchObject({ unit: "story:1.1", outcome: "stop", generation: null, state: null, sessions: 0 });
@@ -780,7 +784,9 @@ describe("runLaneProcess", () => {
     const h = harness();
     h.fake.control.injectError("listPrsByBranch", { kind, message: "nope" } as ForgeError);
     const main = await mainSha(h.fake);
-    expect((await h.run()).outcome).toBe("stop");
+    const r = await h.run();
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toContain(`forge-${kind}`);
     expect(h.fake.control.alerts()).toEqual([{ condition: `forge-${kind}`, main_sha: main }]);
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     expect(h.unitRecord()).toMatchObject({ outcome: "stop", state: null });
@@ -789,7 +795,10 @@ describe("runLaneProcess", () => {
   test("a forge auth on the first snapshot alerts with 40 zeros for main", async () => {
     const h = harness();
     h.fake.control.injectError("snapshot", { kind: "auth", message: "bad token" });
-    expect((await h.run()).outcome).toBe("stop");
+    const r = await h.run();
+    expect(r.outcome).toBe("stop");
+    // A lane stop: `lane run` counts it as a failed start.
+    expect(r.laneStop).toContain("forge-auth");
     expect(h.fake.control.alerts()).toEqual([{ condition: "forge-auth", main_sha: "0".repeat(40) }]);
     expect(h.journal()).toEqual([]);
   });
@@ -804,7 +813,10 @@ describe("runLaneProcess", () => {
 
   test("a missing Standing Authority stops the lane with no claim and no alert", async () => {
     const h = harness({ noAuthority: true });
-    expect((await h.run()).outcome).toBe("stop");
+    const r = await h.run();
+    expect(r.outcome).toBe("stop");
+    // A stop on bad policy from `main` is a lane stop too.
+    expect(r.laneStop).toBeDefined();
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     expect(h.fake.control.alerts()).toEqual([]);
     expect(h.journal()).toEqual([]);
@@ -1139,9 +1151,46 @@ describe("runLaneProcess waits and limits", () => {
     expect(readFileSync(rec1.log, "utf8")).toContain("abandoning the unit");
   });
 
+  test("a beat failing auth during a usage-limit sleep ends the sleep at once: forge-auth alert, a lane stop, no second session, the record left", async () => {
+    const h = harness({ usageLimits: [{ resetAt: null }], behaviors: [() => {}, finishes("done")] });
+    let before: UnitRecord | undefined;
+    let sleptMs: number | null = null;
+    const r = await h.run({
+      heartbeat: { sleep: fastBeats },
+      waiter: {
+        async wait(p) {
+          const signal = p.signal;
+          if (signal === undefined) return { end: "elapsed" };
+          before = (await h.ledger()).get("story:1.1");
+          // The keeper's next beat is the next swap: GitHub refuses its credentials.
+          h.fake.control.injectError("ledgerSwap", { kind: "auth", message: "bad token" });
+          const started = Date.now();
+          // A 15 min sleep: it ends only because the keeper's stop end aborts its signal.
+          await new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve())));
+          sleptMs = Date.now() - started;
+          return { end: "aborted" };
+        },
+      },
+    });
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toContain("forge-auth");
+    expect(r.laneStop).toContain("heartbeat");
+    expect(sleptMs as number | null).toBeLessThan(5000);
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(0);
+    expect(h.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth"]);
+    expect(before).toMatchObject({ state: "claimed" });
+    expect((await h.ledger()).get("story:1.1")).toEqual(before);
+    expect(h.unitRecord()).toMatchObject({ outcome: "stop", state: "claimed" });
+    expect(h.outcomeFile()).toBe("stop\n");
+  });
+
   test("usage limit then STOP: released with no attempt, outcome stop", async () => {
     const h = harness({ usageLimits: [{ resetAt: null }], waitEnds: ["stopped"] });
-    expect((await h.run()).outcome).toBe("stop");
+    const r = await h.run();
+    expect(r.outcome).toBe("stop");
+    // A STOP during a usage-limit sleep is a STOP marker, never a lane stop.
+    expect(r.laneStop).toBeUndefined();
     expect(h.runs).toHaveLength(1);
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
     const rec = h.unitRecord();
@@ -1182,6 +1231,7 @@ describe("runLaneProcess waits and limits", () => {
       },
     });
     expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toBeUndefined();
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 0 });
     const rec = h.unitRecord();
     expect(rec).toMatchObject({ outcome: "stop", state: "released", attempts: 0 });

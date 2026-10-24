@@ -9,6 +9,7 @@ import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
 import type { CoordinatorRecord, UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { Agent } from "../../src/ports/agent.ts";
+import { forgeErr, type Forge } from "../../src/ports/forge.ts";
 import { claimCoordinatorRecord, missingStepReason, runCoordinatorProcess, type CoordinatorDeps, type CoordinatorStep, type CoordinatorStepInput } from "../../src/lane/coordinator-process.ts";
 import type { Sleep } from "../../src/lane/ledger-cas.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
@@ -70,7 +71,7 @@ type Harness = {
   readonly steps: CoordinatorStepInput[];
   /** Lets every keeper sleeping its interval beat once. */
   pulse(): void;
-  run(over?: Partial<CoordinatorDeps>): Promise<{ outcome: string }>;
+  run(over?: Partial<CoordinatorDeps>): Promise<{ outcome: string; laneStop?: string }>;
   ledger(): Promise<{ units: Map<string, UnitRecord>; coordinator: CoordinatorRecord | null }>;
   journal(): JournalRecord[];
   commits(prefix: string): number;
@@ -342,10 +343,64 @@ describe("runCoordinatorProcess", () => {
     const path = which === "host" ? join(h.laneDir, "..", "..", "home", ".xarabot", "STOP") : join(h.laneDir, "STOP");
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "");
-    expect((await h.run({ steps: { reconcile: stepping(h) } })).outcome).toBe("stop");
+    const r = await h.run({ steps: { reconcile: stepping(h) } });
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toBeUndefined();
     expect(h.fake.control.trace()).toEqual([]);
     expect(h.fake.control.ledgerLog()).toHaveLength(1);
     expect(h.waits).toEqual([]);
+  });
+
+  test("a forge auth on the snapshot: forge-auth alert, stop with laneStop set", async () => {
+    const h = harness();
+    h.fake.control.injectError("snapshot", { kind: "auth", message: "bad token" });
+    const r = await h.run({ steps: { reconcile: stepping(h) } });
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toContain("forge-auth");
+    expect(h.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth"]);
+    expect(h.steps).toHaveLength(0);
+  });
+
+  test("a keeper beat failing auth mid-step aborts the step's signal: forge-auth alert, stop with laneStop, the record left claimed", async () => {
+    const h = harness();
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      // The next swap is a keeper's beat: GitHub refuses its credentials.
+      h.fake.control.injectError("ledgerSwap", { kind: "auth", message: "bad token" });
+      h.pulse();
+      await abortOf(input.signal);
+      return { outcome: "failed", state: "claimed", reason: "the step saw its signal abort" };
+    };
+    const r = await h.run({ steps: { reconcile: step } });
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toContain("forge-auth");
+    expect(r.laneStop).toContain("heartbeat");
+    expect(h.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth"]);
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "claimed", attempts: 0 });
+  });
+
+  test("only the unit keeper's beat failing auth mid-step: checkUnit stops the lane, forge-auth alert, laneStop, the record left claimed", async () => {
+    const h = harness();
+    // Only the unit's keepAlive is refused; the coordinator.json keeper's beat lands.
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) =>
+        commit.message.startsWith("ledger: keepAlive reconcile:1 ") ? forgeErr("auth", "bad token") : h.fake.forge.ledgerSwap(oldSha, commit, o),
+    };
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      h.pulse();
+      await abortOf(input.signal);
+      return { outcome: "failed", state: "claimed", reason: "the step saw its signal abort" };
+    };
+    const r = await h.run({ forge, steps: { reconcile: step } });
+    expect(r.outcome).toBe("stop");
+    expect(r.laneStop).toContain("forge-auth");
+    expect(r.laneStop).toContain("heartbeat");
+    expect(r.laneStop).toContain("reconcile:1");
+    expect(h.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth"]);
+    expect(h.commits("ledger: keepCoordinator ")).toBeGreaterThanOrEqual(1);
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "claimed", attempts: 0 });
   });
 
   test.each([

@@ -41,9 +41,13 @@ import { githubConnect, type Connect } from "./lane-connection.ts";
  * builder limit, and its last start check claims `coordinator.json`
  * (AD-8); it then runs one `runCoordinatorProcess`. Every refusal or failure
  * after the STOP check, apart from a version switch and the role and
- * lane-name check (a static `host.yaml` error), is a failed start: three in
- * a row write the lane's `STOP` and post an alert. The PR step redacts the
- * vendor credential read at start from the text it sends to the forge.
+ * lane-name check (a static `host.yaml` error), is a failed start, and so is
+ * a run that ends in a lane stop (outcome `stop` for any reason but a STOP
+ * marker, exit 1): three in a row write the lane's `STOP` and post an alert.
+ * The count is reset only after a run that ends without a lane stop, so a
+ * start check that heals between lane stops does not reset it. The PR step
+ * redacts the vendor credential read at start from the text it sends to the
+ * forge.
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -136,9 +140,30 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   let mainSha: string | null = null;
   const failedPath = join(laneDir, FAILED_STARTS_FILE);
 
-  /** One failed start: count it, and at the third in a row write STOP and alert. */
-  const failedStart = async (reason: string): Promise<number> => {
-    say(`start refused: ${reason}`);
+  /** A run that ended without a lane stop ends the run of failed starts. */
+  const resetFailedStarts = (): void => {
+    try {
+      mkdirSync(laneDir, { recursive: true, mode: 0o700 });
+      writeFileSync(failedPath, "0\n");
+    } catch (e) {
+      say(`${failedPath}: ${message(e)}`);
+    }
+  };
+
+  /** The run's exit: a lane stop is a failed start (exit 1); any other end resets the count (exit 0). */
+  const afterRun = async (result: LaneProcessResult): Promise<number> => {
+    out(`lane ${name}: ${result.outcome}`);
+    if (result.laneStop !== undefined) return failedStart(result.laneStop, "run ended in a lane stop");
+    resetFailedStarts();
+    return 0;
+  };
+
+  /**
+   * One failed start: count it, and at the third in a row write STOP and alert.
+   * `what` heads the message: a refused start, or a run that ended in a lane stop.
+   */
+  const failedStart = async (reason: string, what = "start refused"): Promise<number> => {
+    say(`${what}: ${reason}`);
     const count = parseFailedStarts(readText(failedPath) ?? "");
     const next = afterFailedStart(count);
     try {
@@ -262,23 +287,13 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     claimed = c.value;
   }
 
-  // The start passed: the run of failed starts ends here.
-  try {
-    mkdirSync(laneDir, { recursive: true, mode: 0o700 });
-    writeFileSync(failedPath, "0\n");
-  } catch (e) {
-    say(`${failedPath}: ${message(e)}`);
-  }
-
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
   const fetch = connection.fetchShas(runnerGit);
   if (claimed !== null) {
     // Story 2.5 wires the reconcile step; planning, retro, retro-item and checkpoint units end idle, unclaimed, until their Stories.
     const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo });
     const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile }, waiter: createSleepWaiter({ store }) };
-    const result = await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps);
-    out(`lane ${name}: ${result.outcome}`);
-    return 0;
+    return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
   }
 
   const laneDeps: LaneDeps = {
@@ -301,7 +316,5 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     lane,
     waiter: createSleepWaiter({ store }),
   };
-  const result = await (deps.start ?? runLaneProcess)(laneDeps);
-  out(`lane ${name}: ${result.outcome}`);
-  return 0;
+  return afterRun(await (deps.start ?? runLaneProcess)(laneDeps));
 }

@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -32,6 +32,8 @@ export type GitServer = {
   seen(): string[];
   /** The remote's branches, name to SHA. */
   refs(): Promise<Record<string, string>>;
+  /** Later pushes to `branch` are refused by a `pre-receive` hook, as a repository rule refuses them. */
+  refuse(branch: string): void;
   stop(): Promise<void>;
 };
 
@@ -43,6 +45,19 @@ const SERVER_ENV = (home: string): Record<string, string> => ({
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_CONFIG_GLOBAL: "/dev/null",
 });
+
+/** A `pre-receive` hook refusing a push that updates any ref listed in `$GIT_DIR/refused-refs`. */
+const PRE_RECEIVE = `#!/bin/sh
+refused="\${GIT_DIR:-.}/refused-refs"
+status=0
+while read -r old new ref; do
+  if [ -f "$refused" ] && grep -qxF "$ref" "$refused"; then
+    echo "refused by rule: $ref" >&2
+    status=1
+  fi
+done
+exit $status
+`;
 
 async function git(repoDir: string, args: readonly string[]): Promise<string> {
   const p = Bun.spawn(["git", `--git-dir=${repoDir}`, ...args], { env: SERVER_ENV(repoDir), stdio: ["ignore", "pipe", "pipe"] });
@@ -148,6 +163,13 @@ export async function startGitServer(options: GitServerOptions): Promise<GitServ
     repoDir,
     seen: () => [...seen],
     refs: () => branchRefs(repoDir),
+    refuse: (branch) => {
+      const hook = join(repoDir, "hooks", "pre-receive");
+      mkdirSync(join(repoDir, "hooks"), { recursive: true });
+      writeFileSync(hook, PRE_RECEIVE);
+      chmodSync(hook, 0o755);
+      appendFileSync(join(repoDir, "refused-refs"), `refs/heads/${branch}\n`);
+    },
     stop: async () => {
       await server.stop(true);
     },
