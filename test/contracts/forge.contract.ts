@@ -39,6 +39,8 @@ export type ForgeContractControls = {
   setChecks(sha: GitSha, checks: readonly ForgeCheck[]): MaybePromise<void>;
   setCiLog(sha: GitSha, check: string, log: string): MaybePromise<void>;
   injectError(operation: ForgeOperation, error: ForgeError): MaybePromise<void>;
+  /** Later pushes to `branch` are refused, as a repository rule refuses them. */
+  refusePushes(branch: string): MaybePromise<void>;
   mergeQueueHead(): MaybePromise<ForgePr | null>;
   comments(pr: number): MaybePromise<string[]>;
   queue(): MaybePromise<number[]>;
@@ -379,6 +381,15 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.pushBranch({ branch: "story/2.1", expected_sha: c, sha: b }, live()))).toBe("conflict");
       expect(kind(await fx.forge.pushBranch({ branch: "story/2.2", expected_sha: a, sha: b }, live()))).toBe("conflict");
       expect(value(await fx.forge.pushBranch({ branch: "story/2.1", expected_sha: a, sha: b }, live()))).toEqual({ sha: b });
+    });
+
+    scenario("a push a rule refuses is rejected and moves nothing", OPEN_PR, ["makeCommit", "refusePushes"], async (fx) => {
+      const mk = need(fx, "makeCommit");
+      await need(fx, "refusePushes")("story/2.9");
+      const [a, b] = [await mk(), await mk()];
+      expect(kind(await fx.forge.pushBranch({ branch: "story/2.9", expected_sha: null, sha: a }, live()))).toBe("rejected");
+      expect(kind(await fx.forge.openPr({ branch: "story/2.9", base: "main", title: "T", body: "B" }, live()))).toBe("not-found");
+      expect(value(await fx.forge.pushBranch({ branch: "story/2.8", expected_sha: null, sha: b }, live()))).toEqual({ sha: b });
     });
 
     // ------------------------------------------------------------ PRs

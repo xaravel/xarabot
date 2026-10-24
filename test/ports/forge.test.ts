@@ -35,7 +35,7 @@ type Operations =
   | "alert"
   | "prefetch";
 
-type AR33Kinds = "conflict" | "not-fast-forward" | "auth" | "forbidden" | "rate-limited" | "not-found" | "uninstalled" | "transient";
+type AR33Kinds = "conflict" | "not-fast-forward" | "auth" | "forbidden" | "rate-limited" | "not-found" | "uninstalled" | "transient" | "rejected";
 
 /* Compile-time: `keyof Forge` is exactly the operations, with no approve or merge; the kinds are AR33's. */
 type _PortChecks = [
@@ -61,12 +61,12 @@ function feed(s: ForgeSnapshot): Pick<AssembleInput, "now" | "main_sha" | "tree"
 }
 
 describe("Forge port", () => {
-  test("lists the operations and the eight AR33 error kinds", () => {
+  test("lists the operations and the nine AR33 error kinds", () => {
     expect([...FORGE_OPERATIONS].sort()).toEqual(
       ["alert", "checks", "closePr", "comment", "dequeue", "enqueue", "ledgerSwap", "listPrsByBranch", "openPr", "prefetch", "pushBranch", "queueState", "snapshot", "updatePr"],
     );
     expect([...FORGE_ERROR_KINDS].sort()).toEqual(
-      ["auth", "conflict", "forbidden", "not-fast-forward", "not-found", "rate-limited", "transient", "uninstalled"],
+      ["auth", "conflict", "forbidden", "not-fast-forward", "not-found", "rate-limited", "rejected", "transient", "uninstalled"],
     );
     expect(typeof feed).toBe("function");
   });
@@ -76,6 +76,11 @@ describe("Forge port", () => {
     expect([...BACKOFF_KINDS]).toEqual(["rate-limited", "transient"]);
     expect(FORGE_ERROR_KINDS.filter(isLaneStopKind)).toEqual(["auth", "forbidden", "uninstalled"]);
     expect(FORGE_ERROR_KINDS.filter(isBackoffKind)).toEqual(["rate-limited", "transient"]);
+  });
+
+  test("rejected is neither a lane-stop nor a back-off kind", () => {
+    expect(isLaneStopKind("rejected")).toBe(false);
+    expect(isBackoffKind("rejected")).toBe(false);
   });
 
   test.each([

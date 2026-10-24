@@ -80,7 +80,7 @@ describe("openPr", () => {
       status: 422,
       body: { message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "No commits between main and story/1.9" }] },
     });
-    expect(kind(await forge.openPr({ branch: "story/1.9", base: "main", title: "T", body: "B" }, live()))).toBe("forbidden");
+    expect(kind(await forge.openPr({ branch: "story/1.9", base: "main", title: "T", body: "B" }, live()))).toBe("rejected");
   });
 
   test("a null body comes back as an empty string; merged_at makes it merged", async () => {
@@ -135,7 +135,7 @@ describe("updatePr and closePr", () => {
     gh.control.inject("PATCH", /\/pulls\/7$/, { status: 422, body: { message: "Validation Failed", errors: [{ message: "Cannot update a merged pull request" }] } });
     expect(kind(await forge.closePr(7, live()))).toBe("conflict");
     gh.control.inject("PATCH", /\/pulls\/7$/, { status: 422, body: { message: "Validation Failed" } });
-    expect(kind(await forge.closePr(7, live()))).toBe("forbidden");
+    expect(kind(await forge.closePr(7, live()))).toBe("rejected");
   });
 });
 

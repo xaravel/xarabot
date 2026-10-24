@@ -312,7 +312,7 @@ describe("ledgerSwap", () => {
     expect(kind(await forge.ledgerSwap(t0, { message: "m", writes: { "units/x.json": "1" }, deletes: [] }, live()))).toBe("conflict");
     gh.control.inject("PATCH", /\/git\/refs\/heads\/xarabot\/claims$/, { status: 409, body: { message: "Conflict" } });
     const r = await forge.ledgerSwap(t0, { message: "m", writes: { "units/x.json": "1" }, deletes: [] }, live());
-    expect(kind(r)).toBe("forbidden");
+    expect(kind(r)).toBe("rejected");
     expect(gh.control.ref("xarabot/claims")).toBe(t0);
   });
 

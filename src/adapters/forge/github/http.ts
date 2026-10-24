@@ -220,6 +220,9 @@ export function mapHttpError(op: Operation, reply: Pick<HttpReply, "status" | "b
   }
   if (status === 404) return forgeErr("not-found", what);
   if (status >= 500 && status < 600) return forgeErr("transient", what);
+  // Any other 4xx: GitHub refused the request itself (a validation failure, a conflict no
+  // override maps, a 429 without rate-limit headers). The step fails, not the lane.
+  if (status >= 400 && status < 500) return forgeErr("rejected", what);
   return forgeErr("forbidden", what);
 }
 

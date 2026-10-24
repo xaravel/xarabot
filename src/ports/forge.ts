@@ -10,6 +10,11 @@ import type { PrState } from "../core/schemas/snapshot.ts";
  * argument; a call whose signal is aborted before it completes returns
  * `transient` and changes nothing. There is deliberately no approve, merge,
  * admin-merge, auto-merge or branch-delete operation.
+ *
+ * Error kinds: `auth`, `forbidden` and `uninstalled` stop the lane;
+ * `rate-limited` and `transient` are backed off and retried; `rejected` (the
+ * forge refused the request itself: an unmapped 4xx, or a push a repository
+ * rule refuses) is neither, so a step that meets it fails the unit's attempt.
  */
 
 /** A full lowercase hex git SHA (40 or 64 digits). */
@@ -24,6 +29,7 @@ export const FORGE_ERROR_KINDS = [
   "not-found",
   "uninstalled",
   "transient",
+  "rejected",
 ] as const;
 export type ForgeErrorKind = (typeof FORGE_ERROR_KINDS)[number];
 

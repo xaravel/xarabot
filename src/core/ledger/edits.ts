@@ -656,7 +656,12 @@ export type ApplyRulingParams = EditBase & {
   readonly manifestSha?: string;
 };
 
-/** `parked → released` under a ruling. */
+/**
+ * `parked → released` under a ruling, by any lane identity: the coordinator's
+ * comment rulings (4.6) or the Maintainer's `xarabot rule`. The record must be
+ * `parked` at `generation`; `release` and `rebuild` zero the counters, and
+ * `rebuild` also clears the providers and the reviewed, passed and approved SHAs.
+ */
 export function applyRuling(p: ApplyRulingParams): LedgerEdit {
   return makeEdit("applyRuling", p, (ctx) => {
     const ruling = check("applyRuling ruling", z.enum(["release", "rebuild", "approve"]), p.ruling);
@@ -667,8 +672,6 @@ export function applyRuling(p: ApplyRulingParams): LedgerEdit {
       if (!m.ok) return m;
       manifestSha = m.value;
     }
-    const c = requireCoordinator(ctx);
-    if (!c.ok) return c;
     const rec = requireRecord(ctx);
     if (!rec.ok) return rec;
     const s = requireState(rec.value, ["parked"]);

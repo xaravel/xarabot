@@ -9,6 +9,7 @@ import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/c
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
 import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
 import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
+import { forgeErr, type Forge } from "../../src/ports/forge.ts";
 import { cleanup, fakeConnect, HOST_ID, mainFiles, stubInstaller, world, writeCredential, type MainOpts, type World } from "./lane-fixture.ts";
 
 const dirs: string[] = [];
@@ -301,7 +302,7 @@ describe("xarabot lane run: a failure after the refusal table", () => {
 });
 
 describe("xarabot lane run: a passing start", () => {
-  test("failed-starts goes to 0 and the composed lane runs", async () => {
+  test("failed-starts goes to 0 after a run with no lane stop, and the composed lane runs", async () => {
     const r = await laneRunWith({ failedStarts: 2 });
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
@@ -456,5 +457,85 @@ describe("xarabot lane run: a coordinator lane", () => {
       "ledger: claim reconcile:1 [skip ci]",
       "ledger: finishRecurring reconcile:1 [skip ci]",
     ]);
+  });
+});
+
+describe("xarabot lane run: lane stops count as failed starts", () => {
+  const ELAPSED = { wait: async () => ({ end: "elapsed" as const }) };
+  /** The run's forge, with every snapshot refused `auth`. */
+  const authFailing = (forge: Forge): Forge => ({ ...forge, snapshot: async () => forgeErr("auth", "bad token") });
+  const COORD_HOST = hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] });
+
+  test("the count is reset after the run, not at the passing start", async () => {
+    let during: string | null = null;
+    const r = await laneRunWith({ failedStarts: 2 }, [REPO, "builder-1"], async (d) => {
+      during = read(join(d.laneDir, "failed-starts"));
+      return { outcome: "progress" };
+    });
+    expect(during as string | null).toBe("2\n");
+    expect(r.code).toBe(0);
+    expect(r.failedStarts()).toBe("0\n");
+  });
+
+  test("three starts whose runs each end in a forge-auth lane stop: exit 1, counts 1 then 2, then STOP and one lane-start-failed; a 4th start exits 0 on STOP", async () => {
+    const r = await laneRunWith({}, [REPO, "builder-1"], (d) => runLaneProcess({ ...d, forge: authFailing(d.forge), waiter: ELAPSED }));
+    expect(r.code).toBe(1);
+    expect(r.out.at(-1)).toBe("lane builder-1: stop");
+    expect(r.err.join("\n")).toContain("run ended in a lane stop: forge-auth");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(read(join(r.laneDir, "outcome"))).toBe("stop\n");
+    expect(await r.again()).toBe(1);
+    expect(r.failedStarts()).toBe("2\n");
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(false);
+    expect(await r.again()).toBe(1);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(readFileSync(join(r.laneDir, "STOP"), "utf8")).toBe("stop\n");
+    expect(r.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth", LANE_START_FAILED]);
+    expect(await r.again()).toBe(0);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(r.fake.control.alerts().filter((a) => a.condition === LANE_START_FAILED)).toHaveLength(1);
+  });
+
+  test("heals: lane stop, lane stop, then an idle run counts 1, 2, then 0", async () => {
+    let runs = 0;
+    const r = await laneRunWith({}, [REPO, "builder-1"], (d) => {
+      runs += 1;
+      return runLaneProcess({ ...d, forge: runs <= 2 ? authFailing(d.forge) : d.forge, waiter: ELAPSED });
+    });
+    expect(r.code).toBe(1);
+    expect(r.failedStarts()).toBe("1\n");
+    expect(await r.again()).toBe(1);
+    expect(r.failedStarts()).toBe("2\n");
+    expect(await r.again()).toBe(0);
+    expect(r.out.at(-1)).toBe("lane builder-1: idle");
+    expect(r.failedStarts()).toBe("0\n");
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(false);
+    expect(r.fake.control.alerts().map((a) => a.condition)).not.toContain(LANE_START_FAILED);
+  });
+
+  test("a run that ends stop on the lane STOP marker: exit 0, the count reset", async () => {
+    const r = await laneRunWith({ failedStarts: 2 }, [REPO, "builder-1"], (d) => {
+      // The STOP appears after the start checks, before the run's own check.
+      writeFileSync(join(d.laneDir, "STOP"), "stop\n");
+      return runLaneProcess({ ...d, waiter: ELAPSED });
+    });
+    expect(r.code).toBe(0);
+    expect(r.out.at(-1)).toBe("lane builder-1: stop");
+    expect(r.err).toEqual([]);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(r.fake.control.alerts()).toEqual([]);
+  });
+
+  test("a coordinator run that ends in a lane stop is counted too; the 3rd writes STOP and posts lane-start-failed", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, failedStarts: 1 }, [REPO, "coordinator"], undefined, (d) =>
+      runCoordinatorProcess({ ...d, forge: authFailing(d.forge), waiter: ELAPSED }),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out.at(-1)).toBe("lane coordinator: stop");
+    expect(r.failedStarts()).toBe("2\n");
+    expect(await r.again()).toBe(1);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(true);
+    expect(r.fake.control.alerts().map((a) => a.condition)).toEqual(["forge-auth", LANE_START_FAILED]);
   });
 });

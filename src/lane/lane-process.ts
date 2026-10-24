@@ -178,7 +178,12 @@ export type SessionLimits = {
 /** Why a run ended `stop` after a STOP during a usage-limit sleep. */
 export const LIMIT_STOP_REASON = "STOP during a usage-limit sleep";
 
-export type LaneProcessResult = { readonly outcome: LaneOutcome };
+/**
+ * A run's outcome. `laneStop` is set, to the stop's reason, when the outcome
+ * is `stop` for any reason but a STOP marker (the host or lane `STOP`, or a
+ * STOP during a usage-limit sleep): `lane run` counts it as a failed start.
+ */
+export type LaneProcessResult = { readonly outcome: LaneOutcome; readonly laneStop?: string };
 
 /** Ends the run early with `outcome`. */
 class Halt extends Error {
@@ -192,6 +197,9 @@ class Halt extends Error {
 
 /** The heartbeat keeper lost or released the unit: abandon it, with no further edit. */
 class Abandon extends Halt {}
+
+/** A host or lane STOP marker ends the run: the operator's choice, never a lane stop. */
+class MarkerStop extends Halt {}
 
 /**
  * Installed tool trees: skills for the agents and the BMAD install. The runner
@@ -303,6 +311,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     lastNowAt = clock();
   };
   let unit: UnitTrack | null = null;
+  /** The run ended on a STOP marker (the host or lane `STOP`, or a STOP during a usage-limit sleep). */
+  let markerStop = false;
 
   const log = (text: string): void => {
     if (unit !== null) store.appendLog(unit.logName, text);
@@ -366,8 +376,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   const checkStop = (): void => {
     const s = store.stopMarkers();
     if (!s.ok) throw new Halt("stop", `STOP markers unreadable, stopping: ${s.error.message}`);
-    if (s.value.host) throw new Halt("stop", "host STOP marker present");
-    if (s.value.lane) throw new Halt("stop", "lane STOP marker present");
+    if (s.value.host) throw new MarkerStop("stop", "host STOP marker present");
+    if (s.value.lane) throw new MarkerStop("stop", "lane STOP marker present");
   };
 
   /** The last forge time seen, advanced by the host time since; the host time before any. */
@@ -394,11 +404,17 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   /**
    * Throws `Abandon` (`failed`) once the keeper lost or released the unit,
    * with the unit's state and record from the keeper's end: `null` when lost
-   * or lapsed, the released record when released.
+   * or lapsed, the released record when released. A keeper that met a
+   * lane-stop condition stops the lane instead: the alert, then `stop`, the
+   * record left as it is.
    */
-  const checkHeld = (t: UnitTrack): void => {
+  const checkHeld = async (t: UnitTrack): Promise<void> => {
     const end = keeper?.end() ?? null;
     if (end === null || end.kind === "moved-on") return;
+    if (end.kind === "stop") {
+      note(`stopping the lane: heartbeat: ${end.message}`);
+      await laneStop(end.condition, `heartbeat: ${end.message}`);
+    }
     if (end.kind === "released") {
       if (end.record !== null) t.record = end.record;
       t.state = "released";
@@ -428,7 +444,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
   /** Applies a held edit to the claimed unit; records the state after. None once the keeper lost the unit. */
   const held = async (t: UnitTrack, make: (now: string, generation: number) => LedgerEdit, what: string): Promise<boolean> => {
-    checkHeld(t);
+    await checkHeld(t);
     const generation = t.record?.generation;
     if (generation === undefined) {
       t.state = null;
@@ -631,11 +647,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const spec = agent.launchSpec(u, settings, layout.resultPath);
       if (!spec.ok) return { fail: `launch spec: ${spec.error.message}` };
       const n = t.sessions + 1;
-      checkHeld(t);
+      await checkHeld(t);
       note(`run ${n} (${u.kind}) starts`);
       const { run, timedOut } = await sandboxed(spec.value);
       if (!run.ok) {
-        checkHeld(t);
+        await checkHeld(t);
         return { fail: `sandbox refused: ${run.error.message}` };
       }
       t.sessions = n;
@@ -660,7 +676,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         };
       }
       // A unit the keeper lost or released during the run is abandoned here, before any resume.
-      checkHeld(t);
+      await checkHeld(t);
       return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut };
     };
 
@@ -769,7 +785,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       });
       reportStore(span, "journal");
       note(`usage-limit sleep: ${waited.end}${waited.message === undefined ? "" : ` (${waited.message})`}`);
-      checkHeld(t);
+      await checkHeld(t);
       switch (waited.end) {
         case "elapsed":
         case "woken":
@@ -787,6 +803,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     /** The run ends `stop` with the record the usage-limit STOP released. */
     const stopAfterLimit = (stopped: { readonly record: UnitRecord | null; readonly state: UnitState | null }): LaneOutcome => {
+      markerStop = true;
       t.record = stopped.record;
       t.state = stopped.state;
       addReason(t, LIMIT_STOP_REASON);
@@ -891,7 +908,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (out.record !== undefined) t.record = out.record;
       if (out.reason !== undefined) addReason(t, out.reason);
       note(`${what}: ${out.outcome} (${out.state ?? "unknown"})`);
-      checkHeld(t);
+      await checkHeld(t);
       if (budget.aborted && out.outcome !== "stop" && out.state === "claimed") {
         // The budget passed during the step: release the unit, unless the step already moved it on.
         const before = t.reason;
@@ -935,7 +952,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (specPath === null) return { end: await failUnit(t, "spec: a done result with no spec file") };
       const record = t.record;
       if (record === null) return { end: await failUnit(t, "no claimed record to hand to the PR step") };
-      checkHeld(t);
+      await checkHeld(t);
       let out: PrStepOutput;
       try {
         out = await deps.prStep({ unit: story, record, result, specPath, superseded, clone: layout.clone, signal: budget, log: note, kind: "build" });
@@ -979,7 +996,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         addReason(t, "no merge step to watch the queue");
         return "progress";
       }
-      checkHeld(t);
+      await checkHeld(t);
       first = await mergeRound(mergeStep, record);
     } else {
       first = await build(start);
@@ -1244,11 +1261,15 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   };
 
   let outcome: LaneOutcome;
+  /** The reason of the `Halt` that ended the run, if one did. */
+  let haltReason: string | null = null;
   try {
     outcome = await body();
   } catch (e) {
     if (e instanceof Halt) {
       outcome = e.outcome;
+      haltReason = e.reason;
+      if (e instanceof MarkerStop) markerStop = true;
       if (unit !== null) addReason(unit as UnitTrack, e.reason);
     } else {
       outcome = "failed";
@@ -1263,6 +1284,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
             if (!(inner instanceof Abandon)) t.state = null;
             if (inner instanceof Halt) {
               outcome = inner.outcome;
+              haltReason = inner.reason;
               addReason(t, inner.reason);
             }
           }
@@ -1311,5 +1333,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     await (keeper as Heartbeat | null)?.stop();
   }
   reportStore(store.clearPid("lane"), "lane.pid");
-  return { outcome };
+  if (outcome !== "stop" || markerStop) return { outcome };
+  const t = unit as UnitTrack | null;
+  return { outcome, laneStop: haltReason ?? t?.reason ?? "the run ended stop" };
 }

@@ -10,6 +10,7 @@ const CONTROLS = {
   setChecks: true,
   setCiLog: true,
   injectError: true,
+  refusePushes: true,
   mergeQueueHead: true,
   comments: true,
   queue: true,

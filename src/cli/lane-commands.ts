@@ -28,7 +28,8 @@ export const LANE_USAGE = "xarabot wake <lane> | xarabot stop <lane> | xarabot s
 
 export { laneDirFor };
 
-async function githubForge(env: CredentialEnv, lane: Lane): Promise<{ readonly ok: true; readonly forge: Forge } | { readonly ok: false; readonly message: string }> {
+/** A GitHub forge for `lane`'s repo with its owner's App credentials. */
+export async function githubForge(env: CredentialEnv, lane: Lane): Promise<{ readonly ok: true; readonly forge: Forge } | { readonly ok: false; readonly message: string }> {
   const creds = await loadAppCredentials({ login: lane.owner, env });
   if (!creds.ok) return { ok: false, message: `credentials ${creds.error.kind}: ${creds.error.message}` };
   const [owner, name] = lane.repo.split("/") as [string, string];
