@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -7,6 +7,8 @@ const ROOT = join(import.meta.dir, "..", "..");
 const MAIN = join(ROOT, "src", "cli", "main.ts");
 const MD = "_bmad-output/planning-artifacts/epics.md";
 const dirs: string[] = [];
+
+type RepoConfig = { readonly bootstrapped_epics?: readonly number[]; readonly manifests?: { readonly dir?: string } };
 
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -129,10 +131,12 @@ describe("xarabot graph check", () => {
     expect(r.stderr).toStartWith("xarabot graph check: git rev-parse");
   });
 
-  test("this repo: its epics.yaml graph and a warning per Story heading", async () => {
+  test("this repo: its epics.yaml graph and a warning per unmanifested Story heading", async () => {
     const r = run(ROOT);
     expect(r.code).toBe(0);
-    expect(r.stdout.trimEnd().split("\n").slice(1)).toEqual([
+    // The edges only: an Epic with manifests also lists its Stories after them.
+    const edges = r.stdout.trimEnd().split("\n").slice(1).map((l) => l.replace(/ stories: .*$/, ""));
+    expect(edges).toEqual([
       "1 → []",
       "2 → [1]",
       "3 → [2]",
@@ -141,9 +145,23 @@ describe("xarabot graph check", () => {
       "6 → [4]",
       "7 → [5, 6]",
     ]);
+    // Every Story heading warns unless its Epic is bootstrapped or it has a manifest.
     const md = await Bun.file(join(ROOT, MD)).text();
-    const headings = [...md.matchAll(/^### Story (\d+\.\d+[a-z]?):/gm)].length;
+    const configPath = join(ROOT, ".xarabot/config.yaml");
+    const config = existsSync(configPath) ? (Bun.YAML.parse(readFileSync(configPath, "utf8")) as RepoConfig) : {};
+    const bootstrapped = new Set(config.bootstrapped_epics ?? []);
+    const manifestDir = join(ROOT, config.manifests?.dir ?? "stories");
+    const manifested = new Set(
+      existsSync(manifestDir)
+        ? readdirSync(manifestDir)
+            .filter((f) => f.endsWith(".md"))
+            .map((f) => /^story_id: "?([^"\n]+)"?$/m.exec(readFileSync(join(manifestDir, f), "utf8"))?.[1])
+        : [],
+    );
+    const expected = [...md.matchAll(/^### Story ((\d+)\.\d+[a-z]?):/gm)].filter(
+      (m) => !bootstrapped.has(Number(m[2])) && !manifested.has(m[1]),
+    ).length;
     const warnings = r.stderr.trimEnd().split("\n").filter((l) => /^warning: Story \S+ \(.+:\d+\) has no manifest$/.test(l));
-    expect(warnings.length).toBe(headings);
+    expect(warnings.length).toBe(expected);
   });
 });

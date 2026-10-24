@@ -1,0 +1,7 @@
+schema_version: 1
+runner_version: "runner-1"
+maintainer: edanisko
+standing_authority_path: docs/maintainer/standing-authority.md
+bootstrapped_epics: [1]
+manifests:
+  dir: stories
