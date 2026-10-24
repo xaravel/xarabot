@@ -138,6 +138,13 @@ export type PrefetchRequest = {
   readonly dir: string;
 };
 
+/** A PR as the merge queue sees it: an ejected PR is `open`, not `queued`, at the same head. */
+export type QueueState = {
+  readonly state: ForgePrState;
+  readonly head_sha: GitSha;
+  readonly queued: boolean;
+};
+
 export type Forge = {
   snapshot(opts: SnapshotOpts): Promise<ForgeResult<ForgeSnapshot>>;
   /** Fast-forward only: the tip must still be `oldSha`, else `conflict`. One new commit. */
@@ -160,6 +167,8 @@ export type Forge = {
   enqueue(pr: number, expectedHead: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly queued: true }>>;
   /** `ok` when not queued. */
   dequeue(pr: number, opts: CallOpts): Promise<ForgeResult<{ readonly queued: false }>>;
+  /** A PR's state, head and whether it is in the merge queue. Read-only; a missing PR is `not-found`. */
+  queueState(pr: number, opts: CallOpts): Promise<ForgeResult<QueueState>>;
   /** Posts once per (`condition`, `mainSha`) pair; a repeat posts nothing. */
   alert(condition: string, mainSha: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly posted: boolean }>>;
   /** Writes the failing checks' logs for `sha` into `dir`; returns their absolute paths. */
@@ -181,6 +190,7 @@ export const FORGE_OPERATIONS = [
   "checks",
   "enqueue",
   "dequeue",
+  "queueState",
   "alert",
   "prefetch",
 ] as const satisfies readonly ForgeOperation[];

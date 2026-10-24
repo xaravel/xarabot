@@ -22,6 +22,7 @@ import { emptyDir } from "../sandbox/vendor-home.ts";
 import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
+import type { MergeStep } from "./merge-step.ts";
 import type { Workspace } from "./workspace.ts";
 
 /**
@@ -75,6 +76,12 @@ export type LaneDeps = {
   readonly prStep: PrStep;
   /** Takes the open PR through CI (Story 1.17); without it the run ends after the PR step. */
   readonly ciStep?: CiStep;
+  /**
+   * Takes a PR whose CI passed through the approval gate and the merge queue
+   * (Story 1.17a); without it the run ends after the CI step. After an
+   * ejection the CI step runs again, then this step.
+   */
+  readonly mergeStep?: MergeStep;
   /** The lane folder (AR37). */
   readonly laneDir: string;
   /** Who writes the ledger records. */
@@ -309,6 +316,79 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     note(`failed: ${reason}`);
     await held(t, (now, generation) => failAttempt({ unit: t.story.unit, by: identity, now, generation }), "failAttempt");
     return "failed";
+  };
+
+  type JournalEntry = {
+    readonly unit: string;
+    readonly logName: string;
+    readonly startedMs: number;
+    readonly record: UnitRecord | null;
+    readonly state: UnitState | null;
+    readonly outcome: LaneOutcome;
+    readonly reason: string | null;
+    readonly tokens?: JournalTokens | null;
+    readonly cost?: JournalCost | null;
+    readonly sessions?: number;
+    readonly result?: BuildResult | null;
+  };
+
+  /** Appends one unit journal record, after flushing the unit's log. */
+  const journalUnit = (e: JournalEntry): void => {
+    const endedMs = clock();
+    const logged = store.appendLog(e.logName, "");
+    const record: UnitJournalRecord = {
+      schema_version: 1,
+      type: "unit",
+      unit: e.unit,
+      lane: identity.lane,
+      generation: e.record?.generation ?? null,
+      started_at: iso(e.startedMs),
+      ended_at: iso(endedMs),
+      duration_ms: Math.max(0, endedMs - e.startedMs),
+      agent: lane.agent,
+      model: lane.model ?? agent.defaultModel,
+      effort: lane.effort,
+      tokens: e.tokens ?? null,
+      cost: e.cost ?? null,
+      sessions: e.sessions ?? 0,
+      outcome: e.outcome,
+      result: e.result?.outcome ?? null,
+      state: e.state,
+      attempts: e.record?.attempts ?? 0,
+      loopbacks: e.record?.loopbacks ?? 0,
+      ci_fixes: e.record?.ci_fixes ?? 0,
+      denied_actions: [...(e.result?.denied_actions ?? [])],
+      reason: e.reason,
+      log: logged.ok ? logged.value : join(layout.logs, e.logName),
+    };
+    reportStore(store.appendJournal(record), "journal");
+  };
+
+  /**
+   * Before `next`: every parked or merging record whose PR the forge reports
+   * merged (the Maintainer approved and queued it by hand, or the queue merged
+   * it after its lane ended) is marked `merged`, with one journal record each.
+   */
+  const sweepMerged = async (units: readonly UnitRecord[], prs: ForgeSnapshot["prs"], now: string): Promise<void> => {
+    for (const r of units) {
+      if (r.state !== "parked" && r.state !== "merging") continue;
+      const pr = prs[r.unit];
+      if (pr?.state !== "merged") continue;
+      const startedMs = clock();
+      const logName = logFileName(r.unit, startedMs);
+      const reason = `PR #${pr.number} merged`;
+      store.appendLog(logName, `== ${iso(startedMs)} sweep: ${r.unit} was ${r.state}; ${reason} ==\n`);
+      const swapped = await swap(markMerged({ unit: r.unit, by: identity, now }), r.unit);
+      if (swapped.kind === "lost") {
+        store.appendLog(logName, `== ${iso(clock())} sweep: markMerged lost: ${swapped.message} ==\n`);
+        continue;
+      }
+      if (swapped.kind === "failed") throw new Halt("failed", `sweep markMerged ${r.unit}: ${swapped.message}`);
+      // No commit: another lane already marked it merged.
+      if (swapped.record === null) continue;
+      store.appendLog(logName, `== ${iso(clock())} sweep: marked merged ==\n`);
+      journalUnit({ unit: r.unit, logName, startedMs, record: swapped.record, state: "merged", outcome: "progress", reason });
+    }
   };
 
   const settings: AgentSettings = { effort: lane.effort, ...(lane.model !== undefined ? { model: lane.model } : {}) };
@@ -571,28 +651,49 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     if (prEnd !== null) return prEnd;
 
     const ciStep = deps.ciStep;
-    const withPr = t.record;
-    if (ciStep === undefined || out.outcome !== "progress" || out.state !== "claimed" || withPr === null || withPr.pr === null) return out.outcome;
-    let ci: PrStepOutput;
-    try {
-      ci = await ciStep({
-        unit: story,
-        record: withPr,
-        specPath,
-        clone: layout.clone,
-        signal: budget,
-        log: note,
-        scratchDir: join(layout.laneDir, "scratch"),
-        prStep: deps.prStep,
-        session: ciSession,
-        regenerate,
-      });
-    } catch (e) {
-      return failUnit(t, `CI step threw: ${message(e)}`);
+    const mergeStep = deps.mergeStep;
+    /** The claimed record with a PR a step may take on, else `null`. */
+    const claimedWithPr = (o: PrStepOutput): UnitRecord | null => {
+      const r = t.record;
+      return o.outcome === "progress" && o.state === "claimed" && r !== null && r.pr !== null ? r : null;
+    };
+    let last: PrStepOutput = out;
+    for (;;) {
+      const withPr = claimedWithPr(last);
+      if (ciStep === undefined || withPr === null) return last.outcome;
+      let ci: PrStepOutput;
+      try {
+        ci = await ciStep({
+          unit: story,
+          record: withPr,
+          specPath,
+          clone: layout.clone,
+          signal: budget,
+          log: note,
+          scratchDir: join(layout.laneDir, "scratch"),
+          prStep: deps.prStep,
+          session: ciSession,
+          regenerate,
+        });
+      } catch (e) {
+        return failUnit(t, `CI step threw: ${message(e)}`);
+      }
+      const ciEnd = await settle(ci, "CI step");
+      if (ciEnd !== null) return ciEnd;
+      const passed = claimedWithPr(ci);
+      if (mergeStep === undefined || passed === null) return ci.outcome;
+      let merged: Awaited<ReturnType<MergeStep>>;
+      try {
+        merged = await mergeStep({ unit: story, record: passed, signal: budget, log: note });
+      } catch (e) {
+        return failUnit(t, `merge step threw: ${message(e)}`);
+      }
+      const mergeEnd = await settle(merged, "merge step");
+      if (mergeEnd !== null) return mergeEnd;
+      if (merged.ejected !== true) return merged.outcome;
+      note("ejected from the merge queue: CI again on fresh main");
+      last = merged;
     }
-    const ciEnd = await settle(ci, "CI step");
-    if (ciEnd !== null) return ciEnd;
-    return ci.outcome;
   };
 
   const body = async (): Promise<LaneOutcome> => {
@@ -626,6 +727,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         if (assembled.error.kind === "stop") await laneStop("ledger-schema-version", assembled.error.message);
         throw new Halt("stop", `${assembled.error.kind}: ${assembled.error.message}`);
       }
+      await sweepMerged(assembled.value.ledger.units, snap.prs, snap.now);
       const config = assembled.value.config;
       const picked = next(assembled.value, "builder");
       if (picked.kind === "stop") throw new Halt("stop", `next: ${picked.reason}`);
@@ -747,35 +849,20 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
   const t = unit as UnitTrack | null;
   if (t !== null) {
-    const endedMs = clock();
     note(`outcome ${outcome}`);
-    const logged = store.appendLog(t.logName, "");
-    const record: UnitJournalRecord = {
-      schema_version: 1,
-      type: "unit",
+    journalUnit({
       unit: t.story.unit,
-      lane: identity.lane,
-      generation: t.record?.generation ?? null,
-      started_at: iso(t.startedMs),
-      ended_at: iso(endedMs),
-      duration_ms: Math.max(0, endedMs - t.startedMs),
-      agent: lane.agent,
-      model: lane.model ?? agent.defaultModel,
-      effort: lane.effort,
+      logName: t.logName,
+      startedMs: t.startedMs,
+      record: t.record,
+      state: t.state,
+      outcome,
+      reason: t.reason,
       tokens: t.tokens,
       cost: t.cost,
       sessions: t.sessions,
-      outcome,
-      result: t.result?.outcome ?? null,
-      state: t.state,
-      attempts: t.record?.attempts ?? 0,
-      loopbacks: t.record?.loopbacks ?? 0,
-      ci_fixes: t.record?.ci_fixes ?? 0,
-      denied_actions: [...(t.result?.denied_actions ?? [])],
-      reason: t.reason,
-      log: logged.ok ? logged.value : join(layout.logs, t.logName),
-    };
-    reportStore(store.appendJournal(record), "journal");
+      result: t.result,
+    });
   }
   reportStore(store.writeOutcome(outcome), "outcome");
   return { outcome };

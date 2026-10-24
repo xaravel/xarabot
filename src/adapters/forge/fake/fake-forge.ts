@@ -64,6 +64,8 @@ export type FakeForgeControl = {
   beforeSwap(hook: BeforeSwapHook | null): void;
   /** Merges the PR at the head of the queue onto `main`; `null` when the queue is empty. */
   mergeQueueHead(): ForgePr | null;
+  /** Takes a queued PR out of the queue without merging it, as an ejection does; `false` when it was not queued. */
+  eject(pr: number): boolean;
   /** Comment bodies on PR `pr`, oldest first. */
   comments(pr: number): string[];
   alerts(): FakeAlert[];
@@ -338,6 +340,14 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         return forgeOk({ queued: false as const });
       }),
 
+    queueState: (pr, opts) =>
+      call("queueState", opts, () => {
+        const found = findPr(pr, "queueState");
+        if (!found.ok) return found;
+        const p = found.value;
+        return forgeOk({ state: p.state, head_sha: p.head_sha, queued: queue.includes(pr) });
+      }),
+
     alert: (condition, sha, opts) =>
       call<{ readonly posted: boolean }>("alert", opts, () => {
         if (alerts.some((a) => a.condition === condition && a.main_sha === sha)) return forgeOk({ posted: false });
@@ -401,6 +411,11 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       p.state = "merged";
       mainSha = newSha("main");
       return view(p);
+    },
+    eject(pr) {
+      if (!queue.includes(pr)) return false;
+      dequeueNumber(pr);
+      return true;
     },
     comments: (pr) => [...(comments.get(pr) ?? [])],
     alerts: () => alerts.map((a) => ({ ...a })),

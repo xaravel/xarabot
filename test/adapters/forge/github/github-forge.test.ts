@@ -296,6 +296,7 @@ describe("every operation", () => {
       checks: () => f.checks(sha, o),
       enqueue: () => f.enqueue(1, sha, o),
       dequeue: () => f.dequeue(1, o),
+      queueState: () => f.queueState(1, o),
       alert: () => f.alert("c", sha, o),
       prefetch: () => f.prefetch({ kind: "ci-log", sha, dir: join(tmpdir(), "xarabot-never") }, o),
     };

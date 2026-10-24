@@ -202,6 +202,41 @@ describe("dequeue", () => {
   });
 });
 
+describe("queueState", () => {
+  test("one read-only query; OPEN, CLOSED and MERGED map to lowercase with the queue entry", async () => {
+    const { gh, forge } = setup();
+    openPr(gh);
+    expect(value(await forge.queueState(7, live()))).toEqual({ state: "open", head_sha: H1, queued: false });
+    value(await forge.enqueue(7, H1, live()));
+    gh.control.clearLog();
+    expect(value(await forge.queueState(7, live()))).toEqual({ state: "open", head_sha: H1, queued: true });
+    const [query, ...rest] = graphqlCalls(gh);
+    expect(rest).toEqual([]);
+    expect(query?.query).toMatch(/^query\b/);
+    expect(query?.variables).toEqual({ owner: "acme", name: "widgets", number: 7 });
+    expect(gh.control.mergeQueueHead()?.number).toBe(7);
+    expect(value(await forge.queueState(7, live()))).toEqual({ state: "merged", head_sha: H1, queued: false });
+    gh.control.setBranch("story/1.11", H2);
+    gh.control.setPull(8, { state: "closed", merged: false, head_sha: H2, branch: "story/1.11" });
+    expect(value(await forge.queueState(8, live()))).toEqual({ state: "closed", head_sha: H2, queued: false });
+    expect(graphqlCalls(gh).filter(isMutation)).toEqual([]);
+  });
+
+  test("a missing PR is not-found; an unknown state is malformed (transient); a 403 is forbidden", async () => {
+    const { gh, forge } = setup();
+    expect(kind(await forge.queueState(404, live()))).toBe("not-found");
+    openPr(gh);
+    gh.control.inject("POST", /^\/graphql$/, {
+      status: 200,
+      body: { data: { repository: { pullRequest: { id: "PR_7", state: "DRAFTY", headRefOid: H1, mergeQueueEntry: null } } } },
+    });
+    const r = await forge.queueState(7, live());
+    expect(r.ok ? "" : `${r.error.kind} ${r.error.message}`).toMatch(/^transient pullQueueState: malformed reply/);
+    gh.control.inject("POST", /^\/graphql$/, { status: 403, body: { message: "Resource not accessible by integration" } });
+    expect(kind(await forge.queueState(7, live()))).toBe("forbidden");
+  });
+});
+
 describe("the adapter source", () => {
   test("has no merge, auto-merge, admin, branch-delete or DELETE path", () => {
     const dir = join(import.meta.dir, "../../../../src/adapters/forge/github");
