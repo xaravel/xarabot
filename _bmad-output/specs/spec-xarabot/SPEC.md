@@ -102,7 +102,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 - **CAP-18 · Guard (sandbox and write check 0.x; diff check and CI v1)**
   - **intent:** One fail-closed guard, the same for every adapter:
     - **Sandbox (0.x):** the coding agent runs with only its unit's clone writable, and with no GitHub credentials and no GitHub host (§ Constraints, "Agents never touch GitHub").
-    - **Write check (0.x):** before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`) or Protected Paths. Only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's own BMAD Story spec file, and the `status:` line of its own Story file.
+    - **Write check (0.x):** before the squash, the runner refuses a builder diff that touches coordinator-owned files, Story manifests, `.xarabot/**`, the Standing Authority file, `.github/**`, agent config (`.agents/skills`, `.claude/skills`, `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `CLAUDE.local.md`) or Protected Paths. Only three exceptions: an approved Infrastructure Story's Protected Paths, the unit's spec file, and the `status:` line of its own Story file. The spec file is the single `story_spec_path` match whose `status` is `done`; any other match must be `blocked`, is superseded and is dropped from the squash.
     - **Diff check (v1):** extends the write check to refuse files outside the claim's globs and dependency files the repo has not allowed.
     - **CI (v1):** CI re-checks the same rules.
     - **Hooks:** per-agent write-time hooks, where an agent has them, give earlier feedback but are never the boundary.
@@ -173,9 +173,10 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 **Operating limits**
 - **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs. Besides the coordinator, the Maintainer makes these bootstrap writes, all in Xarabot's own repo and each in a Maintainer PR:
-  - at the self-host switch, running `bmad-sprint-planning` so that `sprint-status.yaml` has the bootstrapped Epic's Stories `done`, creating the file or updating it;
+  - at the self-host switch, running `bmad-sprint-planning` so that `sprint-status.yaml` has the bootstrapped Epic's Stories `done`, creating the file or updating it, and running Epic 1's retro, which writes its retro doc and its entry and action items in `sprint-status.yaml` (PR #53);
   - at the switch, Epic 2's Story manifests and Epic 2's Epic context file;
-  - until the rulings Story merges, the go for a rejected retro, in `retro-gates.yaml`.
+  - until the rulings Story merges, the go for a rejected retro, in `retro-gates.yaml`;
+  - until graph planning units run (Story 2.7), in a correct-course PR, the `epics.md` section, Story manifest and `sprint-status.yaml` key (`backlog`) of each Story added to a started Epic.
 - **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
@@ -213,11 +214,10 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - effort mapping (AD-21);
   - the daily digest (AD-23);
   - the pinned runner's launcher, its version switch and upgrade PRs (AD-25);
-  - keys, App rights and the App permission table (AD-26);
+  - keys, App rights and the App permission table, with no merge-queue permission (AD-26);
   - the forge port's contract suite and error kinds (AD-27, AD-32);
   - the write check (AD-30).
 - **Still open in the spine:**
-  - the App permission the merge queue needs (verified live before the merge-plumbing Story);
   - which `PATCH git/refs` response means "retry the swap" (409 or 422);
   - the adapter spikes: for `claude`, `codex` and `pi`, how `bmad-build-auto`'s outcomes map onto the `build` result and how session resume works; for `claude`, the output format that yields usage; for `codex` and `pi`, whether `bmad-build-auto` gets its subagents;
   - AD-17's two assumptions, spiked in their Stories: pi's vendor-home override and the proxy's hostname allowlist.
