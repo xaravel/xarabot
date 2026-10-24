@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "unit": "story:2.2",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -13,7 +13,7 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-24T08:50:26.327Z",
+  "heartbeat_at": "2026-10-24T08:52:12.103Z",
   "pr": 58,
   "pr_owner": "edanisko",
   "base_sha": "96b313a926cf3811fea1503b9a472b5e9ec232b5",
@@ -22,7 +22,29 @@
   "passed_sha": null,
   "approved_sha": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-2-2-stale-takeover.md",
+      "src/core/lane/takeover.ts",
+      "src/core/ledger/edits.ts",
+      "src/core/next/next.ts",
+      "src/lane/ci-step.ts",
+      "src/lane/lane-process.ts",
+      "src/lane/merge-step.ts",
+      "src/lane/stop.ts",
+      "test/core/lane/takeover.test.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/core/next/next.test.ts",
+      "test/lane/ci-step.test.ts",
+      "test/lane/lane-process.test.ts",
+      "test/lane/merge-step.test.ts",
+      "test/lane/pr-step.test.ts",
+      "test/lane/stop.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
