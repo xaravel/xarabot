@@ -1,7 +1,5 @@
-/** Protected Paths every repo has; a policy can add to them, never remove (AR22). */
-export const MANDATORY_PROTECTED_PATHS: readonly string[] = [
-  ".xarabot/**",
-  ".github/**",
+/** Agent config at any depth: every repo protects it (AR22), and a builder never writes it (FR18). */
+export const AGENT_CONFIG_PATHS: readonly string[] = [
   "**/.agents/**",
   "**/.claude/**",
   "**/.codex/**",
@@ -10,6 +8,9 @@ export const MANDATORY_PROTECTED_PATHS: readonly string[] = [
   "**/AGENTS.md",
   "**/CLAUDE.md",
 ];
+
+/** Protected Paths every repo has; a policy can add to them, never remove (AR22). */
+export const MANDATORY_PROTECTED_PATHS: readonly string[] = [".xarabot/**", ".github/**", ...AGENT_CONFIG_PATHS];
 
 /**
  * The effective Protected Paths: the mandatory list with the Standing
