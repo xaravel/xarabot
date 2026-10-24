@@ -146,7 +146,8 @@ function requireCoordinator(ctx: Ctx): Step<null> {
   return ctx.by.lane === "coordinator" ? ok(null) : pre(`only the coordinator lane may write this edit`);
 }
 
-function isStale(rec: UnitRecord, now: string): boolean {
+/** A record is stale once `now` (the forge's time) is `STALE_AFTER_MS` or more past its `heartbeat_at`. */
+export function isStale(rec: UnitRecord, now: string): boolean {
   return Date.parse(now) - Date.parse(rec.heartbeat_at) >= STALE_AFTER_MS;
 }
 
@@ -419,11 +420,36 @@ export type TakeOverStaleParams = EditBase & {
   readonly generation: number;
   /** For a `merging` record: the caller has seen its PR still in the merge queue. */
   readonly stillQueued?: boolean;
+  /** For a `claimed` record: the manifest's globs, re-resolved; default the record's. */
+  readonly globs?: readonly string[];
+  /**
+   * For a `claimed` record: the open PR on the branch, adopted as a claim
+   * adopts it. For a `merging` record: its own PR (`pr` must match), whose
+   * queue head becomes `head_sha`; nothing else is taken from it.
+   */
+  readonly adoptPr?: AdoptedPr | null;
+  /** For a `claimed` record with no adopted PR: the SHA it starts from (`main`). */
+  readonly baseSha?: string | null;
 };
 
-/** A stale takeover: `claimed → claimed` (or `→ parked` at the attempts cap), `merging → merging`. */
+/**
+ * A stale takeover: `claimed → claimed` (or `→ parked` at the attempts cap),
+ * `merging → merging`. A `claimed` takeover is a claim of the record: its
+ * globs re-checked for overlap, the claim's PR fields, the review SHAs
+ * cleared. A `merging` takeover keeps the PR, SHAs and globs, `head_sha` aside.
+ */
 export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
   return makeEdit("takeOverStale", p, (ctx) => {
+    const globs = p.globs === undefined ? null : normalizeAll("takeOverStale globs", p.globs);
+    if (globs !== null && !globs.ok) return globs;
+    const adopted = p.adoptPr == null ? null : check("takeOverStale adoptPr", AdoptedPrSchema, p.adoptPr);
+    if (adopted !== null && !adopted.ok) return adopted;
+    const baseSha = p.baseSha ?? null;
+    if (baseSha !== null) {
+      if (adopted !== null) return bad("takeOverStale: baseSha and adoptPr are exclusive (an adopted PR carries its base_sha)");
+      const b = check("takeOverStale baseSha", GitSha, baseSha);
+      if (!b.ok) return b;
+    }
     const rec = requireStale(ctx, p.generation, ["claimed", "merging"]);
     if (!rec.ok) return rec;
     const r = rec.value;
@@ -431,13 +457,35 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
     if (r.state === "merging") {
       if (r.lane === "coordinator") return pre(`${ctx.unit} is merging under the coordinator`);
       if (p.stillQueued !== true) return pre(`${ctx.unit}'s PR is not asserted to be still queued`);
-      return to("merging", stamp(ctx, r, { generation }));
+      if (globs !== null || baseSha !== null) return pre(`${ctx.unit} is merging: a merging takeover keeps its globs and base_sha`);
+      if (adopted === null) return to("merging", stamp(ctx, r, { generation }));
+      if (adopted.value.pr !== r.pr) return pre(`${ctx.unit} is merging PR #${r.pr ?? "none"}, not #${adopted.value.pr}`);
+      return to("merging", stamp(ctx, r, { generation, head_sha: adopted.value.head_sha }));
     }
+    const held = globs?.value ?? [...r.globs];
+    for (const [id, other] of ctx.ledger.units) {
+      if (id === ctx.unit) continue;
+      for (const theirs of heldGlobs(other)) {
+        const hit = held.find((g) => globsOverlap(g, theirs));
+        if (hit !== undefined) return pre(`takeOverStale glob "${hit}" overlaps "${theirs}" held by ${id}`);
+      }
+    }
+    const claimed: Partial<UnitRecord> = {
+      generation,
+      globs: held,
+      pr: adopted?.value.pr ?? null,
+      pr_owner: adopted?.value.pr_owner ?? null,
+      head_sha: adopted?.value.head_sha ?? null,
+      base_sha: adopted?.value.base_sha ?? baseSha,
+      reviewed_sha: null,
+      passed_sha: null,
+      approved_sha: null,
+    };
     const attempts = r.attempts + 1;
     if (attempts >= ATTEMPTS_CAP) {
-      return to("parked", stamp(ctx, r, { state: "parked", generation, attempts, park: blocked(ctx, "attempts-cap") }));
+      return to("parked", stamp(ctx, r, { ...claimed, state: "parked", attempts, park: blocked(ctx, "attempts-cap") }));
     }
-    return to("claimed", stamp(ctx, r, { generation, attempts }));
+    return to("claimed", stamp(ctx, r, { ...claimed, attempts }));
   });
 }
 

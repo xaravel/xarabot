@@ -57,7 +57,6 @@ export type CiStepInput = {
   readonly unit: NextStory;
   /** The claimed record, with its `pr` and `head_sha` set. */
   readonly record: UnitRecord;
-  readonly specPath: string;
   readonly clone: string;
   /** The unit budget's signal. */
   readonly signal: AbortSignal;

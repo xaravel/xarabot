@@ -19,12 +19,17 @@ import { defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
  * until it merges, is ejected (back to `claimed`, for the CI step to run
  * again) or fails. Every enqueue retry is fenced again, and every move out
  * of `merging` other than to `merged` fences and dequeues the PR first.
+ * A record already `merging` (a stale takeover, Story 2.2) skips the gate,
+ * the fence, `startMerging` and the enqueue, and is only watched.
  * There is no merge call: the merge queue does every merge. It never throws.
  */
 
 export type MergeStepInput = {
   readonly unit: NextStory;
-  /** The claimed record whose PR's checks just passed, with its `pr` and `head_sha` set. */
+  /**
+   * The claimed record whose PR's checks just passed, or the `merging` record
+   * a stale takeover holds, with its `pr` and `head_sha` set.
+   */
   readonly record: UnitRecord;
   /** The unit budget's signal. */
   readonly signal: AbortSignal;
@@ -235,34 +240,8 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       if (input.signal.aborted) await failed("unit budget passed during the merge step");
     };
 
-    const steps = async (): Promise<never> => {
-      await aborted();
-      const head = record.head_sha;
-      const pr = record.pr;
-      if (head === null || pr === null) return await failed("the record has no PR or head_sha to merge");
-
-      // 1. Fresh main: the config and Standing Authority re-check.
-      const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
-      if (!snapped.ok) return await failed(`snapshot ${describeError(snapped.error)}`);
-      const snap: ForgeSnapshot = snapped.value;
-      base = { now: snap.now, at: clock() };
-      const main = snap.main.sha;
-      mainSha = main;
-      const loaded = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-      if (!loaded.ok) {
-        reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
-        note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-        throw end("stop", record.state);
-      }
-      const policy = loaded.value.repo.policy;
-      const prState = snap.prs[unit];
-      if (prState?.state === "merged") return await merged(pr);
-      if (prState === undefined) return await failed(`PR #${pr} is not known to the forge`);
-      if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
-      if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
-      note(`PR #${pr} at ${head}, fresh main ${main}`);
-
-      // 2. The approval gate.
+    /** 2. The approval gate, then 3. fence, `merging` and enqueue; a park ends the step. */
+    const gateAndEnqueue = async (head: string, pr: number, main: string, gatedGlobs: readonly string[]): Promise<void> => {
       let changed: Awaited<ReturnType<DiffPaths>>;
       try {
         changed = await deps.diffPaths({ headSha: head, mainSha: main, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
@@ -271,7 +250,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       }
       await aborted();
       if (!changed.ok) return await failed(`diff paths ${changed.error.kind}: ${changed.error.message}`);
-      const gated = approvalPaths(changed.value, [...policy.owner_approval_paths, ...policy.effective_protected_paths]);
+      const gated = approvalPaths(changed.value, gatedGlobs);
       if (gated.length > 0) {
         await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value }));
         reasons.push(`awaiting approval: ${gated.join(", ")}`);
@@ -300,6 +279,44 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
         await sleep(delay, input.signal);
       }
       note(`enqueued PR #${pr} at ${head}`);
+    };
+
+    const steps = async (): Promise<never> => {
+      await aborted();
+      const head = record.head_sha;
+      const pr = record.pr;
+      if (head === null || pr === null) return await failed("the record has no PR or head_sha to merge");
+
+      // 1. Fresh main: the config and Standing Authority re-check.
+      const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
+      if (!snapped.ok) return await failed(`snapshot ${describeError(snapped.error)}`);
+      const snap: ForgeSnapshot = snapped.value;
+      base = { now: snap.now, at: clock() };
+      const main = snap.main.sha;
+      mainSha = main;
+      const loaded = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+      if (!loaded.ok) {
+        reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
+        note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
+        throw end("stop", record.state);
+      }
+      const policy = loaded.value.repo.policy;
+      const prState = snap.prs[unit];
+      if (prState?.state === "merged") return await merged(pr);
+      if (prState === undefined) return await failed(`PR #${pr} is not known to the forge`);
+      if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
+      if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
+      note(`PR #${pr} at ${head}, fresh main ${main}`);
+
+      if (input.record.state === "merging") {
+        // A stale takeover's record: already gated, fenced, merging and queued, but only at its passed head.
+        if (record.passed_sha !== head) {
+          return await failed(`PR #${pr} is queued at ${head}, not at its passed_sha ${record.passed_sha ?? "none"}`);
+        }
+        note(`watching PR #${pr}, already merging at ${head}`);
+      } else {
+        await gateAndEnqueue(head, pr, main, [...policy.owner_approval_paths, ...policy.effective_protected_paths]);
+      }
 
       // 4. Watch the queue.
       for (let n = 0; ; n += 1) {

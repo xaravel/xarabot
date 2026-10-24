@@ -13,6 +13,7 @@ import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { createMergeStep } from "../../src/lane/merge-step.ts";
 import { defaultSleep, type Sleep } from "../../src/lane/ledger-cas.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
@@ -28,6 +29,8 @@ const STATUS = "_bmad-output/implementation-artifacts/sprint-status.yaml";
 const SPEC_DIR = "_bmad-output/implementation-artifacts";
 const T0 = Date.parse("2026-10-23T10:00:00.000Z");
 const START_LOG = "2026-10-23T10-00-00Z";
+/** The fake forge's `now` at the start: a heartbeat stamped then is fresh. */
+const FORGE_NOW = "2026-10-23T10:00:00Z";
 
 type Story = { readonly id: string; readonly slug: string; readonly infra?: boolean };
 const STORIES: readonly Story[] = [
@@ -735,7 +738,7 @@ describe("runLaneProcess", () => {
   test("lost claim: another lane claims first, next runs again and picks the next Story", async () => {
     const h = harness({ behaviors: [finishes("done", "done", "second", "1-2")] });
     h.fake.control.beforeSwap(({ n }) => {
-      if (n === 1) foreignRecords(h.fake, [rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane })]);
+      if (n === 1) foreignRecords(h.fake, [rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, heartbeat_at: FORGE_NOW })]);
     });
     expect((await h.run()).outcome).toBe("progress");
     const ledger = await h.ledger();
@@ -748,7 +751,7 @@ describe("runLaneProcess", () => {
   test("three lost claims in a row: outcome failed with no record", async () => {
     const h = harness();
     h.fake.control.beforeSwap(({ n }) => {
-      if (n <= 3) foreignRecords(h.fake, [rec({ unit: `story:1.${n}`, globs: [`src/s${n - 1}/**`], owner: BOB.owner, host: BOB.host, lane: BOB.lane })]);
+      if (n <= 3) foreignRecords(h.fake, [rec({ unit: `story:1.${n}`, globs: [`src/s${n - 1}/**`], owner: BOB.owner, host: BOB.host, lane: BOB.lane, heartbeat_at: FORGE_NOW })]);
     });
     expect((await h.run()).outcome).toBe("failed");
     expect(h.journal()).toEqual([]);
@@ -1360,6 +1363,308 @@ describe("runLaneProcess heartbeat keeper", () => {
     expect(r.outcome).toBe("progress");
     // The first beat, 5 min of host time after the snapshot's now was seen.
     expect(stamps[0]).toBe(new Date(T0 + 5 * 60_000).toISOString());
+  });
+});
+
+describe("runLaneProcess stale takeover", () => {
+  /** Exactly 30 min before the fake forge's `now`: stale. */
+  const STALE_AT = "2026-10-23T09:30:00Z";
+  /** 29:59 before it: not stale. */
+  const FRESH_AT = "2026-10-23T09:30:01Z";
+  const callOpts = () => ({ signal: AbortSignal.timeout(5000) });
+  /** BOB's record for Story 1.1 at generation 3, its heartbeat at `STALE_AT`. */
+  const bobs = (over: Partial<UnitRecord> = {}): UnitRecord =>
+    rec({ unit: "story:1.1", globs: ["src/s0/**"], owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 3, heartbeat_at: STALE_AT, ...over });
+  const messages = (fake: FakeForge): string[] => fake.control.ledgerLog().map((c) => c.message);
+  const held = { owner: IDENTITY.owner, host: IDENTITY.host, lane: IDENTITY.lane };
+
+  test("a stale claimed record with no PR: one takeOverStale commit, held at generation + 1 and attempts + 1, and the session runs", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    foreignRecords(h.fake, [bobs({ globs: ["src/old/**"], reviewed_sha: "a".repeat(40), passed_sha: "a".repeat(40) })]);
+    const main = await mainSha(h.fake);
+    expect((await h.run()).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]"]);
+    const record = (await h.ledger()).get("story:1.1");
+    expect(record).toMatchObject({ state: "claimed", ...held, generation: 4, attempts: 1, pr: null, base_sha: main, reviewed_sha: null, passed_sha: null, globs: ["src/s0/**"] });
+    expect(h.runs.length).toBeGreaterThanOrEqual(1);
+    expect(h.prepares[0]).toMatchObject({ unit: "story:1.1", start: main, fetch: [main], generation: 4 });
+    expect(h.prSteps.map((s) => [s.unit.unit, s.record.generation])).toEqual([["story:1.1", 4]]);
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "progress", generation: 4, attempts: 1 });
+  });
+
+  test("a claimed record 29:59 old is passed over with a record-state reason", async () => {
+    const h = harness({ done: ["1.2", "1.3"] });
+    foreignRecords(h.fake, [bobs({ heartbeat_at: FRESH_AT })]);
+    expect((await h.run()).outcome).toBe("idle");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]"]);
+    expect(h.journal()).toMatchObject([{ type: "span", span: "idle", reason: "story:1.1 is claimed" }]);
+    expect(h.runs).toHaveLength(0);
+  });
+
+  test("a stale claimed record with an open PR: the PR's head is adopted and prepared, start and fetch, before the first session", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    await pr(h.fake, "1.1", "closed");
+    const open = await pr(h.fake, "1.1", "open");
+    foreignRecords(h.fake, [bobs({ pr: open.number, pr_owner: "bob", head_sha: "a".repeat(40), reviewed_sha: "a".repeat(40), approved_sha: "a".repeat(40) })]);
+    const main = await mainSha(h.fake);
+    expect((await h.run()).outcome).toBe("progress");
+    const record = (await h.ledger()).get("story:1.1");
+    expect(record).toMatchObject({
+      state: "claimed",
+      ...held,
+      generation: 4,
+      attempts: 1,
+      pr: open.number,
+      pr_owner: "alice",
+      head_sha: open.head,
+      base_sha: main,
+      reviewed_sha: null,
+      approved_sha: null,
+    });
+    expect(h.prepares).toHaveLength(1);
+    expect(h.prepares[0]).toMatchObject({ start: open.head, fetch: [open.head], generation: 4 });
+    expect(h.runs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a stale claimed record whose PR merged: marked merged with no takeOverStale commit and no session", async () => {
+    const h = harness();
+    await pr(h.fake, "1.1", "merged");
+    foreignRecords(h.fake, [bobs()]);
+    expect((await h.run({ heartbeat: { sleep: fastBeats } })).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+    expect((await h.ledger()).get("story:1.1")?.state).toBe("merged");
+    expect(h.runs).toHaveLength(0);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "merged", sessions: 0 });
+  });
+
+  test("the 3rd takeover parks blocked attempts-cap at generation + 1: no session, no keeper", async () => {
+    const h = harness();
+    foreignRecords(h.fake, [bobs({ attempts: 2 })]);
+    expect((await h.run({ heartbeat: { sleep: fastBeats } })).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({
+      state: "parked",
+      ...held,
+      generation: 4,
+      attempts: 3,
+      park: { kind: "blocked", reason: "attempts-cap", inbox_owner: "alice", globs_held: [] },
+    });
+    expect(h.runs).toHaveLength(0);
+    await Bun.sleep(30);
+    expect(keepAlives(h.fake)).toBe(0);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", attempts: 3, generation: 4, sessions: 0 });
+  });
+
+  test("another lane wins the takeover swap: the next round picks the next Story", async () => {
+    const h = harness({ behaviors: [finishes("done", "done", "second", "1-2")] });
+    foreignRecords(h.fake, [bobs()]);
+    const carols = bobs({ owner: "carol", host: "33333333-3333-4333-8333-333333333333", lane: "builder-3", generation: 4, attempts: 1, heartbeat_at: FORGE_NOW });
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 1) foreignRecords(h.fake, [carols]);
+    });
+    expect((await h.run()).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")).toEqual(carols);
+    expect(h.prSteps.map((s) => s.unit.unit)).toEqual(["story:1.2"]);
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.2", outcome: "progress" });
+  });
+
+  /** An open PR on `story/1.1`, queued (or not), and BOB's stale `merging` record for it. */
+  async function staleMerging(h: Harness, queued: boolean): Promise<{ number: number; head: string }> {
+    const open = await pr(h.fake, "1.1", "open");
+    if (queued) expect((await h.fake.forge.enqueue(open.number, open.head, callOpts())).ok).toBe(true);
+    const main = await mainSha(h.fake);
+    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: open.head, passed_sha: open.head, base_sha: main, attempts: 1 })]);
+    return open;
+  }
+
+  /** The fake forge with `enqueue` and `dequeue` counted. */
+  function counted(fake: FakeForge): { forge: Forge; calls: { enqueue: number; dequeue: number } } {
+    const calls = { enqueue: 0, dequeue: 0 };
+    const forge: Forge = {
+      ...fake.forge,
+      enqueue: (...a) => {
+        calls.enqueue += 1;
+        return fake.forge.enqueue(...a);
+      },
+      dequeue: (...a) => {
+        calls.dequeue += 1;
+        return fake.forge.dequeue(...a);
+      },
+    };
+    return { forge, calls };
+  }
+
+  /** The real merge step on `forge`; `onSleep` runs at each of its sleeps. */
+  const mergeStepOn = (forge: Forge, onSleep: (i: number) => void | Promise<void>) => {
+    let i = 0;
+    return createMergeStep({
+      forge,
+      diffPaths: async () => ok(["src/s0/a.ts"]),
+      identity: IDENTITY,
+      repo: LANE.repo,
+      sleep: async () => {
+        await onSleep(i);
+        i += 1;
+      },
+      random: () => 0,
+    });
+  };
+
+  test("a stale merging record still queued: held merging at generation + 1, no session, no enqueue; merged when the queue merges it", async () => {
+    const h = harness();
+    const open = await staleMerging(h, true);
+    const { forge, calls } = counted(h.fake);
+    let during: UnitRecord | undefined;
+    const mergeStep = mergeStepOn(forge, async (i) => {
+      if (i !== 0) return;
+      during = (await h.ledger()).get("story:1.1");
+      h.fake.control.mergeQueueHead();
+    });
+    expect((await h.run({ forge, mergeStep })).outcome).toBe("progress");
+    expect(during).toMatchObject({ state: "merging", ...held, generation: 4, attempts: 1, pr: open.number, head_sha: open.head, passed_sha: open.head });
+    expect(h.runs).toHaveLength(0);
+    expect(h.prepares).toHaveLength(0);
+    expect(calls.enqueue).toBe(0);
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+    expect((await h.ledger()).get("story:1.1")?.state).toBe("merged");
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "progress", state: "merged", generation: 4, sessions: 0 });
+  });
+
+  test("the keeper heartbeats a stale merging takeover while the merge step watches the queue", async () => {
+    const h = harness();
+    await staleMerging(h, true);
+    let during: UnitRecord | undefined;
+    let beats = 0;
+    const mergeStep = mergeStepOn(h.fake.forge, async (i) => {
+      if (i !== 0) return;
+      await until(() => keepAlives(h.fake) >= 2);
+      beats = keepAlives(h.fake);
+      during = (await h.ledger()).get("story:1.1");
+      h.fake.control.mergeQueueHead();
+    });
+    expect((await h.run({ mergeStep, heartbeat: { sleep: fastBeats } })).outcome).toBe("progress");
+    expect(beats).toBeGreaterThanOrEqual(2);
+    expect(during).toMatchObject({ state: "merging", ...held, generation: 4 });
+    expect((await h.ledger()).get("story:1.1")?.state).toBe("merged");
+  });
+
+  test("a stale merging takeover adopts the queue's head; a head other than passed_sha then fails in the merge step", async () => {
+    const h = harness();
+    const open = await pr(h.fake, "1.1", "open");
+    expect((await h.fake.forge.enqueue(open.number, open.head, callOpts())).ok).toBe(true);
+    const old = "a".repeat(40);
+    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: old, passed_sha: old, attempts: 1 })]);
+    const r = await h.run({ mergeStep: mergeStepOn(h.fake.forge, () => {}) });
+    expect(r.outcome).toBe("failed");
+    const takeover = h.fake.control.ledgerLog().findIndex((c) => c.message === "ledger: takeOverStale story:1.1 [skip ci]");
+    expect(takeover).toBeGreaterThan(0);
+    // The takeover wrote the queue's head; the guard then fenced, dequeued and released it.
+    const edits = messages(h.fake).slice(takeover).map((m) => /^ledger: (\S+)/.exec(m)?.[1] ?? m);
+    expect(edits).toEqual(["takeOverStale", "heartbeat", "failAttempt"]);
+    expect(h.fake.control.queue()).toEqual([]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", ...held, generation: 4, attempts: 2, head_sha: open.head, passed_sha: old });
+    const j = h.unitRecord();
+    expect(j).toMatchObject({ outcome: "failed", state: "released" });
+    expect(j.reason).toContain(old);
+  });
+
+  test("ejected after the takeover: fenced and dequeued, claimed with attempts + 1, then the CI step and merge step run as usual", async () => {
+    const h = harness();
+    const open = await staleMerging(h, true);
+    const { forge, calls } = counted(h.fake);
+    const mergeStep = mergeStepOn(forge, (i) => {
+      if (i === 0) h.fake.control.eject(open.number);
+      else h.fake.control.mergeQueueHead();
+    });
+    const ciInputs: UnitRecord[] = [];
+    const r = await h.run({
+      forge,
+      mergeStep,
+      ciStep: async (input) => {
+        ciInputs.push(input.record);
+        return { outcome: "progress", state: "claimed", record: input.record };
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(ciInputs).toHaveLength(1);
+    expect(ciInputs[0]).toMatchObject({ state: "claimed", ...held, generation: 4, attempts: 2, pr: open.number });
+    expect(calls.dequeue).toBe(1);
+    expect(calls.enqueue).toBe(1);
+    const edits = messages(h.fake).map((m) => /^ledger: (\S+)/.exec(m)?.[1] ?? m);
+    expect(edits).toEqual(["root", "foreign [skip ci]", "takeOverStale", "heartbeat", "ejected", "heartbeat", "startMerging", "markMerged"]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "merged", attempts: 2 });
+    expect(h.runs).toHaveLength(0);
+  });
+
+  test.each(["open, not queued", "closed", "not-found"] as const)("a stale merging record whose PR is %s: releaseStale, attempts + 1, the PR kept, no dequeue, no keeper", async (kind) => {
+    const h = harness();
+    let number = 99;
+    if (kind === "open, not queued") number = (await staleMerging(h, false)).number;
+    else if (kind === "closed") {
+      number = (await pr(h.fake, "1.1", "closed")).number;
+      foreignRecords(h.fake, [bobs({ state: "merging", pr: number, pr_owner: "bob", head_sha: "a".repeat(40), passed_sha: "a".repeat(40), attempts: 1 })]);
+    } else {
+      foreignRecords(h.fake, [bobs({ state: "merging", pr: number, pr_owner: "bob", head_sha: "a".repeat(40), passed_sha: "a".repeat(40), attempts: 1 })]);
+    }
+    const { forge, calls } = counted(h.fake);
+    expect((await h.run({ forge, heartbeat: { sleep: fastBeats } })).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: releaseStale story:1.1 [skip ci]"]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", ...held, generation: 3, attempts: 2, pr: number });
+    expect(calls.dequeue).toBe(0);
+    expect(h.runs).toHaveLength(0);
+    await Bun.sleep(30);
+    expect(keepAlives(h.fake)).toBe(0);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "released", attempts: 2 });
+  });
+
+  test("a stale merging record whose PR merged after the snapshot: queueState says merged, so it is marked merged with no takeover", async () => {
+    const h = harness({ done: ["1.2", "1.3"] });
+    const open = await staleMerging(h, true);
+    h.fake.control.mergeQueueHead();
+    // The snapshot still reports the PR open: the sweep passes it by, and queueState decides.
+    const forge: Forge = {
+      ...h.fake.forge,
+      snapshot: async (o) => {
+        const s = await h.fake.forge.snapshot(o);
+        if (!s.ok) return s;
+        return { ok: true, value: { ...s.value, prs: { ...s.value.prs, "story:1.1": { number: open.number, state: "open", head_sha: open.head } } } };
+      },
+    };
+    expect((await h.run({ forge })).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "merged", reason: `PR #${open.number} merged` });
+  });
+
+  test("a stale merging record whose PR merged before the snapshot: the sweep marks it merged and next never takes it over", async () => {
+    const h = harness({ done: ["1.2", "1.3"] });
+    await staleMerging(h, true);
+    h.fake.control.mergeQueueHead();
+    expect((await h.run()).outcome).toBe("idle");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+  });
+
+  test.each([
+    ["transient", { kind: "transient", message: "502" }],
+    ["rate-limited", { kind: "rate-limited", message: "slow down", retry_after: 5 }],
+  ] as const)("queueState %s: the run ends failed with no ledger edit", async (_name, error) => {
+    const h = harness();
+    await staleMerging(h, true);
+    h.fake.control.injectError("queueState", { ...error });
+    expect((await h.run()).outcome).toBe("failed");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]"]);
+    expect(h.runs).toHaveLength(0);
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "failed" });
+  });
+
+  test.each(["auth", "forbidden", "uninstalled"] as const)("queueState %s: alerts forge-<kind> and stops, with no ledger edit", async (kind) => {
+    const h = harness();
+    await staleMerging(h, true);
+    h.fake.control.injectError("queueState", { kind, message: "nope" } as ForgeError);
+    const main = await mainSha(h.fake);
+    expect((await h.run()).outcome).toBe("stop");
+    expect(h.fake.control.alerts()).toEqual([{ condition: `forge-${kind}`, main_sha: main }]);
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]"]);
+    expect(h.runs).toHaveLength(0);
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "stop" });
   });
 });
 

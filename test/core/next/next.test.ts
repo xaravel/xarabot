@@ -36,6 +36,7 @@ describe("next: happy path", () => {
         globs: ["src/2.1/**"],
         infrastructure: false,
         expect_generation: null,
+        take_over: null,
       },
       reasons: [],
     });
@@ -207,9 +208,104 @@ describe("next: record states", () => {
     });
   }
 
+  test("a fresh claim and a released record: take_over is null", () => {
+    expect(pick(BOOT(["1"]))).toMatchObject({ kind: "unit", story: { take_over: null, expect_generation: null } });
+    const released = pick(BOOT(["1"], { records: [storyRec("2.1", { state: "released", generation: 4, heartbeat_at: "2020-01-01T00:00:00Z" })] }));
+    expect(released).toMatchObject({ kind: "unit", story: { take_over: null, expect_generation: 4 } });
+  });
+
   test("done with its record deleted is never returned", () => {
     const o = pick(BOOT(["1"], { status: { "2.1": "done" } }));
     expect(o).toEqual({ kind: "idle", reason: "no Story left to build", reasons: [] });
+  });
+});
+
+describe("next: stale takeover", () => {
+  // NOW is 2026-10-22T10:10:00Z.
+  const STALE = "2026-10-22T09:40:00Z";
+  const FRESH = "2026-10-22T09:40:01Z";
+  const coordinator = { owner: "carol", host: "33333333-3333-4333-8333-333333333333", lane: "coordinator" };
+  const cases: {
+    name: string;
+    over: Parameters<typeof storyRec>[1];
+    expect: string;
+    takeOver?: "claimed" | "merging";
+    reason?: string;
+  }[] = [
+    { name: "claimed, 29:59 old", over: { state: "claimed", heartbeat_at: FRESH }, expect: "unit 2.2", reason: "story:2.1 is claimed" },
+    { name: "claimed, 30:00 old", over: { state: "claimed", heartbeat_at: STALE }, expect: "unit 2.1", takeOver: "claimed" },
+    { name: "claimed, a year old", over: { state: "claimed", heartbeat_at: "2025-10-22T10:10:00Z" }, expect: "unit 2.1", takeOver: "claimed" },
+    { name: "merging, 29:59 old", over: { state: "merging", pr: 7, heartbeat_at: FRESH }, expect: "unit 2.2", reason: "story:2.1 is merging" },
+    { name: "merging, 30:00 old", over: { state: "merging", pr: 7, heartbeat_at: STALE }, expect: "unit 2.1", takeOver: "merging" },
+    {
+      name: "merging under the coordinator, a year old",
+      over: { state: "merging", pr: 7, ...coordinator, heartbeat_at: "2025-10-22T10:10:00Z" },
+      expect: "unit 2.2",
+      reason: "story:2.1 is merging",
+    },
+    { name: "parked, years old", over: { state: "parked", heartbeat_at: "2020-01-01T00:00:00Z" }, expect: "unit 2.2", reason: "story:2.1 is parked" },
+    { name: "merged, years old", over: { state: "merged", heartbeat_at: "2020-01-01T00:00:00Z" }, expect: "unit 2.2", reason: "story:2.1 is merged" },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      const o = pick(BOOT(["1", "2"], { records: [storyRec("2.1", { generation: 4, ...c.over })] }));
+      expect(chosen(o)).toBe(c.expect);
+      if (c.takeOver !== undefined) {
+        expect(o).toMatchObject({ kind: "unit", story: { take_over: c.takeOver, expect_generation: 4, globs: ["src/2.1/**"] } });
+        expect(codes(o)).toEqual([]);
+      } else {
+        expect(o).toMatchObject({ kind: "unit", story: { take_over: null } });
+        expect(codes(o)).toEqual(["story:2.1 record-state"]);
+        expect(o.kind === "unit" ? o.reasons[0]?.message : "").toBe(c.reason as string);
+      }
+    });
+  }
+
+  test("a stale record still waits on depends_on, escalations and other records' globs", () => {
+    const stale = storyRec("2.2", { state: "claimed", heartbeat_at: STALE, globs: ["src/b/**"] });
+    const manifests = [{ id: "2.1", globs: ["src/a/**"] }, { id: "2.2", globs: ["src/b/**"], deps: ["2.1"] }];
+    expect(codes(pick(BOOT(["1", "2"], { manifests, records: [stale, storyRec("2.1", { globs: ["src/a/**"] })] })))).toEqual([
+      "story:2.1 record-state",
+      "story:2.2 depends-on",
+    ]);
+    const escalated = pick(BOOT(["1", "2"], { records: [storyRec("2.1", { heartbeat_at: STALE })], escalations: ["2.1"] }));
+    expect(chosen(escalated)).toBe("unit 2.2");
+    expect(codes(escalated)).toEqual(["story:2.1 escalation"]);
+    const overlap = BOOT(["1", "2"], {
+      manifests: [{ id: "2.1", globs: ["src/a/**"] }, { id: "2.2", globs: ["src/a/b/**"] }],
+      records: [storyRec("2.1", { globs: ["src/a/**"] }), storyRec("2.2", { heartbeat_at: STALE, globs: ["src/a/b/**"] })],
+    });
+    // The stale 2.2 still holds its globs against 2.1, and 2.1's block 2.2.
+    expect(codes(pick(overlap))).toEqual(["story:2.1 record-state", "story:2.1 overlap", "story:2.2 overlap"]);
+  });
+
+  test("another stale record's globs still block: stale or not, it holds them", () => {
+    const o = pick(
+      BOOT(["1", "2"], {
+        manifests: [{ id: "2.1", globs: ["src/a/**"] }, { id: "2.2", globs: ["src/a/b/**"] }],
+        records: [storyRec("2.1", { state: "parked", heartbeat_at: "2020-01-01T00:00:00Z", globs: ["src/a/**"] })],
+      }),
+    );
+    expect(chosen(o)).toBe("idle");
+    expect(codes(o)).toEqual(["story:2.1 record-state", "story:2.2 overlap"]);
+  });
+
+  test("Infrastructure: a stale record whose approval does not match is passed over with a record-state reason, never parked", () => {
+    const manifests = [{ id: "2.1", infra: true }, { id: "2.2" }];
+    const records = [storyRec("2.1", { heartbeat_at: STALE, approval: { by: "edanisko", manifest_sha: "e".repeat(40) } })];
+    const o = pick(BOOT(["1", "2"], { manifests, records }));
+    expect(chosen(o)).toBe("unit 2.2");
+    expect(codes(o)).toEqual(["story:2.1 record-state"]);
+    expect(o.kind === "unit" ? o.reasons[0]?.message : "").toBe(`story:2.1 is claimed and stale, but has no approval for manifest ${shaOf("2.1")}`);
+    const none = pick(BOOT(["1"], { manifests: [{ id: "2.1", infra: true }], records: [storyRec("2.1", { state: "merging", pr: 7, heartbeat_at: STALE })] }));
+    expect(none.kind).toBe("idle");
+    expect(codes(none)).toEqual(["story:2.1 record-state"]);
+  });
+
+  test("Infrastructure: a stale record with a matching approval is taken over", () => {
+    const records = [storyRec("2.1", { generation: 3, heartbeat_at: STALE, approval: { by: "edanisko", manifest_sha: shaOf("2.1") } })];
+    const o = pick(BOOT(["1"], { manifests: [{ id: "2.1", infra: true }], records }));
+    expect(o).toMatchObject({ kind: "unit", story: { infrastructure: true, take_over: "claimed", expect_generation: 3 } });
   });
 });
 

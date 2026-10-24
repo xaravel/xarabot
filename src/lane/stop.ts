@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { release } from "../core/ledger/edits.ts";
+import { heartbeat, release } from "../core/ledger/edits.ts";
 import { parseLedger } from "../core/ledger/codec.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { LaneIdentity } from "../core/schemas/ledger.ts";
@@ -77,8 +77,9 @@ export type ReleaseHeldParams = {
 
 /**
  * Releases every unit `identity` holds `claimed` or `merging`, with no
- * attempt counted. A `merging` record with a PR is dequeued first; a failed
- * dequeue leaves that record as it is.
+ * attempt counted. A `merging` record with a PR is fenced (a `heartbeat`
+ * swap at its generation) and dequeued first; a failed fence or dequeue
+ * leaves that record as it is.
  */
 export async function releaseHeld(p: ReleaseHeldParams): Promise<ReleaseReport> {
   const timeout = p.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
@@ -94,6 +95,16 @@ export async function releaseHeld(p: ReleaseHeldParams): Promise<ReleaseReport> 
   );
   for (const r of held) {
     if (r.state === "merging" && r.pr !== null) {
+      // Fence first: a record another lane took over is neither dequeued nor released.
+      const fenced = await swapLedger({
+        forge: p.forge,
+        edit: heartbeat({ unit: r.unit, by: p.identity, now: snap.value.now, generation: r.generation }),
+        signal: AbortSignal.timeout(timeout),
+      });
+      if (!fenced.ok) {
+        failed.push({ unit: r.unit, message: `dequeue fence ${fenced.error.kind}: ${fenced.error.message}` });
+        continue;
+      }
       const dq = await p.forge.dequeue(r.pr, { signal: AbortSignal.timeout(timeout) });
       if (!dq.ok) {
         failed.push({ unit: r.unit, message: `dequeue PR #${r.pr} ${dq.error.kind}: ${dq.error.message}` });
