@@ -291,6 +291,7 @@ export function forgeContract(harness: ForgeHarness): void {
         checks: () => f.checks(sha, aborted()),
         enqueue: () => f.enqueue(1, sha, aborted()),
         dequeue: () => f.dequeue(1, aborted()),
+        queueState: () => f.queueState(1, aborted()),
         alert: () => f.alert("c", sha, aborted()),
         prefetch: () => f.prefetch({ kind: "ci-log", sha, dir: join(tmpdir(), "xarabot-never") }, aborted()),
       };
@@ -495,6 +496,28 @@ export function forgeContract(harness: ForgeHarness): void {
       value(await fx.forge.closePr(pr.number, live()));
       expect(kind(await fx.forge.enqueue(pr.number, pr.head_sha, live()))).toBe("conflict");
       expect(await queue()).toEqual([]);
+      },
+    );
+
+    scenario(
+      "queueState reports open, queued, dequeued, closed and merged; a missing PR is not-found",
+      [...OPEN_PR, "enqueue", "dequeue", "closePr", "queueState"],
+      ["makeCommit", "mergeQueueHead"],
+      async (fx) => {
+        const f = fx.forge;
+        const a = await openOn(fx, "story/5.3");
+        expect(value(await f.queueState(a.number, live()))).toEqual({ state: "open", head_sha: a.head_sha, queued: false });
+        value(await f.enqueue(a.number, a.head_sha, live()));
+        expect(value(await f.queueState(a.number, live()))).toEqual({ state: "open", head_sha: a.head_sha, queued: true });
+        value(await f.dequeue(a.number, live()));
+        expect(value(await f.queueState(a.number, live()))).toEqual({ state: "open", head_sha: a.head_sha, queued: false });
+        value(await f.closePr(a.number, live()));
+        expect(value(await f.queueState(a.number, live()))).toEqual({ state: "closed", head_sha: a.head_sha, queued: false });
+        const b = await openOn(fx, "story/5.4");
+        value(await f.enqueue(b.number, b.head_sha, live()));
+        expect((await need(fx, "mergeQueueHead")())?.number).toBe(b.number);
+        expect(value(await f.queueState(b.number, live()))).toEqual({ state: "merged", head_sha: b.head_sha, queued: false });
+        expect(kind(await f.queueState(MISSING_PR, live()))).toBe("not-found");
       },
     );
 

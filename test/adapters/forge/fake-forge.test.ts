@@ -150,6 +150,21 @@ describe("fake forge", () => {
     value(await forge.pushBranch({ branch: "story/1.2", expected_sha: b.head_sha, sha: control.makeCommit() }, live()));
   });
 
+  test("eject takes a queued PR out of the queue without merging it", async () => {
+    const { forge, control } = createFakeForge();
+    const sha = control.makeCommit();
+    value(await forge.pushBranch({ branch: "story/1.4", expected_sha: null, sha }, live()));
+    const pr = value(await forge.openPr({ branch: "story/1.4", base: "main", title: "t", body: "b" }, live()));
+    expect(control.eject(pr.number)).toBe(false);
+    value(await forge.enqueue(pr.number, sha, live()));
+    const main0 = value(await forge.snapshot(live())).main.sha;
+    expect(control.eject(pr.number)).toBe(true);
+    expect(control.queue()).toEqual([]);
+    expect(value(await forge.queueState(pr.number, live()))).toEqual({ state: "open", head_sha: sha, queued: false });
+    expect(value(await forge.snapshot(live())).main.sha).toBe(main0);
+    expect(control.eject(pr.number)).toBe(false);
+  });
+
   test("a push to a queued PR's branch or closing it leaves the queue", async () => {
     const { forge, control } = createFakeForge();
     const sha = control.makeCommit();

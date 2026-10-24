@@ -13,11 +13,13 @@ import {
   type ForgeFailure,
   type ForgeOperation,
   type ForgePr,
+  type ForgePrState,
   type ForgeResult,
   type ForgeSnapshot,
   type GitSha,
   type PrefetchRequest,
   type PushLease,
+  type QueueState,
   rateLimited,
 } from "../../../ports/forge.ts";
 import type { AppCredentials } from "./credentials.ts";
@@ -43,9 +45,10 @@ import { createTokenSource } from "./tokens.ts";
  * API; `pushBranch` runs `git push --force-with-lease` from the lane's private
  * `runner.git`; the PR operations, `comment`, `checks` (check runs plus the
  * combined commit status) and the CI-log prefetch use REST; `enqueue` and
- * `dequeue` read the PR's merge-queue state over GraphQL and then call
- * `enqueuePullRequest` or `dequeuePullRequest` (the merge queue is the only
- * merge path; the adapter has no direct or admin merge call); `alert`
+ * `dequeue` read the PR's merge-queue state over GraphQL (as the read-only
+ * `queueState` does) and then call `enqueuePullRequest` or
+ * `dequeuePullRequest` (the merge queue is the only merge path; the adapter
+ * has no direct or admin merge call); `alert`
  * posts one deduplicated comment on the Maintainer's inbox issue. Each call
  * makes one attempt, never throws, and returns `transient` for an
  * already-aborted signal before any request.
@@ -779,10 +782,10 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     return forgeOk({ data: asObj(body["data"]), errors });
   }
 
-  type QueueState = { readonly id: string; readonly state: string; readonly head: string; readonly queued: boolean };
+  type PullQueue = { readonly id: string; readonly state: string; readonly head: string; readonly queued: boolean };
 
   /** The PR's node id, state, head and whether it has a merge-queue entry; a missing PR is `not-found`. */
-  async function queueState(ctx: Ctx, pr: number, operation: string): Promise<ForgeResult<QueueState>> {
+  async function readQueueState(ctx: Ctx, pr: number, operation: string): Promise<ForgeResult<PullQueue>> {
     const op = GITHUB_OPERATIONS.pullQueueState;
     const r = await graphql(ctx, op, PULL_QUEUE_STATE_QUERY, { owner, name, number: pr });
     if (!r.ok) return r;
@@ -810,7 +813,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
 
   async function enqueue(pr: number, expectedHead: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly queued: true }>> {
     return guarded("enqueue", opts, async (ctx) => {
-      const current = await queueState(ctx, pr, "enqueue");
+      const current = await readQueueState(ctx, pr, "enqueue");
       if (!current.ok) return current;
       const { id, state, head, queued } = current.value;
       if (state !== "OPEN") return forgeErr("conflict", `enqueue: PR #${pr} is ${state.toLowerCase()}`);
@@ -826,7 +829,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
 
   async function dequeue(pr: number, opts: CallOpts): Promise<ForgeResult<{ readonly queued: false }>> {
     return guarded("dequeue", opts, async (ctx) => {
-      const current = await queueState(ctx, pr, "dequeue");
+      const current = await readQueueState(ctx, pr, "dequeue");
       if (!current.ok) return current;
       if (!current.value.queued) return forgeOk({ queued: false as const });
       const op = GITHUB_OPERATIONS.dequeuePullRequest;
@@ -834,6 +837,18 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
       if (!r.ok) return r;
       const done = mutationResult(op, r.value.errors, NOT_QUEUED);
       return done.ok ? forgeOk({ queued: false as const }) : done;
+    });
+  }
+
+  /** The read-only merge-queue state: `OPEN`, `CLOSED` and `MERGED` map to lowercase; any other state is malformed. */
+  async function queueState(pr: number, opts: CallOpts): Promise<ForgeResult<QueueState>> {
+    return guarded("queueState", opts, async (ctx) => {
+      const current = await readQueueState(ctx, pr, "queueState");
+      if (!current.ok) return current;
+      const { state, head, queued } = current.value;
+      const mapped: ForgePrState | undefined = state === "OPEN" ? "open" : state === "CLOSED" ? "closed" : state === "MERGED" ? "merged" : undefined;
+      if (mapped === undefined) return malformed(GITHUB_OPERATIONS.pullQueueState, `PR #${pr} state ${JSON.stringify(state)}`);
+      return forgeOk({ state: mapped, head_sha: head, queued });
     });
   }
 
@@ -923,6 +938,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     checks,
     enqueue,
     dequeue,
+    queueState,
     alert,
     prefetch: prefetchCiLogs,
   };
