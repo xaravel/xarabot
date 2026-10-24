@@ -1299,7 +1299,7 @@ So that sprint status follows merges with no agent writing status, and merged le
 **Then** its record becomes `merged` with no PR and raises no inbox item
 **And** it is kept as the newest `reconcile:<n>` record, the last run's time that Story 2.4's due rule reads; the record it replaces as newest is deleted, so at most one `merged` `reconcile:<n>` record stays on the ledger.
 
-**Given** a `merging` record that `reconcile` holds
+**Given** a `merging` record that `reconcile` holds for its own `reconcile` PR (approved gated PRs are Story 2.6's)
 **When** a later `reconcile` runs
 **Then** a merged PR makes it `merged`, a still-queued PR leaves it unchanged, and an ejected or dequeued PR is closed and the record `released` (above), with no attempt counted.
 
@@ -1349,11 +1349,17 @@ So that my approving review is the only step a gated PR needs from me (FR13, AR8
 
 **Given** an approval-gated PR that the queue ejects or dequeues
 **When** this is seen
-**Then** the record becomes `parked`, holding only the paths its diff changes, with `approved_sha` cleared; it never returns to `claimed`.
+**Then** the record becomes `parked`, holding only the paths its diff changes, with `approved_sha` cleared; it never returns to `claimed`
+**And** the same applies when its enqueue is refused because it conflicts; only `reconcile`'s own PRs are closed and released instead (Story 2.5).
+
+**Given** an approval that still stands on a PR parked after an ejection or dequeue
+**When** `reconcile` runs
+**Then** it does not take the PR again; it takes it only for an approving review submitted after the park, on the current head, so a PR that keeps failing does not loop and a manual dequeue sticks (Maintainer, 2026-10-24).
 
 **Given** this Story merged and the runner version advanced
 **When** a gated PR is approved
-**Then** the Maintainer no longer queues it by hand, and `docs/maintainer/self-host.md` says so.
+**Then** the Maintainer no longer queues it by hand, and `docs/maintainer/self-host.md` says so
+**And** the Standing Authority says that after the Maintainer's approving review, the coordinator adds the PR to the merge queue.
 
 ### Story 2.7: Planning units
 

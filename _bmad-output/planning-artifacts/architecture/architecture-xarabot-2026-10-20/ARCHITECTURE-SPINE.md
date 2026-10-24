@@ -192,7 +192,11 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 
 Every move out of `merging` other than to `merged` dequeues the PR first. Every cap (`attempts`, `loopbacks`, `ci_fixes`) is tested with `>=`.
 
-**`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, or its enqueue was refused because it conflicts, the run closes the PR and the record becomes `released`. A `reconcile` PR holds only runner-written content, so it is disposable: the next due run deletes the `released` record and opens a fresh PR from fresh `main`. No attempt is counted either way.
+**`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, or its enqueue was refused because it conflicts, it depends on whose PR it is:
+- **An approval-gated PR** (a builder's or graph unit's, taken by `reconcile` after approval): the record becomes `parked` (`awaiting-approval`), holding only the paths its diff changes, with `approved_sha` cleared (the AD-7 row above). `reconcile` takes it again only for an approval submitted after the park, on the current head.
+- **`reconcile`'s own PR**: it holds only runner-written content, so it is disposable. The run closes the PR and the record becomes `released`; the next due run deletes that record and opens a fresh PR from fresh `main`.
+
+No attempt is counted either way.
 
 ### AD-8: The coordinator role is a claim
 
