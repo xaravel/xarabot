@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "unit": "story:2.1",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -13,7 +13,7 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-24T07:57:31.952Z",
+  "heartbeat_at": "2026-10-24T07:59:16.105Z",
   "pr": 57,
   "pr_owner": "edanisko",
   "base_sha": "891c39f4380de657bc3354c5bf3df60a54c2f150",
@@ -22,7 +22,28 @@
   "passed_sha": null,
   "approved_sha": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-2-1-heartbeat-and-fencing-2.md",
+      "src/core/lane/heartbeat.ts",
+      "src/core/lane/waits.ts",
+      "src/core/ledger/edits.ts",
+      "src/lane/heartbeat.ts",
+      "src/lane/lane-process.ts",
+      "src/lane/merge-step.ts",
+      "src/lane/pr-step.ts",
+      "test/core/lane/heartbeat.test.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/lane/ci-step.test.ts",
+      "test/lane/heartbeat.test.ts",
+      "test/lane/lane-process.test.ts",
+      "test/lane/merge-step.test.ts",
+      "test/lane/pr-step.test.ts"
+    ]
+  },
   "attempts": 1,
   "loopbacks": 0,
   "ci_fixes": 0,
