@@ -1498,7 +1498,16 @@ So that my approving review is the only step a gated PR needs from me (FR13, AR8
 **Given** the `Forge` port
 **When** `reconcile` reads a PR's approvals
 **Then** `Forge.reviews(pr)` returns each review's author, state, commit SHA and submitted time, and the fake and GitHub adapters pass its contract-suite cases (AR1)
-**And** "submitted after the park" compares the review's submitted time with the parked record's `heartbeat_at`, which the park edit stamps.
+**And** "submitted after the park" compares the review's submitted time with the parked record's `heartbeat_at`, which the park edit stamps
+**And** the after-park rule applies only to a re-park, which is a parked `awaiting-approval` record whose `lane` is `coordinator` (the coordinator wrote the park after an ejection, a dequeue or a conflict); a builder's first park counts any approving review from the owner on the PR's current head, including one given while CI still ran, with no schema change (Maintainer, 2026-10-25).
+
+**Given** a coordinator-held `merging` record whose holder is a coordinator on another host (the coordinator moved)
+**When** its gated PR is ejected, dequeued or refused for a conflict
+**Then** `park` accepts any coordinator-lane writer at the record's `generation`, fencing on the generation, as Story 2.5's `releaseReconcile` does, so the record never stays stuck holding globs (Maintainer, 2026-10-25).
+
+**Given** a parked PR whose head moved after the park
+**When** `reconcile` runs
+**Then** it is never enqueued automatically, since the queue only ever gets the head the lane's CI passed (AD-14); the Maintainer queues it by hand or runs `xarabot rule rebuild` (Maintainer, 2026-10-25).
 
 **Given** this Story merged and the runner version advanced
 **When** a gated PR is approved
