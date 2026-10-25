@@ -27,7 +27,7 @@ const OTHER = { owner: "dave", host: "44444444-4444-4444-8444-444444444444" };
 /** The claim `lane run` wrote: generation 1, the digest posted today (so the digest slot is no work). */
 function claimRec(over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 2,
+    schema_version: 3,
     owner: COORD.owner,
     host: COORD.host,
     lane: "coordinator",

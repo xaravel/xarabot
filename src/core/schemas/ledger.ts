@@ -10,16 +10,20 @@ import { RETRO_ITEM_ID_PATTERN } from "./retro-gates.ts";
  */
 
 /**
- * The ledger's own `schema_version` (Story 2.7): every record written carries
- * it; the reader accepts each of `LEDGER_SCHEMA_VERSIONS`. The other versioned
- * files keep `SCHEMA_VERSION` (1).
+ * The ledger's own `schema_version` (Story 2.7; 3 since Story 2.8 added
+ * `approved_graph`): every record written carries it; the reader accepts each
+ * of `LEDGER_SCHEMA_VERSIONS`. The other versioned files keep
+ * `SCHEMA_VERSION` (1).
  */
-export const LEDGER_SCHEMA_VERSION = 2;
+export const LEDGER_SCHEMA_VERSION = 3;
 
 /** The ledger `schema_version`s this runner reads. */
-export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, LEDGER_SCHEMA_VERSION];
+export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, 2, LEDGER_SCHEMA_VERSION];
 
-export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(LEDGER_SCHEMA_VERSION)]);
+export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(LEDGER_SCHEMA_VERSION)]);
+
+/** A `resolveGraph` hash: `sha256:` and 64 lowercase hex digits. */
+export const GraphHash = z.string().regex(/^sha256:[0-9a-f]{64}$/, "must be sha256: and 64 lowercase hex digits");
 
 const POSITIVE = /^[1-9][0-9]*$/;
 const PLANNING_BODY = /^[a-z0-9]+(?:-[a-z0-9]+)*\.([1-9][0-9]*)$/;
@@ -179,6 +183,8 @@ export const UnitRecordSchema = z
     reviewed_sha: GitSha.nullable(),
     passed_sha: GitSha.nullable(),
     approved_sha: GitSha.nullable(),
+    /** The merge result's graph hash the Maintainer approved (Story 2.8); a v1 or v2 record without it reads as `null`. */
+    approved_graph: GraphHash.nullable().default(null),
     builder_providers: z.array(NonEmpty),
     park: ParkSchema.nullable(),
     attempts: Count,

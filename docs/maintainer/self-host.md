@@ -469,6 +469,7 @@ decision, 2026-10-24).
   **When to advance (Maintainer decision, 2026-10-24).** In this order:
   1. Advance `runner_version` past Story 2.4 only together with the coordinator install (below), and only after the `Protect main` change in "`reconcile` PRs and `Protect main`" (below). A runner with Story 2.4 posts `coordinator-missing` on every `main` SHA until the coordinator runs.
   2. Then advance after each of these Stories merges: 2.5c (the blocked-Story fixes of 2.5a–2.5c), 2.6 (the coordinator enqueues approved PRs), 2.7 (planning units, which compile Epic 3's context and write its manifests), 2.8 (the graph-change gate) and 2.9 (Epic 2's retro).
+  3. Story 2.8 writes ledger records at `schema_version` 3 (the new `approved_graph` field), and a runner without 2.8 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 2.8 together, in one Maintainer PR, and never roll back past it once version-3 records are on the ledger. A runner with 2.8 still reads version 1 and 2 records.
 - **The coordinator lane.** Never install it while `runner_version` lacks Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done). A runner with 2.4 alone claims `coordinator.json` and then idles ("no reconcile step (Story 2.5)"). In this order:
   1. Make the `Protect main` change in "`reconcile` PRs and `Protect main`" (below).
   2. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.
@@ -537,12 +538,18 @@ decision, 2026-10-24).
   ```sh
   git --git-dir ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/runner.git show refs/wip/story__<id>
   ```
-- **Graph PRs.** Until Story 2.8 (the graph-change gate) merges, check every PR that changes `.xarabot/epics.yaml`, `epics.md` or `stories/` before approving it:
+- **Graph PRs.** Until `runner_version` has Story 2.8 (the graph-change gate), check every PR that changes `.xarabot/epics.yaml`, `epics.md` or `stories/` before approving it:
 
   ```sh
   gh pr checkout <n> && bun src/cli/main.ts graph check
   # expected: exit 0
   ```
+
+  From Story 2.8 on, the runner does that check itself for the PRs a lane opens, so you stop running it on those. It never gates a PR a lane did not open (yours included): keep running `graph check` on such a PR before you merge it. Before it queues a bot PR, it recomputes the PR's merge with fresh `main` in the lane's `runner.git` and compares the Epic graph of the merge result with `main`'s. It runs at the builder merge step, after a graph planning unit's CI, and when `reconcile` takes an approved PR; the ungated status planning PRs and `reconcile`'s own PRs skip it, since their diffs hold no graph input.
+  - **Unchanged graph.** The PR goes on as before: the owner's approval rule applies.
+  - **Changed graph.** The PR parks awaiting approval in your inbox, with one 🤖 comment giving the merge result's hash and listing the change against `main`: edges, checkpoints, Epics and Stories added and removed, and the Epics each unrecorded checkpoint holds. Only your approval of the PR's current head queues it; another owner's approval never does. A PR parked under the owner rule whose merge result now changes the graph is parked again in your inbox, with that comment, once its owner approves it; only an approval you submit after that re-park counts. When `reconcile` takes it, the record holds `xarabot:graph` (one graph change at a time: a second approved graph PR waits until the first has merged or parked again, and also while a graph planning unit is running, since that unit holds `xarabot:graph` too; such a wait posts no comment, only a reason in the coordinator lane's journal) and stores the approved hash as `approved_graph`. If `main` moves before the enqueue and the hash changes, the approval is void: the PR parks again for you with the new delta, and only a new approval of its head queues it.
+  - **Refused.** The PR parks `blocked` `graph-invalid`, with a 🤖 comment naming why: the merge result fails `graph check` (a missing or invalid config included); it drops an Epic number or Story id already used (a status beyond `backlog`, a ledger record, a retro-gates entry, or for a Story a PR on `story/<id>`); it adds a Story to an Epic whose retro is recorded or that is in `bootstrapped_epics`; or it removes `checkpoint: true` from an Epic whose checkpoint go is not recorded. Fix the PR, then release the unit with `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule release <unit-id>` or rebuild it.
+  - A merge that conflicts, or a `main` whose own graph does not resolve, is a failed attempt (in `reconcile`, the take is skipped; a conflict there parks the PR again with the conflict comment).
 
 - **A rejected retro's go.** Until Story 4.6 adds `/xarabot go retro:<N>`, a `rejected` retro of Epic 2 or Epic 3 holds its dependents. Record the go by hand in `_bmad-output/implementation-artifacts/retro-gates.yaml` (`retro_gates_path`), in a Maintainer PR. Add a `go` with `ruling: maintainer-pr` to the Epic's existing `retro` entry (AR13):
 

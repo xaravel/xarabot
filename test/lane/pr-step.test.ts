@@ -797,7 +797,7 @@ describe("createPrStep", () => {
 
   test("an unknown schema_version found by the fence alerts ledger-schema-version and stops", async () => {
     const w = await world();
-    const v2 = JSON.stringify({ ...w.record, schema_version: 3 });
+    const v2 = JSON.stringify({ ...w.record, schema_version: 4 });
     w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.1.json": v2 }, deletes: [] });
     const out = await w.run();
     expect(out.outcome).toBe("stop");

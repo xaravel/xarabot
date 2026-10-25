@@ -30,13 +30,13 @@ describe("serializeUnitRecord", () => {
     expect(Object.keys(parsed)).toEqual([
       "schema_version", "unit", "state", "owner", "host", "lane", "generation", "globs", "heartbeat_at",
       "pr", "pr_owner", "base_sha", "head_sha", "reviewed_sha", "passed_sha", "approved_sha",
-      "builder_providers", "park", "attempts", "loopbacks", "ci_fixes", "approval",
+      "approved_graph", "builder_providers", "park", "attempts", "loopbacks", "ci_fixes", "approval",
     ]);
     expect(parsed.globs).toEqual(["src/a/**", "src/b/**"]);
     expect(parsed.builder_providers).toEqual(["claude", "codex"]);
     expect(Object.keys(parsed.park)).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
     expect(parsed.park.globs_held).toEqual(["a.ts", "z.ts"]);
-    expect(text).toContain('\n  "schema_version": 2,\n');
+    expect(text).toContain('\n  "schema_version": 3,\n');
   });
 });
 
@@ -77,34 +77,63 @@ describe("parseLedger", () => {
     expect(parseLedger({})).toEqual({ ok: true, value: { units: new Map(), coordinator: null } });
   });
 
-  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 2', `"schema_version": ${n}`);
+  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 3', `"schema_version": ${n}`);
   const cv = (n: number) => serializeCoordinator(COORDINATOR).replace('"schema_version": 2', `"schema_version": ${n}`);
 
-  test.each([1, 2])("unit and coordinator records at schema_version %p both parse (Story 2.7)", (n) => {
+  test.each([1, 2, 3])("unit and coordinator records at schema_version %p both parse (Stories 2.7, 2.8)", (n) => {
     const r = parseLedger({ "units/story__1.5.json": v(n), [COORDINATOR_PATH]: cv(n) });
     if (!r.ok) throw new Error(r.error.message);
-    expect(r.value.units.get("story:1.5")?.schema_version).toBe(n as 1 | 2);
-    expect(r.value.coordinator?.schema_version).toBe(n as 1 | 2);
+    expect(r.value.units.get("story:1.5")?.schema_version).toBe(n as 1 | 2 | 3);
+    expect(r.value.coordinator?.schema_version).toBe(n as 1 | 2 | 3);
   });
 
-  test("a tip mixing schema_version 1 and 2 records parses", () => {
+  test.each([1, 2])("a schema_version %p record with no approved_graph reads it as null, and a write stamps 3 with it (Story 2.8)", (n) => {
+    const raw = JSON.parse(v(n)) as Record<string, unknown>;
+    delete raw["approved_graph"];
+    const r = parseLedger({ "units/story__1.5.json": JSON.stringify(raw) });
+    if (!r.ok) throw new Error(r.error.message);
+    const got = r.value.units.get("story:1.5");
+    expect(got?.approved_graph).toBeNull();
+    if (got === undefined) throw new Error("no record");
+    const text = serializeUnitRecord({ ...got, schema_version: 3 });
+    expect(JSON.parse(text)).toMatchObject({ schema_version: 3, approved_graph: null });
+  });
+
+  test("approved_graph round-trips as sha256:<64 hex>; anything else is invalid", () => {
+    const hash = `sha256:${"e".repeat(64)}`;
+    const r = parseLedger({ "units/story__1.5.json": serializeUnitRecord(rec({ approved_graph: hash })) });
+    expect(r.ok && r.value.units.get("story:1.5")?.approved_graph).toBe(hash);
+    for (const bad of ["e".repeat(64), `sha256:${"E".repeat(64)}`, `sha256:${"e".repeat(63)}`]) {
+      const b = parseLedger({ "units/story__1.5.json": serializeUnitRecord(rec({ approved_graph: bad })) });
+      expect(b.ok).toBe(false);
+    }
+  });
+
+  test("a tip mixing schema_version 2 and 3 records parses", () => {
+    const r = parseLedger({ "units/story__1.5.json": v(2), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(2) });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.units.get("story:1.5")?.schema_version).toBe(2);
+    expect(r.value.units.get("story:1.6")?.schema_version).toBe(3);
+  });
+
+  test("a tip mixing schema_version 1 and 3 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(1), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(1) });
     expect(r.ok).toBe(true);
   });
 
   const stop: readonly [string, Record<string, string>][] = [
-    ["unit schema_version 3", { "units/story__1.5.json": v(3) }],
+    ["unit schema_version 4", { "units/story__1.5.json": v(4) }],
     ["unit schema_version 0", { "units/story__1.5.json": v(0) }],
-    ["coordinator schema_version 3", { [COORDINATOR_PATH]: cv(3) }],
+    ["coordinator schema_version 4", { [COORDINATOR_PATH]: cv(4) }],
     ["coordinator schema_version 0", { [COORDINATOR_PATH]: cv(0) }],
-    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(3) }],
+    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(4) }],
   ];
   for (const [name, files] of stop) {
     test(`${name} -> stop`, () => {
       const r = parseLedger(files);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.kind).toBe("stop");
-      if (!r.ok) expect(r.error.message).toContain("this runner reads 1 and 2");
+      if (!r.ok) expect(r.error.message).toContain("this runner reads 1, 2 and 3");
     });
   }
 
@@ -117,7 +146,7 @@ describe("parseLedger", () => {
     ["nested path", { "units/x/story__1.5.json": good }],
     ["bad park.reason", { "units/story__1.5.json": serializeUnitRecord(rec({ state: "parked", park: { kind: "blocked", reason: "x" as never, inbox_owner: "alice", globs_held: [] } })) }],
     ["park on a non-parked record", { "units/story__1.5.json": serializeUnitRecord(rec({ park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } })) }],
-    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 2', '"schema_version": "2"') }],
+    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 3', '"schema_version": "3"') }],
     ["bad coordinator", { [COORDINATOR_PATH]: "{}" }],
   ];
   for (const [name, files] of invalid) {

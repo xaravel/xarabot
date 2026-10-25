@@ -22,6 +22,13 @@ export type Ledger = {
 
 export type LedgerParseErrorKind = "stop" | "invalid";
 
+/** `1, 2 and 3`. */
+function readable(versions: readonly number[]): string {
+  const head = versions.slice(0, -1);
+  const last = versions[versions.length - 1];
+  return head.length === 0 ? String(last) : `${head.join(", ")} and ${String(last)}`;
+}
+
 type Parsed<T> = Result<T, LedgerParseErrorKind>;
 
 function parseRecord<S extends z.ZodType>(path: string, text: string, schema: S): Parsed<z.infer<S>> {
@@ -36,7 +43,7 @@ function parseRecord<S extends z.ZodType>(path: string, text: string, schema: S)
   }
   const version = (value as Record<string, unknown>)["schema_version"];
   if (typeof version === "number" && Number.isInteger(version) && !LEDGER_SCHEMA_VERSIONS.includes(version)) {
-    return err("stop", `${path}: unsupported schema_version ${version} (this runner reads ${LEDGER_SCHEMA_VERSIONS.join(" and ")})`);
+    return err("stop", `${path}: unsupported schema_version ${version} (this runner reads ${readable(LEDGER_SCHEMA_VERSIONS)})`);
   }
   const parsed = schema.safeParse(value);
   if (!parsed.success) return err("invalid", `${path}: ${describeIssues(parsed.error)}`);
@@ -119,6 +126,7 @@ export function serializeUnitRecord(r: UnitRecord): string {
     reviewed_sha: r.reviewed_sha,
     passed_sha: r.passed_sha,
     approved_sha: r.approved_sha,
+    approved_graph: r.approved_graph,
     builder_providers: sortedSet(r.builder_providers),
     park: r.park === null ? null : orderedPark(r.park),
     attempts: r.attempts,

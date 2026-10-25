@@ -20,6 +20,8 @@ import type { ReconcileCommit, ReconcileCommitRequest, ReconcileCommitter } from
 import { createReconcileStep, reconcileBranch, reconcilePrText, reparkComment, type ReconcileStepDeps } from "../../src/lane/reconcile-step.ts";
 import type { WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
+import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
+import { graphFiles, GRAPH_STATUS, stubGraphTrees, treeOf, unchangedGraph, type StubAnswer } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -195,6 +197,7 @@ async function setup(o: FakeOpts = {}, seed: (fake: FakeForge) => Promise<readon
       return createReconcileStep({
         forge,
         committer,
+        graphTrees: unchangedGraph(),
         identity: COORD,
         repo: "xaravel/xarabot",
         now: () => t,
@@ -850,7 +853,7 @@ describe("createReconcileStep: the gate, the re-check and failures", () => {
     const ac = new AbortController();
     ac.abort();
     const before = f.messages().length;
-    const out = await createReconcileStep({ forge: f.fake.forge, committer: { commit: async () => err("git", "unused") }, identity: COORD, repo: "xaravel/xarabot" })({ ...input, signal: ac.signal });
+    const out = await createReconcileStep({ forge: f.fake.forge, committer: { commit: async () => err("git", "unused") }, graphTrees: unchangedGraph(), identity: COORD, repo: "xaravel/xarabot" })({ ...input, signal: ac.signal });
     expect([out.outcome, out.state]).toEqual(["failed", "claimed"]);
     expect(f.messages()).toHaveLength(before);
   });
@@ -1375,6 +1378,281 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     await f.run();
     expect(f.events.slice(0, 6)).toEqual(["ledgerSwap markMerged story:1.9", "queueState", "queueState", "reviews", "ledgerSwap takeApproved story:1.1", "ledgerSwap heartbeat story:1.1"]);
   });
+
+  describe("the graph-change gate (Story 2.8)", () => {
+    const MAIN_GRAPH = graphFiles({ 1: ["1.1"], 2: ["2.1"] });
+    const ADDED = graphFiles({ 1: ["1.1"], 2: ["2.1", "2.2"] });
+    const ADDED_MORE = graphFiles({ 1: ["1.1"], 2: ["2.1", "2.2", "2.3"] });
+    const CHANGE = { main: MAIN_GRAPH, merged: ADDED } as const;
+    const byMaintainer = (h: string) => [review(h, 5, { author: "edanisko" })];
+
+    /** A parked world whose take runs `answer` through a stub port. */
+    async function gated(reviews: (head: string) => readonly ForgeReview[], answer: StubAnswer | ((r: { headSha: string; mainSha: string }, i: number) => StubAnswer), extra: readonly UnitRecord[] = []) {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        for (const r of reviews(pr.head)) fake.control.addReview(pr.number, r);
+        return [parkedRec(pr), ...extra];
+      });
+      const g = stubGraphTrees(answer);
+      return { f, pr, g, run: () => f.run({ graphTrees: g.trees }) };
+    }
+
+    test("AC: an approved graph-changing PR is taken merging with xarabot:graph in globs and approved_graph the merge result's hash, and enqueued at its head", async () => {
+      const w = await gated(byMaintainer, CHANGE);
+      const out = await w.run();
+      expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+      const r = (await w.f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "merging", generation: 2, approved_sha: w.pr.head, passed_sha: w.pr.head, lane: "coordinator" });
+      expect(r?.globs).toEqual([...DIFF, "xarabot:graph"].sort());
+      const expected = checkGraphChange({ main: treeOf(MAIN_GRAPH), merged: treeOf(ADDED), ledgerUnits: [] });
+      expect(expected.kind === "checked" && r?.approved_graph === expected.mergedHash).toBe(true);
+      expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+      expect(w.g.calls.map((c) => c.headSha)).toEqual([w.pr.head]);
+      expect(out.reason).toContain("approved by edanisko");
+    });
+
+    test("AC: a graph-changing PR approved only by its owner, who is not the Maintainer, is not queued: parked again for the Maintainer with the delta", async () => {
+      const w = await gated((h) => [review(h, 5)], CHANGE);
+      const out = await w.run();
+      expect(w.f.fake.control.queue()).toEqual([]);
+      expect((await w.f.ledger()).get(S)).toMatchObject({
+        state: "parked",
+        generation: 2,
+        lane: "coordinator",
+        passed_sha: w.pr.head,
+        approved_sha: null,
+        approved_graph: null,
+        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF },
+      });
+      expect(out.reason).toContain("only the Maintainer's (edanisko) approval counts");
+      const comments = w.f.fake.control.comments(w.pr.number);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]).toContain("- Stories added: Epic 2: +2.2");
+      expect(comments[0]).toContain("(`edanisko`)");
+      // The fenced passed_sha makes the next take need an approval after the re-park: the owner's old one never re-takes it.
+      w.f.events.length = 0;
+      await w.run();
+      expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
+      expect(await stateOf(w.f, S)).toBe("parked");
+    });
+
+    test("an unchanged graph keeps the owner rule: the Maintainer's approval alone does not take it", async () => {
+      const w = await gated(byMaintainer, { main: MAIN_GRAPH, merged: MAIN_GRAPH });
+      await w.run();
+      expect(await stateOf(w.f, S)).toBe("parked");
+      expect(w.f.logs.join("\n")).toContain("from its owner");
+    });
+
+    test("a re-park needs the Maintainer's approval after it, as the owner's does", async () => {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        fake.control.addReview(pr.number, review(pr.head, 30, { author: "edanisko" }));
+        return [coord(S, { state: "parked", generation: 3, pr: pr.number, pr_owner: "alice", head_sha: pr.head, passed_sha: pr.head, heartbeat_at: minutesBefore(10), park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF } })];
+      });
+      await f.run({ graphTrees: stubGraphTrees(CHANGE).trees });
+      expect(await stateOf(f, S)).toBe("parked");
+    });
+
+    test("a second graph PR: with another record holding xarabot:graph the take is refused and the PR stays parked", async () => {
+      const holder = coord("story:1.2", { state: "merging", generation: 2, globs: ["xarabot:graph", "src/b/**"], approved_graph: `sha256:${"b".repeat(64)}` });
+      const w = await gated(byMaintainer, CHANGE, [holder]);
+      const out = await w.run();
+      expect(await stateOf(w.f, S)).toBe("parked");
+      expect(w.f.fake.control.queue()).toEqual([]);
+      expect(out.reason).toContain("overlaps \"xarabot:graph\"");
+    });
+
+    test("a refused merge result: taken, then parked blocked graph-invalid with the refusal named; not enqueued", async () => {
+      const used = { ...MAIN_GRAPH, [GRAPH_STATUS]: "development_status:\n  2-1-s: done\n" };
+      const w = await gated((h) => [review(h, 5)], { main: used, merged: { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string } });
+      await w.run();
+      const r = (await w.f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, approved_graph: null, park: { kind: "blocked", reason: "graph-invalid", inbox_owner: "alice" } });
+      expect(w.f.fake.control.queue()).toEqual([]);
+      const [comment] = w.f.fake.control.comments(w.pr.number);
+      expect(comment).toContain("Story 2.1 is removed, but it is used");
+    });
+
+    test("a conflicting merge: taken, then parked awaiting approval again with the conflict comment", async () => {
+      const w = await gated((h) => [review(h, 5)], { conflict: ["stories/1.1.md"] });
+      await w.run();
+      await expectReparked(w.f, 2);
+      expect(w.f.fake.control.comments(w.pr.number)).toEqual([reparkComment(S, "conflict")]);
+      expect(w.f.fake.control.queue()).toEqual([]);
+    });
+
+    test("a conflicting merge with no passed_sha on the park: the fence sets it, so the same approval never re-takes it", async () => {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        fake.control.addReview(pr.number, review(pr.head, 5));
+        return [parkedRec(pr, { passed_sha: null })];
+      });
+      const g = stubGraphTrees({ conflict: ["stories/1.1.md"] });
+      await f.run({ graphTrees: g.trees });
+      expect((await f.ledger()).get(S)).toMatchObject({ state: "parked", passed_sha: pr.head, lane: "coordinator" });
+      const again = await f.run({ graphTrees: g.trees });
+      expect(again.reason ?? "").not.toContain("takeApproved");
+      expect(swaps(f.events)).not.toContain("takeApproved story:1.1");
+      expect(g.calls).toHaveLength(1);
+    });
+
+    test.each([
+      ["main not resolving", { main: { ...MAIN_GRAPH, ".xarabot/config.yaml": "x: [" }, merged: MAIN_GRAPH }],
+      ["a failed read", { error: "git broke" }],
+    ] as const)("%s skips the take; the PR stays parked", async (_name, answer) => {
+      const w = await gated((h) => [review(h, 5)], answer);
+      const before = (await w.f.ledger()).get(S);
+      const out = await w.run();
+      expect((await w.f.ledger()).get(S)).toEqual(before);
+      expect(out.reason).toContain("not taken");
+    });
+
+    test("a failed branch PR lookup skips the take", async () => {
+      const w = await gated(byMaintainer, { main: MAIN_GRAPH, merged: graphFiles({ 1: ["1.1"], 2: [] }) });
+      w.f.fake.control.injectError("listPrsByBranch", { kind: "transient", message: "flaky" });
+      const out = await w.run();
+      expect(await stateOf(w.f, S)).toBe("parked");
+      expect(out.reason).toContain("listPrsByBranch story/2.1");
+    });
+
+    test("main moved at enqueue, a different hash: the approval is void, parked again for the Maintainer with the new delta", async () => {
+      let f!: Fake;
+      const w = await gated(byMaintainer, (_r, i) => {
+        if (i === 0) {
+          f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+          return CHANGE;
+        }
+        return { main: MAIN_GRAPH, merged: ADDED_MORE };
+      });
+      f = w.f;
+      await w.run();
+      expect(w.g.calls).toHaveLength(2);
+      expect(w.g.calls[1]?.mainSha).not.toBe(w.g.calls[0]?.mainSha);
+      const r = (await w.f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, approved_graph: null, passed_sha: w.pr.head, park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF } });
+      expect(w.f.fake.control.queue()).toEqual([]);
+      const [comment] = w.f.fake.control.comments(w.pr.number);
+      expect(comment).toContain("no longer counts");
+      expect(comment).toContain("+2.3");
+    });
+
+    test("main moved at enqueue, an equal hash: enqueued", async () => {
+      let f!: Fake;
+      const w = await gated(byMaintainer, (_r, i) => {
+        if (i === 0) f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+        return CHANGE;
+      });
+      f = w.f;
+      await w.run();
+      expect(w.g.calls).toHaveLength(2);
+      expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+      expect((await w.f.ledger()).get(S)?.state).toBe("merging");
+    });
+
+    test("main moved at enqueue, now refused: the coordinator-held merging record parks blocked graph-invalid", async () => {
+      let f!: Fake;
+      const used = { ...MAIN_GRAPH, [GRAPH_STATUS]: "development_status:\n  2-1-s: done\n" };
+      const w = await gated(byMaintainer, (_r, i) => {
+        if (i === 0) {
+          f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+          return CHANGE;
+        }
+        return { main: used, merged: { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string } };
+      });
+      f = w.f;
+      await w.run();
+      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "parked", approved_graph: null, park: { kind: "blocked", reason: "graph-invalid" } });
+      expect(w.f.fake.control.queue()).toEqual([]);
+    });
+
+    /** A world whose `main` moves during the first gate call; the second call returns `second`. */
+    async function movedWorld(second: StubAnswer) {
+      let f!: Fake;
+      const w = await gated(byMaintainer, (_r, i) => {
+        if (i > 0) return second;
+        f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+        return CHANGE;
+      });
+      f = w.f;
+      return w;
+    }
+
+    test("main moved at enqueue, the second gate run fails: left merging, not enqueued", async () => {
+      const w = await movedWorld({ error: "git broke" });
+      const out = await w.run();
+      expect(w.g.calls).toHaveLength(2);
+      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: w.pr.head });
+      expect(w.f.fake.control.queue()).toEqual([]);
+      expect(out.reason).toContain("left merging for the next run's queue check");
+    });
+
+    test("main moved at enqueue, the merge now conflicts: parked again with the conflict comment, not enqueued", async () => {
+      const w = await movedWorld({ conflict: ["stories/2.2.md"] });
+      await w.run();
+      const r = (await w.f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, approved_graph: null, park: { kind: "awaiting-approval", inbox_owner: "edanisko", globs_held: DIFF } });
+      expect(w.f.fake.control.comments(w.pr.number)).toEqual([reparkComment(S, "conflict")]);
+      expect(w.f.fake.control.queue()).toEqual([]);
+    });
+
+    test("the snapshot after the fence fails: left merging, not enqueued, no second gate run", async () => {
+      const w = await gated(byMaintainer, CHANGE);
+      const base = spied(w.f.fake, w.f.events);
+      let reads = 0;
+      const forge: Forge = {
+        ...base,
+        snapshot: async (o) => {
+          if (o.read !== undefined && ++reads === 2) return { ok: false, error: { kind: "transient", message: "502" } };
+          return base.snapshot(o);
+        },
+      };
+      const out = await w.f.run({ forge, graphTrees: w.g.trees });
+      expect(w.g.calls).toHaveLength(1);
+      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: w.pr.head });
+      expect(w.f.fake.control.queue()).toEqual([]);
+      expect(out.reason).toContain("before the enqueue");
+    });
+
+    test("a checkGated record holding xarabot:graph parks again in the Maintainer's inbox, the pseudo-glob dropped from globs_held", async () => {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        return [gatedRec(pr, { globs: [...DIFF, "xarabot:graph"], approved_graph: `sha256:${"b".repeat(64)}` })];
+      });
+      await f.run();
+      const r = (await f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", approved_sha: null, approved_graph: null });
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF });
+      expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(S, "not-queued")]);
+    });
+
+    test.each([
+      ["a failing port", { error: "never called" }],
+      ["a conflicting port", { conflict: [STATUS] }],
+    ] as const)("an approved reconcile PR skips the gate (%s): taken and enqueued, no gate call", async (_name, answer) => {
+      let r3 = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        r3 = await prOn(fake, "xarabot/reconcile-3");
+        fake.control.addReview(r3.number, { author: COORD.owner, state: "approved", commit_sha: r3.head, submitted_at: minutesBefore(5) });
+        return [coord("reconcile:3", { state: "parked", pr: r3.number, pr_owner: COORD.owner, head_sha: r3.head, passed_sha: r3.head, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [STATUS] } })];
+      });
+      const g = stubGraphTrees(answer);
+      await f.run({ graphTrees: g.trees });
+      expect(g.calls).toEqual([]);
+      expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "merging", generation: 2, approved_sha: r3.head, approved_graph: null, globs: [STATUS] });
+      expect(f.fake.control.queue()).toEqual([r3.number]);
+    });
+
+    test("main unmoved at enqueue: no second gate run", async () => {
+      const w = await gated(byMaintainer, CHANGE);
+      await w.run();
+      expect(w.g.calls).toHaveLength(1);
+      expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+    });
+  });
 });
 
 // ------------------------------------------------------------------ acceptance
@@ -1470,7 +1748,7 @@ describe("reconcile through the coordinator process", () => {
       identity: COORD,
       lane: LANE,
       claim: claimRec(),
-      steps: { reconcile: createReconcileStep({ forge: fake.forge, committer, identity: COORD, repo: "xaravel/xarabot", now: () => clock, sleep: async (ms) => { clock += ms; }, random: () => 0 }) },
+      steps: { reconcile: createReconcileStep({ forge: fake.forge, committer, graphTrees: unchangedGraph(), identity: COORD, repo: "xaravel/xarabot", now: () => clock, sleep: async (ms) => { clock += ms; }, random: () => 0 }) },
       pid: 4242,
       now: () => (clock += 1000),
       sleep: async () => {},
