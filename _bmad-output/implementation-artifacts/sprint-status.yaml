@@ -61,14 +61,14 @@ development_status:
   epic-1-retrospective: done
 
   epic-2: backlog
-  2-1-heartbeat-and-fencing: backlog
-  2-2-stale-takeover: backlog
-  2-3-the-0-x-write-check: backlog
-  2-4-the-coordinator-lane-and-its-claim: backlog
-  2-5-reconcile-marks-units-done: backlog
-  2-5a-resuming-a-blocked-story: backlog
-  2-5b-host-rulings-and-lane-stop-exits: backlog
-  2-5c-honest-sandboxed-sessions: backlog
+  2-1-heartbeat-and-fencing: done
+  2-2-stale-takeover: done
+  2-3-the-0-x-write-check: done
+  2-4-the-coordinator-lane-and-its-claim: done
+  2-5-reconcile-marks-units-done: done
+  2-5a-resuming-a-blocked-story: done
+  2-5b-host-rulings-and-lane-stop-exits: done
+  2-5c-honest-sandboxed-sessions: done
   2-6-reconcile-enqueues-approved-prs: backlog
   2-6a-one-session-runner: backlog
   2-6b-epic-1-retro-fixes: backlog
