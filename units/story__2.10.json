@@ -5,7 +5,7 @@
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "bun.lock",
     "docs/**",
@@ -13,7 +13,7 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-25T09:36:01.985Z",
+  "heartbeat_at": "2026-10-25T10:06:43Z",
   "pr": 96,
   "pr_owner": "edanisko",
   "base_sha": "1840ef0686d4db119ee6855750fdbea36e25c02b",
@@ -25,7 +25,7 @@
   "retro_result": null,
   "builder_providers": [],
   "park": null,
-  "attempts": 0,
+  "attempts": 1,
   "loopbacks": 0,
   "ci_fixes": 1,
   "approval": null
