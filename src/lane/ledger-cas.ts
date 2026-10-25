@@ -1,4 +1,5 @@
 import type { LedgerCommit, LedgerEdit, LedgerEditErrorKind, LedgerFiles } from "../core/ledger/edits.ts";
+import { unitPath, UnitRecordSchema, type UnitRecord } from "../core/schemas/ledger.ts";
 import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
 
 /**
@@ -12,7 +13,25 @@ import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
  * After a `transient` swap the next try compares tips: a re-fetched tip that
  * moved, and whose files equal the old files with the attempted commit
  * applied, is that swap, so the loop returns `ok` without writing again.
+ *
+ * It also holds `writtenRecord` and the forge call deadline every lane module
+ * shares, so `heartbeat.ts` and `session.ts` depend only on this module.
  */
+
+/** Each forge call's (and each ledger swap's) default deadline. */
+export const DEFAULT_CALL_TIMEOUT_MS = 60_000;
+
+/** The record `commit` writes for `unit`, or `null`. */
+export function writtenRecord(commit: LedgerCommit | null, unit: string): UnitRecord | null {
+  const text = commit?.writes[unitPath(unit)];
+  if (text === undefined) return null;
+  try {
+    const parsed = UnitRecordSchema.safeParse(JSON.parse(text));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
 
 export const CAS_MAX_TRIES = 10;
 export const CAS_BACKOFF_BASE_MS = 100;

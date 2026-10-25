@@ -1,0 +1,905 @@
+import { lstatSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
+import { failAttempt, heartbeat, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import type { NextStory } from "../core/next/next.ts";
+import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
+import type { LaneIdentity, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
+import { parseSessionResult, type BuildResult, type ResultKind, type SessionResultOf } from "../core/schemas/session-result.ts";
+import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
+import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult } from "../ports/forge.ts";
+import type { LaneStore } from "../ports/lane-store.ts";
+import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
+import { emptyDir } from "../sandbox/vendor-home.ts";
+import type { Heartbeat } from "./heartbeat.ts";
+import { swapLedger, writtenRecord, type Sleep } from "./ledger-cas.ts";
+import type { LaneLayout } from "./lane-store.ts";
+import type { Waiter, WaitResult } from "./wait.ts";
+import type { Workspace } from "./workspace.ts";
+
+/**
+ * The one session runner and step helper set (Story 2.6a, AR1, AR3, AR23).
+ * The lane process and the coordinator process use it, and so do the PR, CI,
+ * merge and `reconcile` steps; Stories 2.7 and 2.9 (planning and retro
+ * sessions) and Epic 3's reviews build on it next.
+ *
+ * - The shared lane types: the PR step's input and output, the session
+ *   limits, the run's result, and the `Halt` family a process ends through.
+ * - `forgeClock`: the last forge time seen, advanced by the host time since.
+ * - `forgeOps`: one forge call or ledger swap under its own deadline. A port
+ *   method that throws is a `transient` error; a lane-stop kind posts a
+ *   best-effort alert and calls the caller's `stop`.
+ * - `stepKit`: a step's ending (`End`), its reasons, and its fenced edits on
+ *   its own record (`held`, `beat`, `failed`, `lost`), on top of `forgeOps`.
+ * - The unit track both processes keep: the keeper check, a held edit on the
+ *   unit, a failed attempt and the unit's journal record.
+ * - `createSessionRunner`: prepare, the sandboxed run under the unit budget
+ *   and the session limit, the kill `RESULT_LINGER_MS` after the result file
+ *   first appears, the fresh run plus one resume, the usage-limit sleep with
+ *   its `usage-limit` span, and the result parse for a `ResultKind`. It holds
+ *   no Story logic: the caller passes the prompt and the result kind.
+ *
+ * `heartbeat.ts` must never import this module.
+ */
+
+export const MAX_CLAIM_ROUNDS = 3;
+export const ZERO_SHA = "0".repeat(40);
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Installed tool trees: skills for the agents and the BMAD install. The runner
+ * reads none of their contents, and a repo holds hundreds of files there.
+ */
+const UNREAD_TREES = [".claude/", ".agents/", "_bmad/"];
+
+/** The `main` paths a snapshot reads the contents of. */
+export function readsPath(path: string): boolean {
+  if (UNREAD_TREES.some((t) => path.startsWith(t))) return false;
+  return path.startsWith(".xarabot/") || /\.(?:md|ya?ml)$/.test(path);
+}
+
+/** The CI-fix session's log file in `tmp`. */
+export const CI_FIX_LOG = "ci-fix-log.md";
+
+/** What the PR step gets after a `done` result whose spec checks out. */
+export type PrStepInput = {
+  readonly unit: NextStory;
+  /** The claimed ledger record. */
+  readonly record: UnitRecord;
+  readonly result: BuildResult;
+  /** The spec file's repo-relative path in the clone. */
+  readonly specPath: string;
+  /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
+  readonly superseded: readonly string[];
+  readonly clone: string;
+  /** The unit budget's signal. */
+  readonly signal: AbortSignal;
+  /** Writes a note to the unit log. */
+  readonly log: (text: string) => void;
+  /** `fix`: a CI fix pushed to the open PR, whose title and body stay as they are. Default `build`. */
+  readonly kind?: "build" | "fix";
+};
+
+export type PrStepOutput = {
+  readonly outcome: LaneOutcome;
+  readonly state: UnitState | null;
+  /** The latest ledger record the step saw or wrote. */
+  readonly record?: UnitRecord;
+  /** Why the step ended as it did; added to the journal reason. */
+  readonly reason?: string;
+};
+
+/** A step's output; `ejected`: the queue ejected the PR, the unit `claimed` again for another CI round. */
+export type StepOutput = PrStepOutput & { readonly ejected?: true };
+
+/** Commits, pushes and opens the PR (Story 1.16a). Never throws. */
+export type PrStep = (input: PrStepInput) => Promise<PrStepOutput>;
+
+/** An agent session's limits (AR3); defaults 3 h, 5 min and 5 s. */
+export type SessionLimits = {
+  /** A run still going after this is killed; with no result it is a failed attempt. */
+  readonly sessionMs?: number;
+  /** A run still going this long after its result file is first seen is killed. */
+  readonly resultLingerMs?: number;
+  /** How often the lane looks for the result file during a run. */
+  readonly resultPollMs?: number;
+};
+
+/** Why a run ended `stop` after a STOP during a usage-limit sleep. */
+export const LIMIT_STOP_REASON = "STOP during a usage-limit sleep";
+
+/**
+ * A run's outcome. `laneStop` is set, to the stop's reason, when the outcome
+ * is `stop` for any reason but a STOP marker (the host or lane `STOP`, or a
+ * STOP during a usage-limit sleep): `lane run` counts it as a failed start.
+ */
+export type LaneProcessResult = { readonly outcome: LaneOutcome; readonly laneStop?: string };
+
+/** Ends the run early with `outcome`. */
+export class Halt extends Error {
+  constructor(
+    readonly outcome: LaneOutcome,
+    readonly reason: string,
+  ) {
+    super(reason);
+  }
+}
+
+/** The heartbeat keeper lost or released the unit: abandon it, with no further edit. */
+export class Abandon extends Halt {}
+
+/** A host or lane STOP marker ends the run: the operator's choice, never a lane stop. */
+export class MarkerStop extends Halt {}
+
+/** A regular file's text; a symlink or anything else is refused. */
+export function readRegular(path: string): string | null {
+  const st = lstatSync(path, { throwIfNoEntry: false });
+  if (st === undefined || !st.isFile()) return null;
+  return readFileSync(path, "utf8");
+}
+
+export function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** A host or lane STOP marker (or one that can't be read) ends the run with `stop`. */
+export function checkStop(store: LaneStore): void {
+  const s = store.stopMarkers();
+  if (!s.ok) throw new Halt("stop", `STOP markers unreadable, stopping: ${s.error.message}`);
+  if (s.value.host) throw new MarkerStop("stop", "host STOP marker present");
+  if (s.value.lane) throw new MarkerStop("stop", "lane STOP marker present");
+}
+
+/** A lane store write's result, for `ReportStore`. */
+export type StoreWrite = { readonly ok: boolean; readonly error?: { readonly kind: string; readonly message: string } };
+
+/** Reports a failed lane store write; the outcome stays. */
+export type ReportStore = (r: StoreWrite, what: string) => void;
+
+// ------------------------------------------------------------ forge time
+
+export type ForgeClock = {
+  /** Records forge time `now`, seen at the current host time. */
+  see(now: string): void;
+  /** The last forge time seen plus the host time since; the host time before any. */
+  forgeNow(): string;
+  /** `forgeNow` at host time `hostMs`. */
+  forgeAt(hostMs: number): string;
+  /** The host time the last forge time was seen at (0 before any). */
+  seenAt(): number;
+};
+
+/** The forge's time as last seen, advanced by the host clock; `seed` is a forge time seen now. */
+export function forgeClock(clock: () => number, seed?: string): ForgeClock {
+  let last: string | null = seed ?? null;
+  let at = seed === undefined ? 0 : clock();
+  const forgeAt = (hostMs: number): string =>
+    last === null ? new Date(hostMs).toISOString() : new Date(Date.parse(last) + Math.max(0, hostMs - at)).toISOString();
+  const forgeNow = (): string => forgeAt(clock());
+  return {
+    see(now) {
+      last = now;
+      at = clock();
+    },
+    forgeNow,
+    forgeAt,
+    seenAt: () => at,
+  };
+}
+
+// ------------------------------------------------------------ forge calls
+
+/** A ledger swap's outcome: the record it wrote for the unit (or `null`), else lost or failed. */
+export type Swapped =
+  | { readonly kind: "ok"; readonly record: UnitRecord | null }
+  | { readonly kind: "lost"; readonly message: string }
+  | { readonly kind: "failed"; readonly message: string };
+
+export type ForgeOpsParams = {
+  readonly forge: Forge;
+  /** Each forge call's and each swap's deadline. */
+  readonly callTimeoutMs: number;
+  readonly sleep?: Sleep;
+  readonly random?: () => number;
+  readonly clock: ForgeClock;
+  /** The `main` SHA a lane-stop alert names; the zero SHA when `null`. */
+  readonly alertSha: () => string | null;
+  /** Ends the caller after a lane-stop alert; it throws. */
+  readonly stop: (condition: string, why: string) => never;
+};
+
+export type ForgeOps = {
+  /** One forge call under its own deadline; a throw is `transient`, a lane-stop kind stops the lane. */
+  call<T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>>;
+  /** One ledger edit through the CAS loop under its own deadline; a ledger or forge stop stops the lane. */
+  swap(edit: LedgerEdit, unit: string): Promise<Swapped>;
+  /** Posts the alert (its failure ignored), then `stop`. */
+  laneStop(condition: string, why: string): Promise<never>;
+  /** The forge's current time for a ledger edit, from a fresh snapshot; the estimate when the read fails. */
+  freshNow(): Promise<string>;
+};
+
+export function forgeOps(p: ForgeOpsParams): ForgeOps {
+  const { forge, callTimeoutMs } = p;
+  const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
+
+  const laneStop = async (condition: string, why: string): Promise<never> => {
+    try {
+      await forge.alert(condition, p.alertSha() ?? ZERO_SHA, deadline());
+    } catch {
+      // The alert is best effort; the lane stops either way.
+    }
+    return p.stop(condition, why);
+  };
+
+  const call = async <T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>> => {
+    let r: ForgeResult<T>;
+    try {
+      r = await run(deadline());
+    } catch (e) {
+      return { ok: false, error: { kind: "transient", message: `${operation} threw: ${message(e)}` } };
+    }
+    if (!r.ok && isLaneStopKind(r.error.kind)) await laneStop(`forge-${r.error.kind}`, `${operation}: ${r.error.message}`);
+    return r;
+  };
+
+  const swap = async (edit: LedgerEdit, unit: string): Promise<Swapped> => {
+    const r = await swapLedger({
+      forge,
+      edit,
+      signal: AbortSignal.timeout(callTimeoutMs),
+      ...(p.sleep !== undefined ? { sleep: p.sleep } : {}),
+      ...(p.random !== undefined ? { random: p.random } : {}),
+    });
+    if (r.ok) return { kind: "ok", record: writtenRecord(r.value.commit, unit) };
+    const e = r.error;
+    if (e.kind === "edit" && e.edit === "stop") await laneStop("ledger-schema-version", e.message);
+    if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) await laneStop(`forge-${e.forge.kind}`, e.message);
+    if (e.kind === "edit" && e.edit === "precondition") return { kind: "lost", message: e.message };
+    return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
+  };
+
+  const freshNow = async (): Promise<string> => {
+    const s = await call("snapshot", (o) => forge.snapshot(o));
+    if (s.ok) {
+      p.clock.see(s.value.now);
+      return s.value.now;
+    }
+    return p.clock.forgeNow();
+  };
+
+  return { call, swap, laneStop, freshNow };
+}
+
+// ------------------------------------------------------------ step kit
+
+/** Ends a step with `out`. */
+export class End {
+  constructor(readonly out: StepOutput) {}
+}
+
+export type StepKitParams = {
+  /** The step's log prefix: `PR step`, `CI step`, `merge step`, `reconcile step`. */
+  readonly name: string;
+  readonly forge: Forge;
+  /** Who writes the ledger records. */
+  readonly identity: LaneIdentity;
+  /** The record the step starts from; the kit's unit and generation are its. */
+  readonly record: UnitRecord;
+  /** Writes a note to the unit log. */
+  readonly log: (text: string) => void;
+  /** The host clock in epoch ms. */
+  readonly clock: () => number;
+  readonly callTimeoutMs: number;
+  readonly sleep?: Sleep;
+  readonly random?: () => number;
+  /** A forge time already seen (the round's snapshot `now`); default none. */
+  readonly seen?: string;
+  /** The `main` SHA lane-stop alerts name until the step sees a fresher one. */
+  readonly mainSha?: string;
+  /** Runs before `failed`'s `failAttempt` (the merge step leaves `merging`). */
+  readonly beforeFail?: () => Promise<void>;
+};
+
+export type StepKit = {
+  readonly unit: string;
+  /** The input record's generation: every held edit fences on it. */
+  readonly generation: number;
+  /** The latest record the step saw or wrote. */
+  record: UnitRecord;
+  /** The `main` SHA a lane-stop alert names. */
+  mainSha: string | null;
+  readonly reasons: string[];
+  /** The host time of the last good `beat` (the kit's start before any). */
+  lastBeat: number;
+  readonly End: typeof End;
+  /** Writes `<name>: <text>`; a log that cannot be written never ends the step. */
+  note(text: string): void;
+  see(now: string): void;
+  forgeNow(): string;
+  /** The step's ending, carrying the record and the reasons so far. */
+  end(outcome: LaneOutcome, state: UnitState | null, extra?: { readonly ejected?: true }): End;
+  laneStop(condition: string, why: string): Promise<never>;
+  call<T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>>;
+  /** One ledger edit; the record it wrote for the kit's unit is adopted. */
+  swap(edit: LedgerEdit): Promise<Swapped>;
+  /** A failed attempt: released, or parked at the attempts cap. */
+  failed(why: string): Promise<never>;
+  /** The unit was lost to another writer: no further ledger edit. */
+  lost(what: string, why: string): never;
+  /** A held edit: a lost unit ends the step, any other failure is a failed attempt. */
+  held(what: string, edit: LedgerEdit): Promise<void>;
+  /** A fenced heartbeat at the kit's generation, with `set`. */
+  beat(what: string, set?: HeartbeatSet): Promise<void>;
+  /** Runs the step's body: an `End` is its output; anything else is one failed attempt. Never throws. */
+  run(body: () => Promise<StepOutput>): Promise<StepOutput>;
+};
+
+export function stepKit(p: StepKitParams): StepKit {
+  const unit = p.record.unit;
+  const generation = p.record.generation;
+  const { identity } = p;
+  const fc = forgeClock(p.clock, p.seen);
+  const reasons: string[] = [];
+
+  const note = (text: string): void => {
+    try {
+      p.log(`${p.name}: ${text}`);
+    } catch {
+      // A log that cannot be written never ends the step.
+    }
+  };
+  const end = (outcome: LaneOutcome, state: UnitState | null, extra: { readonly ejected?: true } = {}): End => {
+    const r = reasons.length === 0 ? undefined : reasons.join("; ");
+    return new End({ outcome, state, record: kit.record, ...(r !== undefined ? { reason: r } : {}), ...extra });
+  };
+  const ops = forgeOps({
+    forge: p.forge,
+    callTimeoutMs: p.callTimeoutMs,
+    ...(p.sleep !== undefined ? { sleep: p.sleep } : {}),
+    ...(p.random !== undefined ? { random: p.random } : {}),
+    clock: fc,
+    alertSha: () => kit.mainSha,
+    stop: (condition, why) => {
+      reasons.push(`${condition}: ${why}`);
+      note(`stop: ${condition}: ${why}`);
+      throw end("stop", kit.record.state);
+    },
+  });
+
+  const swap = async (edit: LedgerEdit): Promise<Swapped> => {
+    const r = await ops.swap(edit, unit);
+    if (r.kind === "ok" && r.record !== null) kit.record = r.record;
+    return r;
+  };
+
+  const failed = async (why: string): Promise<never> => {
+    reasons.push(why);
+    note(`failed: ${why}`);
+    if (p.beforeFail !== undefined) await p.beforeFail();
+    const r = await swap(failAttempt({ unit, by: identity, now: fc.forgeNow(), generation }));
+    if (r.kind === "ok") {
+      note(`failAttempt: ${kit.record.state}`);
+      throw end("failed", kit.record.state);
+    }
+    reasons.push(`failAttempt: ${r.message}`);
+    note(`failAttempt failed: ${r.message}`);
+    throw end("failed", null);
+  };
+
+  const lost = (what: string, why: string): never => {
+    reasons.push(`${what}: unit lost: ${why}`);
+    note(`${what}: unit lost: ${why}`);
+    throw end("failed", null);
+  };
+
+  const held = async (what: string, edit: LedgerEdit): Promise<void> => {
+    const r = await swap(edit);
+    if (r.kind === "lost") lost(what, r.message);
+    if (r.kind === "failed") await failed(`${what}: ${r.message}`);
+  };
+
+  const beat = async (what: string, set?: HeartbeatSet): Promise<void> => {
+    // The host time of the beat's stamp, read once: the baseline the merge step's queue heartbeat counts from.
+    const at = p.clock();
+    await held(what, heartbeat({ unit, by: identity, now: fc.forgeAt(at), generation, ...(set !== undefined ? { set } : {}) }));
+    kit.lastBeat = at;
+  };
+
+  const run = async (body: () => Promise<StepOutput>): Promise<StepOutput> => {
+    try {
+      return await body();
+    } catch (e) {
+      if (e instanceof End) return e.out;
+      // An unexpected error: try one failed attempt, never throw.
+      try {
+        return await failed(`unexpected error: ${message(e)}`);
+      } catch (inner) {
+        if (inner instanceof End) return inner.out;
+        reasons.push(`unexpected error: ${message(inner)}`);
+        return { outcome: "failed", state: null, record: kit.record, reason: reasons.join("; ") };
+      }
+    }
+  };
+
+  const kit: StepKit = {
+    unit,
+    generation,
+    record: p.record,
+    mainSha: p.mainSha ?? null,
+    reasons,
+    lastBeat: p.clock(),
+    End,
+    note,
+    see: fc.see,
+    forgeNow: fc.forgeNow,
+    end,
+    laneStop: ops.laneStop,
+    call: ops.call,
+    swap,
+    failed,
+    lost,
+    held,
+    beat,
+    run,
+  };
+  return kit;
+}
+
+// ------------------------------------------------------------ the unit track
+
+/** The unit a process is handling, for its journal record. */
+export type UnitTrack = {
+  readonly unit: string;
+  readonly startedMs: number;
+  readonly logName: string;
+  record: UnitRecord | null;
+  state: UnitState | null;
+  sessions: number;
+  tokens: JournalTokens | null;
+  cost: JournalCost | null;
+  /** A run reported no cost. */
+  uncosted: boolean;
+  reason: string | null;
+};
+
+/** A fresh track for `unit`, with no record, session or cost yet. */
+export function newTrack(p: { readonly unit: string; readonly startedMs: number; readonly logName: string; readonly state: UnitState | null }): UnitTrack {
+  return { ...p, record: null, sessions: 0, tokens: null, cost: null, uncosted: false, reason: null };
+}
+
+/** Appends `reason` to the unit's reason unless it is already there. */
+export function addReason(t: UnitTrack, reason: string): void {
+  if (t.reason === null) t.reason = reason;
+  else if (t.reason !== reason && !t.reason.endsWith(`; ${reason}`)) t.reason = `${t.reason}; ${reason}`;
+}
+
+export type TrackOpsParams = {
+  readonly ops: ForgeOps;
+  readonly identity: LaneIdentity;
+  readonly note: (text: string) => void;
+  /** The unit's heartbeat keeper, once it runs. */
+  readonly keeper: () => Heartbeat | null;
+};
+
+export type TrackOps = {
+  /**
+   * Throws `Abandon` (`failed`) once the keeper lost or released the unit,
+   * with the unit's state and record from the keeper's end: `null` when lost
+   * or lapsed, the released record when released. A keeper that met a
+   * lane-stop condition stops the lane instead: the alert, then `stop`, the
+   * record left as it is.
+   */
+  checkHeld(t: UnitTrack): Promise<void>;
+  /** Applies a held edit to the claimed unit; records the state after. None once the keeper lost the unit. */
+  held(t: UnitTrack, make: (now: string, generation: number) => LedgerEdit, what: string): Promise<boolean>;
+  /** A failed attempt: released, or parked at the attempts cap. */
+  failUnit(t: UnitTrack, reason: string): Promise<LaneOutcome>;
+};
+
+export function trackOps(p: TrackOpsParams): TrackOps {
+  const { ops, identity, note } = p;
+
+  const checkHeld = async (t: UnitTrack): Promise<void> => {
+    const end = p.keeper()?.end() ?? null;
+    if (end === null || end.kind === "moved-on") return;
+    if (end.kind === "stop") {
+      note(`stopping the lane: heartbeat: ${end.message}`);
+      await ops.laneStop(end.condition, `heartbeat: ${end.message}`);
+    }
+    if (end.kind === "released") {
+      if (end.record !== null) t.record = end.record;
+      t.state = "released";
+    } else {
+      t.state = null;
+    }
+    note(`abandoning the unit: heartbeat: ${end.message}`);
+    throw new Abandon("failed", `heartbeat: ${end.message}`);
+  };
+
+  const held = async (t: UnitTrack, make: (now: string, generation: number) => LedgerEdit, what: string): Promise<boolean> => {
+    await checkHeld(t);
+    const generation = t.record?.generation;
+    if (generation === undefined) {
+      t.state = null;
+      return false;
+    }
+    const r = await ops.swap(make(await ops.freshNow(), generation), t.unit);
+    if (r.kind === "ok") {
+      if (r.record !== null) t.record = r.record;
+      t.state = r.record?.state ?? null;
+      note(`${what}: ${t.state ?? "unknown"}`);
+      return true;
+    }
+    t.state = null;
+    t.reason = t.reason === null ? `${what}: ${r.message}` : `${t.reason}; ${what}: ${r.message}`;
+    note(`${what} failed: ${r.message}`);
+    return false;
+  };
+
+  const failUnit = async (t: UnitTrack, reason: string): Promise<LaneOutcome> => {
+    t.reason = reason;
+    note(`failed: ${reason}`);
+    await held(t, (now, generation) => failAttempt({ unit: t.unit, by: identity, now, generation }), "failAttempt");
+    return "failed";
+  };
+
+  return { checkHeld, held, failUnit };
+}
+
+export type JournalDeps = {
+  readonly store: LaneStore;
+  readonly clock: () => number;
+  readonly identity: LaneIdentity;
+  /** The lane's agent, model and effort, as configured. */
+  readonly agent: UnitJournalRecord["agent"];
+  readonly model: string;
+  readonly effort: UnitJournalRecord["effort"];
+  /** The lane's `logs` folder, for a log path the store could not report. */
+  readonly logsDir: string;
+  readonly reportStore: ReportStore;
+};
+
+export type JournalEntry = {
+  readonly unit: string;
+  readonly logName: string;
+  readonly startedMs: number;
+  readonly record: UnitRecord | null;
+  readonly state: UnitState | null;
+  readonly outcome: LaneOutcome;
+  readonly reason: string | null;
+  readonly tokens?: JournalTokens | null;
+  readonly cost?: JournalCost | null;
+  readonly sessions?: number;
+  /** A build session's result, when one ran. */
+  readonly result?: BuildResult | null;
+  /** The wip ref a `blocked` park's work is saved under. */
+  readonly wipRef?: string | null;
+};
+
+/** Appends one unit journal record, after flushing the unit's log. */
+export function journalUnit(d: JournalDeps, e: JournalEntry): void {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const endedMs = d.clock();
+  const logged = d.store.appendLog(e.logName, "");
+  const record: UnitJournalRecord = {
+    schema_version: 1,
+    type: "unit",
+    unit: e.unit,
+    lane: d.identity.lane,
+    generation: e.record?.generation ?? null,
+    started_at: iso(e.startedMs),
+    ended_at: iso(endedMs),
+    duration_ms: Math.max(0, endedMs - e.startedMs),
+    agent: d.agent,
+    model: d.model,
+    effort: d.effort,
+    tokens: e.tokens ?? null,
+    cost: e.cost ?? null,
+    sessions: e.sessions ?? 0,
+    outcome: e.outcome,
+    result: e.result?.outcome ?? null,
+    state: e.state,
+    attempts: e.record?.attempts ?? 0,
+    loopbacks: e.record?.loopbacks ?? 0,
+    ci_fixes: e.record?.ci_fixes ?? 0,
+    denied_actions: [...(e.result?.denied_actions ?? [])],
+    reason: e.reason,
+    log: logged.ok ? logged.value : join(d.logsDir, e.logName),
+    ...(e.wipRef !== undefined && e.wipRef !== null ? { wip_ref: e.wipRef } : {}),
+  };
+  d.reportStore(d.store.appendJournal(record), "journal");
+}
+
+// ------------------------------------------------------------ the session runner
+
+export type SessionRunnerDeps = {
+  readonly agent: Agent;
+  readonly sandbox: Sandbox;
+  readonly store: LaneStore;
+  readonly workspace: Workspace;
+  /** Runs the usage-limit sleeps. */
+  readonly waiter: Waiter;
+  readonly layout: LaneLayout;
+  readonly settings: AgentSettings;
+  readonly limits?: SessionLimits;
+  /** The host clock in epoch ms. */
+  readonly clock: () => number;
+  /** Writes a `== <time> <text> ==` line to the unit log. */
+  readonly note: (text: string) => void;
+  /** Writes raw text to the unit log. */
+  readonly log: (text: string) => void;
+  readonly reportStore: ReportStore;
+};
+
+/** One unit's session context: its track, its clone's branch, its budget and its keeper. */
+export type SessionContext = {
+  readonly track: UnitTrack;
+  readonly branch: string;
+  readonly profile: SandboxProfile;
+  /** The unit budget's signal. */
+  readonly budget: AbortSignal;
+  /** The reason a passed budget gives. */
+  readonly overBudget: () => string;
+  /** The keeper signals to join into a run's or a wait's signal. */
+  readonly signals: () => AbortSignal[];
+  /** Throws once the keeper lost or released the unit (`TrackOps.checkHeld`). */
+  readonly checkHeld: () => Promise<void>;
+  /** A STOP ended a usage-limit sleep: release the unit; the session then fails with `LIMIT_STOP_REASON`. */
+  readonly onLimitStop: () => Promise<void>;
+};
+
+/** A prompt for the fresh run, built after `prepare`, else the failure's reason. */
+export type PromptOutcome = { readonly ok: true; readonly value: string } | { readonly ok: false; readonly reason: string };
+
+export type SessionRequest<K extends ResultKind> = {
+  /** The SHA the clone starts at. */
+  readonly at: string;
+  readonly kind: K;
+  readonly prompt: () => PromptOutcome | Promise<PromptOutcome>;
+};
+
+export type SessionOutcome<K extends ResultKind> = { readonly ok: true; readonly result: SessionResultOf<K> } | { readonly ok: false; readonly reason: string };
+
+export type SandboxedRun = { readonly run: SandboxResult<SandboxRun>; readonly timedOut: boolean };
+
+export type SessionRunner = {
+  /** The limits in force, defaults filled in. */
+  readonly limits: Required<SessionLimits>;
+  /** Empties `tmp` and prepares the clone at `at`; the failure's reason, else `null`. */
+  prepare(ctx: SessionContext, at: string): Promise<string | null>;
+  /**
+   * One sandboxed run under one signal: the unit budget, the session limit,
+   * the keeper, and an abort `resultLingerMs` after the result file is first
+   * seen. `timedOut` says the session limit fired.
+   */
+  sandboxed(ctx: SessionContext, spec: LaunchSpec): Promise<SandboxedRun>;
+  /** A sandboxed run's exit and output, into the unit log. */
+  logRun(what: string, r: SandboxRun): void;
+  /**
+   * One agent session at `at`: prepare, the prompt, the fresh run and its one
+   * resume, a usage-limit sleep and a fresh start as often as a limit hits,
+   * then the result file parsed as `kind`.
+   */
+  session<K extends ResultKind>(ctx: SessionContext, req: SessionRequest<K>): Promise<SessionOutcome<K>>;
+};
+
+export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
+  const { agent, sandbox, store, workspace, layout, settings, clock, note, log, reportStore } = deps;
+  const limits: Required<SessionLimits> = {
+    sessionMs: deps.limits?.sessionMs ?? SESSION_MS,
+    resultLingerMs: deps.limits?.resultLingerMs ?? RESULT_LINGER_MS,
+    resultPollMs: deps.limits?.resultPollMs ?? RESULT_POLL_MS,
+  };
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  const logRun = (what: string, r: SandboxRun): void =>
+    log(
+      `== ${iso(clock())} ${what} pid ${r.pid} exit ${r.exitCode ?? "none"} signal ${r.signal ?? "none"} ${r.durationMs} ms ==\n` +
+        `--- stdout ---\n${r.stdout}${r.stdout.endsWith("\n") || r.stdout === "" ? "" : "\n"}` +
+        `--- stderr ---\n${r.stderr}${r.stderr.endsWith("\n") || r.stderr === "" ? "" : "\n"}`,
+    );
+
+  const prepare = async (ctx: SessionContext, at: string): Promise<string | null> => {
+    try {
+      emptyDir(layout.tmp);
+    } catch (e) {
+      return `tmp: cannot empty ${layout.tmp}: ${message(e)}`;
+    }
+    const generation = ctx.track.record?.generation ?? 1;
+    let prepared: Awaited<ReturnType<Workspace["prepare"]>>;
+    try {
+      prepared = await workspace.prepare({ unit: ctx.track.unit, branch: ctx.branch, start: at, generation, fetch: [at], signal: ctx.budget });
+    } catch (e) {
+      return `prepare: ${message(e)}`;
+    }
+    if (ctx.budget.aborted) return ctx.overBudget();
+    if (!prepared.ok) return `prepare ${prepared.error.kind}: ${prepared.error.message}`;
+    note(`clone at ${prepared.value.sha}${prepared.value.resumed ? " (wip resumed)" : ""}`);
+    return null;
+  };
+
+  const resultSeen = (): boolean => {
+    try {
+      return lstatSync(layout.resultPath, { throwIfNoEntry: false }) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+
+  const sandboxed = async (ctx: SessionContext, spec: LaunchSpec): Promise<SandboxedRun> => {
+    const session = new AbortController();
+    const linger = new AbortController();
+    const sessionTimer = setTimeout(() => session.abort(), limits.sessionMs);
+    let lingerTimer: ReturnType<typeof setTimeout> | null = null;
+    const poll = setInterval(() => {
+      if (lingerTimer === null && resultSeen()) lingerTimer = setTimeout(() => linger.abort(), limits.resultLingerMs);
+    }, limits.resultPollMs);
+    // The keeper's signal kills the run when the unit is lost or released.
+    const signal = AbortSignal.any([ctx.budget, session.signal, linger.signal, ...ctx.signals()]);
+    const command = basename(spec.argv[0] ?? "");
+    let run: SandboxResult<SandboxRun>;
+    try {
+      run = await sandbox.run(spec, ctx.profile, signal, { onSpawn: (pid) => reportStore(store.writePid("agent", pid, command), "agent.pid") });
+    } catch (e) {
+      run = { ok: false as const, error: { kind: "refused" as const, message: `sandbox threw: ${message(e)}` } };
+    } finally {
+      clearTimeout(sessionTimer);
+      clearInterval(poll);
+      if (lingerTimer !== null) clearTimeout(lingerTimer);
+      reportStore(store.clearPid("agent"), "agent.pid");
+    }
+    if (linger.signal.aborted && !session.signal.aborted) note(`run killed ${limits.resultLingerMs} ms after its result appeared`);
+    return { run, timedOut: session.signal.aborted && !ctx.budget.aborted };
+  };
+  const sessionPast = (): string => `agent session ran past ${limits.sessionMs / HOUR_MS} h`;
+
+  type Once = {
+    readonly sessionId: string | null;
+    readonly usageLimit: AgentUsage["usageLimit"];
+    readonly timedOut: boolean;
+  };
+
+  /** One sandboxed run: its session id, usage limit and whether the session limit fired, else the failure. */
+  const runOnce = async (ctx: SessionContext, u: AgentUnit): Promise<Once | { readonly fail: string }> => {
+    const t = ctx.track;
+    const spec = agent.launchSpec(u, settings, layout.resultPath);
+    if (!spec.ok) return { fail: `launch spec: ${spec.error.message}` };
+    const n = t.sessions + 1;
+    await ctx.checkHeld();
+    note(`run ${n} (${u.kind}) starts`);
+    const { run, timedOut } = await sandboxed(ctx, spec.value);
+    if (!run.ok) {
+      await ctx.checkHeld();
+      return { fail: `sandbox refused: ${run.error.message}` };
+    }
+    t.sessions = n;
+    const r = run.value;
+    logRun(`run ${n} (${u.kind})`, r);
+    const usage = agent.parseUsage(r.stdout);
+    if (usage.tokens !== null) {
+      const a = t.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+      t.tokens = {
+        input: a.input + usage.tokens.input,
+        output: a.output + usage.tokens.output,
+        cacheRead: a.cacheRead + usage.tokens.cacheRead,
+        cacheCreation: a.cacheCreation + usage.tokens.cacheCreation,
+      };
+    }
+    // A run that reported no cost makes the sum an estimate.
+    if (usage.cost === null) t.uncosted = true;
+    if (usage.cost !== null || t.cost !== null) {
+      t.cost = {
+        usd: (t.cost?.usd ?? 0) + (usage.cost?.usd ?? 0),
+        estimate: (t.cost?.estimate ?? false) || (usage.cost?.estimate ?? true) || t.uncosted,
+      };
+    }
+    // A unit the keeper lost or released during the run is abandoned here, before any resume.
+    await ctx.checkHeld();
+    return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut };
+  };
+
+  const resultText = (): string | null => {
+    try {
+      return readRegular(layout.resultPath);
+    } catch {
+      return null;
+    }
+  };
+
+  type Runs = { readonly text: string | null; readonly limit: NonNullable<AgentUsage["usageLimit"]> | null } | { readonly fail: string };
+
+  /**
+   * Prepares the clone at `at`, builds the prompt and runs the session with
+   * its one resume. A run that hit a usage limit and left no result returns
+   * that `limit`, with no further run.
+   */
+  const sessionRuns = async (ctx: SessionContext, at: string, buildPrompt: SessionRequest<ResultKind>["prompt"]): Promise<Runs> => {
+    const setUpFailed = await prepare(ctx, at);
+    if (setUpFailed !== null) return { fail: setUpFailed };
+    const prompt = await buildPrompt();
+    if (!prompt.ok) return { fail: prompt.reason };
+
+    /** After a run: the budget, then the result, the session limit and the usage limit decide. */
+    const after = (once: Once): Runs | null => {
+      if (ctx.budget.aborted) return { fail: ctx.overBudget() };
+      const text = resultText();
+      if (text !== null) return { text, limit: null };
+      if (once.timedOut) return { fail: sessionPast() };
+      if (once.usageLimit !== null) return { text: null, limit: once.usageLimit };
+      return null;
+    };
+    const first = await runOnce(ctx, { kind: "fresh", prompt: prompt.value });
+    if ("fail" in first) return first;
+    const firstEnd = after(first);
+    if (firstEnd !== null) return firstEnd;
+    if (first.sessionId === null) return { text: null, limit: null };
+    const second = await runOnce(ctx, { kind: "resume", sessionId: first.sessionId });
+    if ("fail" in second) return second;
+    return after(second) ?? { text: null, limit: null };
+  };
+
+  /**
+   * Sleeps through a usage limit under the budget, the heartbeat keeper
+   * stamping the claim meanwhile, then journals one `usage-limit` span.
+   * `null` means the session starts again; otherwise the failure's reason.
+   * A STOP runs `onLimitStop`; a unit the keeper lost or released is abandoned.
+   */
+  const usageLimitSleep = async (ctx: SessionContext, resetAt: number | null): Promise<string | null> => {
+    const startedMs = clock();
+    const ms = usageLimitSleepMs(resetAt, startedMs);
+    const reset = resetAt === null ? "unknown" : iso(resetAt);
+    note(`usage limit, reset ${reset}: sleeping ${ms} ms`);
+    let waited: WaitResult;
+    try {
+      waited = await deps.waiter.wait({ ms, signal: AbortSignal.any([ctx.budget, ...ctx.signals()]) });
+    } catch (e) {
+      waited = { end: "failed", message: message(e) };
+    }
+    const span = store.appendJournal({
+      schema_version: 1,
+      type: "span",
+      span: "usage-limit",
+      reason: `usage limit; reset ${reset}`,
+      started_at: iso(startedMs),
+      ended_at: iso(clock()),
+    });
+    reportStore(span, "journal");
+    note(`usage-limit sleep: ${waited.end}${waited.message === undefined ? "" : ` (${waited.message})`}`);
+    await ctx.checkHeld();
+    switch (waited.end) {
+      case "elapsed":
+      case "woken":
+        return null;
+      case "aborted":
+        return ctx.overBudget();
+      case "failed":
+        return `usage-limit sleep failed: ${waited.message ?? "no message"}`;
+      case "stopped":
+        await ctx.onLimitStop();
+        return LIMIT_STOP_REASON;
+    }
+  };
+
+  const session = async <K extends ResultKind>(ctx: SessionContext, req: SessionRequest<K>): Promise<SessionOutcome<K>> => {
+    const fail = (reason: string): SessionOutcome<K> => ({ ok: false, reason });
+    let text: string | null = null;
+    for (;;) {
+      const attempt = await sessionRuns(ctx, req.at, req.prompt);
+      if ("fail" in attempt) return fail(attempt.fail);
+      if (attempt.limit === null) {
+        text = attempt.text;
+        break;
+      }
+      const slept = await usageLimitSleep(ctx, attempt.limit.resetAt);
+      if (slept !== null) return fail(slept);
+      note("usage-limit sleep over: the session starts again");
+    }
+    if (text === null) return fail(`no result at ${layout.resultPath} after ${ctx.track.sessions} run(s)`);
+    const parsed = parseSessionResult(layout.resultPath, text, req.kind);
+    if (!parsed.ok) return fail(`result ${parsed.error.kind}: ${parsed.error.message}`);
+    return { ok: true, result: parsed.value };
+  };
+
+  return { limits, prepare, sandboxed, logRun, session };
+}

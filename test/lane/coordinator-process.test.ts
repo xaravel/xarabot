@@ -449,6 +449,77 @@ describe("runCoordinatorProcess", () => {
   });
 });
 
+describe("runCoordinatorProcess: the shared track helpers (Story 2.6a)", () => {
+  /** A step output whose `reason` getter throws: a non-`Halt` throw from the process body after the claim. */
+  const throwingReason = (): Awaited<ReturnType<CoordinatorStep>> => {
+    const out = { outcome: "progress" as const, state: "claimed" as const };
+    Object.defineProperty(out, "reason", {
+      get() {
+        throw new Error("reason blew up");
+      },
+    });
+    return out;
+  };
+
+  test("a step that throws: failAttempt stamps the forge's fresh now, and the journal names the throw", async () => {
+    const h = harness();
+    const step: CoordinatorStep = async () => {
+      h.fake.control.setNow("2026-10-23T10:07:00Z");
+      throw new Error("boom");
+    };
+    expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 1, heartbeat_at: "2026-10-23T10:07:00Z" });
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released" });
+    expect(unit?.type === "unit" ? unit.reason : "").toContain("reconcile step threw: boom");
+  });
+
+  test("an unexpected error after the claim: one failed attempt, the journal reason names it", async () => {
+    const h = harness();
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      return throwingReason();
+    };
+    expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 1 });
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released", attempts: 1 });
+    expect(unit?.type === "unit" ? unit.reason : "").toStartWith("unexpected error: reason blew up");
+  });
+
+  test("an unexpected error after the unit keeper released the unit: the journal keeps the keeper's state, no attempt counted", async () => {
+    const h = harness();
+    // Only the unit's keepAlive fails; with a 40 min retry wait its first failed beat would lapse, so the keeper releases.
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) =>
+        commit.message.startsWith("ledger: keepAlive reconcile:1 ") ? forgeErr("transient", "down") : h.fake.forge.ledgerSwap(oldSha, commit, o),
+    };
+    const pending: (() => void)[] = [];
+    const sleep: Sleep = (ms, signal) => {
+      if (ms < MIN) return tick();
+      return new Promise<void>((resolve) => {
+        if (signal.aborted) return resolve();
+        signal.addEventListener("abort", () => resolve(), { once: true });
+        pending.push(() => resolve());
+      });
+    };
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      for (const f of pending.splice(0)) f();
+      await abortOf(input.signal);
+      return throwingReason();
+    };
+    expect((await h.run({ forge, steps: { reconcile: step }, heartbeat: { sleep, retryMs: 40 * MIN } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 0 });
+    expect(h.commits("ledger: failAttempt ")).toBe(0);
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released", attempts: 0 });
+    expect(unit?.type === "unit" ? unit.reason : "").toContain("unexpected error: reason blew up");
+    expect(unit?.type === "unit" ? unit.reason : "").toContain("heartbeat: reconcile:1 released");
+  });
+});
+
 describe("claimCoordinatorRecord", () => {
   test("no record: generation 1; again: the same generation", async () => {
     const fake = createFakeForge({ now: FORGE_NOW });

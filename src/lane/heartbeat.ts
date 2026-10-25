@@ -3,8 +3,7 @@ import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
 import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isLaneStopKind, type Forge } from "../ports/forge.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, writtenRecord } from "./lane-process.ts";
-import { defaultSleep, swapLedger, type Sleep, type SwapLedgerOutcome } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, writtenRecord, type Sleep, type SwapLedgerOutcome } from "./ledger-cas.ts";
 
 /**
  * The heartbeat keeper (FR3, AR7, AR33): one per claimed unit, from the claim
@@ -134,7 +133,7 @@ function startKeeper(params: KeeperParams): Heartbeat {
     if (end.kind !== "moved-on") lost.abort(end.kind);
   };
 
-  const swap = async (edit: LedgerEdit): Promise<SwapLedgerOutcome> => {
+  const trySwap = async (edit: LedgerEdit): Promise<SwapLedgerOutcome> => {
     try {
       return await swapLedger({
         forge,
@@ -155,7 +154,7 @@ function startKeeper(params: KeeperParams): Heartbeat {
       finish({ kind: "lapsed", message: `${what} lapsed: ${why}` });
       return;
     }
-    const r = await swap(rel.edit(params.forgeNow()));
+    const r = await trySwap(rel.edit(params.forgeNow()));
     if (r.ok) {
       finish({ kind: "released", message: `${what} released: ${why}`, record: rel.record(r.value.commit) });
       return;
@@ -172,7 +171,7 @@ function startKeeper(params: KeeperParams): Heartbeat {
       if (stopping.signal.aborted) return;
       // The host time of this beat's stamp, taken before the swap: a slow swap never moves the baseline later.
       const at = clock();
-      const r = await swap(params.beat(params.forgeNow()));
+      const r = await trySwap(params.beat(params.forgeNow()));
       if (r.ok) {
         if (r.value.commit === null) {
           finish({ kind: "moved-on", message: `${what} moved on at generation ${params.generation}; the keeper stops` });

@@ -329,3 +329,116 @@ export async function checkTree(root: string): Promise<Violation[]> {
   }
   return violations;
 }
+
+// ------------------------------------------------------------ import cycles
+
+/**
+ * Every elementary cycle in `graph` (file -> the files it imports). Each
+ * cycle starts at its smallest file and closes on it (`["a.ts", "b.ts",
+ * "a.ts"]`; a self import is `["a.ts", "a.ts"]`), and the cycles are sorted.
+ */
+export function findCycles(graph: ReadonlyMap<string, readonly string[]>): string[][] {
+  const nodes = [...graph.keys()].sort();
+  const edges = new Map(nodes.map((n) => [n, [...new Set(graph.get(n) ?? [])].filter((m) => graph.has(m)).sort()]));
+  const cycles: string[][] = [];
+  for (const start of nodes) {
+    // Only files after `start` may sit on its cycles, so each cycle is found once, from its smallest file.
+    const inScope = (n: string): boolean => n >= start;
+    // The in-scope files that can reach `start`: no path through any other file closes a cycle.
+    const reaches = new Set<string>([start]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const n of nodes) {
+        if (!inScope(n) || reaches.has(n)) continue;
+        if ((edges.get(n) ?? []).some((m) => reaches.has(m))) {
+          reaches.add(n);
+          grew = true;
+        }
+      }
+    }
+    const path: string[] = [start];
+    const onPath = new Set<string>([start]);
+    const walk = (n: string): void => {
+      for (const m of edges.get(n) ?? []) {
+        if (m === start) cycles.push([...path, start]);
+        else if (inScope(m) && reaches.has(m) && !onPath.has(m)) {
+          path.push(m);
+          onPath.add(m);
+          walk(m);
+          onPath.delete(m);
+          path.pop();
+        }
+      }
+    };
+    walk(start);
+  }
+  const key = (c: readonly string[]): string => c.join("\u0000");
+  return cycles.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+}
+
+const LANE_DIR = "src/lane";
+
+/**
+ * The import graph of `src/lane`'s files (file name -> source). Type-only
+ * imports count. Every relative specifier is resolved from the file's own
+ * path (`src/lane/<name>`), so `../lane/b.ts` counts as `b.ts`; a target
+ * directly in `src/lane` is kept, a `.js` ending read as `.ts` and `.ts`
+ * appended when there is no extension. Anything else (another directory, a
+ * package, a file not in `files`) is dropped.
+ */
+export function laneGraph(files: Readonly<Record<string, string>>): Map<string, string[]> {
+  const graph = new Map<string, string[]>();
+  for (const [name, source] of Object.entries(files)) {
+    const file = posix.join(LANE_DIR, name);
+    const targets: string[] = [];
+    for (const specifier of importsOf(strip(source).code)) {
+      if (!isRelative(specifier)) continue;
+      const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
+      if (posix.dirname(resolved) !== LANE_DIR) continue;
+      let target = posix.basename(resolved);
+      const ext = posix.extname(target);
+      if (ext === ".js") target = `${target.slice(0, -ext.length)}.ts`;
+      else if (ext === "") target = `${target}.ts`;
+      if (Object.hasOwn(files, target)) targets.push(target);
+    }
+    graph.set(name, targets);
+  }
+  return graph;
+}
+
+const LANE_GLOB = new Bun.Glob("*.ts");
+
+/** The sources of `<root>/src/lane/*.ts` by file name; throws if there are none. */
+export async function laneSources(root: string): Promise<Record<string, string>> {
+  const dir = posix.join(root, LANE_DIR);
+  const files: Record<string, string> = {};
+  for await (const name of LANE_GLOB.scan({ cwd: dir })) files[name] = await Bun.file(posix.join(dir, name)).text();
+  if (Object.keys(files).length === 0) throw new Error(`no source files under ${dir}`);
+  return files;
+}
+
+/** The import cycles in `<root>/src/lane`. */
+export async function laneCycles(root: string): Promise<string[][]> {
+  return findCycles(laneGraph(await laneSources(root)));
+}
+
+// ------------------------------------------------------------ the step helpers' one home
+
+/** The session runner's step helpers, declared only in `src/lane/session.ts` (Story 2.6a). */
+export const SHARED_HELPERS: readonly string[] = ["call", "swap", "forgeNow", "laneStop", "held", "beat"];
+
+const HELPER = SHARED_HELPERS.join("|");
+const HELPER_FUNCTION = new RegExp(`\\bfunction\\s*\\*?\\s*(${HELPER})\\b`, "g");
+/** `const`/`let <name> =` an arrow or `async` arrow, generic or not, with or without parentheses. */
+const HELPER_ARROW = new RegExp(`\\b(?:const|let)\\s+(${HELPER})\\s*(?::[^=]*)?=\\s*(?:async\\s+)?(?:<[^>]*>\\s*)?(?:\\(|[A-Za-z_$][\\w$]*\\s*=>)`, "g");
+const END_CLASS = /\bclass\s+End\b/;
+
+/** The shared helpers `source` declares a copy of (comments ignored), plus `End` for a `class End`. */
+export function helperCopies(source: string): string[] {
+  const { code } = strip(source);
+  const found = new Set<string>();
+  for (const m of code.matchAll(HELPER_FUNCTION)) found.add(m[1] as string);
+  for (const m of code.matchAll(HELPER_ARROW)) found.add(m[1] as string);
+  if (END_CLASS.test(code)) found.add("End");
+  return [...found].sort();
+}
