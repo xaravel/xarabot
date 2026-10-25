@@ -9,3 +9,10 @@ export const isLive: boolean = process.env.XARABOT_LIVE === "1";
  * because Bun 1.4.3 swallows a `--live` flag.)
  */
 export const liveTest: typeof test = test.skipIf(!isLive) as typeof test;
+
+/**
+ * True when long-running live cases (such as the 30-minute stale takeover)
+ * are asked for too, with `XARABOT_LIVE_LONG=1`. It needs `XARABOT_LIVE=1`
+ * as well; on its own it switches nothing on.
+ */
+export const isLiveLong: boolean = isLive && process.env.XARABOT_LIVE_LONG === "1";
