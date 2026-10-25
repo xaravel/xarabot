@@ -158,7 +158,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-3, CAP-6, CAP-15.
 - **Prevents:** a lane that went quiet and lost its claim pushing or merging over the lane that took over.
 - **Rule:**
-  - A heartbeat runs every 5 minutes, for `claimed` records and for `merging` records that a builder lane holds. `merging` records that `reconcile` holds have no heartbeat and can never be taken over (AD-7).
+  - A heartbeat runs every 5 minutes, for `claimed` records and for `merging` records that a builder lane holds. `merging` records that `reconcile` holds have no heartbeat and can never be taken over (AD-7). Any coordinator lane may move them on (release a `reconcile` PR's record, or park an ejected gated PR's record), fencing on the record's `generation` rather than the exact holder, so a coordinator that moved hosts leaves nothing stuck (Stories 2.5 and 2.6).
   - **A stale `claimed` record** (no heartbeat for 30 minutes) can be taken over by any lane: `generation` + 1, `attempts` + 1, and on the 3rd it becomes `parked` (blocked) instead.
   - **A stale `merging` record that a builder lane holds:**
     - If its PR merged, it becomes `merged`.
