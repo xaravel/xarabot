@@ -2,16 +2,16 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
-import { ciFix, failAttempt, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import { ciFix, park } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import type { Result } from "../core/result.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, ParkReason, UnitRecord } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
-import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, readsPath, writtenRecord, type PrStep, type PrStepOutput } from "./lane-process.ts";
-import { defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
+import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import type { MergeOutcome, Merger } from "./merger.ts";
+import { message, readsPath, stepKit, type PrStep, type PrStepOutput } from "./session.ts";
 
 /**
  * The CI step after the PR is open (FR6, AR8, AR20, AR21, AR44, AD-19). Each
@@ -90,7 +90,6 @@ export type CiStepDeps = {
   readonly random?: () => number;
 };
 
-const ZERO_SHA = "0".repeat(40);
 const MINUTE_MS = 60_000;
 
 export type CiLogFile = { readonly path: string; readonly text: string };
@@ -149,15 +148,6 @@ export function mergeComment(p: { readonly storyId: string; readonly mainSha: st
   );
 }
 
-/** Ends the step with `out`. */
-class End {
-  constructor(readonly out: PrStepOutput) {}
-}
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 type Next = { readonly kind: "poll"; readonly head: string } | { readonly kind: "conflict"; readonly start: string; readonly paths: readonly string[]; readonly lockfiles: readonly string[] };
 
 export function createCiStep(deps: CiStepDeps): CiStep {
@@ -165,112 +155,28 @@ export function createCiStep(deps: CiStepDeps): CiStep {
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const sleep = deps.sleep ?? defaultSleep;
-  const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
 
   return async (input: CiStepInput): Promise<PrStepOutput> => {
     const story = input.unit;
     const unit = story.unit;
-    const generation = input.record.generation;
-    let record: UnitRecord = input.record;
-    let mainSha: string | null = null;
-    let base: { readonly now: string; readonly at: number } | null = null;
-    const reasons: string[] = [];
-
-    const note = (text: string): void => {
-      try {
-        input.log(`CI step: ${text}`);
-      } catch {
-        // A log that cannot be written never ends the step.
-      }
-    };
-    const end = (outcome: PrStepOutput["outcome"], state: PrStepOutput["state"]): End => {
-      const r = reasons.length === 0 ? undefined : reasons.join("; ");
-      return new End({ outcome, state, record, ...(r !== undefined ? { reason: r } : {}) });
-    };
-    const forgeNow = (): string => {
-      if (base === null) return new Date(clock()).toISOString();
-      return new Date(Date.parse(base.now) + Math.max(0, clock() - base.at)).toISOString();
-    };
-
-    const laneStop = async (condition: string, why: string): Promise<never> => {
-      try {
-        await forge.alert(condition, mainSha ?? ZERO_SHA, deadline());
-      } catch {
-        // The alert is best effort; the lane stops either way.
-      }
-      reasons.push(`${condition}: ${why}`);
-      note(`stop: ${condition}: ${why}`);
-      throw end("stop", record.state);
-    };
-
-    const call = async <T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>> => {
-      let r: ForgeResult<T>;
-      try {
-        r = await run(deadline());
-      } catch (e) {
-        return { ok: false, error: { kind: "transient", message: `${operation} threw: ${message(e)}` } };
-      }
-      if (!r.ok && isLaneStopKind(r.error.kind)) await laneStop(`forge-${r.error.kind}`, `${operation}: ${r.error.message}`);
-      return r;
-    };
-
-    type Swapped = { readonly kind: "ok" } | { readonly kind: "lost" | "failed"; readonly message: string };
-
-    const swap = async (edit: LedgerEdit): Promise<Swapped> => {
-      const r = await swapLedger({
-        forge,
-        edit,
-        signal: AbortSignal.timeout(callTimeoutMs),
-        sleep,
-        ...(deps.random !== undefined ? { random: deps.random } : {}),
-      });
-      if (r.ok) {
-        const written = writtenRecord(r.value.commit, unit);
-        if (written !== null) record = written;
-        return { kind: "ok" };
-      }
-      const e = r.error;
-      if (e.kind === "edit" && e.edit === "stop") await laneStop("ledger-schema-version", e.message);
-      if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) await laneStop(`forge-${e.forge.kind}`, e.message);
-      if (e.kind === "edit" && e.edit === "precondition") return { kind: "lost", message: e.message };
-      return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
-    };
-
-    /** A failed attempt: released, or parked at the attempts cap. */
-    const failed = async (why: string): Promise<never> => {
-      reasons.push(why);
-      note(`failed: ${why}`);
-      const r = await swap(failAttempt({ unit, by: identity, now: forgeNow(), generation }));
-      if (r.kind === "ok") {
-        note(`failAttempt: ${record.state}`);
-        throw end("failed", record.state);
-      }
-      reasons.push(`failAttempt: ${r.message}`);
-      note(`failAttempt failed: ${r.message}`);
-      throw end("failed", null);
-    };
-
-    const lost = (what: string, why: string): never => {
-      reasons.push(`${what}: unit lost: ${why}`);
-      note(`${what}: unit lost: ${why}`);
-      throw end("failed", null);
-    };
-
-    /** A held edit: a lost unit ends the step, any other failure is a failed attempt. */
-    const held = async (what: string, edit: LedgerEdit): Promise<void> => {
-      const r = await swap(edit);
-      if (r.kind === "lost") lost(what, r.message);
-      if (r.kind === "failed") await failed(`${what}: ${r.message}`);
-    };
-
-    const beat = (what: string, set?: HeartbeatSet): Promise<void> =>
-      held(what, heartbeat({ unit, by: identity, now: forgeNow(), generation, ...(set !== undefined ? { set } : {}) }));
+    const kit = stepKit({
+      name: "CI step",
+      forge,
+      identity,
+      record: input.record,
+      log: input.log,
+      clock,
+      callTimeoutMs,
+      sleep,
+      ...(deps.random !== undefined ? { random: deps.random } : {}),
+    });
+    const { generation, reasons, note, end, forgeNow, call, failed, held, beat } = kit;
 
     const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
       reasons.push(why);
       note(`parking blocked ${reason}: ${why}`);
       await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason }));
-      throw end("progress", record.state);
+      throw end("progress", kit.record.state);
     };
 
     /** The unit budget passed: end `failed`, the record left as it is for the lane's budget rule. */
@@ -278,7 +184,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       if (!input.signal.aborted) return;
       reasons.push("unit budget passed during the CI step");
       note("unit budget passed");
-      throw end("failed", record.state);
+      throw end("failed", kit.record.state);
     };
 
     const merge = async (head: string, main: string, statusPaths: readonly string[], lockfiles?: Readonly<Record<string, string>>): Promise<MergeOutcome> => {
@@ -344,12 +250,12 @@ export function createCiStep(deps: CiStepDeps): CiStep {
     /** A CI-fix or conflict session at `start`; returns when the next round should run. */
     const session = async (start: string, what: string, logText: () => Promise<string>): Promise<void> => {
       await held("ciFix", ciFix({ unit, by: identity, now: forgeNow(), generation, cap: CI_FIX_CAP }));
-      if (record.state === "parked") {
+      if (kit.record.state === "parked") {
         reasons.push(`${what}: CI-fix cap of ${CI_FIX_CAP} reached`);
         note(`parked ci-fix-cap before ${what}`);
-        throw end("progress", record.state);
+        throw end("progress", kit.record.state);
       }
-      note(`${what} ${record.ci_fixes} of ${CI_FIX_CAP} at ${start}`);
+      note(`${what} ${kit.record.ci_fixes} of ${CI_FIX_CAP} at ${start}`);
       aborted();
       const text = await logText();
       aborted();
@@ -368,11 +274,11 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       if (specPath === null) return await failed(`${what} session: a done result with no spec file`);
       let out: PrStepOutput;
       try {
-        out = await input.prStep({ unit: story, record, result, specPath, superseded, clone: input.clone, signal: input.signal, log: input.log, kind: "fix" });
+        out = await input.prStep({ unit: story, record: kit.record, result, specPath, superseded, clone: input.clone, signal: input.signal, log: input.log, kind: "fix" });
       } catch (e) {
         return await failed(`PR step threw: ${message(e)}`);
       }
-      if (out.record !== undefined) record = out.record;
+      if (out.record !== undefined) kit.record = out.record;
       if (out.reason !== undefined) reasons.push(out.reason);
       note(`PR step (fix): ${out.outcome} (${out.state ?? "unknown"})`);
       if (out.outcome !== "progress" || out.state !== "claimed") throw end(out.outcome, out.state);
@@ -406,22 +312,22 @@ export function createCiStep(deps: CiStepDeps): CiStep {
     const steps = async (): Promise<PrStepOutput> => {
       for (;;) {
         aborted();
-        const head = record.head_sha;
-        const pr = record.pr;
+        const head = kit.record.head_sha;
+        const pr = kit.record.pr;
         if (head === null || pr === null) return await failed("the record has no PR or head_sha to take through CI");
 
         // 1. Snapshot and config: the Standing Authority re-check.
         const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
         if (!snapped.ok) return await failed(`snapshot ${snapped.error.kind}: ${snapped.error.message}`);
         const snap: ForgeSnapshot = snapped.value;
-        base = { now: snap.now, at: clock() };
+        kit.see(snap.now);
         const main = snap.main.sha;
-        mainSha = main;
+        kit.mainSha = main;
         const loaded = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
         if (!loaded.ok) {
           reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
           note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-          throw end("stop", record.state);
+          throw end("stop", kit.record.state);
         }
         const config = loaded.value.repo.config;
         const expected = loaded.value.repo.policy.expected_checks;
@@ -475,7 +381,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
         const polled = await poll(next.head, config.ci_max_wait_minutes * MINUTE_MS, expected);
         if (polled === "passed") {
           note(`CI passed on ${next.head}`);
-          throw end("progress", record.state);
+          throw end("progress", kit.record.state);
         }
         note(`CI failed on ${next.head}: ${polled.join(", ")}`);
         // 4. A CI-fix session.
@@ -484,17 +390,6 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       }
     };
 
-    try {
-      return await steps();
-    } catch (e) {
-      if (e instanceof End) return e.out;
-      try {
-        return await failed(`unexpected error: ${message(e)}`);
-      } catch (inner) {
-        if (inner instanceof End) return inner.out;
-        reasons.push(`unexpected error: ${message(inner)}`);
-        return { outcome: "failed", state: null, record, reason: reasons.join("; ") };
-      }
-    }
+    return kit.run(steps);
   };
 }

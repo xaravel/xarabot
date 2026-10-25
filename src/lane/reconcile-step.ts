@@ -4,7 +4,6 @@ import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config
 import {
   deleteMerged,
   deleteReleasedReconcile,
-  failAttempt,
   fenced,
   finishRecurring,
   heartbeat,
@@ -21,13 +20,13 @@ import { reconcileNumber } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
-import { unitKind, type LaneIdentity, type ParkReason, type UnitRecord } from "../core/schemas/ledger.ts";
-import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import { unitKind, type LaneIdentity, type ParkReason } from "../core/schemas/ledger.ts";
+import { isBackoffKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, readsPath, writtenRecord, type PrStepOutput } from "./lane-process.ts";
-import { defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
+import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
 
 /**
  * The `reconcile` step (FR2, NFR20, AR4, AR10, AR14, AD-9): runner code only,
@@ -88,15 +87,6 @@ export type ReconcileStepDeps = {
 
 const MINUTE_MS = 60_000;
 
-/** Ends the step with `out`. */
-class End {
-  constructor(readonly out: PrStepOutput) {}
-}
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 function describeError(e: ForgeError): string {
   return `${e.kind}: ${e.message}`;
 }
@@ -152,119 +142,38 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const sleep = deps.sleep ?? defaultSleep;
-  const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
 
   return async (input: CoordinatorStepInput): Promise<PrStepOutput> => {
     const unit = input.unit.unit;
     const snapshot = input.snapshot;
-    const generation = input.record.generation;
-    let record: UnitRecord = input.record;
-    let mainSha: string = snapshot.main_sha;
-    let base: { readonly now: string; readonly at: number } = { now: snapshot.now, at: clock() };
-    const reasons: string[] = [];
-
-    const note = (text: string): void => {
-      try {
-        input.log(`reconcile step: ${text}`);
-      } catch {
-        // A log that cannot be written never ends the step.
-      }
-    };
-    const end = (outcome: PrStepOutput["outcome"], state: PrStepOutput["state"]): End => {
-      const r = reasons.length === 0 ? undefined : reasons.join("; ");
-      return new End({ outcome, state, record, ...(r !== undefined ? { reason: r } : {}) });
-    };
-    const forgeNow = (): string => new Date(Date.parse(base.now) + Math.max(0, clock() - base.at)).toISOString();
-
-    const laneStop = async (condition: string, why: string): Promise<never> => {
-      try {
-        await forge.alert(condition, mainSha, deadline());
-      } catch {
-        // The alert is best effort; the lane stops either way.
-      }
-      reasons.push(`${condition}: ${why}`);
-      note(`stop: ${condition}: ${why}`);
-      throw end("stop", record.state);
-    };
-
-    /** One forge call under its own deadline; a lane-stop kind stops the lane. */
-    const call = async <T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>> => {
-      let r: ForgeResult<T>;
-      try {
-        r = await run(deadline());
-      } catch (e) {
-        return { ok: false, error: { kind: "transient", message: `${operation} threw: ${message(e)}` } };
-      }
-      if (!r.ok && isLaneStopKind(r.error.kind)) await laneStop(`forge-${r.error.kind}`, `${operation}: ${r.error.message}`);
-      return r;
-    };
-
-    type Swapped = { readonly kind: "ok" } | { readonly kind: "lost" | "failed"; readonly message: string };
-
-    /** One ledger edit through the CAS loop; the run's own record is read back from what it wrote. */
-    const swap = async (edit: LedgerEdit): Promise<Swapped> => {
-      const r = await swapLedger({
-        forge,
-        edit,
-        signal: AbortSignal.timeout(callTimeoutMs),
-        sleep,
-        ...(deps.random !== undefined ? { random: deps.random } : {}),
-      });
-      if (r.ok) {
-        const written = writtenRecord(r.value.commit, unit);
-        if (written !== null) record = written;
-        return { kind: "ok" };
-      }
-      const e = r.error;
-      if (e.kind === "edit" && e.edit === "stop") await laneStop("ledger-schema-version", e.message);
-      if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) await laneStop(`forge-${e.forge.kind}`, e.message);
-      if (e.kind === "edit" && e.edit === "precondition") return { kind: "lost", message: e.message };
-      return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
-    };
-
-    const lost = (what: string, why: string): never => {
-      reasons.push(`${what}: unit lost: ${why}`);
-      note(`${what}: unit lost: ${why}`);
-      throw end("failed", null);
-    };
-
-    /** A failed attempt: released (or parked at the attempts cap from `claimed`). */
-    const failed = async (why: string): Promise<never> => {
-      reasons.push(why);
-      note(`failed: ${why}`);
-      const r = await swap(failAttempt({ unit, by: identity, now: forgeNow(), generation }));
-      if (r.kind === "ok") {
-        note(`failAttempt: ${record.state}`);
-        throw end("failed", record.state);
-      }
-      reasons.push(`failAttempt: ${r.message}`);
-      note(`failAttempt failed: ${r.message}`);
-      throw end("failed", null);
-    };
-
-    /** An edit of the run's own record: a lost unit ends the step, any other failure is a failed attempt. */
-    const held = async (what: string, edit: LedgerEdit): Promise<void> => {
-      const r = await swap(edit);
-      if (r.kind === "lost") lost(what, r.message);
-      if (r.kind === "failed") await failed(`${what}: ${r.message}`);
-    };
-
-    const beat = (what: string, set?: HeartbeatSet): Promise<void> =>
-      held(what, heartbeat({ unit, by: identity, now: forgeNow(), generation, ...(set !== undefined ? { set } : {}) }));
+    const kit = stepKit({
+      name: "reconcile step",
+      forge,
+      identity,
+      record: input.record,
+      log: input.log,
+      clock,
+      callTimeoutMs,
+      sleep,
+      ...(deps.random !== undefined ? { random: deps.random } : {}),
+      seen: snapshot.now,
+      mainSha: snapshot.main_sha,
+    });
+    const { generation, reasons, note, end, forgeNow, call, swap, failed, lost, held, beat } = kit;
 
     /** The unit or the coordinator claim was lost: end `failed`, the record left for the process to judge. */
     const aborted = (): void => {
       if (!input.signal.aborted) return;
       reasons.push("the unit or the coordinator claim was lost during the reconcile step");
       note("aborted");
-      throw end("failed", record.state);
+      throw end("failed", kit.record.state);
     };
 
     const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
       reasons.push(why);
       note(`parking blocked ${reason}: ${why}`);
       await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason }));
-      throw end("progress", record.state);
+      throw end("progress", kit.record.state);
     };
 
     /**
@@ -277,13 +186,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
       if (!snapped.ok) return snapped;
       const snap: ForgeSnapshot = snapped.value;
-      base = { now: snap.now, at: clock() };
-      mainSha = snap.main.sha;
+      kit.see(snap.now);
+      kit.mainSha = snap.main.sha;
       const loaded = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
       if (!loaded.ok) {
         reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
         note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-        throw end("stop", record.state);
+        throw end("stop", kit.record.state);
       }
       return { ok: true, value: { snap, config: loaded.value } };
     };
@@ -608,7 +517,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           note(`deleteMerged ${u} failed: ${r.message}`);
         }
       }
-      throw end("progress", record.state);
+      throw end("progress", kit.record.state);
     };
 
     /** Polls `sha` until it passes or fails; parks `ci-timeout` past the max wait. */
@@ -695,9 +604,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const prState = snap.prs[unit];
       if (prState?.state === "merged") {
         await held("markMerged", markMerged({ unit, by: identity, now: forgeNow() }));
-        if (record.state !== "merged") record = { ...record, state: "merged", park: null };
+        if (kit.record.state !== "merged") kit.record = { ...kit.record, state: "merged", park: null };
         reasons.push(`PR #${pr} merged`);
-        throw end("progress", record.state);
+        throw end("progress", kit.record.state);
       }
       if (prState === undefined) return await failed(`PR #${pr} is not known to the forge`);
       if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
@@ -714,7 +623,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           reasons.push(`approval comment on PR #${pr} failed: ${describeError(commented.error)}`);
           note(`approval comment failed: ${describeError(commented.error)}`);
         }
-        throw end("progress", record.state);
+        throw end("progress", kit.record.state);
       }
 
       // 6. Fence, merging, enqueue; the queue is not watched.
@@ -728,7 +637,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         if (r.ok) {
           reasons.push(`PR #${pr} enqueued at ${head}`);
           note(`enqueued PR #${pr} at ${head}`);
-          throw end("progress", record.state);
+          throw end("progress", kit.record.state);
         }
         if (r.error.kind === "conflict") {
           // A disposable reconcile PR: closed, and the record released with no attempt.
@@ -738,7 +647,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           const closed = await call("closePr", (o) => forge.closePr(pr, o));
           if (!closed.ok) reasons.push(`closePr PR #${pr} ${describeError(closed.error)}`);
           await held("releaseReconcile", releaseReconcile({ unit, by: identity, now: forgeNow(), generation }));
-          throw end("progress", record.state);
+          throw end("progress", kit.record.state);
         }
         if (!isBackoffKind(r.error.kind) || n + 1 >= ENQUEUE_TRIES) return await failed(`enqueue ${describeError(r.error)}`);
         const delay = r.error.kind === "rate-limited" ? Math.max(pollDelayMs(n), r.error.retry_after * 1000) : pollDelayMs(n);
@@ -776,17 +685,6 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       }
     };
 
-    try {
-      return await steps();
-    } catch (e) {
-      if (e instanceof End) return e.out;
-      try {
-        return await failed(`unexpected error: ${message(e)}`);
-      } catch (inner) {
-        if (inner instanceof End) return inner.out;
-        reasons.push(`unexpected error: ${message(inner)}`);
-        return { outcome: "failed", state: null, record, reason: reasons.join("; ") };
-      }
-    }
+    return kit.run(steps);
   };
 }

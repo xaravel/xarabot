@@ -1,14 +1,14 @@
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { writeRules } from "../core/lane/write-check.ts";
-import { failAttempt, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import { park } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import { capText, FORGE_TEXT_LIMITS, redactSecrets, sanitizeAgentText } from "../core/sanitize.ts";
-import { unitPath, UnitRecordSchema, type LaneIdentity, type UnitRecord } from "../core/schemas/ledger.ts";
+import { unitPath, UnitRecordSchema, type LaneIdentity } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
-import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
 import type { Committer } from "./committer.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, readsPath, writtenRecord, type PrStep, type PrStepInput, type PrStepOutput } from "./lane-process.ts";
-import { swapLedger, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, type Sleep } from "./ledger-cas.ts";
+import { message, readsPath, stepKit, type PrStep, type PrStepInput, type PrStepOutput } from "./session.ts";
 
 /**
  * The PR step after a `done` result (FR6, FR13, FR18, FR22, NFR10, AR7, AR16,
@@ -43,8 +43,6 @@ export type PrStepDeps = {
    */
   readonly secrets?: readonly string[];
 };
-
-const ZERO_SHA = "0".repeat(40);
 
 /** The PR title and body: both sanitized, with `secrets` redacted, and capped at the forge's limits. */
 export function prText(
@@ -87,15 +85,6 @@ export function statusComment(p: StatusCommentParams): string {
   return capText(`${lines.join("\n")}\n`, FORGE_TEXT_LIMITS.comment);
 }
 
-/** Ends the step with `out`. */
-class End {
-  constructor(readonly out: PrStepOutput) {}
-}
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 /** Control, line-separator and bidi characters: a path holding one is quoted in the log. */
 // oxlint-disable-next-line no-control-regex
 const UNSAFE = /[\u0000-\u001f\u007f\u0085\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
@@ -130,109 +119,22 @@ export function createPrStep(deps: PrStepDeps): PrStep {
   const secrets = deps.secrets ?? [];
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
-  const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
 
   return async (input: PrStepInput): Promise<PrStepOutput> => {
     const { unit: story, result } = input;
     const unit = story.unit;
-    const generation = input.record.generation;
-    let record: UnitRecord = input.record;
-    let ontoSha: string | null = null;
-    /** The snapshot's `now` and the host time it was seen at. */
-    let base: { readonly now: string; readonly at: number } | null = null;
-    const reasons: string[] = [];
-
-    const note = (text: string): void => {
-      try {
-        input.log(`PR step: ${text}`);
-      } catch {
-        // A log that cannot be written never ends the step.
-      }
-    };
-    const reason = (): string | undefined => (reasons.length === 0 ? undefined : reasons.join("; "));
-    const end = (outcome: PrStepOutput["outcome"], state: PrStepOutput["state"]): End => {
-      const r = reason();
-      return new End({ outcome, state, record, ...(r !== undefined ? { reason: r } : {}) });
-    };
-    const forgeNow = (): string => {
-      if (base === null) return new Date(clock()).toISOString();
-      return new Date(Date.parse(base.now) + Math.max(0, clock() - base.at)).toISOString();
-    };
-
-    /** Posts the alert (its failure ignored) and stops the lane; the record stays as it is. */
-    const laneStop = async (condition: string, why: string): Promise<never> => {
-      try {
-        await forge.alert(condition, ontoSha ?? ZERO_SHA, deadline());
-      } catch {
-        // The alert is best effort; the lane stops either way.
-      }
-      reasons.push(`${condition}: ${why}`);
-      note(`stop: ${condition}: ${why}`);
-      throw end("stop", record.state);
-    };
-
-    /** One forge call under its own deadline; a lane-stop kind stops the lane. */
-    const call = async <T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>> => {
-      let r: ForgeResult<T>;
-      try {
-        r = await run(deadline());
-      } catch (e) {
-        return { ok: false, error: { kind: "transient", message: `${operation} threw: ${message(e)}` } };
-      }
-      if (!r.ok && isLaneStopKind(r.error.kind)) await laneStop(`forge-${r.error.kind}`, `${operation}: ${r.error.message}`);
-      return r;
-    };
-
-    type Swapped = { readonly kind: "ok" } | { readonly kind: "lost" | "failed"; readonly message: string };
-
-    /** One ledger edit through the CAS loop; a ledger or forge stop stops the lane. */
-    const swap = async (edit: LedgerEdit): Promise<Swapped> => {
-      const r = await swapLedger({
-        forge,
-        edit,
-        signal: AbortSignal.timeout(callTimeoutMs),
-        ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
-        ...(deps.random !== undefined ? { random: deps.random } : {}),
-      });
-      if (r.ok) {
-        const written = writtenRecord(r.value.commit, unit);
-        if (written !== null) record = written;
-        return { kind: "ok" };
-      }
-      const e = r.error;
-      if (e.kind === "edit" && e.edit === "stop") await laneStop("ledger-schema-version", e.message);
-      if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) await laneStop(`forge-${e.forge.kind}`, e.message);
-      if (e.kind === "edit" && e.edit === "precondition") return { kind: "lost", message: e.message };
-      return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
-    };
-
-    /** A failed attempt: released, or parked at the attempts cap. */
-    const failed = async (why: string): Promise<never> => {
-      reasons.push(why);
-      note(`failed: ${why}`);
-      const r = await swap(failAttempt({ unit, by: identity, now: forgeNow(), generation }));
-      if (r.kind === "ok") {
-        note(`failAttempt: ${record.state}`);
-        throw end("failed", record.state);
-      }
-      reasons.push(`failAttempt: ${r.message}`);
-      note(`failAttempt failed: ${r.message}`);
-      throw end("failed", null);
-    };
-
-    /** The unit was lost to another writer: no further ledger edit. */
-    const lost = (what: string, why: string): never => {
-      reasons.push(`${what}: unit lost: ${why}`);
-      note(`${what}: unit lost: ${why}`);
-      throw end("failed", null);
-    };
-
-    /** A fenced heartbeat; a lost unit ends the step, any other failure is a failed attempt. */
-    const beat = async (what: string, set?: HeartbeatSet): Promise<void> => {
-      const r = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation, ...(set !== undefined ? { set } : {}) }));
-      if (r.kind === "lost") lost(what, r.message);
-      if (r.kind === "failed") await failed(`${what}: ${r.message}`);
-    };
+    const kit = stepKit({
+      name: "PR step",
+      forge,
+      identity,
+      record: input.record,
+      log: input.log,
+      clock,
+      callTimeoutMs,
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+      ...(deps.random !== undefined ? { random: deps.random } : {}),
+    });
+    const { generation, reasons, note, end, forgeNow, call, swap, failed, lost, beat } = kit;
 
     const overBudget = async (): Promise<void> => {
       if (input.signal.aborted) await failed("unit budget passed before the push");
@@ -244,9 +146,9 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
       if (!snapped.ok) return await failed(`snapshot ${snapped.error.kind}: ${snapped.error.message}`);
       const snap: ForgeSnapshot = snapped.value;
-      base = { now: snap.now, at: clock() };
+      kit.see(snap.now);
       const onto = snap.main.sha;
-      ontoSha = onto;
+      kit.mainSha = onto;
       note(`fresh main ${onto}`);
 
       // 2. Standing Authority re-check on this `main`; the write check's rules come from it too.
@@ -254,7 +156,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       if (!config.ok) {
         reasons.push(`config ${config.error.kind}: ${config.error.message}`);
         note(`stop: config ${config.error.kind}: ${config.error.message}`);
-        throw end("stop", record.state);
+        throw end("stop", kit.record.state);
       }
       const rules = writeRules({
         config: config.value.repo.config,
@@ -291,7 +193,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
         const r = await swap(park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "write-check" }));
         if (r.kind === "lost") lost("park", r.message);
         if (r.kind === "failed") await failed(`park: ${r.message}`);
-        throw end("progress", record.state);
+        throw end("progress", kit.record.state);
       }
       if (c.kind === "empty") {
         reasons.push("no-op: the commit onto main is empty");
@@ -299,7 +201,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
         const r = await swap(park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "no-op" }));
         if (r.kind === "lost") lost("park", r.message);
         if (r.kind === "failed") await failed(`park: ${r.message}`);
-        throw end("progress", record.state);
+        throw end("progress", kit.record.state);
       }
       note(`committed ${c.head_sha} onto ${c.base_sha}`);
       await overBudget();
@@ -345,21 +247,9 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       }
 
       // 9. Done.
-      throw end("progress", record.state);
+      throw end("progress", kit.record.state);
     };
 
-    try {
-      return await steps();
-    } catch (e) {
-      if (e instanceof End) return e.out;
-      // An unexpected error: try one failed attempt, never throw.
-      try {
-        return await failed(`unexpected error: ${message(e)}`);
-      } catch (inner) {
-        if (inner instanceof End) return inner.out;
-        reasons.push(`unexpected error: ${message(inner)}`);
-        return { outcome: "failed", state: null, record, reason: reasons.join("; ") };
-      }
-    }
+    return kit.run(steps);
   };
 }

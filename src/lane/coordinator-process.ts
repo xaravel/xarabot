@@ -1,22 +1,40 @@
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { coordinatorTrailingWaitMs } from "../core/lane/waits.ts";
 import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
-import { claim, claimCoordinator, failAttempt, takeOverStale, type AdoptedPr, type LedgerEdit } from "../core/ledger/edits.ts";
+import { claim, claimCoordinator, takeOverStale, type AdoptedPr, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { CoordinatorKind, CoordinatorUnit } from "../core/next/coordinator.ts";
 import { next } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { Lane } from "../core/schemas/host.ts";
-import type { LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
-import { CoordinatorRecordSchema, type CoordinatorRecord, type LaneIdentity, type UnitRecord, type UnitState } from "../core/schemas/ledger.ts";
+import type { LaneOutcome } from "../core/schemas/journal.ts";
+import { CoordinatorRecordSchema, type CoordinatorRecord, type LaneIdentity, type UnitRecord } from "../core/schemas/ledger.ts";
 import type { Snapshot } from "../core/schemas/snapshot.ts";
 import type { Agent } from "../ports/agent.ts";
-import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult } from "../ports/forge.ts";
+import type { Forge } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "./heartbeat.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, MAX_CLAIM_ROUNDS, readsPath, writtenRecord, type LaneProcessResult, type PrStepOutput } from "./lane-process.ts";
-import { swapLedger, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName } from "./lane-store.ts";
+import {
+  Abandon,
+  addReason,
+  checkStop,
+  forgeClock,
+  forgeOps,
+  Halt,
+  journalUnit,
+  MarkerStop,
+  MAX_CLAIM_ROUNDS,
+  message,
+  newTrack,
+  readsPath,
+  trackOps,
+  type LaneProcessResult,
+  type PrStepOutput,
+  type StoreWrite,
+  type UnitTrack,
+} from "./session.ts";
 import type { Waiter, WaitResult } from "./wait.ts";
 
 /**
@@ -36,6 +54,10 @@ import type { Waiter, WaitResult } from "./wait.ts";
  * coordinator-held `merging` records have no heartbeat (AD-6). The trailing
  * wait after `idle` is 10 min, matching the `reconcile` due rule; other
  * outcomes keep the builder's waits.
+ *
+ * The forge and ledger helpers, the unit keeper check (`checkHeld`), the
+ * failed attempt (`failUnit`) and the unit journal record are the lane
+ * process's own, from `session.ts` (Story 2.6a).
  */
 
 /** What a coordinator step gets: the claimed unit and the snapshot it was picked from. */
@@ -145,121 +167,46 @@ export async function claimCoordinatorRecord(p: ClaimCoordinatorParams): Promise
   }
 }
 
-const ZERO_SHA = "0".repeat(40);
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-/** Ends the run early with `outcome`. */
-class Halt extends Error {
-  constructor(
-    readonly outcome: LaneOutcome,
-    readonly reason: string,
-  ) {
-    super(reason);
-  }
-}
-
-/** A host or lane STOP marker ends the run: the operator's choice, never a lane stop. */
-class MarkerStop extends Halt {}
-
-type Track = {
-  readonly unit: CoordinatorUnit;
-  readonly startedMs: number;
-  readonly logName: string;
-  record: UnitRecord | null;
-  state: UnitState | null;
-  reason: string | null;
-};
-
-type Swapped =
-  | { readonly kind: "ok"; readonly record: UnitRecord | null }
-  | { readonly kind: "lost"; readonly message: string }
-  | { readonly kind: "failed"; readonly message: string };
-
 export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<LaneProcessResult> {
   const { forge, store, identity, lane, agent } = deps;
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const layout = laneLayout(deps.laneDir);
   const iso = (ms: number) => new Date(ms).toISOString();
-  const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
   const generation = deps.claim.generation;
 
   let mainSha: string | null = null;
   // The claim's stamp is the last forge time seen.
-  let lastNow = deps.claim.heartbeat_at;
-  let lastNowAt = clock();
-  const seeNow = (now: string): void => {
-    lastNow = now;
-    lastNowAt = clock();
-  };
-  /** The last forge time seen, advanced by the host time since. */
-  const estimatedNow = (): string => iso(Date.parse(lastNow) + Math.max(0, clock() - lastNowAt));
+  const fc = forgeClock(clock, deps.claim.heartbeat_at);
 
-  let track: Track | null = null;
+  let track: UnitTrack | null = null;
   const log = (text: string): void => {
     if (track !== null) store.appendLog(track.logName, text);
     else console.error(text.trimEnd());
   };
   const note = (text: string): void => log(`== ${iso(clock())} ${text} ==\n`);
 
-  const reportStore = (r: { readonly ok: boolean; readonly error?: { readonly kind: string; readonly message: string } }, what: string): void => {
+  const reportStore = (r: StoreWrite, what: string): void => {
     if (r.ok || r.error === undefined) return;
     note(`lane store: ${what}: ${r.error.kind}: ${r.error.message}`);
   };
 
-  const addReason = (t: Track, reason: string): void => {
-    if (t.reason === null) t.reason = reason;
-    else if (t.reason !== reason && !t.reason.endsWith(`; ${reason}`)) t.reason = `${t.reason}; ${reason}`;
-  };
-
-  /** Posts the alert (its failure ignored) and stops the lane. */
-  const laneStop = async (condition: string, reason: string): Promise<never> => {
-    try {
-      await forge.alert(condition, mainSha ?? ZERO_SHA, deadline());
-    } catch {
-      // The alert is best effort; the lane stops either way.
-    }
-    throw new Halt("stop", `${condition}: ${reason}`);
-  };
-
-  /** One forge call under its own deadline; a lane-stop kind stops the lane. */
-  const call = async <T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>> => {
-    const r = await run(deadline());
-    if (!r.ok && isLaneStopKind(r.error.kind)) await laneStop(`forge-${r.error.kind}`, `${operation}: ${r.error.message}`);
-    return r;
-  };
-
-  /** A host or lane STOP marker (or one that can't be read) ends the run with `stop`. */
-  const checkStop = (): void => {
-    const s = store.stopMarkers();
-    if (!s.ok) throw new Halt("stop", `STOP markers unreadable, stopping: ${s.error.message}`);
-    if (s.value.host) throw new MarkerStop("stop", "host STOP marker present");
-    if (s.value.lane) throw new MarkerStop("stop", "lane STOP marker present");
-  };
-
-  /** One ledger edit through the CAS loop under its own deadline. */
-  const swap = async (edit: LedgerEdit, unit: string): Promise<Swapped> => {
-    const r = await swapLedger({
-      forge,
-      edit,
-      signal: AbortSignal.timeout(callTimeoutMs),
-      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
-      ...(deps.random !== undefined ? { random: deps.random } : {}),
-    });
-    if (r.ok) return { kind: "ok", record: writtenRecord(r.value.commit, unit) };
-    const e = r.error;
-    if (e.kind === "edit" && e.edit === "stop") await laneStop("ledger-schema-version", e.message);
-    if (e.kind === "forge" && isLaneStopKind(e.forge.kind)) await laneStop(`forge-${e.forge.kind}`, e.message);
-    if (e.kind === "edit" && e.edit === "precondition") return { kind: "lost", message: e.message };
-    return { kind: "failed", message: `ledger ${e.kind}: ${e.message}` };
-  };
+  const ops = forgeOps({
+    forge,
+    callTimeoutMs,
+    ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    ...(deps.random !== undefined ? { random: deps.random } : {}),
+    clock: fc,
+    alertSha: () => mainSha,
+    stop: (condition, why) => {
+      throw new Halt("stop", `${condition}: ${why}`);
+    },
+  });
+  const { call, swap, laneStop } = ops;
 
   const keeperOpts = {
     clock,
-    forgeNow: estimatedNow,
+    forgeNow: fc.forgeNow,
     callTimeoutMs,
     ...(deps.heartbeat?.everyMs !== undefined ? { everyMs: deps.heartbeat.everyMs } : {}),
     ...(deps.heartbeat?.retryMs !== undefined ? { retryMs: deps.heartbeat.retryMs } : {}),
@@ -282,60 +229,30 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     throw new Halt("failed", `coordinator claim: ${end.message}`);
   };
 
-  /**
-   * Throws `failed` once the unit keeper lost or released the unit; the state
-   * follows the keeper's end. A keeper that met a lane-stop condition stops
-   * the lane instead, the record left as it is.
-   */
-  const checkUnit = async (t: Track): Promise<void> => {
-    const end = unitKeeper?.end() ?? null;
-    if (end === null || end.kind === "moved-on") return;
-    if (end.kind === "stop") await laneStop(end.condition, `heartbeat: ${end.message}`);
-    if (end.kind === "released") {
-      if (end.record !== null) t.record = end.record;
-      t.state = "released";
-    } else {
-      t.state = null;
-    }
-    throw new Halt("failed", `heartbeat: ${end.message}`);
-  };
+  /** The unit keeper's end decides through the shared track helpers: `checkHeld` and `failUnit` (Story 2.6a). */
+  const { checkHeld, failUnit } = trackOps({ ops, identity, note, keeper: () => unitKeeper });
 
   const idleSpan = (reason: string, startedMs: number): void => {
     const span = store.appendJournal({ schema_version: 1, type: "span", span: "idle", reason, started_at: iso(startedMs), ended_at: iso(clock()) });
     reportStore(span, "journal");
   };
 
-  /** A failed attempt on the claimed unit: released, or parked at the attempts cap. */
-  const failUnit = async (t: Track, reason: string): Promise<void> => {
-    addReason(t, reason);
-    const held = t.record;
-    if (held === null || t.state !== "claimed") return;
-    const r = await swap(failAttempt({ unit: t.unit.unit, by: identity, now: estimatedNow(), generation: held.generation }), t.unit.unit);
-    if (r.kind === "ok") {
-      if (r.record !== null) t.record = r.record;
-      t.state = r.record?.state ?? null;
-      return;
-    }
-    t.state = null;
-    addReason(t, `failAttempt: ${r.message}`);
-  };
-
   const body = async (): Promise<LaneOutcome> => {
     const pid = store.writePid("lane", deps.pid ?? process.pid, deps.command ?? basename(process.execPath));
     if (!pid.ok) throw new Halt("failed", `lane.pid: ${pid.error.message}`);
-    coordinatorKeeper = startCoordinatorHeartbeat({ ...keeperOpts, forge, identity, generation, claimedMs: lastNowAt });
+    coordinatorKeeper = startCoordinatorHeartbeat({ ...keeperOpts, forge, identity, generation, claimedMs: fc.seenAt() });
 
     for (let round = 1; round <= MAX_CLAIM_ROUNDS; round += 1) {
       track = null;
-      checkStop();
+      checkStop(store);
       await checkClaim();
       const roundStart = clock();
       const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
       if (!snapped.ok) throw new Halt("failed", `snapshot ${snapped.error.kind}: ${snapped.error.message}`);
       const snap = snapped.value;
       mainSha = snap.main.sha;
-      seeNow(snap.now);
-      const claimNowAt = lastNowAt;
+      fc.see(snap.now);
+      const claimNowAt = fc.seenAt();
       const assembled = assembleSnapshot({
         repo: lane.repo,
         now: snap.now,
@@ -375,17 +292,15 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
         return "idle";
       }
 
-      const t: Track = {
-        unit: u,
+      const t = newTrack({
+        unit: u.unit,
         startedMs: roundStart,
         logName: logFileName(u.unit, roundStart),
-        record: null,
         state: view.ledger.units.find((r) => r.unit === u.unit)?.state ?? null,
-        reason: null,
-      };
+      });
       track = t;
       note(`round ${round}: next picked ${u.unit} (${u.why}) at main ${snap.main.sha}`);
-      checkStop();
+      checkStop(store);
 
       const pr = u.pr === null ? undefined : snap.prs[u.unit];
       const adoptPr: AdoptedPr | null =
@@ -430,7 +345,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       if (out.record !== undefined) t.record = out.record;
       if (out.reason !== undefined) addReason(t, out.reason);
       note(`${u.kind} step: ${out.outcome} (${out.state ?? "unknown"})`);
-      await checkUnit(t);
+      await checkHeld(t);
       await checkClaim();
       if (out.state === "merging") {
         // A coordinator-held merging record has no heartbeat (AD-6): later reconcile runs check it.
@@ -452,7 +367,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     outcome = await body();
   } catch (e) {
     outcome = "failed";
-    const t = track as Track | null;
+    const t = track as UnitTrack | null;
     if (e instanceof Halt) {
       outcome = e.outcome;
       haltReason = e.reason;
@@ -460,14 +375,19 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       if (t !== null) addReason(t, e.reason);
       else note(e.reason);
     } else if (t !== null) {
-      try {
-        await failUnit(t, `unexpected error: ${message(e)}`);
-      } catch (inner) {
-        t.state = null;
-        if (inner instanceof Halt) {
-          outcome = inner.outcome;
-          haltReason = inner.reason;
-          addReason(t, inner.reason);
+      const reason = `unexpected error: ${message(e)}`;
+      if (t.state !== "claimed") addReason(t, reason);
+      else {
+        try {
+          await failUnit(t, reason);
+        } catch (inner) {
+          // An abandoned unit keeps the state the keeper's end gave it.
+          if (!(inner instanceof Abandon)) t.state = null;
+          if (inner instanceof Halt) {
+            outcome = inner.outcome;
+            haltReason = inner.reason;
+            addReason(t, inner.reason);
+          }
         }
       }
     } else {
@@ -476,37 +396,24 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   }
 
   try {
-    const t = track as Track | null;
+    const t = track as UnitTrack | null;
     if (t !== null) {
       note(`outcome ${outcome}`);
-      const endedMs = clock();
-      const logged = store.appendLog(t.logName, "");
-      const record: UnitJournalRecord = {
-        schema_version: 1,
-        type: "unit",
-        unit: t.unit.unit,
-        lane: identity.lane,
-        generation: t.record?.generation ?? null,
-        started_at: iso(t.startedMs),
-        ended_at: iso(endedMs),
-        duration_ms: Math.max(0, endedMs - t.startedMs),
-        agent: lane.agent,
-        model: lane.model ?? agent.defaultModel,
-        effort: lane.effort,
-        tokens: null,
-        cost: null,
-        sessions: 0,
-        outcome,
-        result: null,
-        state: t.state,
-        attempts: t.record?.attempts ?? 0,
-        loopbacks: t.record?.loopbacks ?? 0,
-        ci_fixes: t.record?.ci_fixes ?? 0,
-        denied_actions: [],
-        reason: t.reason,
-        log: logged.ok ? logged.value : join(layout.logs, t.logName),
-      };
-      reportStore(store.appendJournal(record), "journal");
+      journalUnit(
+        { store, clock, identity, agent: lane.agent, model: lane.model ?? agent.defaultModel, effort: lane.effort, logsDir: layout.logs, reportStore },
+        {
+          unit: t.unit,
+          logName: t.logName,
+          startedMs: t.startedMs,
+          record: t.record,
+          state: t.state,
+          outcome,
+          reason: t.reason,
+          tokens: t.tokens,
+          cost: t.cost,
+          sessions: t.sessions,
+        },
+      );
     }
     reportStore(store.writeOutcome(outcome), "outcome");
 
@@ -530,6 +437,6 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   }
   reportStore(store.clearPid("lane"), "lane.pid");
   if (outcome !== "stop" || markerStop) return { outcome };
-  const t = track as Track | null;
+  const t = track as UnitTrack | null;
   return { outcome, laneStop: haltReason ?? t?.reason ?? "the run ended stop" };
 }

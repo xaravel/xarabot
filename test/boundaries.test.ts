@@ -2,7 +2,19 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ALLOWED, checkSource, checkTree, type Layer, type Violation } from "./support/boundaries.ts";
+import {
+  ALLOWED,
+  checkSource,
+  checkTree,
+  findCycles,
+  helperCopies,
+  laneCycles,
+  laneGraph,
+  laneSources,
+  SHARED_HELPERS,
+  type Layer,
+  type Violation,
+} from "./support/boundaries.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -260,5 +272,128 @@ describe("outside the layers", () => {
 
   test("cli may read package.json", () => {
     expect(checkSource("src/cli/main.ts", 'import pkg from "../../package.json" with { type: "json" };')).toEqual([]);
+  });
+});
+
+describe("import cycles in src/lane", () => {
+  const cycles = (files: Record<string, string>): string[][] => findCycles(laneGraph(files));
+
+  test("the real tree has none", async () => {
+    expect(await laneCycles(ROOT)).toEqual([]);
+  });
+
+  test("a two-file cycle", () => {
+    expect(cycles({ "a.ts": 'import { b } from "./b.ts";\n', "b.ts": 'import { a } from "./a.ts";\n' })).toEqual([["a.ts", "b.ts", "a.ts"]]);
+  });
+
+  test("a type-only cycle, one side with no extension", () => {
+    expect(cycles({ "a.ts": 'import type { X } from "./b.ts";\n', "b.ts": 'import { a } from "./a";\n' })).toEqual([["a.ts", "b.ts", "a.ts"]]);
+  });
+
+  test("a three-file cycle through export * and await import()", () => {
+    expect(
+      cycles({
+        "a.ts": 'export * from "./b.ts";\n',
+        "b.ts": 'const c = await import("./c.ts");\n',
+        "c.ts": 'import { a } from "./a.ts";\n',
+      }),
+    ).toEqual([["a.ts", "b.ts", "c.ts", "a.ts"]]);
+  });
+
+  test("a cycle is listed from its smallest file", () => {
+    expect(cycles({ "c.ts": 'import "./b.ts";\n', "b.ts": 'import "./a.ts";\n', "a.ts": 'import "./c.ts";\n' })).toEqual([["a.ts", "c.ts", "b.ts", "a.ts"]]);
+  });
+
+  test("a cycle through ../lane/", () => {
+    expect(cycles({ "a.ts": 'import { b } from "../lane/b.ts";\n', "b.ts": 'import { a } from "./a.ts";\n' })).toEqual([["a.ts", "b.ts", "a.ts"]]);
+  });
+
+  test("a cycle through a .js specifier", () => {
+    expect(cycles({ "a.ts": 'import { b } from "./b.js";\n', "b.ts": 'import { a } from "./a.ts";\n' })).toEqual([["a.ts", "b.ts", "a.ts"]]);
+  });
+
+  test("a self import", () => {
+    expect(cycles({ "a.ts": 'import { a } from "./a.ts";\n' })).toEqual([["a.ts", "a.ts"]]);
+  });
+
+  test("an acyclic graph, with imports outside the directory and packages", () => {
+    expect(
+      cycles({
+        "a.ts": 'import { b } from "./b.ts";\nimport { c } from "./c.ts";\nimport { x } from "../core/x.ts";\nimport { z } from "zod";\n',
+        "b.ts": 'import { c } from "./c.ts";\n',
+        "c.ts": 'import { x } from "../core/x.ts";\n',
+      }),
+    ).toEqual([]);
+  });
+
+  test("an unresolved import is not a cycle", () => {
+    expect(cycles({ "a.ts": 'import { m } from "./missing.ts";\n' })).toEqual([]);
+  });
+
+  test("a commented-out import is not an edge", () => {
+    expect(cycles({ "a.ts": '// import { b } from "./b.ts";\n', "b.ts": 'import { a } from "./a.ts";\n' })).toEqual([]);
+  });
+
+  test("two cycles through one file are both found, sorted", () => {
+    expect(
+      cycles({
+        "a.ts": 'import "./b.ts";\nimport "./c.ts";\n',
+        "b.ts": 'import "./a.ts";\n',
+        "c.ts": 'import "./a.ts";\n',
+      }),
+    ).toEqual([
+      ["a.ts", "b.ts", "a.ts"],
+      ["a.ts", "c.ts", "a.ts"],
+    ]);
+  });
+
+  test("findCycles on a hand-built graph ignores edges to unknown files", () => {
+    const graph = new Map<string, readonly string[]>([
+      ["x.ts", ["y.ts", "nowhere.ts"]],
+      ["y.ts", ["x.ts"]],
+    ]);
+    expect(findCycles(graph)).toEqual([["x.ts", "y.ts", "x.ts"]]);
+  });
+});
+
+describe("the step helpers live only in src/lane/session.ts", () => {
+  test("no other src/lane file declares a copy", async () => {
+    const files = await laneSources(ROOT);
+    expect(Object.keys(files)).toContain("session.ts");
+    const copies = Object.entries(files)
+      .filter(([name]) => name !== "session.ts")
+      .flatMap(([name, source]) => helperCopies(source).map((helper) => `${name}: ${helper}`));
+    expect(copies).toEqual([]);
+  });
+
+  test("session.ts declares them", async () => {
+    const files = await laneSources(ROOT);
+    expect(helperCopies(files["session.ts"] ?? "")).toEqual([...SHARED_HELPERS, "End"].sort());
+  });
+
+  test.each([
+    ["function call(op: string) {}", ["call"]],
+    ["async function swap(edit) {}", ["swap"]],
+    ["const forgeNow = (): string => iso(clock());", ["forgeNow"]],
+    ["const laneStop = async (condition: string): Promise<never> => {};", ["laneStop"]],
+    ["const call = async <T>(operation: string) => run();", ["call"]],
+    ["let held = async (what) => {};", ["held"]],
+    ["const beat = <T,>(x: T) => x;", ["beat"]],
+    ["const swap = async edit => edit;", ["swap"]],
+    ["class End {}", ["End"]],
+  ])("a copy is found: %s", (source, expected) => {
+    expect(helperCopies(source)).toEqual(expected);
+  });
+
+  test.each([
+    "const held = [...ledger.units.values()].filter((r) => r.owner === me);",
+    "const holding = t.record;",
+    "const { call, swap, laneStop } = ops;",
+    "await kit.beat(\"fence\");",
+    "// const call = async () => {};",
+    "class Ending {}",
+    "const beats = (n: number) => n;",
+  ])("not a copy: %s", (source) => {
+    expect(helperCopies(source)).toEqual([]);
   });
 });
