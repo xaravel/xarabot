@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-16-reconcile-writes-an-epic-done-key",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "src/core/reconcile/status-edit.ts",
     "test/core/reconcile/**"
   ],
-  "heartbeat_at": "2026-10-25T23:25:03.642Z",
+  "heartbeat_at": "2026-10-25T23:25:23.561Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "ceef6d512a025537cdf32def09264b507f0bc192",
@@ -22,7 +22,12 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "verification",
+    "inbox_owner": "edanisko",
+    "globs_held": []
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
