@@ -2,8 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
 import { DEFAULT_GRAPH_CONFIG, graphInputPaths, resolveGraph, type GraphConfig } from "../core/graph/resolve-graph.ts";
-import { parseVersionedYaml } from "../core/schemas/common.ts";
-import { ConfigSchema } from "../core/schemas/config.ts";
+import { graphSettings } from "../core/graph/graph-gate.ts";
 
 const PREFIX = "xarabot graph check:";
 
@@ -48,19 +47,9 @@ function graphConfig(root: string): { ok: true; config: GraphConfig } | { ok: fa
   } catch (e) {
     return { ok: false, message: `${CONFIG_PATH}: unreadable: ${e instanceof Error ? e.message : String(e)}` };
   }
-  const parsed = parseVersionedYaml(CONFIG_PATH, text, ConfigSchema);
+  const parsed = graphSettings(text);
   if (!parsed.ok) return { ok: false, message: parsed.error.message };
-  const c = parsed.value;
-  return {
-    ok: true,
-    config: {
-      epics_path: c.epics_path,
-      retro_gates_path: c.retro_gates_path,
-      bootstrapped_epics: c.bootstrapped_epics,
-      ...(c.manifests === undefined ? {} : { manifests: c.manifests }),
-      ...(c.epic_packages === undefined ? {} : { epic_packages: c.epic_packages }),
-    },
-  };
+  return { ok: true, config: parsed.value.graph };
 }
 
 /**

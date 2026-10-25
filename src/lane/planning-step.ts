@@ -18,7 +18,10 @@ import type { LaneStore } from "../ports/lane-store.ts";
 import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
 import type { Committer } from "./committer.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
+import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { DiffPaths } from "./diff-paths.ts";
+import { gateGraph } from "./graph-gate.ts";
+import type { GraphTrees } from "./graph-trees.ts";
 import { laneLayout } from "./lane-store.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
@@ -61,7 +64,13 @@ import type { Workspace } from "./workspace.ts";
  *   `verification`, CI timing out parks `ci-timeout`.
  * - After CI the Standing Authority is re-checked on fresh `main`. A graph
  *   PR always parks `awaiting-approval` holding its diff's paths, with a 🤖
- *   comment; a status PR parks only when policy gates a path, else it is
+ *   comment, after the graph-change gate (Story 2.8) on its merge with fresh
+ *   `main`: a refused merge result parks `blocked` `graph-invalid` and
+ *   nothing is enqueued; a changed graph parks for the Maintainer
+ *   (`inbox_owner`), the comment carrying the delta, then the gated paths; a
+ *   conflicting merge or a `main` that does not resolve is a failed attempt.
+ *   A status PR skips that gate (its diff holds no graph input) and parks
+ *   only when policy gates a path, else it is
  *   fenced, written `merging` and enqueued at its head, and is disposable
  *   like `reconcile`'s (a conflicting enqueue closes it and releases the
  *   record).
@@ -90,6 +99,8 @@ export type PlanningStepDeps = {
   readonly lane: Lane;
   readonly committer: Committer;
   readonly diffPaths: DiffPaths;
+  /** `main`'s tree and the PR's merge tree, for the graph-change gate. */
+  readonly graphTrees: GraphTrees;
   /** Who writes the ledger records: the coordinator lane. */
   readonly identity: LaneIdentity;
   /** The lane's credentials, redacted from the commit message, the PR text and the comment; default none. */
@@ -137,7 +148,7 @@ export function planningPrText(
   const title = capText(`${unit}: ${summary}`, FORGE_TEXT_LIMITS.title);
   const gate =
     kind === "graph"
-      ? "It changes the Epic graph inputs, so it waits for the owner's approval of its head before it is queued."
+      ? "It changes the Epic graph inputs, so it waits for the owner's approval of its head before it is queued; when its merge with `main` changes the Epic graph, only the Maintainer's approval counts."
       : "The runner queues this PR once its checks pass, unless policy gates a path it changes.";
   const denied = result.denied_actions.map((a) => sanitizeAgentText(a, { secrets }).replace(/\s+/g, " ").trim()).filter((a) => a !== "");
   const body = [
@@ -290,7 +301,37 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
       if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
 
-      // 3. The gate: a graph PR always waits for approval; a status PR only when policy gates a path.
+      // 3. A graph PR's merge result through the graph-change gate.
+      let graph: GraphDelta | null = null;
+      if (kind === "graph") {
+        const g = await gateGraph(deps.graphTrees, {
+          headSha: head,
+          mainSha: snap.main.sha,
+          ledgerFiles: snap.ledger.files,
+          signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+          listPrsByBranch: (b) => call("listPrsByBranch", (o) => forge.listPrsByBranch(b, o)),
+        });
+        aborted();
+        if (g.kind === "conflict") return await failed(`graph gate: the merge with main ${snap.main.sha} conflicts: ${g.paths.map(shown).join(", ")}`);
+        if (g.kind === "error") return await failed(`graph gate: ${g.message}`);
+        if (g.kind === "refuse") {
+          reasons.push(`graph-invalid: ${g.refusals.join("; ")}`);
+          note(`parking blocked graph-invalid: ${g.refusals.join("; ")}`);
+          await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "graph-invalid" }));
+          const commented = await call("comment", (o) => forge.comment(pr, graphRefusalComment(`Unit ${unit}`, g.refusals), o));
+          if (!commented.ok) {
+            reasons.push(`graph refusal comment on PR #${pr} failed: ${describeError(commented.error)}`);
+            note(`graph refusal comment failed: ${describeError(commented.error)}`);
+          }
+          throw end("progress", kit.record.state);
+        }
+        if (g.kind === "change") {
+          note(`graph gate: changed from ${g.mainHash} to ${g.mergedHash}`);
+          graph = g.delta;
+        } else note(`graph gate: unchanged (${g.hash})`);
+      }
+
+      // 4. The approval gate: a graph PR always waits for approval; a status PR only when policy gates a path.
       let changed: Awaited<ReturnType<DiffPaths>>;
       try {
         changed = await deps.diffPaths({ headSha: head, mainSha: snap.main.sha, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
@@ -302,10 +343,15 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       const policy = repo.repo.policy;
       const gated = kind === "graph" ? [...changed.value] : approvalPaths(changed.value, [...policy.owner_approval_paths, ...policy.effective_protected_paths]);
       if (kind === "graph" || gated.length > 0) {
-        await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value }));
-        reasons.push(`awaiting approval: ${gated.map(shown).join(", ")}`);
-        note(`parked awaiting-approval: ${gated.map(shown).join(", ")}`);
-        const commented = await call("comment", (o) => forge.comment(pr, gateComment(`Unit ${unit}`, gated), o));
+        const maintainer = repo.repo.config.maintainer;
+        await held(
+          "park",
+          park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value, ...(graph !== null ? { inboxOwner: maintainer } : {}) }),
+        );
+        reasons.push(`awaiting ${graph !== null ? `the Maintainer's approval (the graph changes to ${graph.hash})` : "approval"}: ${gated.map(shown).join(", ")}`);
+        note(`parked awaiting-approval${graph !== null ? ` for the Maintainer ${maintainer}` : ""}: ${gated.map(shown).join(", ")}`);
+        const body = graph !== null ? graphDeltaComment(`Unit ${unit}`, { delta: graph, maintainer, gatedPaths: gated }) : gateComment(`Unit ${unit}`, gated);
+        const commented = await call("comment", (o) => forge.comment(pr, body, o));
         if (!commented.ok) {
           reasons.push(`approval comment on PR #${pr} failed: ${describeError(commented.error)}`);
           note(`approval comment failed: ${describeError(commented.error)}`);
@@ -313,7 +359,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
         throw end("progress", kit.record.state);
       }
 
-      // 4. Fence, merging, enqueue at the head; the queue is not watched.
+      // 5. Fence, merging, enqueue at the head; the queue is not watched.
       await beat("fence", { passed_sha: head });
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
       note(`merging at ${head}`);

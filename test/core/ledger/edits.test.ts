@@ -37,6 +37,8 @@ import type { CoordinatorRecord, LaneIdentity, Park, UnitRecord } from "../../..
 import { ALICE, BOB, COORD, LATE, NOW, rec, SHA_A, SHA_B, SHA_C, SHA_D, T0, tip } from "./fixtures.ts";
 
 const U = "story:1.5";
+/** A graph hash. */
+const GH = `sha256:${"9".repeat(64)}`;
 const PATH = "units/story__1.5.json";
 
 /** A record as written by `by` at `at`. */
@@ -294,6 +296,60 @@ const CASES: readonly Case[] = [
   ["takeApproved wrong generation", takeApproved({ unit: U, by: COORD, now: NOW, generation: 3, approvedSha: SHA_D }), [rec({ state: "parked", park: awaiting([]) })], "precondition"],
   ["takeApproved a claimed unit", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }), [rec()], "precondition"],
   ["takeApproved bad sha", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: "nope" }), [rec({ state: "parked", park: awaiting([]) })], "invalid"],
+  // takeApproved with a graph (Story 2.8): xarabot:graph held, approved_graph set, one graph change at a time
+  [
+    "takeApproved with a graph",
+    takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }),
+    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7 }), rec({ unit: "story:1.6", state: "parked", globs: ["xarabot:graph"], park: awaiting(["src/b.ts"]) })],
+    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts", "xarabot:graph"], approved_sha: SHA_D, approved_graph: GH, pr: 7 }),
+  ],
+  ["takeApproved with a graph beside a merging graph change", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: awaiting(["src/a.ts"]) }), by(COORD, T0, { unit: "story:1.6", state: "merging", globs: ["src/b.ts", "xarabot:graph"], approved_graph: GH })], "precondition"],
+  ["takeApproved with a graph beside a claimed graph planning unit", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: awaiting(["src/a.ts"]) }), by(COORD, T0, { unit: "planning:graph.2", globs: ["stories/*.md", "xarabot:graph"] })], "precondition"],
+  [
+    "takeApproved with no graph beside a merging graph change",
+    takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),
+    [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7 }), by(COORD, T0, { unit: "story:1.6", state: "merging", globs: ["xarabot:graph"] })],
+    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7 }),
+  ],
+  ["takeApproved with a bad graph hash", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: "sha256:xyz" }), [rec({ state: "parked", park: awaiting([]) })], "invalid"],
+  // every move that clears approved_sha clears approved_graph (Story 2.8)
+  [
+    "claim released clears approved_graph",
+    claim({ ...base, globs: ["src/core/ledger/**"], expectGeneration: 2 }),
+    [by(COORD, T0, { state: "released", generation: 2, approved_sha: SHA_A, approved_graph: GH, passed_sha: SHA_A })],
+    by(ALICE, NOW, { generation: 3 }),
+  ],
+  [
+    "takeOverStale claimed clears approved_graph",
+    takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1 }),
+    [rec({ approved_sha: SHA_A, approved_graph: GH })],
+    by(BOB, LATE, { generation: 2, attempts: 1 }),
+  ],
+  [
+    "park coordinator-held merging awaiting-approval clears approved_graph",
+    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], inboxOwner: "edanisko" }),
+    [by(COORD, T0, { state: "merging", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, approved_sha: SHA_A, approved_graph: GH })],
+    by(COORD, NOW, { state: "parked", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, park: { ...awaiting(["src/a.ts"]), inbox_owner: "edanisko" } }),
+  ],
+  [
+    "park coordinator-held merging blocked graph-invalid",
+    park({ ...held, by: COORD_2, generation: 2, kind: "blocked", reason: "graph-invalid", inboxOwner: "alice" }),
+    [by(COORD, T0, { state: "merging", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, approved_sha: SHA_A, approved_graph: GH })],
+    by(COORD_2, NOW, { state: "parked", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, park: blocked("graph-invalid") }),
+  ],
+  ["park builder-held merging blocked graph-invalid", park({ ...held, kind: "blocked", reason: "graph-invalid" }), [rec({ state: "merging", pr: 7 })], "precondition"],
+  [
+    "applyRuling rebuild clears approved_graph",
+    applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "rebuild" }),
+    [rec({ state: "parked", park: blocked("graph-invalid"), approved_sha: SHA_A, approved_graph: GH })],
+    by(COORD, NOW, { state: "released" }),
+  ],
+  [
+    "applyRuling release keeps approved_graph",
+    applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "release" }),
+    [rec({ state: "parked", park: blocked("graph-invalid"), approved_sha: SHA_A, approved_graph: GH })],
+    by(COORD, NOW, { state: "released", approved_sha: SHA_A, approved_graph: GH }),
+  ],
   // applyRuling
   [
     "applyRuling release",
@@ -432,11 +488,11 @@ describe("ledger edits", () => {
     expect(STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
-  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 2', '"schema_version": 3') };
-  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 2', '"schema_version": 0') };
+  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 3', '"schema_version": 4') };
+  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 3', '"schema_version": 0') };
   const everyEdit: readonly [string, LedgerEdit][] = CASES.map(([name, edit]) => [name, edit]);
   for (const [name, edit] of everyEdit) {
-    test(`${name}: a schema_version 3 or 0 record on the tip stops`, () => {
+    test(`${name}: a schema_version 4 or 0 record on the tip stops`, () => {
       for (const files of [v2, v0]) {
         const r = edit({ ...tip([rec()]), ...files });
         expect(r.ok).toBe(false);
@@ -467,7 +523,7 @@ describe("ledger edits", () => {
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 2,
+    schema_version: 3,
     owner: who.owner,
     host: who.host,
     lane: "coordinator",
@@ -523,8 +579,8 @@ describe("claimCoordinator", () => {
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 
-  test("a schema_version 3 coordinator.json stops", () => {
-    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 2', '"schema_version": 3');
+  test("a schema_version 4 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 3', '"schema_version": 4');
     const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
     expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
@@ -642,24 +698,24 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     expect(r.ok && r.value).toEqual({ message: `ledger: deleteReleasedRecurring ${u} [skip ci]`, writes: {}, deletes: [path(u)] });
   });
 
-  test("every record an edit writes carries schema_version 2, whatever the tip held", () => {
+  test("every record an edit writes carries schema_version 3, whatever the tip held", () => {
     const v1 = rec({ schema_version: 1, state: "claimed" });
     const r = heartbeat({ unit: U, by: ALICE, now: NOW, generation: 1 })(tip([v1]));
     if (!r.ok || r.value === null) throw new Error("expected a write");
-    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(2);
+    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(3);
     const c = claim({ unit: "story:7.1", by: ALICE, now: NOW, globs: ["src/7/**"], expectGeneration: null })(tip([v1]));
     if (!c.ok || c.value === null) throw new Error("expected a write");
-    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(2);
+    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(3);
   });
 
-  test("coordinator.json writes carry schema_version 2: a claim over a v1 record, and the keeper's beat", () => {
+  test("coordinator.json writes carry schema_version 3: a claim over a v1 record, and the keeper's beat", () => {
     const v1 = serializeCoordinator(coordRec(COORD, T0, { schema_version: 1 }));
     const claimed = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v1 });
     if (!claimed.ok || claimed.value === null) throw new Error("expected a write");
-    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(2);
+    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(3);
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
-    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(2);
+    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(3);
   });
 });
 

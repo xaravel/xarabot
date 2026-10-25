@@ -22,6 +22,7 @@ import type { Workspace } from "../../src/lane/workspace.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
+import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -159,6 +160,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
       createMergeStep({
         forge,
         diffPaths,
+        graphTrees: unchangedGraph(),
         identity: ALICE,
         repo: "xaravel/xarabot",
         now: () => t,
@@ -262,6 +264,117 @@ describe("the approval gate", () => {
     expect([out.outcome, out.state]).toEqual(["failed", "released"]);
     expect((await w.ledger())?.attempts).toBe(1);
     expect(w.events).not.toContain("enqueue");
+  });
+});
+
+// -------------------------------------------------------------- the graph-change gate (Story 2.8)
+
+describe("the graph-change gate", () => {
+  const MAIN_GRAPH = graphFiles({ 1: ["1.1"], 2: ["2.1"] });
+  const ADDED = graphFiles({ 1: ["1.1"], 2: ["2.1", "2.2"] });
+
+  test("unchanged: the merge of the head with fresh main is checked before the approval gate, then queued as today", async () => {
+    const w = await world({ onSleep: mergeAtFirst });
+    const g = stubGraphTrees({ main: MAIN_GRAPH, merged: MAIN_GRAPH });
+    const before = value(await w.fake.forge.snapshot(opts())).main.sha;
+    const out = await w.run({}, { graphTrees: g.trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    expect(g.calls.map((c) => [c.headSha, c.mainSha])).toEqual([[w.head, before]]);
+    expect(w.diffs.map((d) => d.mainSha)).toEqual([before]);
+    expect(w.fake.control.comments(w.pr)).toEqual([]);
+  });
+
+  test("a changed graph parks awaiting-approval for the Maintainer, one comment carrying the delta then the gated paths, and never enqueues", async () => {
+    const w = await world({ ownerPaths: ["src/**"], diff: ["package.json", "src/a.ts"] });
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: ADDED }).trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    const after = await w.ledger();
+    expect(after?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["package.json", "src/a.ts"] });
+    const comments = w.fake.control.comments(w.pr);
+    expect(comments.length).toBe(1);
+    expect(comments[0]).toStartWith("🤖 Story 1.1:");
+    expect(comments[0]).toContain("(`edanisko`)");
+    expect(comments[0]).toContain("- Stories added: Epic 2: +2.2");
+    expect((comments[0] as string).indexOf("merge result's graph hash is")).toBeLessThan((comments[0] as string).indexOf("src/a.ts"));
+    expect(comments[0]).not.toContain("package.json");
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("a changed graph with no gated path still parks for the Maintainer", async () => {
+    const w = await world();
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: ADDED }).trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect((await w.ledger())?.park?.inbox_owner).toBe("edanisko");
+    expect(w.fake.control.comments(w.pr)[0]).not.toContain("need approval");
+  });
+
+  test("a refused merge result parks blocked graph-invalid with a comment naming the refusal; nothing is enqueued", async () => {
+    const w = await world();
+    const used = { ...MAIN_GRAPH, [GRAPH_STATUS]: "development_status:\n  2-1-s: done\n" };
+    const dropped = { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string };
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: used, merged: dropped }).trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect((await w.ledger())?.park).toMatchObject({ kind: "blocked", reason: "graph-invalid" });
+    const [comment] = w.fake.control.comments(w.pr);
+    expect(comment).toContain("graph-invalid");
+    expect(comment).toContain("Story 2.1 is removed, but it is used: 2-1-s is done");
+    expect(w.events).not.toContain("enqueue");
+    expect(w.diffs).toEqual([]);
+  });
+
+  test("an invalid merge result (a cycle) parks graph-invalid", async () => {
+    const w = await world();
+    const cycle = { ...MAIN_GRAPH, ".xarabot/epics.yaml": "version: 1\nepics:\n  1: {depends_on: [2]}\n" };
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: cycle }).trees });
+    expect((await w.ledger())?.park).toMatchObject({ kind: "blocked", reason: "graph-invalid" });
+    expect(out.reason).toContain("cycle");
+  });
+
+  test("a removed Story with a PR on its branch is refused; with none it is only a change", async () => {
+    const dropped = graphFiles({ 1: ["1.1"], 2: [] });
+    const used = await world();
+    value(await used.fake.forge.pushBranch({ branch: "story/2.1", expected_sha: null, sha: used.fake.control.makeCommit() }, opts()));
+    value(await used.fake.forge.openPr({ branch: "story/2.1", base: "main", title: "t", body: "b" }, opts()));
+    await used.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: dropped }).trees });
+    expect((await used.ledger())?.park).toMatchObject({ kind: "blocked", reason: "graph-invalid" });
+    expect(used.events).toContain("listPrsByBranch");
+
+    const unused = await world();
+    await unused.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: dropped }).trees });
+    expect((await unused.ledger())?.park).toMatchObject({ kind: "awaiting-approval", inbox_owner: "edanisko" });
+  });
+
+  test("a failed branch PR lookup is a failed attempt", async () => {
+    const w = await world();
+    w.fake.control.injectError("listPrsByBranch", { kind: "transient", message: "flaky" });
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: graphFiles({ 1: ["1.1"], 2: [] }) }).trees });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("listPrsByBranch");
+  });
+
+  test.each([
+    ["a conflicting merge", { conflict: ["stories/2.1.md"] }, "conflicts"],
+    ["main not resolving", { main: { ...MAIN_GRAPH, ".xarabot/config.yaml": "schema_version: 1\n" }, merged: MAIN_GRAPH }, "main:"],
+    ["a failed read", { error: "git broke" }, "git broke"],
+  ] as const)("%s is a failed attempt, with no park, comment or enqueue", async (_name, answer, why) => {
+    const w = await world();
+    const out = await w.run({}, { graphTrees: stubGraphTrees(answer).trees });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain(why);
+    expect((await w.ledger())?.attempts).toBe(1);
+    expect(w.fake.control.comments(w.pr)).toEqual([]);
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("a merging takeover skips the graph gate", async () => {
+    const w = await world({ onSleep: mergeAtFirst, record: { state: "merging", generation: 2 } });
+    const record: UnitRecord = { ...w.record, passed_sha: w.head };
+    w.fake.control.writeForeignLedger({ message: "seed passed [skip ci]", writes: tip([record]), deletes: [] });
+    value(await w.fake.forge.enqueue(w.pr, w.head, opts()));
+    const g = stubGraphTrees({ error: "never called" });
+    const out = await w.run({ record }, { graphTrees: g.trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    expect(g.calls).toEqual([]);
   });
 });
 
@@ -685,6 +798,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
   const mergeStep = createMergeStep({
     forge,
     diffPaths: async () => ok(["src/s0/a.ts"]),
+    graphTrees: unchangedGraph(),
     identity: ALICE,
     repo: LANE.repo,
     now,

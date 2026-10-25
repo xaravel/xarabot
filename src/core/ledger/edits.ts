@@ -5,6 +5,8 @@ import { describeIssues, GitHubLogin, IsoDateTime, NonEmpty } from "../schemas/c
 import {
   CoordinatorRecordSchema,
   GitSha,
+  GRAPH_PSEUDO_GLOB,
+  GraphHash,
   LaneIdentity,
   LEDGER_SCHEMA_VERSION,
   ParkReason,
@@ -216,6 +218,7 @@ function fresh(ctx: Ctx, state: UnitState, globs: string[], park: Park | null): 
     reviewed_sha: null,
     passed_sha: null,
     approved_sha: null,
+    approved_graph: null,
     builder_providers: [],
     park,
     attempts: 0,
@@ -308,6 +311,7 @@ export function claim(p: ClaimParams): LedgerEdit {
         reviewed_sha: null,
         passed_sha: null,
         approved_sha: null,
+        approved_graph: null,
       }),
     );
   });
@@ -484,6 +488,7 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
       reviewed_sha: null,
       passed_sha: null,
       approved_sha: null,
+      approved_graph: null,
     };
     const attempts = r.attempts + 1;
     if (attempts >= ATTEMPTS_CAP) {
@@ -519,11 +524,14 @@ export type ParkParams = HeldParams & {
 };
 
 /**
- * `claimed → parked` and, for an approval-gated ejection, `merging → parked`.
- * The record must be held by the writer at `generation`, except a `merging`
- * record held by a coordinator lane: any coordinator-lane writer may park it
- * at its `generation` (as `releaseDisposable` releases one), so a coordinator
- * that moved hosts leaves nothing stuck (AD-6).
+ * `claimed → parked` and, for an approval-gated ejection, `merging → parked`
+ * (`awaiting-approval`; a coordinator-held record may also park `blocked`
+ * `graph-invalid`, Story 2.8). A park from `merging` clears `approved_sha`
+ * and `approved_graph`. The record must be held by the writer at
+ * `generation`, except a `merging` record held by a coordinator lane: any
+ * coordinator-lane writer may park it at its `generation` (as
+ * `releaseDisposable` releases one), so a coordinator that moved hosts
+ * leaves nothing stuck (AD-6).
  */
 export function park(p: ParkParams): LedgerEdit {
   return makeEdit("park", p, (ctx) => {
@@ -546,11 +554,15 @@ export function park(p: ParkParams): LedgerEdit {
     });
     if (!parkValue.ok) return parkValue;
     if (reason.value === "unclaimable") return bad("park: unclaimable is not a reason for parking a claimed unit");
-    const rec = coordinatorMerging(ctx) ? requireCoordinatorMerging(ctx, p.generation) : requireHeld(ctx, p.generation, ["claimed", "merging"]);
+    const coordinator = coordinatorMerging(ctx);
+    const rec = coordinator ? requireCoordinatorMerging(ctx, p.generation) : requireHeld(ctx, p.generation, ["claimed", "merging"]);
     if (!rec.ok) return rec;
     if (rec.value.state === "merging") {
-      if (p.kind !== "awaiting-approval") return pre(`${ctx.unit} is merging; only awaiting-approval parks it`);
-      return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value, approved_sha: null }));
+      const graphInvalid = coordinator && p.kind === "blocked" && reason.value === "graph-invalid";
+      if (p.kind !== "awaiting-approval" && !graphInvalid) {
+        return pre(`${ctx.unit} is merging; only awaiting-approval${coordinator ? " or blocked graph-invalid" : ""} parks it`);
+      }
+      return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value, approved_sha: null, approved_graph: null }));
     }
     return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value }));
   });
@@ -641,13 +653,25 @@ export function finishRecurring(p: HeldParams): LedgerEdit {
 
 // ---------------------------------------------------------------- coordinator
 
-export type TakeApprovedParams = EditBase & { readonly generation: number; readonly approvedSha: string };
+export type TakeApprovedParams = EditBase & {
+  readonly generation: number;
+  readonly approvedSha: string;
+  /** A graph-changing PR's merge-result hash the Maintainer approved (Story 2.8): the record also holds `xarabot:graph`. */
+  readonly approvedGraph?: string | null;
+};
 
-/** `parked → merging`: the coordinator takes an approved PR at `approved_sha`. */
+/**
+ * `parked → merging`: the coordinator takes an approved PR at `approved_sha`.
+ * With `approvedGraph`, the record's `globs` are the park's `globs_held` plus
+ * `xarabot:graph` and `approved_graph` is set; another record holding a glob
+ * that overlaps `xarabot:graph` refuses the take (precondition).
+ */
 export function takeApproved(p: TakeApprovedParams): LedgerEdit {
   return makeEdit("takeApproved", p, (ctx) => {
     const sha = check("takeApproved approvedSha", GitSha, p.approvedSha);
     if (!sha.ok) return sha;
+    const graph = check("takeApproved approvedGraph", GraphHash.nullable(), p.approvedGraph ?? null);
+    if (!graph.ok) return graph;
     const c = requireCoordinator(ctx);
     if (!c.ok) return c;
     const rec = requireRecord(ctx);
@@ -658,13 +682,23 @@ export function takeApproved(p: TakeApprovedParams): LedgerEdit {
     if (!g.ok) return g;
     const parked = rec.value.park;
     if (parked?.kind !== "awaiting-approval") return pre(`${ctx.unit} is not parked awaiting-approval`);
+    let globs = [...parked.globs_held];
+    if (graph.value !== null) {
+      for (const [id, other] of ctx.ledger.units) {
+        if (id === ctx.unit) continue;
+        const held = heldGlobs(other).find((g) => globsOverlap(g, GRAPH_PSEUDO_GLOB));
+        if (held !== undefined) return pre(`takeApproved: ${id} holds "${held}", which overlaps "${GRAPH_PSEUDO_GLOB}"`);
+      }
+      globs = [...new Set([...globs, GRAPH_PSEUDO_GLOB])];
+    }
     return to(
       "merging",
       stamp(ctx, rec.value, {
         state: "merging",
         generation: rec.value.generation + 1,
         approved_sha: sha.value,
-        globs: parked.globs_held,
+        approved_graph: graph.value,
+        globs,
         park: null,
       }),
     );
@@ -684,7 +718,7 @@ export type ApplyRulingParams = EditBase & {
  * `parked → released` under a ruling, by any lane identity: the coordinator's
  * comment rulings (4.6) or the Maintainer's `xarabot rule`. The record must be
  * `parked` at `generation`; `release` and `rebuild` zero the counters, and
- * `rebuild` also clears the providers and the reviewed, passed and approved SHAs.
+ * `rebuild` also clears the providers, the reviewed, passed and approved SHAs and `approved_graph`.
  */
 export function applyRuling(p: ApplyRulingParams): LedgerEdit {
   return makeEdit("applyRuling", p, (ctx) => {
@@ -718,6 +752,7 @@ export function applyRuling(p: ApplyRulingParams): LedgerEdit {
           reviewed_sha: null,
           passed_sha: null,
           approved_sha: null,
+          approved_graph: null,
         }),
       );
     }

@@ -14,6 +14,7 @@ import { createCiStep } from "../lane/ci-step.ts";
 import { claimCoordinatorRecord, runCoordinatorProcess, type CoordinatorDeps } from "../lane/coordinator-process.ts";
 import { createGitCommitter } from "../lane/committer.ts";
 import { createGitDiffPaths } from "../lane/diff-paths.ts";
+import { createGitGraphTrees } from "../lane/graph-trees.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type LaneProcessResult } from "../lane/lane-process.ts";
 import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
@@ -290,10 +291,11 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
 
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
   const fetch = connection.fetchShas(runnerGit);
+  const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
   if (claimed !== null) {
     // Story 2.5 wires the reconcile step and Story 2.7 the planning step; retro and retro-item units end idle, unclaimed, until their Stories.
     const waiter = createSleepWaiter({ store });
-    const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo });
+    const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
     const planning = createPlanningStep({
       forge,
       agent,
@@ -305,6 +307,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       lane,
       committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
       diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+      graphTrees,
       identity,
       secrets: [credential.value],
     });
@@ -326,7 +329,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       secrets: [credential.value],
     }),
     ciStep: createCiStep({ forge, merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo }),
-    mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), identity, repo: lane.repo }),
+    mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), graphTrees, identity, repo: lane.repo }),
     laneDir,
     identity,
     lane,

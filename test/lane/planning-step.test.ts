@@ -28,6 +28,7 @@ import { newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.t
 import type { WaitEnd, WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
+import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -243,6 +244,7 @@ function harness(o: HarnessOpts = {}): Harness {
       diffs.push(r);
       return ok(o.diff ?? [STATUS]);
     },
+    graphTrees: unchangedGraph(),
     identity: COORD,
     secrets: ["sekrit-credential"],
     now: () => t,
@@ -496,6 +498,79 @@ describe("createPlanningStep: done", () => {
     expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
     expect((await h.ledger()).get("planning:graph.1")?.park).toMatchObject({ kind: "awaiting-approval", globs_held: [] });
     expect(h.fake.control.queue()).toEqual([]);
+  });
+
+  describe("the graph-change gate (Story 2.8)", () => {
+    const MAIN_GRAPH = graphFiles({ 1: ["1.1"], 2: ["2.1"] });
+    const ADDED = graphFiles({ 1: ["1.1"], 2: ["2.1", "2.2"] });
+    const graphRun = (answer: Parameters<typeof stubGraphTrees>[0]) => {
+      const diff = [EPICS, "stories/2.2.md"];
+      const h = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("done", "Add the Story 2.2 manifest"))], diff });
+      const g = stubGraphTrees(answer);
+      return { h, g, diff, out: h.run("planning:graph.1", {}, { graphTrees: g.trees }) };
+    };
+
+    test("AC: a changed graph parks awaiting-approval for the Maintainer, the comment carrying the delta, then the gated paths; never queued", async () => {
+      const { h, g, diff, out } = graphRun({ main: MAIN_GRAPH, merged: ADDED });
+      expect([(await out).outcome, (await out).state]).toEqual(["progress", "parked"]);
+      const pr = (await prOnBranch(h, "xarabot/planning-graph.1"))?.number as number;
+      expect((await h.ledger()).get("planning:graph.1")).toMatchObject({ state: "parked", park: { kind: "awaiting-approval", inbox_owner: "edanisko", globs_held: diff } });
+      const comments = h.fake.control.comments(pr);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]).toStartWith("🤖 Unit planning:graph.1: this PR's merge with `main` changes the Epic graph");
+      expect(comments[0]).toContain("- Stories added: Epic 2: +2.2");
+      expect((comments[0] as string).indexOf("merge result's graph hash is")).toBeLessThan((comments[0] as string).indexOf("stories/2.2.md"));
+      expect(h.fake.control.queue()).toEqual([]);
+      expect(g.calls.map((c) => c.headSha)).toEqual([h.head]);
+    });
+
+    test("an unchanged graph parks as today, for the writer, with the gate comment", async () => {
+      const { h, out } = graphRun({ main: MAIN_GRAPH, merged: MAIN_GRAPH });
+      expect((await out).state).toBe("parked");
+      const record = (await h.ledger()).get("planning:graph.1");
+      expect(record?.park).toMatchObject({ kind: "awaiting-approval", inbox_owner: COORD.owner });
+      const pr = record?.pr as number;
+      expect(h.fake.control.comments(pr)[0]).toStartWith("🤖 Unit planning:graph.1: this PR changes paths that need the owner's approval:");
+    });
+
+    test("AC: a merge result that fails validation parks blocked graph-invalid with a comment naming it; nothing is enqueued", async () => {
+      const cycle = { ...ADDED, ".xarabot/epics.yaml": "version: 1\nepics:\n  1: {depends_on: [2]}\n" };
+      const { h, out } = graphRun({ main: MAIN_GRAPH, merged: cycle });
+      const o = await out;
+      expect([o.outcome, o.state]).toEqual(["progress", "parked"]);
+      const record = (await h.ledger()).get("planning:graph.1");
+      expect(record?.park).toMatchObject({ kind: "blocked", reason: "graph-invalid" });
+      const [comment] = h.fake.control.comments(record?.pr as number);
+      expect(comment).toContain("graph-invalid");
+      expect(comment).toContain("cycle");
+      expect(h.fake.control.queue()).toEqual([]);
+      expect(h.diffs).toEqual([]);
+    });
+
+    test("a used Story dropped parks graph-invalid", async () => {
+      const used = { ...MAIN_GRAPH, [GRAPH_STATUS]: "development_status:\n  2-1-s: in-progress\n" };
+      const { h, out } = graphRun({ main: used, merged: { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string } });
+      expect((await out).reason).toContain("Story 2.1 is removed, but it is used");
+      expect((await h.ledger()).get("planning:graph.1")?.park).toMatchObject({ kind: "blocked", reason: "graph-invalid" });
+    });
+
+    test.each([
+      ["a conflicting merge", { conflict: [EPICS] }],
+      ["main not resolving", { main: { ...MAIN_GRAPH, ".xarabot/config.yaml": "x: [" }, merged: MAIN_GRAPH }],
+    ] as const)("%s is a failed attempt", async (_name, answer) => {
+      const { h, out } = graphRun(answer);
+      expect([(await out).outcome, (await out).state]).toEqual(["failed", "released"]);
+      expect((await h.ledger()).get("planning:graph.1")?.attempts).toBe(1);
+      expect(h.fake.control.queue()).toEqual([]);
+    });
+
+    test("a status unit skips the gate", async () => {
+      const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))] });
+      const g = stubGraphTrees({ error: "never called" });
+      const out = await h.run("planning:status.1", {}, { graphTrees: g.trees });
+      expect(out.state).toBe("merging");
+      expect(g.calls).toEqual([]);
+    });
   });
 
   test("a status PR policy gates (owner_approval_paths) parks awaiting-approval with the comment", async () => {

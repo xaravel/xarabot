@@ -20,9 +20,12 @@ import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
-import { unitKind, type LaneIdentity, type ParkReason } from "../core/schemas/ledger.ts";
+import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity, type ParkReason } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
+import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
+import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
@@ -62,6 +65,21 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
  * conflicting enqueue parks it again in the same run, or for a disposable
  * `reconcile` PR closes the PR and releases the record.
  *
+ * The graph-change gate (Story 2.8) runs on each approved PR but a
+ * `reconcile` one, before the take, on its merge with fresh `main`. An
+ * unchanged graph keeps the owner's rule. A changed one is taken only on the
+ * Maintainer's standing approval of the head (an owner who is not the
+ * Maintainer never suffices: with only the owner's approval standing, it is
+ * taken and parked again for the Maintainer with the delta), holding
+ * `xarabot:graph` with `approved_graph` set to the merge result's hash; another record holding an overlapping
+ * glob refuses the take, and the PR waits. A refused merge result is taken
+ * and parked `blocked` `graph-invalid`; a conflicting merge is taken and
+ * parked again (`conflict`); a `main` that does not resolve, or a failed
+ * read, skips the take. After the fence, a record with `approved_graph`
+ * re-reads fresh `main`: when it moved, the gate runs again, and a refusal
+ * parks `blocked` `graph-invalid`, a different hash voids the approval (parked
+ * again for the Maintainer, with the new delta), and an equal hash enqueues.
+ *
  * With no status change, no `sprint-status.yaml`, or another `reconcile` PR
  * open that the ledger work did not close or settle, the run finishes `merged` with no PR and the older `merged`
  * `reconcile` records are deleted. Otherwise it commits the edited file onto
@@ -76,6 +94,8 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
 export type ReconcileStepDeps = {
   readonly forge: Forge;
   readonly committer: ReconcileCommitter;
+  /** `main`'s tree and a PR's merge tree, for the graph-change gate. */
+  readonly graphTrees: GraphTrees;
   /** Who writes the ledger records: the coordinator lane. */
   readonly identity: LaneIdentity;
   /** The repo slug, for the Standing Authority check. */
@@ -335,7 +355,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * `coordinator`, so only a later review re-takes it), then a best-effort
      * 🤖 comment on its PR chosen by `cause` (`null`: no comment).
      */
-    const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null): Promise<void> => {
+    const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null, over: { readonly inboxOwner: string; readonly body: string } | null = null): Promise<void> => {
+      // Only the Maintainer's approval re-takes a record holding `xarabot:graph`, so it lands in the Maintainer's inbox.
+      const inbox = over?.inboxOwner ?? (t.globs.includes(GRAPH_PSEUDO_GLOB) ? snapshot.config.maintainer : t.pr_owner);
       const parked = await item(
         `park ${t.unit}`,
         park({
@@ -344,14 +366,15 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           now: forgeNow(),
           generation: t.generation,
           kind: "awaiting-approval",
-          diffPaths: t.globs,
-          ...(t.pr_owner !== null ? { inboxOwner: t.pr_owner } : {}),
+          diffPaths: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
+          ...(inbox !== null ? { inboxOwner: inbox } : {}),
         }),
       );
       if (!parked) return;
       reasons.push(`${t.unit}: PR #${t.pr} ${why}: parked awaiting approval again`);
-      if (cause === null) return;
-      const posted = await call("comment", (o) => forge.comment(t.pr, reparkComment(t.unit, cause), o));
+      const body = over?.body ?? (cause === null ? null : reparkComment(t.unit, cause));
+      if (body === null) return;
+      const posted = await call("comment", (o) => forge.comment(t.pr, body, o));
       if (!posted.ok) {
         reasons.push(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
         note(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
@@ -387,24 +410,137 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       await repark(t, "is not in the merge queue", "not-queued");
     };
 
+    /** A taken record parked `blocked` `graph-invalid` (from `merging`), then a best-effort 🤖 comment naming the refusals. */
+    const blockGraph = async (t: GatedTarget, refusals: readonly string[]): Promise<void> => {
+      const parked = await item(
+        `park ${t.unit}`,
+        park({
+          unit: t.unit,
+          by: identity,
+          now: forgeNow(),
+          generation: t.generation,
+          kind: "blocked",
+          reason: "graph-invalid",
+          ...(t.pr_owner !== null ? { inboxOwner: t.pr_owner } : {}),
+        }),
+      );
+      if (!parked) return;
+      reasons.push(`${t.unit}: PR #${t.pr} graph-invalid: ${refusals.join("; ")}`);
+      const posted = await call("comment", (o) => forge.comment(t.pr, graphRefusalComment(`Unit ${t.unit}`, refusals), o));
+      if (!posted.ok) {
+        reasons.push(`${t.unit}: graph refusal comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
+        note(`${t.unit}: graph refusal comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
+      }
+    };
+
+    /** The graph gate on `t`'s merge with `snap`'s `main`. */
+    const runGate = (t: ApprovalTarget, snap: ForgeSnapshot): Promise<GraphGateOutcome> =>
+      gateGraph(deps.graphTrees, {
+        headSha: t.head_sha,
+        mainSha: snap.main.sha,
+        ledgerFiles: snap.ledger.files,
+        signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+        listPrsByBranch: (branch) => call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o)),
+      });
+
+    /** What happens after the take: enqueue (`null`), park `blocked` `graph-invalid`, or park again (`conflict`). */
+    type AfterTake =
+      | { readonly kind: "refuse"; readonly refusals: readonly string[] }
+      | { readonly kind: "conflict"; readonly paths: readonly string[] }
+      /** The graph changes and only the owner approved: parked again for the Maintainer, with the delta. */
+      | { readonly kind: "maintainer"; readonly maintainer: string; readonly delta: GraphDelta; readonly hash: string }
+      | null;
+
     /**
-     * Takes one approved PR: `takeApproved` at its head, a fence on the taken
-     * record (`passed_sha` = head), then the enqueue, each retry fenced again.
-     * A conflict parks it again (a `reconcile` PR is closed and released
-     * instead); any other failure leaves it `merging` for the next run.
+     * The `approved_graph` re-check after the fence: fresh `main` re-read;
+     * when it moved from the `main` the gate ran on, the gate runs again. `true` enqueues;
+     * `false` means the record was parked or left `merging` for the next run.
      */
-    const take = async (t: ApprovalTarget, approver: string, settled: Set<string>): Promise<void> => {
+    const recheckGraph = async (t: ApprovalTarget, taken: GatedTarget, approved: { readonly hash: string; readonly mainSha: string }): Promise<boolean> => {
+      const f = await freshMain();
+      if (!f.ok) {
+        reasons.push(`${t.unit}: snapshot ${describeError(f.error)} before the enqueue; PR #${t.pr} not enqueued, left merging for the next run's queue check`);
+        note(`${t.unit}: graph re-check snapshot failed: ${describeError(f.error)}`);
+        return false;
+      }
+      const { snap, config } = f.value;
+      if (snap.main.sha === approved.mainSha) return true;
+      note(`${t.unit}: main moved from ${approved.mainSha} to ${snap.main.sha} after the take: the graph gate runs again`);
+      const g = await runGate(t, snap);
+      aborted();
+      switch (g.kind) {
+        case "error":
+          reasons.push(`${t.unit}: graph gate ${g.message}; PR #${t.pr} not enqueued, left merging for the next run's queue check`);
+          note(`${t.unit}: graph re-check failed: ${g.message}`);
+          return false;
+        case "conflict":
+          await repark(taken, `conflicts with main ${snap.main.sha}: ${g.paths.join(", ")}`, "conflict");
+          return false;
+        case "refuse":
+          await blockGraph(taken, g.refusals);
+          return false;
+        case "pass":
+        case "change": {
+          const hash = g.kind === "pass" ? g.hash : g.mergedHash;
+          if (hash === approved.hash) return true;
+          const maintainer = config.repo.config.maintainer;
+          await repark(taken, `merge result's graph is now ${hash}, not the approved ${approved.hash}: the approval is void`, null, {
+            inboxOwner: maintainer,
+            body: graphDeltaComment(`Unit ${t.unit}`, { delta: g.delta, maintainer, voided: true }),
+          });
+          return false;
+        }
+      }
+    };
+
+    /**
+     * Takes one approved PR: `takeApproved` at its head (with `approvedGraph`
+     * for a graph change), a fence on the taken record (`passed_sha` = head),
+     * the `approved_graph` re-check, then the enqueue, each retry fenced
+     * again. A conflict parks it again (a `reconcile` PR is closed and
+     * released instead); any other failure leaves it `merging` for the next
+     * run. With `after`, the taken record is parked at once instead.
+     */
+    const take = async (
+      t: ApprovalTarget,
+      approver: string,
+      settled: Set<string>,
+      graph: { readonly hash: string; readonly mainSha: string } | null = null,
+      after: AfterTake = null,
+    ): Promise<void> => {
       const head = t.head_sha;
       const pr = t.pr;
-      const taken = await item(`takeApproved ${t.unit}`, takeApproved({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation, approvedSha: head }));
+      const taken = await item(
+        `takeApproved ${t.unit}`,
+        takeApproved({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation, approvedSha: head, ...(graph !== null ? { approvedGraph: graph.hash } : {}) }),
+      );
       if (!taken) return;
       const generation2 = t.generation + 1;
+      const takenTarget: GatedTarget = {
+        unit: t.unit,
+        generation: generation2,
+        pr,
+        pr_owner: t.pr_owner,
+        head_sha: head,
+        approved_sha: head,
+        globs: graph !== null ? [...new Set([...t.globs, GRAPH_PSEUDO_GLOB])] : t.globs,
+      };
       const fence = (set?: HeartbeatSet): Promise<boolean> =>
         item(`heartbeat ${t.unit}`, heartbeat({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2, ...(set !== undefined ? { set } : {}) }));
       if (!(await fence({ passed_sha: head }))) {
         note(`${t.unit}: the fence on the taken record was refused; PR #${pr} not enqueued, left for the queue check`);
         return;
       }
+      // The fenced `passed_sha` makes a re-park need an approval submitted after it, as an enqueue conflict's does.
+      if (after?.kind === "refuse") return await blockGraph(takenTarget, after.refusals);
+      if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict");
+      if (after?.kind === "maintainer") {
+        return await repark(takenTarget, `changes the Epic graph to ${after.hash}: only the Maintainer's (${after.maintainer}) approval counts`, null, {
+          inboxOwner: after.maintainer,
+          body: graphDeltaComment(`Unit ${t.unit}`, { delta: after.delta, maintainer: after.maintainer }),
+        });
+      }
+      if (graph !== null && !(await recheckGraph(t, takenTarget, graph))) return;
       for (let n = 0; ; n += 1) {
         aborted();
         if (n > 0 && !(await fence())) return;
@@ -424,8 +560,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
             if (released) reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}: closed, released`);
             return;
           }
-          const gated: GatedTarget = { unit: t.unit, generation: generation2, pr, pr_owner: t.pr_owner, head_sha: head, approved_sha: head, globs: t.globs };
-          return await repark(gated, `enqueue ${describeError(r.error)}`, "conflict");
+          return await repark(takenTarget, `enqueue ${describeError(r.error)}`, "conflict");
         }
         if (!isBackoffKind(r.error.kind) || n + 1 >= ENQUEUE_TRIES) {
           reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}; left merging for the next run's queue check`);
@@ -446,7 +581,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * another head is skipped.
      */
     const takeApprovedWork = async (targets: readonly ApprovalTarget[], settled: Set<string>): Promise<void> => {
-      let fresh: ForgeSnapshot | null = null;
+      let fresh: { readonly snap: ForgeSnapshot; readonly config: RepoConfig } | null = null;
       for (const t of targets) {
         aborted();
         const listed = await call("reviews", (o) => forge.reviews(t.pr, o));
@@ -455,9 +590,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           note(`${t.unit}: reviews PR #${t.pr} failed: ${describeError(listed.error)}`);
           continue;
         }
-        const approval = standingApproval(listed.value, { owner: t.pr_owner, head: t.head_sha, parkedAt: t.parked_at });
-        if (approval === null) {
-          note(`${t.unit}: no standing approval of ${t.head_sha} on PR #${t.pr}${t.parked_at !== null ? ` since ${t.parked_at}` : ""}`);
+        const since = t.parked_at !== null ? ` since ${t.parked_at}` : "";
+        const query = (owner: string) => standingApproval(listed.value, { owner, head: t.head_sha, parkedAt: t.parked_at });
+        const ownerApproval = query(t.pr_owner);
+        // The round's Maintainer, to tell whether fresh main is worth reading; the gate uses fresh main's.
+        const anyApproval = ownerApproval ?? query(fresh?.config.repo.config.maintainer ?? snapshot.config.maintainer);
+        if (anyApproval === null) {
+          note(`${t.unit}: no standing approval of ${t.head_sha} on PR #${t.pr}${since}`);
           continue;
         }
         if (fresh === null) {
@@ -467,16 +606,63 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
             note(`snapshot failed: ${describeError(f.error)}; no approved PR taken this run`);
             return;
           }
-          fresh = f.value.snap;
+          fresh = f.value;
         }
-        const now = fresh.prs[t.unit];
+        const snap = fresh.snap;
+        const now = snap.prs[t.unit];
         if (now?.state !== "open" || now.head_sha !== t.head_sha) {
           const where = now === undefined ? "unknown" : now.state !== "open" ? now.state : `at ${now.head_sha}`;
           reasons.push(`${t.unit}: PR #${t.pr} is ${where} on fresh main, not open at ${t.head_sha}; not taken`);
           note(`${t.unit}: PR #${t.pr} is ${where} on fresh main; not taken`);
           continue;
         }
-        await take(t, approval.author ?? t.pr_owner, settled);
+
+        // A reconcile PR holds only runner-written status entries: no graph input, so no graph gate.
+        if (unitKind(t.unit) === "reconcile") {
+          if (ownerApproval === null) {
+            note(`${t.unit}: no standing approval of ${t.head_sha} on PR #${t.pr} from its owner${since}`);
+            continue;
+          }
+          await take(t, ownerApproval.author ?? t.pr_owner, settled);
+          continue;
+        }
+
+        const g = await runGate(t, snap);
+        aborted();
+        const approver = anyApproval.author ?? t.pr_owner;
+        switch (g.kind) {
+          case "error":
+            reasons.push(`${t.unit}: graph gate ${g.message}; not taken`);
+            note(`${t.unit}: graph gate failed: ${g.message}; not taken`);
+            continue;
+          case "conflict":
+            note(`${t.unit}: graph gate: the merge with main ${snap.main.sha} conflicts: ${g.paths.join(", ")}`);
+            await take(t, approver, settled, null, { kind: "conflict", paths: g.paths });
+            continue;
+          case "refuse":
+            note(`${t.unit}: graph gate refused: ${g.refusals.join("; ")}`);
+            await take(t, approver, settled, null, { kind: "refuse", refusals: g.refusals });
+            continue;
+          case "pass":
+            if (ownerApproval === null) {
+              note(`${t.unit}: no standing approval of ${t.head_sha} on PR #${t.pr} from its owner${since}`);
+              continue;
+            }
+            await take(t, ownerApproval.author ?? t.pr_owner, settled);
+            continue;
+          case "change": {
+            const maintainer = fresh.config.repo.config.maintainer;
+            const approval = query(maintainer);
+            if (approval === null) {
+              // Only the owner's approval stands: parked again in the Maintainer's inbox, with the delta.
+              note(`${t.unit}: the graph changes; no standing approval from the Maintainer ${maintainer}${since}; parked again for the Maintainer`);
+              await take(t, approver, settled, null, { kind: "maintainer", maintainer, delta: g.delta, hash: g.mergedHash });
+              continue;
+            }
+            await take(t, approval.author ?? maintainer, settled, { hash: g.mergedHash, mainSha: snap.main.sha });
+            continue;
+          }
+        }
       }
     };
 
