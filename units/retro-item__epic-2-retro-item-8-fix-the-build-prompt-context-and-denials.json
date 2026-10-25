@@ -1,17 +1,17 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-8-fix-the-build-prompt-context-and-denials",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 3,
   "globs": [
     "src/core/prompt/build-prompt.ts",
     "src/core/prompt/template.ts",
     "test/core/prompt/build-prompt.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T20:53:17.437Z",
+  "heartbeat_at": "2026-10-25T20:56:15Z",
   "pr": 121,
   "pr_owner": "edanisko",
   "base_sha": "6f621397ffedf22dea7e3431d4a44f3b05dfedfc",
