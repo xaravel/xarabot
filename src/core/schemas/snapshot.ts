@@ -110,6 +110,11 @@ export const SnapshotSchema = z.strictObject({
   epic_context: z.record(EpicKey, EpicContextState),
   /** Each graph Epic: whether a `main` path matches `live_evidence_glob` with `<N>` set to it (Story 2.9). */
   live_evidence: z.record(EpicKey, z.boolean()),
+  /**
+   * Each graph Epic whose live evidence file is on `main` and was read: the
+   * first matching path in path order, and its text (retro item 14).
+   */
+  live_evidence_file: z.record(EpicKey, z.strictObject({ path: NonEmpty, text: z.string() })),
   prs: z.record(UnitId, PrStateSchema),
   lane: LaneIdentity,
   role: LaneRole,

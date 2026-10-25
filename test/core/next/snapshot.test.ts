@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { assembleSnapshot, epicContextState } from "../../../src/core/next/snapshot.ts";
+import { assembleSnapshot, epicContextState, liveEvidenceGaps, liveEvidencePath } from "../../../src/core/next/snapshot.ts";
 import { SnapshotSchema } from "../../../src/core/schemas/snapshot.ts";
 import { tip } from "../ledger/fixtures.ts";
 import {
   CONFIG_PATH,
   contextPath,
+  evidencePath,
   input,
   LEDGER_SHA,
   MAIN_SHA,
@@ -49,7 +50,7 @@ describe("assembleSnapshot: fields", () => {
     expect(Object.keys(s).sort()).toEqual(
       [
         "now", "main_sha", "ledger", "config", "policy", "standing_authority", "manifests", "graph",
-        "sprint_status", "retro_gates", "escalations", "epic_context", "live_evidence", "prs", "lane", "role",
+        "sprint_status", "retro_gates", "escalations", "epic_context", "live_evidence", "live_evidence_file", "prs", "lane", "role",
       ].sort(),
     );
     expect(s.main_sha).toBe(MAIN_SHA);
@@ -68,6 +69,7 @@ describe("assembleSnapshot: fields", () => {
     expect(s.escalations).toEqual({ open: ["2.2"] });
     expect(s.epic_context).toEqual({ 1: "valid", 2: "valid" });
     expect(s.live_evidence).toEqual({ 1: false, 2: false });
+    expect(s.live_evidence_file).toEqual({});
     expect(s.role).toBe("builder");
     expect(SnapshotSchema.safeParse(s).success).toBe(true);
   });
@@ -79,6 +81,24 @@ describe("assembleSnapshot: fields", () => {
     ["a configured glob with a wildcard", { liveEvidenceGlob: "ev/epic-<N>-run-*.md", files: { "ev/epic-3-run-1.md": "x\n" } }, { 1: false, 2: false, 3: true }],
   ] as const)("live_evidence: %s", (_name, over, want) => {
     expect(snapshotOf({ epics: { 1: [], 2: [], 3: [] }, ...over }).live_evidence).toEqual(want);
+  });
+
+  test("live_evidence_file: the read text of each Epic's first matching path", () => {
+    const s = snapshotOf({
+      epics: { 1: [], 2: [], 3: [] },
+      liveEvidenceGlob: "ev/epic-<N>*.md",
+      files: { "ev/epic-2-b.md": "b\n", "ev/epic-2-a.md": "a\n", "ev/epic-3.md": "three\n" },
+    });
+    expect(s.live_evidence_file).toEqual({ 2: { path: "ev/epic-2-a.md", text: "a\n" }, 3: { path: "ev/epic-3.md", text: "three\n" } });
+    expect(liveEvidencePath("ev/epic-<N>*.md", 2, ["ev/epic-2-b.md", "ev/epic-2-a.md"])).toBe("ev/epic-2-a.md");
+    expect(liveEvidencePath("ev/epic-<N>*.md", 4, ["ev/epic-2-b.md"])).toBeNull();
+  });
+
+  test("live_evidence_file: an evidence file listed but not read is left out when its Epic has no checks", () => {
+    const i = input({ epics: { 1: [], 2: [] }, evidence: [2], liveEvidenceChecks: { 1: ["bun test"] } });
+    const r = assembleSnapshot({ ...i, files: Object.fromEntries(Object.entries(i.files).filter(([p]) => p !== evidencePath(2))) });
+    if (!r.ok) throw new Error(r.error.message);
+    expect([r.value.live_evidence, r.value.live_evidence_file]).toEqual([{ 1: false, 2: true }, {}]);
   });
 
   test("absent sprint-status.yaml reads as empty", () => {
@@ -154,6 +174,12 @@ describe("assembleSnapshot: errors", () => {
       kind: "unreadable",
       tweak: (i) => ({ ...i, files: Object.fromEntries(Object.entries(i.files).filter(([p]) => p !== contextPath(2))) }),
     },
+    {
+      name: "evidence listed but not read, its Epic with checks",
+      world: { ...BASE, evidence: [2], liveEvidenceChecks: { 2: ["bun test"] } },
+      kind: "unreadable",
+      tweak: (i) => ({ ...i, files: Object.fromEntries(Object.entries(i.files).filter(([p]) => p !== evidencePath(2))) }),
+    },
     { name: "bad main SHA", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, main_sha: "abc" }) },
     { name: "bad PR entry", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, prs: { "story:2.1": { number: 0, state: "open", head_sha: MAIN_SHA } } }) },
     {
@@ -184,5 +210,33 @@ describe("assembleSnapshot: errors", () => {
   test("a valid ledger with records parses", () => {
     const r = assembleSnapshot({ ...input(BASE), ledger_files: tip([storyRec("2.1")]) });
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("liveEvidenceGaps (retro item 14)", () => {
+  const A = "XARABOT_LIVE=1 bun test test/e2e/claims-race.test.ts";
+  const B = "XARABOT_LIVE=1 bun test test/contracts/";
+  const row = (cmd: string, result: string) => `| \`${cmd}\` | ${result} | 12 s |`;
+  const table = (...rows: string[]) => ["| Command | Result | Time |", "|---|---|---|", ...rows, ""].join("\n");
+
+  test.each([
+    ["each command in a table row with 0 fail", table(row(A, "20 pass, 0 skip, 0 fail"), row(B, "107 pass, 72 skip, 0 fail")), [], []],
+    ["one command missing", table(row(A, "20 pass, 0 skip, 0 fail")), [B], []],
+    ["one command with failures", table(row(A, "20 pass, 0 skip, 0 fail"), row(B, "116 pass, 43 skip, 20 fail")), [], [B]],
+    ["no file text", "", [A, B], []],
+    ["a transcript: prompt, output, then bun's summary lines", `$ ${A}\n\n 20 pass\n 0 skip\n 0 fail\nRan 20 tests across 1 file.\n\n\`${B}\`:\n 3 pass\n 0 fail\n`, [], []],
+    ["CRLF line ends", `${A}\r\n 20 pass\r\n 0 fail\r\n${B}\r\n 1 pass\r\n 0 fail\r\n`, [], []],
+    ["a failed run kept on the record, then the re-run that passed", table(row(B, "116 pass, 20 fail"), row(A, "20 pass, 0 fail"), row(B, "107 pass, 0 fail")), [], []],
+    ["a command with no summary does not borrow the next command's", table(row(B, "not run"), row(A, "20 pass, 0 fail")), [], [B]],
+    ["no summary at all", table(row(A, "pending"), row(B, "pending")), [], [A, B]],
+    ["inside a longer command (another variable) is not the command", table(row(B.replace("XARABOT_LIVE=1 ", "XARABOT_LIVE=1 X=y "), "1 pass, 0 fail"), row(A, "0 fail")), [B], []],
+    ["with extra arguments is not the command", table(row(`${B}agent.test.ts`, "1 pass, 0 fail"), row(A, "0 fail")), [B], []],
+    ["a word-bounded count: 10 fail is not 0 fail", table(row(A, "10 fail"), row(B, "0 failed, 2 fail")), [], [A, B]],
+  ] as const)("%s", (_name, text, missing, failing) => {
+    expect(liveEvidenceGaps(text, [A, B])).toEqual({ missing: [...missing], failing: [...failing] });
+  });
+
+  test("no commands: no gaps", () => {
+    expect(liveEvidenceGaps("anything", [])).toEqual({ missing: [], failing: [] });
   });
 });

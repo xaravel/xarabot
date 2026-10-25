@@ -62,6 +62,8 @@ export type World = {
   readonly liveEvidenceGlob?: string;
   /** Epics whose default live evidence file (`docs/maintainer/evidence/epic-<N>.md`) is on `main`. */
   readonly evidence?: readonly number[];
+  /** Config `live_evidence_checks`: Epic → commands; default none. */
+  readonly liveEvidenceChecks?: Record<number, readonly string[]>;
 };
 
 export const evidencePath = (n: number) => `docs/maintainer/evidence/epic-${n}.md`;
@@ -96,6 +98,9 @@ function config(w: World): string {
     `bootstrapped_epics: [${(w.bootstrapped ?? []).join(", ")}]`,
     ...(w.digestTime === undefined ? [] : [`digest_time: "${w.digestTime}"`]),
     ...(w.liveEvidenceGlob === undefined ? [] : [`live_evidence_glob: "${w.liveEvidenceGlob}"`]),
+    ...(w.liveEvidenceChecks === undefined
+      ? []
+      : ["live_evidence_checks:", ...Object.entries(w.liveEvidenceChecks).map(([n, cs]) => `  "${n}": [${cs.map((c) => JSON.stringify(c)).join(", ")}]`)]),
     "manifests:",
     "  dir: stories",
   ];

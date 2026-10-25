@@ -780,10 +780,76 @@ describe("next(coordinator): retro (Story 2.9)", () => {
   test("retroCandidates and retroDue", () => {
     const s = snapshotOf(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" }, evidence: [3] }));
     expect(retroCandidates(s)).toEqual([
-      { epic: 2, evidence: "docs/maintainer/evidence/epic-2.md", evidenceOnMain: false },
-      { epic: 3, evidence: "docs/maintainer/evidence/epic-3.md", evidenceOnMain: true },
+      { epic: 2, evidence: "docs/maintainer/evidence/epic-2.md", evidenceOnMain: false, missingChecks: [], failingChecks: [] },
+      { epic: 3, evidence: "docs/maintainer/evidence/epic-3.md", evidenceOnMain: true, missingChecks: [], failingChecks: [] },
     ]);
     expect([retroDue(s, 2), retroDue(s, 3), retroDue(s, 1)]).toEqual([false, true, false]);
+  });
+
+  describe("live_evidence_checks (retro item 14)", () => {
+    const A = "XARABOT_LIVE=1 bun test test/e2e/claims-race.test.ts";
+    const B = "XARABOT_LIVE=1 bun test test/contracts/";
+    const EVIDENCE = "docs/maintainer/evidence/epic-2.md";
+    const row = (cmd: string, result: string) => `| \`${cmd}\` | ${result} | 12 s |`;
+    const evidence = (...rows: string[]) => ({ [EVIDENCE]: ["# Epic 2 live evidence", "", "| Command | Result | Time |", "|---|---|---|", ...rows, ""].join("\n") });
+    const BOTH_PASS = evidence(row(A, "20 pass, 0 skip, 0 fail"), row(B, "107 pass, 72 skip, 0 fail"));
+    const CHECKED: Partial<World> = { ...DUE, liveEvidenceChecks: { 2: [A, B] } };
+
+    test("all present with 0 fail: due, and why says so", () => {
+      const o = pick({ ...CHECKED, files: BOTH_PASS });
+      expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.why] : null).toEqual([
+        "retro:2",
+        `retro:2 is due: Epic 2's Stories are all done, its retro is not recorded and ${EVIDENCE} is on main with each required live result`,
+      ]);
+    });
+
+    test("one missing: idle waiting-on-maintainer, naming the command", () => {
+      const o = pick({ ...CHECKED, files: evidence(row(A, "20 pass, 0 skip, 0 fail")) });
+      expect(picked(o)).toBe("idle");
+      expect(reasonOf(o).startsWith(`${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file ${EVIDENCE} on main to hold each required live result: missing \`${B}\`;`)).toBe(true);
+      expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence"]);
+    });
+
+    test("one with failures: idle waiting-on-maintainer, naming the command", () => {
+      const o = pick({ ...CHECKED, files: evidence(row(A, "20 pass, 0 skip, 0 fail"), row(B, "116 pass, 43 skip, 20 fail")) });
+      expect(picked(o)).toBe("idle");
+      expect(reasonOf(o)).toStartWith(`${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file ${EVIDENCE} on main to hold each required live result: no '0 fail' summary after \`${B}\`;`);
+    });
+
+    test("one missing and one failing: both named", () => {
+      const o = pick({ ...CHECKED, files: evidence(row(B, "1 fail")) });
+      expect(reasonOf(o)).toContain(`required live result: missing \`${A}\`; no '0 fail' summary after \`${B}\``);
+    });
+
+    test("none listed for the Epic: existence alone is enough, as before", () => {
+      const o = pick({ ...DUE, liveEvidenceChecks: { 3: [A] } });
+      expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.why] : null).toEqual([
+        "retro:2",
+        `retro:2 is due: Epic 2's Stories are all done, its retro is not recorded and ${EVIDENCE} is on main`,
+      ]);
+    });
+
+    test("listed but the file absent: waits for the file, as before", () => {
+      const o = pick({ status: DONE, liveEvidenceChecks: { 2: [A] } });
+      expect(reasonOf(o)).toStartWith(`${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file ${EVIDENCE} on main;`);
+    });
+
+    test("a wildcard glob names the matched file", () => {
+      const o = pick({ status: DONE, liveEvidenceGlob: "ev/e<N>-*.md", liveEvidenceChecks: { 2: [A] }, files: { "ev/e2-run.md": "nothing yet\n" } });
+      expect(reasonOf(o)).toContain(`the live evidence file ev/e2-run.md on main to hold each required live result: missing \`${A}\``);
+    });
+
+    test("an Epic lacking a result passes to the next one", () => {
+      const w = { epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" }, evidence: [2, 3], liveEvidenceChecks: { 2: [A] } };
+      expect(picked(pick(w))).toBe("unit retro:3");
+    });
+
+    test("retroCandidates carries the gaps; retroDue needs none", () => {
+      const s = snapshotOf(world({ ...CHECKED, files: evidence(row(B, "3 fail")) }));
+      expect(retroCandidates(s)).toEqual([{ epic: 2, evidence: EVIDENCE, evidenceOnMain: true, missingChecks: [A], failingChecks: [B] }]);
+      expect(retroDue(s, 2)).toBe(false);
+      expect(retroDue(snapshotOf(world({ ...CHECKED, files: BOTH_PASS })), 2)).toBe(true);
+    });
   });
 
   test("retro:<N> is done on main once retro-gates records its verdict", () => {
