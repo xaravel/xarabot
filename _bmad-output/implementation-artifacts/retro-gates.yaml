@@ -15,7 +15,7 @@ epics:
         route: maintainer
         blocking: true
         globs: []
-        status: open
+        status: done
       - id: "epic-2-retro-item-2-bind-the-retro-result-to-its-validated-head"
         text: "Bind a retro's result to the commit it was validated at: re-run checkRetroDiff (or fail) when an adopted retro PR's head moved, and have reconcile write retro_result only when the merged head is the validated head; add moved-head tests (C1, A2)"
         route: lane
@@ -41,11 +41,11 @@ epics:
         globs: ["src/lane/ledger-cas.ts", "src/lane/session.ts", "src/lane/lane-process.ts", "src/lane/coordinator-process.ts", "src/core/ledger/**", "test/lane/ledger-cas.test.ts", "test/lane/session.test.ts", "test/lane/lane-process.test.ts", "test/lane/coordinator-process.test.ts", "test/core/ledger/**"]
         status: done
       - id: "epic-2-retro-item-5-decide-coordinator-status-file-write-rules"
-        text: "Decide what coordinator sessions may change inside the status files (e.g. a retro only appends action_items and sets its retro key; status planning never sets a Story done) and whether the coordinator write check stops folding its own allow-list (C5)"
+        text: "Decide what coordinator sessions may change inside the status files (e.g. a retro only appends action_items and sets its retro key; status planning never sets a Story done) and whether the coordinator write check stops folding its own allow-list (C5). Decided by the Maintainer on 2026-10-25 (epics.md AR31); built by epic-2-retro-item-15"
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-2-retro-item-6-run-the-six-missing-follow-up-reviews"
         text: "Run the follow-up reviews Stories 2.3, 2.4, 2.5, 2.8, 2.9 and 2.11 recommended, on their named unverified risks, before tagging runner-8, and decide how the loop runs a follow-up review a spec asks for (E1)"
         route: maintainer
@@ -87,4 +87,16 @@ epics:
         route: maintainer
         blocking: false
         globs: []
+        status: open
+      - id: "epic-2-retro-item-14-gate-the-retro-on-the-evidence-contents"
+        text: "Make an Epic's retro due only when its live evidence file holds the required live results, not merely exists (A1; Maintainer decision 2026-10-25): an optional config key live_evidence_checks maps an Epic number to the exact commands its verification Story's runbook requires (the Maintainer sets the values in .xarabot/config.yaml); the snapshot carries the evidence file's text from its existing blob reads; the retro is due only when, for each listed command, the file holds that command verbatim followed by a bun test summary with '0 fail'; otherwise next idles waiting-on-maintainer naming each missing or failing command; with no checks listed for an Epic, existence alone is enough, as now; tests for all present, one missing, one with failures, none listed"
+        route: lane
+        blocking: false
+        globs: ["src/core/schemas/config.ts", "src/core/schemas/snapshot.ts", "src/core/next/snapshot.ts", "src/core/next/coordinator.ts", "src/adapters/forge/github/github-forge.ts", "src/adapters/forge/fake/fake-forge.ts", "test/core/schemas/**", "test/core/config/**", "test/core/next/**", "test/adapters/forge/**", "docs/maintainer/self-host.md"]
+        status: open
+      - id: "epic-2-retro-item-15-field-level-status-file-rules"
+        text: "Make the coordinator write check enforce field-level rules in the status files (C5; Maintainer decision 2026-10-25, epics.md AR31): a status planning session may only add missing keys to sprint-status.yaml, never change an existing value; a retro session may only append its Epic's action_items and set its own epic-<N>-retrospective key; no coordinator session may set a Story's status to done (only reconcile's runner code does); a refusal parks write-check naming the key; pass the file's before and after text to the check as for the Story file and retro-gates.yaml; and stop the coordinator check case-folding its own allow-list, so case variants of a unit's globs are refused; tests for each rule and each case variant"
+        route: lane
+        blocking: false
+        globs: ["src/core/lane/write-check.ts", "src/core/retro/**", "src/lane/commit.ts", "test/core/lane/write-check.test.ts", "test/core/retro/**", "test/lane/commit.test.ts"]
         status: open
