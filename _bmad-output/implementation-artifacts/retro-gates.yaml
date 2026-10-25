@@ -47,11 +47,11 @@ epics:
         globs: []
         status: done
       - id: "epic-2-retro-item-6-run-the-six-missing-follow-up-reviews"
-        text: "Run the follow-up reviews Stories 2.3, 2.4, 2.5, 2.8, 2.9 and 2.11 recommended, on their named unverified risks, before tagging runner-8, and decide how the loop runs a follow-up review a spec asks for (E1)"
+        text: "Run the follow-up reviews Stories 2.3, 2.4, 2.5, 2.8, 2.9 and 2.11 recommended, on their named unverified risks, before tagging runner-8, and decide how the loop runs a follow-up review a spec asks for (E1). Done 2026-10-25: the six reviews ran (no high, three medium: items 17, 18, 19; the lows and decisions go to item 7's course correction); the Maintainer decided that a spec's follow-up-review flag triggers another review pass before the PR parks, to be built in Epic 3 through item 7"
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-2-retro-item-7-correct-course-for-epic-2-drift"
         text: "Run bmad-correct-course for Epic 2's drift: reconcile spine, SPEC and glossary with the accepted deviations (A7, A8) and route the deferrals with no receiving Story: committed-content credential scan, reconcile branch cleanup, 2.7 attempts cap and inbox findings, 2.8 approved_graph timing and gate scope, AR10 cross-owner close (A3-A5, A9)"
         route: maintainer
@@ -105,4 +105,22 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/reconcile/plan.ts", "src/core/reconcile/status-edit.ts", "test/core/reconcile/**"]
+        status: open
+      - id: "epic-2-retro-item-17-void-a-stale-graph-approval-after-a-retake"
+        text: "Story 2.8 follow-up review F1 (medium): approved_graph is written at the take but never read again, so after a runner failure that follows the take (refused fence, failed re-check snapshot or gate, non-conflict enqueue error), a later main graph change lets reconcile re-take and enqueue the PR on the Maintainer's approval of the older delta, and the new delta is never posted. Carry approved_graph through GatedTarget and untake's target; in the take, when it differs from the gate's current hash, void the approval and re-park for the Maintainer with the delta comment. Fix the test at test/lane/reconcile-step.test.ts (re-taken at a different hash and queued with no comment) to assert the void"
+        route: lane
+        blocking: false
+        globs: ["src/lane/reconcile-step.ts", "src/core/reconcile/plan.ts", "src/core/reconcile/approval.ts", "test/lane/reconcile-step.test.ts", "test/core/reconcile/**"]
+        status: open
+      - id: "epic-2-retro-item-18-refuse-symlinks-that-leave-the-clone"
+        text: "Story 2.3 follow-up review F3 (medium): the write check never reads a committed symlink's target, so a session can commit a link pointing outside the clone (an absolute path, ../runner.git/hooks, ~/.claude) and every later checkout carries it. In writeChanges read the blob of each added or changed mode-120000 entry and refuse, with a new symlink class, a target that is absolute, leaves the repo root after normalizing, or resolves into a refused class; also F4 (low): refuse a path when a protected <dir>/** glob matches it with /x appended, and F5 (low): normalize paths to NFD before folding in write-check.ts and commit.ts; tests for each"
+        route: lane
+        blocking: false
+        globs: ["src/core/lane/write-check.ts", "src/lane/commit.ts", "test/core/lane/write-check.test.ts", "test/lane/commit.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-19-harden-retro-item-ids"
+        text: "Story 2.9 follow-up review F1-F3: RETRO_ITEM_ID_PATTERN accepts ids that collide on the lane host's case-insensitive APFS (case and NFC/NFD twins, the Kelvin sign) and so share one ref or file, ids of any length (ENAMETOOLONG on refs and log files), and invisible or leading combining marks the stock slug never emits. Refuse a slug that is not equal to its lowercase form, a repeated (epic, seq) pair, and ids whose NFC-folded form repeats, in both RetroGatesSchema and checkRetroResult; cap the slug at 40 code points (the stock maxlen); drop \\p{M} from the slug class and fix the comment that says the slug emits marks; tests for each"
+        route: lane
+        blocking: false
+        globs: ["src/core/schemas/retro-gates.ts", "src/core/retro/validate.ts", "test/core/graph/retro-gates.test.ts", "test/core/retro/**", "test/core/schemas/**"]
         status: open
