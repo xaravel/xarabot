@@ -36,8 +36,8 @@ host). The last row runs inside a sandboxed session instead.
 | `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `101 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
 | `bun test test/sandbox/proxy.test.ts` | `50 pass`, `1 skip`, `0 fail`. The skip is the live `CONNECT pypi.org:443` case. |
 | `XARABOT_LIVE=1 bun test test/sandbox/proxy.test.ts` | `51 pass`, `0 skip`, `0 fail` |
-| `bun test test/sandbox/` | `283 pass`, `2 skip`, `0 fail` |
-| `XARABOT_LIVE=1 bun test test/sandbox/` | `285 pass`, `0 skip`, `0 fail` |
+| `bun test test/sandbox/` | `283 pass`, `3 skip`, `0 fail`. The third skip is the live `bun install` case (Story 2.12). |
+| `XARABOT_LIVE=1 bun test test/sandbox/` | `286 pass`, `0 skip`, `0 fail` |
 | `bun test`, run from the clone inside a real sandboxed lane session (e.g. a Story session's own verification) | `0 fail`. The nested sandbox cases and the host cases (binding a socket, `ps`, signalling another process, resolving `/tmp`) report skipped. |
 
 If a nested case passes inside a sandboxed session, or is skipped on the host
@@ -111,8 +111,9 @@ run it again as often as you like. Each merged run adds `canary/<run>.md` to
 the scratch `main`.
 
 Without the three variables, or inside a sandbox (`XARABOT_SANDBOXED=1`), the
-live case reports skipped: `bun test test/e2e/` gives `21 pass`, `1 skip`,
-`0 fail` on the host, and `19 pass`, `3 skip`, `0 fail` inside a sandbox.
+live case reports skipped. With the claims race suite (Story 2.12, below),
+`bun test test/e2e/` gives `37 pass`, `5 skip`, `0 fail` on the host, and
+`34 pass`, `8 skip`, `0 fail` inside a sandbox.
 
 ### `xarabot graph check` on this repo
 
@@ -526,7 +527,7 @@ decision, 2026-10-24).
 
   At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until `runner_version` has Story 2.6, keep adding approved PRs to the merge queue by hand; a runner with 2.6 does it for you (above). A moved coordinator leaves nothing stuck: when the new coordinator lane finds a PR the old one queued ejected, dequeued or closed, it parks that unit again itself, holding only the paths of the PR's diff.
 - **A crashed lane.** A crashed lane's unit is taken over 30 min after its last heartbeat; `stop --now <lane>` releases it at once.
-- **Several builder lanes.** Once `runner_version` has Story 2.11, one host can run several builder lanes. Keep the limit at 1 until Epic 3 merges: Story 2.12's live race proof comes first, and a coordinator and 2 builders running 24 hours with no double build is the check for lifting it. Then:
+- **Several builder lanes.** Once `runner_version` has Story 2.11, one host can run several builder lanes. Keep the limit at 1 until Epic 3 merges: Story 2.12's live race proof comes first, and the acceptance check after Epic 3 (a coordinator and 2 builders for 24 hours) is the check for lifting it. Both are in [Epic 2's live evidence (Story 2.12)](#epic-2s-live-evidence-story-212) below. Then:
   1. Reinstall every existing builder lane on the host (here `builder-1`) with `XARABOT_MAX_BUILDERS=2` first, so its plist carries the new limit; a reinstall keeps the lane's folder and `host.yaml` entry. A builder whose plist still says 1 refuses every start once two builders are in `host.yaml` (a failed start; the third writes its `STOP` and alerts). The coordinator ignores the limit, so it needs no reinstall. The limit counts the builder lanes in `host.yaml` across all repos.
 
      ```sh
@@ -593,3 +594,136 @@ decision, 2026-10-24).
   ```
 
   Keep every other entry and item as it is. `go` is allowed only on a `rejected` verdict.
+
+## Epic 2's live evidence (Story 2.12)
+
+Epic 2's retro (`retro:2`) waits until `docs/maintainer/evidence/epic-2.md`
+is on `main` (Story 2.9). Run the three evidence commands below on the
+Xarabot host as `edanisko-xarabot`, outside any sandbox (`XARABOT_SANDBOXED`
+must be unset), from a checkout of a `main` commit that has Story 2.12.
+
+**Setup** (not one of the three commands): update the checkout and note the
+commit it is at. The evidence file records that commit.
+
+```sh
+git -C ~/xarabot-switch pull --ff-only && cd ~/xarabot-switch && bun install --frozen-lockfile
+git rev-parse HEAD
+```
+
+Then commit the results, as described at the end of this section, before
+Epic 2's retro runs.
+
+### The claims race suite
+
+The suite runs real `laneRun` lanes against the scratch repo the canary uses
+(`xaravel/xarabot-scratch`, set up as in "The canary" above). Each lane runs
+the real STOP check, `lane.lock`, the version check, the start checks and the
+claim loop with its heartbeat keeper and fencing. The sessions are stubs that
+hold the unit until the test releases them, so no agent runs. The lanes read
+the scratch `main` with their own Story set overlaid, and nothing is pushed
+to `main`. No PR is opened and nothing is merged. The one push the suite
+tries is the replayed late push, which the fence must refuse. Alerts are
+recorded by the test, not posted. Each case uses a fresh ledger branch
+`xarabot/test-<uuid>` and unit branches under `xarabot-test/<uuid>/`, and
+deletes both when it ends, whether it passes or fails. Only a test timeout or
+Ctrl-C can leave them behind (see below).
+
+```sh
+XARABOT_LIVE=1 XARABOT_LIVE_LONG=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/claims-race.test.ts
+```
+
+**Expected result:** `20 pass`, `0 skip`, `0 fail`, in about 35 to 45
+minutes. Most of that is the takeover case waiting 30 minutes for the stale
+age. The four live cases assert:
+
+- **One unit** (`live race: one unit, …`): two hosts with different `host_id`s race for Story 1.1. Both first ledger swaps start from the same tip; one is `ok` and one `conflict`. The ledger has exactly one `ledger: claim story:1.1 [skip ci]`, held by the winner at generation 1. Only the winner's session starts. The loser's `laneRun` exits 0 with `lane builder-1: idle`.
+- **Overlapping globs** (`live race: overlapping globs, …`): one host sees Stories 1.1 (`race/shared/**`) and 1.3, the other 1.2 (`race/shared/b/**`) and 1.3, so each lane picks a different Story and the two overlap. Both swaps start from the same tip; one is `ok` and one `conflict`. Exactly one of 1.1 and 1.2 is claimed; the other has no record. The losing lane claims 1.3 and its session runs on it.
+- **Same lane, two processes** (`live race: same lane, …`): two OS processes of `builder-1` with one `HOME` start at once. One holds `lane.lock` and claims; the ledger has exactly one claim commit. The other exits 0 printing `is already running` and `exiting without a claim`. Once released, the holder exits 0 and `lane.lock` is gone.
+- **Killed mid-unit** (`live long: …`): host A's lane, in its own process, holds Story 1.1 and is killed by PID; it ends by SIGKILL. A run on host B before the stale age exits 0 `idle`, and the record is unchanged. Once the forge's time is 30 minutes past A's last heartbeat, B's next run takes the unit over at `generation` + 1 with `attempts` + 1, and its session starts. A's late push, replayed with the real PR step from A's old record and a real commit, ends `failed` with `fence: unit lost`. No `story/1.1` branch is pushed, and the record is still B's.
+
+Without `XARABOT_LIVE_LONG=1`, the long case reports skipped: `19 pass`,
+`1 skip`, `0 fail`. That is not enough for the evidence file; run it with the
+long case. Without the variables, every live case reports skipped: `16 pass`,
+`4 skip`, `0 fail` on the host. Inside a sandbox you get `15 pass`, `5 skip`,
+`0 fail`, because the two-process rehearsal needs `ps`. The rehearsals that
+pass there run the same cases on the fake forge in every `bun test`.
+
+A failed assertion starts `step "<name>":`, names the step that failed, and
+is followed by each lane's output, the alerts the lanes recorded and the
+tail of their unit logs. The branches are deleted even then. A run cut short
+by Bun's per-test timeout or by Ctrl-C can leave its `xarabot/test-<uuid>`
+and `xarabot-test/<uuid>/…` branches on the scratch repo. They do no harm,
+and you can delete them by hand. To list any that are left:
+
+```sh
+gh api --paginate repos/xaravel/xarabot-scratch/git/matching-refs/heads/xarabot --jq '.[].ref | select(startswith("refs/heads/xarabot/test-") or startswith("refs/heads/xarabot-test/"))'
+```
+
+### `bun install` in a sandboxed session
+
+```sh
+XARABOT_LIVE=1 bun test test/sandbox/bun-install.test.ts
+```
+
+**Expected result:** `1 pass`, `0 skip`, `0 fail`, in about a minute. It
+clones the checkout's committed `HEAD` (uncommitted changes are not
+included) into a lane-layout folder and runs
+`bun install --frozen-lockfile` there in the real macOS sandbox. The command
+runs with no credential, through the proxy, which allows the clone's
+`proxy_hosts` (`registry.npmjs.org`). On failure, the test prints the
+install's output.
+
+### The agent contract's live smoke
+
+```sh
+XARABOT_LIVE=1 bun test test/contracts/
+```
+
+This needs the Claude credential (`docs/maintainer/claude-credential.md`) and
+`claude` on `PATH`. It runs one short real session at effort `low`, which uses
+a little of the subscription.
+
+**Expected result:** `0 fail`. These two agent contract cases must pass, not
+skip: `the real CLI passes the start check and starts in the sandbox without
+EPERM` and `live: a smoke session writes a result and reports its usage`.
+Without the scratch variables, the GitHub forge contract's live cases report
+skipped. Add `XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch
+XARABOT_LIVE_GITHUB_LOGIN=edanisko` to run them too.
+
+### Committing the evidence
+
+Commit the results as `docs/maintainer/evidence/epic-2.md` in a Maintainer
+PR from a `planning/<topic>` branch, and merge it before Epic 2's retro.
+Builders are refused any change to this file (`live-evidence`), so only you
+write it. Until it is on `main`, the coordinator lane idles with a
+`waiting-on-maintainer:` reason that names the file. The file holds:
+
+- the date, the host, the `main` commit (and its tag, if any) the checkout was at, and `bun --version`;
+- each of the three commands above, exactly as run, with its summary lines (`pass`, `skip` and `fail` counts) and how long it took;
+- for any run that failed: the failing `step "<name>":` line, what you changed, and the re-run that passed. Never replace a failed result silently.
+
+### After Epic 3: lifting the builder limit
+
+Before you raise `XARABOT_MAX_BUILDERS` above 1 for good, run a coordinator
+and 2 builders on the host for 24 hours. Set them up as "Several builder
+lanes" (in "While Epic 2 is built") describes, with `XARABOT_MAX_BUILDERS=2`.
+Note the start time, then check both of these:
+
+- **No unit was built twice.** No two builders ran a session on one unit at the same time, and no Story merged twice. For each unit, the time spans these rows list must not overlap:
+
+  ```sh
+  cat ~/.xarabot/repos/xaravel__xarabot/lanes/builder-*/journal.jsonl | jq -r --arg start "<start>" 'select(.type == "unit" and .sessions > 0 and .started_at >= $start) | [.unit, .lane, .started_at, .ended_at] | @tsv' | sort
+  gh pr list --repo xaravel/xarabot --state merged --search "merged:>=<start, e.g. 2026-11-10T09:00:00Z>" --limit 200 --json headRefName --jq '[.[].headRefName | select(startswith("story/"))] | group_by(.) | map(select(length > 1))'
+  # expected: []
+  ```
+
+- **No builder wrote a status file.** No builder PR opened in the window, whether open, closed or merged, changes `sprint-status.yaml` or `retro-gates.yaml`:
+
+  ```sh
+  for n in $(gh pr list --repo xaravel/xarabot --state all --search "created:>=<start>" --limit 200 --json number,headRefName --jq '.[] | select(.headRefName | startswith("story/")) | .number'); do
+    gh pr diff "$n" --repo xaravel/xarabot --name-only | grep -E '(^|/)(sprint-status|retro-gates)\.yaml$' && echo "PR #$n"
+  done
+  # expected: no output
+  ```
+
+If either check fails, keep the limit at 1 and investigate.
