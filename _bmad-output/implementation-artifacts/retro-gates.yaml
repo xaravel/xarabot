@@ -63,7 +63,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/prompt/**", "test/core/prompt/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-9-sprint-status-and-trailer-housekeeping"
         text: "Set epic-2 to done in sprint-status.yaml and decide who writes an Epic's done key; decide whether the bot Co-authored-by trailer GitHub's squash adds is acceptable or change the squash settings (E6, E7)"
         route: maintainer
