@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
   "unit": "story:2.10",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 3,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-2-10-retro-item-units.md",
@@ -37,7 +37,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/lane/retro-item-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T10:35:12.359Z",
+  "heartbeat_at": "2026-10-25T10:41:58Z",
   "pr": 96,
   "pr_owner": "edanisko",
   "base_sha": "1840ef0686d4db119ee6855750fdbea36e25c02b",
