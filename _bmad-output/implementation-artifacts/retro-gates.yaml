@@ -53,10 +53,10 @@ epics:
         globs: []
         status: open
       - id: "epic-2-retro-item-8-fix-the-build-prompt-context-and-denials"
-        text: "Fix wasted and risky session work: tell build sessions the runner owns epic-<N>-context.md and reverts it so they skip the recompile, make a status planning unit due when the Epic context is older than epics.md, and state that a denial is reported in denied_actions, never retried another way (E2, E3)"
+        text: "Fix wasted and risky session work through the build prompt: tell build sessions the runner owns epic-<N>-context.md and reverts it so they skip the recompile, and state that a sandbox or permission denial is reported in denied_actions, never retried another way (E2, E3). Narrowed by the Maintainer on 2026-10-25: re-planning a stale Epic context moved to epic-2-retro-item-12"
         route: lane
         blocking: false
-        globs: ["src/core/prompt/**", "src/core/next/coordinator.ts", "test/core/prompt/**", "test/core/next/**"]
+        globs: ["src/core/prompt/**", "test/core/prompt/**"]
         status: open
       - id: "epic-2-retro-item-9-sprint-status-and-trailer-housekeeping"
         text: "Set epic-2 to done in sprint-status.yaml and decide who writes an Epic's done key; decide whether the bot Co-authored-by trailer GitHub's squash adds is acceptable or change the squash settings (E6, E7)"
@@ -75,4 +75,16 @@ epics:
         route: lane
         blocking: false
         globs: ["test/lane/retro-step.test.ts", "test/cli/lane-run.test.ts", "test/lane/reconcile-step.test.ts", "test/core/lane/write-check.test.ts", "test/lane/retro-item-step.test.ts", "test/core/reconcile/**"]
+        status: open
+      - id: "epic-2-retro-item-12-replan-a-stale-epic-context"
+        text: "Make a status planning unit due when an Epic's context is older than epics.md (split from item 8 by the Maintainer on 2026-10-25). Needs a Maintainer decision and a Story: 'older' by last commit time on main (clone mtimes are checkout times), commit times or a stale context state in the snapshot, and a reconciliation with Story 2.7's missing-or-invalid rule"
+        route: maintainer
+        blocking: false
+        globs: []
+        status: open
+      - id: "epic-2-retro-item-13-act-on-approvals-in-the-next-round"
+        text: "Make reconcile due when the snapshot shows a record parked awaiting-approval whose open PR the Maintainer approved at the parked head (Maintainer decision 2026-10-25, epics.md Story 2.4): carry each parked PR's review decision in the snapshot from the snapshot's own forge query (GitHub reviewDecision), with no extra call per PR and no ledger schema change, and count it in reconcileDue; tests for an approval at the parked head, at another head, by another login, and none"
+        route: lane
+        blocking: false
+        globs: ["src/core/schemas/snapshot.ts", "src/core/next/snapshot.ts", "src/core/next/coordinator.ts", "src/ports/forge.ts", "src/adapters/forge/github/github-forge.ts", "src/adapters/forge/fake/fake-forge.ts", "test/core/next/**", "test/core/schemas/**", "test/adapters/forge/**", "test/contracts/forge.contract.ts"]
         status: open

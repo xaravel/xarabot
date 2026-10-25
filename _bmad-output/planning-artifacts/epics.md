@@ -1249,6 +1249,7 @@ So that two coordinators never run, and builders keep going and raise an alert w
 **When** it decides whether `reconcile` is due
 **Then** `reconcile` is due when the snapshot shows `reconcile` work, or when 10 minutes have passed by the forge's `now` since the last `reconcile` run, and is otherwise skipped for the later positions
 **And** `reconcile` work in the snapshot is: a ledger record not `merged` whose PR has merged, a `merged` record whose unit is done on `main`, or the daily digest time passed
+**And** (amended by the Maintainer on 2026-10-25) `reconcile` work also includes a record parked `awaiting-approval` whose open PR the Maintainer has approved at the parked head, so an approval is acted on in the next coordinator round, not after the 10-minute backstop. The snapshot carries each such PR's review decision from the snapshot's own forge query (for example GitHub's `reviewDecision`), with no extra call per PR. This adds no ledger schema change. Built by retro item `epic-2-retro-item-13-act-on-approvals-in-the-next-round`.
 **And** the last run's time is the `heartbeat_at` of the highest-numbered `reconcile:<n>` record, which `finishRecurring` stamps; `reconcile` never deletes the newest `reconcile:<n>` record, so no ledger schema change is needed; with no `reconcile:<n>` record, `reconcile` is due
 **And** the case table covers: work shown, under 10 minutes, at 10 minutes, no earlier run, and a later position returned while `reconcile` is not due.
 
