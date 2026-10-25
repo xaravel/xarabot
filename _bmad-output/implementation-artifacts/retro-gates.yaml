@@ -81,7 +81,7 @@ epics:
         route: lane
         blocking: false
         globs: ["test/lane/retro-step.test.ts", "test/cli/lane-run.test.ts", "test/lane/reconcile-step.test.ts", "test/core/lane/write-check.test.ts", "test/lane/retro-item-step.test.ts", "test/core/reconcile/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-12-replan-a-stale-epic-context"
         text: "Make a status planning unit due when an Epic's context is older than epics.md (split from item 8 by the Maintainer on 2026-10-25). Needs a Maintainer decision and a Story: 'older' by last commit time on main (clone mtimes are checkout times), commit times or a stale context state in the snapshot, and a reconciliation with Story 2.7's missing-or-invalid rule"
         route: maintainer
