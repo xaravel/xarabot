@@ -3,6 +3,7 @@ import { parseRetroGates } from "../graph/retro-gates.ts";
 import { parseYaml } from "../schemas/common.ts";
 import type { Config } from "../schemas/config.ts";
 import type { Policy } from "../schemas/policy.ts";
+import { unitKind } from "../schemas/ledger.ts";
 import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
 
 /**
@@ -11,9 +12,11 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
  * case-folded, because the clone lives on a case-insensitive filesystem;
  * the exceptions compare exact paths, so folding only ever widens a
  * refusal. A coordinator session's change has its own rules
- * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds; a
- * retro item's (Story 2.10) adds every builder refusal, with no exception.
- * Pure.
+ * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds,
+ * matched exactly, so a case variant of one is refused; a retro item's
+ * (Story 2.10) adds every builder refusal, with no exception; and in
+ * `sprint_status_path` only the keys its session may change (AR31, Epic 2
+ * retro C5). Pure.
  */
 
 /** The refused path classes, in reporting order: a path in several is reported as the first. */
@@ -114,8 +117,19 @@ export type WriteChange = {
    * change is `retro-gates-invalid`.
    */
   readonly retroGates?: { readonly before: string | null; readonly after: string | null };
+  /**
+   * Under coordinator rules, for a change to `sprint_status_path`: its text
+   * before and after (`null` when absent on that side). Missing for such a
+   * change is `status-invalid`.
+   */
+  readonly sprintStatus?: { readonly before: string | null; readonly after: string | null };
 };
 
+/**
+ * One refused change. `path` is the changed path; for a refusal of one key
+ * of `sprint_status_path` (`story-done`, `status-key`) it is
+ * `<path>#<key>`, so every line that names the refusal names the key.
+ */
 export type WriteRefusal = { readonly path: string; readonly class: WriteClass | CoordinatorWriteClass };
 
 /**
@@ -130,7 +144,11 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * `retro-verdict`, to `items` `retro-item`, to `retro.go` `retro-go`, to
  * `checkpoint` `checkpoint-go` (one refusal per class hit), and a side that
  * does not parse, or texts not given, is `retro-gates-invalid`. Only
- * `reconcile`'s runner code writes those records. With `refused` set (a
+ * `reconcile`'s runner code writes those records. A change to
+ * `sprint_status_path` the classes before left is then compared by key
+ * (`sprintStatusRefusals`): a Story key set `done` is `story-done`, a key
+ * the session may not change `status-key`, one refusal per key, and a side
+ * that does not parse, or texts not given, is `status-invalid`. With `refused` set (a
  * retro item, Story 2.10), a path no coordinator class refuses is then
  * classified as a builder's would be, with no exception (`WRITE_CLASSES`).
  */
@@ -145,6 +163,9 @@ export const COORDINATOR_WRITE_CLASSES = [
   "retro-go",
   "checkpoint-go",
   "retro-gates-invalid",
+  "story-done",
+  "status-key",
+  "status-invalid",
 ] as const;
 export type CoordinatorWriteClass = (typeof COORDINATOR_WRITE_CLASSES)[number];
 
@@ -160,6 +181,14 @@ export type CoordinatorWriteRules = {
   readonly statusFiles: readonly string[];
   /** `retro_gates_path`: its retro records are never an agent's to change (Story 2.9). */
   readonly retroGatesPath: string;
+  /** `sprint_status_path`: only the keys the session may change (`statusSession`). */
+  readonly sprintStatusPath: string;
+  /**
+   * The session's unit, which picks what it may change in
+   * `sprint_status_path`: `commitSession` sets it from the clone session's
+   * marker. `null` (any other session) changes no key there.
+   */
+  readonly unit: string | null;
   /**
    * The builder's refused paths, with no exception, checked after the
    * coordinator classes (a retro item, Story 2.10); `null` for every other
@@ -184,6 +213,8 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
     graphInputs: graphInputGlobs(input.config),
     statusFiles: statusFiles(input.config),
     retroGatesPath: input.config.retro_gates_path,
+    sprintStatusPath: input.config.sprint_status_path,
+    unit: null,
     refused: input.builderRefusals === undefined ? null : refusedPaths(input.builderRefusals),
   };
 }
@@ -283,11 +314,15 @@ export function checkWrite(rules: WriteRules | CoordinatorWriteRules, changes: r
   return rules.role === "coordinator" ? checkCoordinatorWrite(rules, changes) : checkBuilderWrite(rules, changes);
 }
 
-/** The first class in 1-3 of `COORDINATOR_WRITE_CLASSES` a folded path is in, or `null`. */
-function classifyCoordinator(rules: CoordinatorWriteRules, p: string): CoordinatorWriteClass | null {
-  if ((p === ".xarabot" || p.startsWith(".xarabot/")) && p !== ".xarabot/epics.yaml") return "xarabot";
+/**
+ * The first class in 1-3 of `COORDINATOR_WRITE_CLASSES` `path` (folded `p`)
+ * is in, or `null`. The refusals are case-folded; the allowances, the unit's
+ * globs and `.xarabot/epics.yaml`, match `path` exactly.
+ */
+function classifyCoordinator(rules: CoordinatorWriteRules, path: string, p: string): CoordinatorWriteClass | null {
+  if ((p === ".xarabot" || p.startsWith(".xarabot/")) && path !== ".xarabot/epics.yaml") return "xarabot";
   if (!rules.graphUnit && matchesAny(rules.graphInputs, p)) return "graph-input";
-  if (!matchesAny(rules.globs, p)) return "outside-unit";
+  if (!rules.globs.some((g) => new Bun.Glob(g).match(path))) return "outside-unit";
   return null;
 }
 
@@ -320,22 +355,136 @@ export function retroGatesClasses(path: string, texts: WriteChange["retroGates"]
   return order.filter((c) => hit.has(c));
 }
 
+/** What a coordinator session may change in `sprint_status_path` (AR31, Epic 2 retro C5). */
+export type StatusSession = { readonly kind: "status-planning" } | { readonly kind: "retro"; readonly epic: number } | { readonly kind: "other" };
+
+/** The session `unit` runs: status planning (a planning unit but graph), a retro of its Epic, or any other. */
+export function statusSession(unit: string | null, graphUnit: boolean): StatusSession {
+  const kind = unit === null ? undefined : unitKind(unit);
+  if (kind === "retro") return { kind: "retro", epic: Number((unit as string).slice("retro:".length)) };
+  if (kind === "planning" && !graphUnit) return { kind: "status-planning" };
+  return { kind: "other" };
+}
+
+/** `sprint_status_path`'s key classes, a refusal each. */
+type StatusKeyClass = "story-done" | "status-key" | "status-invalid";
+
+/** One refused key of `sprint_status_path`, or `key: null` for the whole file. */
+export type StatusKeyRefusal = { readonly key: string | null; readonly class: StatusKeyClass };
+
+type Mapping = Record<string, unknown>;
+const isMapping = (v: unknown): v is Mapping => v !== null && typeof v === "object" && !Array.isArray(v);
+const get = (m: unknown, k: string): unknown => (isMapping(m) && Object.hasOwn(m, k) ? m[k] : undefined);
+const same = (a: unknown, b: unknown): boolean => Bun.deepEquals(a, b, true);
+
+/** A `development_status` key that is an Epic's or its retrospective's, so not a Story's. */
+const EPIC_KEY = /^epic-[0-9]+(?:-retrospective)?$/;
+
+/** The key `last_updated`: BMAD's skills set it on every write, so the sessions that write the file may. */
+const LAST_UPDATED = "last_updated";
+
+/** One side parsed: an absent file, or an empty one, is `{}`; `null` when it does not parse as a mapping. */
+function statusSide(path: string, text: string | null): Mapping | null {
+  if (text === null) return {};
+  const yaml = parseYaml(path, text);
+  if (!yaml.ok) return null;
+  if (yaml.value === null) return {};
+  return isMapping(yaml.value) ? yaml.value : null;
+}
+
+/** A key whose value differs; a side that lacks the key is `undefined`. */
+type KeyChange = { readonly key: string; readonly before: unknown; readonly after: unknown };
+
+/** Each key whose value differs, descending only into mappings on both sides. */
+function changedKeys(before: unknown, after: unknown, key: string, out: KeyChange[]): void {
+  if (isMapping(before) && isMapping(after)) {
+    for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      changedKeys(get(before, k), get(after, k), key === "" ? k : `${key}.${k}`, out);
+    }
+  } else if (!same(before, after)) {
+    out.push({ key, before, after });
+  }
+}
+
+/** The `action_items` keys a retro of Epic `epic` may not change: every entry kept as it was, each appended one an entry of its Epic. */
+function actionItemRefusals(epic: number, before: unknown, after: unknown): string[] {
+  const b = before ?? [];
+  const a = after ?? [];
+  if (!Array.isArray(b) || !Array.isArray(a)) return ["action_items"];
+  const out: string[] = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const kept = i < b.length ? same(b[i], a[i]) : get(a[i], "epic") === epic;
+    if (!kept) out.push(`action_items[${i}]`);
+  }
+  return out;
+}
+
+/**
+ * What `sprint_status_path`'s change refuses, by key (AR31; Maintainer
+ * decision 2026-10-25, Epic 2 retro C5). No coordinator session sets a
+ * Story key of `development_status` (any but `epic-<N>` and
+ * `epic-<N>-retrospective`) to `done`: `story-done`, since only
+ * `reconcile`'s runner code does. Then each other changed key the session
+ * may not change is `status-key`: status planning may only add a missing
+ * key, never change or remove one; a retro of Epic N may only append Epic
+ * N's `action_items` entries and set `development_status.epic-N-retrospective`;
+ * either may set `last_updated`; any other session changes no key. A side
+ * that does not parse as a mapping, or texts not given, is `status-invalid`.
+ * Values are compared parsed, so comments and layout are free.
+ */
+export function sprintStatusRefusals(session: StatusSession, path: string, texts: WriteChange["sprintStatus"]): StatusKeyRefusal[] {
+  if (texts === undefined) return [{ key: null, class: "status-invalid" }];
+  const before = statusSide(path, texts.before);
+  const after = statusSide(path, texts.after);
+  if (before === null || after === null) return [{ key: null, class: "status-invalid" }];
+
+  const out: StatusKeyRefusal[] = [];
+  const done = new Set<string>();
+  const statusAfter = get(after, "development_status");
+  if (isMapping(statusAfter)) {
+    for (const k of Object.keys(statusAfter)) {
+      if (EPIC_KEY.test(k) || statusAfter[k] !== "done" || get(get(before, "development_status"), k) === "done") continue;
+      done.add(`development_status.${k}`);
+      out.push({ key: `development_status.${k}`, class: "story-done" });
+    }
+  }
+
+  const changed: KeyChange[] = [];
+  changedKeys(before, after, "", changed);
+  const allowed = (c: KeyChange): boolean => {
+    if (session.kind === "other") return false;
+    if (c.key === LAST_UPDATED) return true;
+    if (session.kind === "status-planning") return c.before === undefined;
+    if (c.key === "action_items" || c.key.startsWith("action_items.")) return true;
+    return c.key === `development_status.epic-${session.epic}-retrospective` && c.after !== undefined;
+  };
+  const refused = changed.filter((c) => !done.has(c.key) && !allowed(c)).map((c) => c.key);
+  if (session.kind === "retro" && !same(get(before, "action_items"), get(after, "action_items"))) {
+    refused.push(...actionItemRefusals(session.epic, get(before, "action_items"), get(after, "action_items")));
+  }
+  for (const key of refused) out.push({ key, class: "status-key" });
+  return out;
+}
+
 function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
-  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode, retroGates: c.retroGates }));
+  const session = statusSession(rules.unit, rules.graphUnit);
+  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode, retroGates: c.retroGates, sprintStatus: c.sprintStatus }));
   const isGraph = (p: string) => matchesAny(rules.graphInputs, p);
   const isStatus = (p: string) => rules.statusFiles.some((f) => fold(f) === p);
   const both = folded.some((c) => isGraph(c.p)) && folded.some((c) => isStatus(c.p));
-  for (const { path, p, mode, retroGates } of folded) {
+  for (const { path, p, mode, retroGates, sprintStatus } of folded) {
     const kept = isGraph(p) || isStatus(p);
-    const cls = classifyCoordinator(rules, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
+    const cls = classifyCoordinator(rules, path, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
     if (cls !== null) {
       out.push({ path, class: cls });
       continue;
     }
     const records = fold(rules.retroGatesPath) === p ? retroGatesClasses(rules.retroGatesPath, retroGates) : [];
     for (const c of records) out.push({ path, class: c });
-    if (records.length > 0 || rules.refused === null) continue;
+    const keys = fold(rules.sprintStatusPath) === p ? sprintStatusRefusals(session, rules.sprintStatusPath, sprintStatus) : [];
+    for (const k of keys) out.push({ path: k.key === null ? path : `${path}#${k.key}`, class: k.class });
+    if (records.length > 0 || keys.length > 0 || rules.refused === null) continue;
     // A retro item: then a builder's refusal, with no exception.
     const builder = classify(rules.refused, path);
     if (builder !== null) out.push({ path, class: builder });
