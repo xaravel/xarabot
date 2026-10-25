@@ -65,11 +65,11 @@ epics:
         globs: ["src/core/prompt/**", "test/core/prompt/**"]
         status: done
       - id: "epic-2-retro-item-9-sprint-status-and-trailer-housekeeping"
-        text: "Set epic-2 to done in sprint-status.yaml and decide who writes an Epic's done key; decide whether the bot Co-authored-by trailer GitHub's squash adds is acceptable or change the squash settings (E6, E7)"
+        text: "Set epic-2 to done in sprint-status.yaml and decide who writes an Epic's done key; decide whether the bot Co-authored-by trailer GitHub's squash adds is acceptable or change the squash settings (E6, E7). Decided by the Maintainer on 2026-10-25: epic-2 set done by hand; reconcile's runner code writes an Epic's done key from now on (epic-2-retro-item-16); GitHub's bot co-author trailer is allowed (the clarifying AGENTS.md line is the Maintainer's to add)"
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-2-retro-item-10-consolidate-the-coordinator-steps"
         text: "Consolidate the coordinator steps before Epic 3: move describeError, parkBlocked, the CI poll, freshMain, closeOrphans, aborted and message(e) into the shared session module, build the lane run step wiring once, move checkModel behind the agent port, and extend the cycle test to src/core and break the core/next cycle (D1-D3)"
         route: lane
@@ -99,4 +99,10 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/lane/write-check.ts", "src/core/retro/**", "src/lane/commit.ts", "test/core/lane/write-check.test.ts", "test/core/retro/**", "test/lane/commit.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-16-reconcile-writes-an-epic-done-key"
+        text: "Make reconcile's runner code set an Epic's epic-<N> key to done in sprint-status.yaml once every Story of the Epic is done there (E6; Maintainer decision 2026-10-25), in the same status edit that marks the last Story done; never for an Epic in bootstrapped_epics whose key is absent, and never back from done; tests for the last Story done, a Story not yet done, an Epic already done, and a bootstrapped Epic"
+        route: lane
+        blocking: false
+        globs: ["src/core/reconcile/plan.ts", "src/core/reconcile/status-edit.ts", "test/core/reconcile/**"]
         status: open
