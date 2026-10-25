@@ -337,6 +337,12 @@ export type ParkNewParams = EditBase & {
   readonly kind: "needs-approval" | "blocked";
   /** Whose inbox the park lands in; defaults to the writer's owner. */
   readonly inboxOwner?: string;
+  /**
+   * The head a park from `merging` sets `passed_sha` to: a re-park of a
+   * record the coordinator took, so only an approval submitted after it
+   * re-takes the PR. Absent: `passed_sha` is kept.
+   */
+  readonly passedSha?: string;
 };
 
 /** `none → parked`: an unapproved Infrastructure Story or an open Escalation. */
@@ -547,13 +553,19 @@ export type ParkParams = HeldParams & {
   readonly diffPaths?: readonly string[];
   /** Whose inbox the park lands in; defaults to the writer's owner. */
   readonly inboxOwner?: string;
+  /**
+   * The head a park from `merging` sets `passed_sha` to: a re-park of a
+   * record the coordinator took, so only an approval submitted after it
+   * re-takes the PR. Absent: `passed_sha` is kept.
+   */
+  readonly passedSha?: string;
 };
 
 /**
  * `claimed → parked` and, for an approval-gated ejection, `merging → parked`
  * (`awaiting-approval`; a coordinator-held record may also park `blocked`
  * `graph-invalid`, Story 2.8). A park from `merging` clears `approved_sha`
- * and `approved_graph`. The record must be held by the writer at
+ * and `approved_graph`, and sets `passed_sha` to `passedSha` when given. The record must be held by the writer at
  * `generation`, except a `merging` record held by a coordinator lane: any
  * coordinator-lane writer may park it at its `generation` (as
  * `releaseDisposable` releases one), so a coordinator that moved hosts
@@ -565,6 +577,8 @@ export function park(p: ParkParams): LedgerEdit {
     if (!reason.ok) return reason;
     const inbox = check("park inboxOwner", GitHubLogin, p.inboxOwner ?? ctx.by.owner);
     if (!inbox.ok) return inbox;
+    const passed = check("park passedSha", GitSha.nullable(), p.passedSha ?? null);
+    if (!passed.ok) return passed;
     let held: string[] = [];
     if (p.kind === "awaiting-approval") {
       if (p.diffPaths === undefined) return bad("park: awaiting-approval needs diffPaths");
@@ -588,8 +602,10 @@ export function park(p: ParkParams): LedgerEdit {
       if (p.kind !== "awaiting-approval" && !graphInvalid) {
         return pre(`${ctx.unit} is merging; only awaiting-approval${coordinator ? " or blocked graph-invalid" : ""} parks it`);
       }
-      return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value, approved_sha: null, approved_graph: null }));
+      const fencedAt = passed.value !== null ? { passed_sha: passed.value } : {};
+      return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value, approved_sha: null, approved_graph: null, ...fencedAt }));
     }
+    if (passed.value !== null) return bad("park: passedSha is only for a park from merging");
     return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value }));
   });
 }
@@ -691,6 +707,9 @@ export type TakeApprovedParams = EditBase & {
  * With `approvedGraph`, the record's `globs` are the park's `globs_held` plus
  * `xarabot:graph` and `approved_graph` is set; another record holding a glob
  * that overlaps `xarabot:graph` refuses the take (precondition).
+ * `passed_sha` is cleared: the taker sets it at the head once the enqueue
+ * succeeds (or before it parks the record again), so a taken record with no
+ * `passed_sha` is one the runner never enqueued, and its approval stands.
  */
 export function takeApproved(p: TakeApprovedParams): LedgerEdit {
   return makeEdit("takeApproved", p, (ctx) => {
@@ -724,6 +743,7 @@ export function takeApproved(p: TakeApprovedParams): LedgerEdit {
         generation: rec.value.generation + 1,
         approved_sha: sha.value,
         approved_graph: graph.value,
+        passed_sha: null,
         globs,
         park: null,
       }),
@@ -844,6 +864,47 @@ export function releaseDisposable(p: HeldParams): LedgerEdit {
     if (!g.ok) return g;
     if (rec.value.lane !== "coordinator") return pre(`${ctx.unit} is held by lane ${rec.value.lane}, not a coordinator`);
     return to("released", stamp(ctx, rec.value, { state: "released" }));
+  });
+}
+
+/**
+ * Whether `rec` is a retro or retro-item record its own step queued with no
+ * approval (Stories 2.9, 2.10): `approved_sha` is `null`, as only
+ * `takeApproved` sets it. Its PR follows a Story's path, so an ejection is a
+ * failed attempt, never a park awaiting approval.
+ */
+export function isUngatedRetro(rec: Pick<UnitRecord, "unit" | "approved_sha">): boolean {
+  const kind = unitKind(rec.unit);
+  return (kind === "retro" || kind === "retro-item") && rec.approved_sha === null;
+}
+
+/**
+ * `merging → released`, `attempts` + 1 (`→ parked` `blocked` `attempts-cap`
+ * at the cap): an ungated retro or retro-item PR (`isUngatedRetro`) that
+ * left the merge queue unmerged, as a Story's ejection counts an attempt. Its
+ * PR fields are kept, so the next claim adopts an open PR and takes it
+ * through CI again. The record must be held by a coordinator lane at
+ * `generation`, whichever coordinator; the writer is a coordinator lane.
+ */
+export function releaseEjected(p: HeldParams): LedgerEdit {
+  return makeEdit("releaseEjected", p, (ctx) => {
+    const kind = unitKind(ctx.unit);
+    if (kind !== "retro" && kind !== "retro-item") return bad(`releaseEjected: ${ctx.unit} is not a retro or retro-item unit`);
+    const c = requireCoordinator(ctx);
+    if (!c.ok) return c;
+    const rec = requireRecord(ctx);
+    if (!rec.ok) return rec;
+    if (!isUngatedRetro(rec.value)) return pre(`${ctx.unit} was taken on an approval: an ejection parks it awaiting approval`);
+    const s = requireState(rec.value, ["merging"]);
+    if (!s.ok) return s;
+    const g = requireGeneration(rec.value, p.generation);
+    if (!g.ok) return g;
+    if (rec.value.lane !== "coordinator") return pre(`${ctx.unit} is held by lane ${rec.value.lane}, not a coordinator`);
+    const attempts = rec.value.attempts + 1;
+    if (attempts >= ATTEMPTS_CAP) {
+      return to("parked", stamp(ctx, rec.value, { state: "parked", attempts, park: blocked(ctx, "attempts-cap") }));
+    }
+    return to("released", stamp(ctx, rec.value, { state: "released", attempts }));
   });
 }
 

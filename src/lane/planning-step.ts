@@ -2,7 +2,7 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { deleteMerged, finishRecurring, markMerged, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
+import { deleteMerged, finishRecurring, heartbeat, markMerged, park, release, releaseDisposable, startMerging, type HeartbeatSet } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -57,7 +57,9 @@ import type { Workspace } from "./workspace.ts";
  * - A `blocked` result parks `blocked` `readiness`, the findings in the
  *   journal reason; `nothing-due`, or `done` with an empty commit, finishes
  *   the unit (`finishRecurring`) and deletes its record. A missing or invalid
- *   result, a commit conflict, or a push or PR failure is a failed attempt.
+ *   result, a commit conflict, or a push or PR failure is a failed attempt;
+ *   a PR the `record` beat fails to record is closed first, since no record
+ *   carries it.
  * - The commit goes onto fresh `main` behind the coordinator write check (a
  *   refusal parks `write-check` and pushes nothing). The push leases from
  *   `Forge.branchHead` when the record has no PR. CI failing parks
@@ -380,6 +382,21 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
     };
 
+    /**
+     * The `record` beat for the PR just opened. When it fails, no record
+     * carries the PR, so the next attempt would not adopt it and its own
+     * `openPr` would fail on it: the PR is closed, then the unit is lost or
+     * the attempt failed.
+     */
+    const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {
+      const recorded = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation, set }));
+      if (recorded.kind === "ok") return;
+      const closed = await call("closePr", (o) => forge.closePr(pr, o));
+      reasons.push(closed.ok ? `closed PR #${pr}, which no record carries` : `closePr PR #${pr} ${describeError(closed.error)}; it stays open with no record`);
+      if (recorded.kind === "lost") kit.lost("record", recorded.message);
+      await failed(`record: ${recorded.message}`);
+    };
+
     /** Best effort after a failed `openPr`: each open PR on the branch closed, behind a fence. */
     const closeOrphans = async (): Promise<void> => {
       const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
@@ -455,7 +472,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
       const pr = opened.value.number;
       note(`opened PR #${pr}`);
-      await beat("record", { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha });
+      await recordPr(pr, { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha });
       return await ciAndGate(pr, head);
     };
 

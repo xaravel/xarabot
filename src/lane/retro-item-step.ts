@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { checkHumanLiveStep } from "../core/lane/build-check.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { park, release } from "../core/ledger/edits.ts";
+import { heartbeat, park, release } from "../core/ledger/edits.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroItemPrompt, type PromptSection, type RetroItemPromptMode } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
@@ -20,6 +20,7 @@ import type { Forge, ForgeError, ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
 import { createCiStep, type CiSession, type CiUnit, type PushFix } from "./ci-step.ts";
+import type { CommitOutcome } from "./commit.ts";
 import type { Committer } from "./committer.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
 import type { DiffPaths } from "./diff-paths.ts";
@@ -68,11 +69,15 @@ import type { Workspace } from "./workspace.ts";
  * - A `done` result's push, and each CI fix's, mirrors the PR step: fresh
  *   `main` and its config (a bad one ends the step `stop`), the commit onto it
  *   under `coordinatorWriteRules` with the record's globs and every builder
- *   refusal (a refusal parks `write-check`, an empty commit `no-op`, a
- *   conflict is a failed attempt), the lease (`branchHead` for a new PR, else
- *   the record's `head_sha`), a fence and the push; a build opens the PR
- *   (closing orphans on the branch when `openPr` fails), a fix keeps it; then
- *   the `record` beat and the 🤖 status comment.
+ *   refusal (a refusal parks `write-check`, an empty commit `no-op`; a
+ *   conflict with that `main` commits onto the session's start instead, as a
+ *   Story's PR step does, so the CI step's merge of `main` takes the conflict
+ *   to a conflict session counted in `ci_fixes`, never an attempt), the lease
+ *   (`branchHead` for a new PR, else the record's `head_sha`), a fence and
+ *   the push; a build opens the PR (closing orphans on the branch when
+ *   `openPr` fails), a fix keeps it; then the `record` beat (a new PR it
+ *   fails to record is closed, since no record carries it) and the 🤖 status
+ *   comment.
  * - CI is the CI step's (`createCiStep`): fix and conflict sessions in
  *   `ci-fix` mode up to `CI_FIX_CAP`, lockfile regeneration, no spec file.
  * - The merge step runs with `watch: false`: the graph-change gate, then the
@@ -283,16 +288,28 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
           builderRefusals: { config: repoConfig, policy: loaded.value.repo.policy },
         });
         const text = retroItemPrText(unit, item, result, secrets);
-        let committed: Awaited<ReturnType<Committer["commit"]>>;
-        try {
-          committed = await committer.commit({ unit, ontoSha: onto, message: text.message, secrets, rules, signal: AbortSignal.any([signal, AbortSignal.timeout(callTimeoutMs)]) });
-        } catch (e) {
-          committed = { ok: false, error: { kind: "transient", message: `commit threw: ${message(e)}` } };
+        const commitOnto = async (ontoSha: string): Promise<CommitOutcome> => {
+          let committed: Awaited<ReturnType<Committer["commit"]>>;
+          try {
+            committed = await committer.commit({ unit, ontoSha, message: text.message, secrets, rules, signal: AbortSignal.any([signal, AbortSignal.timeout(callTimeoutMs)]) });
+          } catch (e) {
+            committed = { ok: false, error: { kind: "transient", message: `commit threw: ${message(e)}` } };
+          }
+          await guard();
+          if (!committed.ok) return await k.failed(`commit ${committed.error.kind}: ${committed.error.message}`);
+          return committed.value;
+        };
+        let c = await commitOnto(onto);
+        if (c.kind === "conflict") {
+          // As a Story's PR step does: committed onto the session's start, the PR's head conflicts with main
+          // exactly as this commit did, and the CI step's merge of main runs a conflict session.
+          const first = c;
+          k.note(`commit conflict onto ${onto}: ${first.paths.map(shown).join(", ")}; committing onto the session's start ${first.start} for the CI step's merge of main`);
+          c = await commitOnto(first.start);
+          if (c.kind === "conflict") {
+            return await k.failed(`commit conflict onto ${onto} (${first.paths.map(shown).join(", ")}), and again onto the session's start ${first.start}: ${c.paths.map(shown).join(", ")}`);
+          }
         }
-        await guard();
-        if (!committed.ok) return await k.failed(`commit ${committed.error.kind}: ${committed.error.message}`);
-        const c = committed.value;
-        if (c.kind === "conflict") return await k.failed(`commit conflict onto ${onto}: ${c.paths.map(shown).join(", ")}`);
         if (c.kind === "refused") {
           for (const r of c.refusals) k.note(`write-check: refused ${shown(r.path)} (${r.class})`);
           return await parkK("write-check", `write-check: refused ${c.refusals.map((r) => `${shown(r.path)} (${r.class})`).join(", ")}`);
@@ -337,7 +354,18 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
         }
 
         // 6. Record the PR and SHAs, then the status comment.
-        await k.beat("record", { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha });
+        const set = { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha };
+        if (kept !== null) await k.beat("record", set);
+        else {
+          const recorded = await k.swap(heartbeat({ unit, by: identity, now: k.forgeNow(), generation: k.generation, set }));
+          if (recorded.kind !== "ok") {
+            // No record carries the new PR, so the next attempt would not adopt it, and its own openPr would fail on it: close it.
+            const closed = await k.call("closePr", (o) => forge.closePr(pr, o));
+            k.reasons.push(closed.ok ? `closed PR #${pr}, which no record carries` : `closePr PR #${pr} ${describeError(closed.error)}; it stays open with no record`);
+            if (recorded.kind === "lost") k.lost("record", recorded.message);
+            return await k.failed(`record: ${recorded.message}`);
+          }
+        }
         const body = statusComment({ subject: stepUnit.subject, headSha: head, lane: identity.lane, deniedActions: result.denied_actions, secrets });
         const commented = await k.call("comment", (o) => forge.comment(pr, body, o));
         if (!commented.ok) {

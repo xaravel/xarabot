@@ -11,6 +11,7 @@ import {
   park,
   releaseDeadReconcile,
   releaseDisposable,
+  releaseEjected,
   startMerging,
   takeApproved,
   type HeartbeatSet,
@@ -56,14 +57,27 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
  * `passed_sha`) needs a review submitted after the park.
  * Before the first take the run re-checks the Standing Authority on fresh
  * `main`; it then takes the record at `generation` + 1 (`takeApproved`,
- * `approved_sha` = head), fences it (`passed_sha` = head) and enqueues the PR
- * at that head. Later runs check the queue of these coordinator-held
- * `merging` records, whichever coordinator lane took them: merged is
- * `merged`, queued at `approved_sha` is left, anything else (dequeued after a
- * fenced `dequeue` when queued at another head) parks it `awaiting-approval`
- * again with `approved_sha` cleared, so only a fresh approval re-takes it. A
- * conflicting enqueue parks it again in the same run, or for a disposable
- * `reconcile` PR closes the PR and releases the record.
+ * `approved_sha` = head, `passed_sha` cleared), fences it, enqueues the PR at
+ * that head and records the enqueue (`passed_sha` = head). Later runs check
+ * the queue of these coordinator-held `merging` records, whichever
+ * coordinator lane took them: merged is `merged`, queued at `approved_sha` is
+ * left; one open at `approved_sha` and out of the queue that the runner never
+ * enqueued (no `passed_sha`: a failed enqueue, fence or read after the take,
+ * or a run that died) is parked again with `passed_sha` still unset and taken
+ * again in the same run on its standing approval, so the runner's own
+ * failure never costs a review; anything else (an ejection, a moved head, a
+ * closed PR; dequeued after a fenced `dequeue` when queued at another head)
+ * parks it `awaiting-approval` again with `approved_sha` cleared and
+ * `passed_sha` set, so only a fresh approval re-takes it. A conflicting
+ * enqueue parks it again in the same run, or for a disposable `reconcile` PR
+ * closes the PR and releases the record.
+ *
+ * An ungated retro or retro-item PR (Stories 2.9, 2.10: `merging` under the
+ * coordinator with no `approved_sha`, queued by its own step) follows a
+ * Story's path: merged is `merged`, queued at its head is left, and anything
+ * else (dequeued first when queued at another head) is released with an
+ * attempt (`releaseEjected`), its PR kept, so the next claim adopts an open
+ * PR and takes it through CI again; it is never parked awaiting approval.
  *
  * The graph-change gate (Story 2.8) runs on each approved PR but a
  * `reconcile` one, before the take, on its merge with fresh `main`. An
@@ -376,15 +390,15 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     };
 
     /**
-     * A gated record back to `parked` `awaiting-approval` (holding its diff's
+     * A gated record back to `parked` `awaiting-approval`, holding its diff's
      * paths, `approved_sha` cleared, `heartbeat_at` stamped and `lane`
-     * `coordinator`, so only a later review re-takes it), then a best-effort
-     * 🤖 comment on its PR chosen by `cause` (`null`: no comment).
+     * `coordinator`. With `passedSha`, `passed_sha` is set to it, so only a
+     * review submitted after the park re-takes the PR.
      */
-    const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null, over: { readonly inboxOwner: string; readonly body: string } | null = null): Promise<void> => {
+    const parkAwaiting = (t: GatedTarget, passedSha: string | null, inboxOwner: string | null = null): Promise<boolean> => {
       // Only the Maintainer's approval re-takes a record holding `xarabot:graph`, so it lands in the Maintainer's inbox.
-      const inbox = over?.inboxOwner ?? (t.globs.includes(GRAPH_PSEUDO_GLOB) ? snapshot.config.maintainer : t.pr_owner);
-      const parked = await item(
+      const inbox = inboxOwner ?? (t.globs.includes(GRAPH_PSEUDO_GLOB) ? snapshot.config.maintainer : t.pr_owner);
+      return item(
         `park ${t.unit}`,
         park({
           unit: t.unit,
@@ -394,8 +408,19 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           kind: "awaiting-approval",
           diffPaths: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
           ...(inbox !== null ? { inboxOwner: inbox } : {}),
+          ...(passedSha !== null ? { passedSha } : {}),
         }),
       );
+    };
+
+    /**
+     * A gated record parked again for a fresh approval (`parkAwaiting`, with
+     * `passed_sha` set at its approved head when the take left it unset), then
+     * a best-effort 🤖 comment on its PR chosen by `cause` (`null`: no comment).
+     */
+    const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null, over: { readonly inboxOwner: string; readonly body: string } | null = null): Promise<void> => {
+      const passedSha = t.passed_sha === null ? (t.approved_sha ?? t.head_sha) : null;
+      const parked = await parkAwaiting(t, passedSha, over?.inboxOwner ?? null);
       if (!parked) return;
       reasons.push(`${t.unit}: PR #${t.pr} ${why}: parked awaiting approval again`);
       const body = over?.body ?? (cause === null ? null : reparkComment(t.unit, cause));
@@ -407,12 +432,71 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       }
     };
 
-    /** 3. A gated record the coordinator queued: left while queued at `approved_sha`, `merged` once merged, else parked again. */
-    const checkGated = async (t: GatedTarget): Promise<void> => {
+    /**
+     * A taken record the runner never enqueued, open at its approved head
+     * `head` and out of the queue: parked again with `passed_sha` unset, so
+     * its standing approval still counts, and returned as a candidate for
+     * this run's takes, which re-check that approval, fresh `main` and the
+     * graph gate before enqueueing it. No comment: the owner has nothing to do.
+     */
+    const untake = async (t: GatedTarget, head: string): Promise<ApprovalTarget | null> => {
+      if (!(await parkAwaiting(t, null))) return null;
+      reasons.push(`${t.unit}: PR #${t.pr} was never enqueued after its take: parked on its standing approval, to be taken again`);
+      if (t.pr_owner === null) return null;
+      return { unit: t.unit, generation: t.generation, pr: t.pr, pr_owner: t.pr_owner, head_sha: head, parked_at: null, globs: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB) };
+    };
+
+    /**
+     * 3. A gated record the coordinator took: left while queued at
+     * `approved_sha`, `merged` once merged, returned to its standing approval
+     * when the runner never enqueued it (`untake`, the candidate returned),
+     * else parked again.
+     */
+    const checkGated = async (t: GatedTarget): Promise<ApprovalTarget | null> => {
       const pr = t.pr;
       const q = await call("queueState", (o) => forge.queueState(pr, o));
       if (!q.ok) {
-        if (q.error.kind === "not-found") return await repark(t, "is not known to the forge", null);
+        if (q.error.kind === "not-found") {
+          await repark(t, "is not known to the forge", null);
+          return null;
+        }
+        reasons.push(`${t.unit}: queueState PR #${pr} ${describeError(q.error)}; left for a later run`);
+        note(`${t.unit}: queueState PR #${pr} failed: ${describeError(q.error)}`);
+        return null;
+      }
+      const s = q.value;
+      if (s.state === "merged") {
+        await item(`markMerged ${t.unit}`, markMerged({ unit: t.unit, by: identity, now: forgeNow() }));
+        return null;
+      }
+      const at = t.approved_sha ?? t.head_sha;
+      if (s.state === "open" && s.queued && s.head_sha === at) {
+        note(`${t.unit}: PR #${pr} still queued at ${s.head_sha}`);
+        return null;
+      }
+      if (s.state === "open" && s.queued) {
+        if (await prChange(t.unit, "dequeue", pr, (o) => forge.dequeue(pr, o))) await repark(t, `was queued at ${s.head_sha}, not ${at ?? "its approved head"}`, "head-moved");
+        return null;
+      }
+      if (s.head_sha !== at) await repark(t, `head moved to ${s.head_sha}`, "head-moved");
+      else if (s.state === "closed") await repark(t, "is closed", "closed");
+      // Taken on an approval but never enqueued: the runner's own failure, so the approval stands.
+      else if (t.approved_sha !== null && t.passed_sha === null) return await untake(t, s.head_sha);
+      else await repark(t, "is not in the merge queue", "not-queued");
+      return null;
+    };
+
+    /** 3a. An ungated retro or retro-item record: left while queued at its head, `merged` once merged, else released with an attempt. */
+    const checkUngated = async (t: PlanTarget): Promise<void> => {
+      const pr = t.pr;
+      const releaseIt = async (why: string): Promise<void> => {
+        const done = await item(`releaseEjected ${t.unit}`, releaseEjected({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        if (done) reasons.push(`${t.unit}: PR #${pr ?? "none"} ${why}: released with an attempt, to be taken through CI again`);
+      };
+      if (pr === null) return await releaseIt("is missing");
+      const q = await call("queueState", (o) => forge.queueState(pr, o));
+      if (!q.ok) {
+        if (q.error.kind === "not-found") return await releaseIt("is not known to the forge");
         reasons.push(`${t.unit}: queueState PR #${pr} ${describeError(q.error)}; left for a later run`);
         note(`${t.unit}: queueState PR #${pr} failed: ${describeError(q.error)}`);
         return;
@@ -422,18 +506,15 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         await item(`markMerged ${t.unit}`, markMerged({ unit: t.unit, by: identity, now: forgeNow() }));
         return;
       }
-      const at = t.approved_sha ?? t.head_sha;
-      if (s.state === "open" && s.queued && s.head_sha === at) {
+      if (s.state === "open" && s.queued && s.head_sha === t.head_sha) {
         note(`${t.unit}: PR #${pr} still queued at ${s.head_sha}`);
         return;
       }
       if (s.state === "open" && s.queued) {
-        if (!(await prChange(t.unit, "dequeue", pr, (o) => forge.dequeue(pr, o)))) return;
-        return await repark(t, `was queued at ${s.head_sha}, not ${at ?? "its approved head"}`, "head-moved");
+        if (await prChange(t.unit, "dequeue", pr, (o) => forge.dequeue(pr, o))) await releaseIt(`was queued at ${s.head_sha}, not ${t.head_sha ?? "its head"}`);
+        return;
       }
-      if (s.head_sha !== at) return await repark(t, `head moved to ${s.head_sha}`, "head-moved");
-      if (s.state === "closed") return await repark(t, "is closed", "closed");
-      await repark(t, "is not in the merge queue", "not-queued");
+      await releaseIt(s.state === "closed" ? "is closed" : s.head_sha !== t.head_sha ? `head moved to ${s.head_sha}` : "is not in the merge queue");
     };
 
     /** A taken record parked `blocked` `graph-invalid` (from `merging`), then a best-effort 🤖 comment naming the refusals. */
@@ -521,11 +602,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
 
     /**
      * Takes one approved PR: `takeApproved` at its head (with `approvedGraph`
-     * for a graph change), a fence on the taken record (`passed_sha` = head),
-     * the `approved_graph` re-check, then the enqueue, each retry fenced
-     * again. A conflict parks it again (a `reconcile` PR is closed and
-     * released instead); any other failure leaves it `merging` for the next
-     * run. With `after`, the taken record is parked at once instead.
+     * for a graph change), a fence on the taken record, the `approved_graph`
+     * re-check, then the enqueue, each retry fenced again, and once it is
+     * queued the enqueue recorded (`passed_sha` = head). A conflict parks it
+     * again (a `reconcile` PR is closed and released instead); any other
+     * failure leaves it `merging` with no `passed_sha`, for the next run's
+     * queue check to take it again on its standing approval. With `after`,
+     * the taken record is parked at once instead.
      */
     const take = async (
       t: ApprovalTarget,
@@ -549,15 +632,16 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         pr_owner: t.pr_owner,
         head_sha: head,
         approved_sha: head,
+        passed_sha: null,
         globs: graph !== null ? [...new Set([...t.globs, GRAPH_PSEUDO_GLOB])] : t.globs,
       };
       const fence = (set?: HeartbeatSet): Promise<boolean> =>
         item(`heartbeat ${t.unit}`, heartbeat({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2, ...(set !== undefined ? { set } : {}) }));
-      if (!(await fence({ passed_sha: head }))) {
+      if (!(await fence())) {
         note(`${t.unit}: the fence on the taken record was refused; PR #${pr} not enqueued, left for the queue check`);
         return;
       }
-      // The fenced `passed_sha` makes a re-park need an approval submitted after it, as an enqueue conflict's does.
+      // Each re-park sets `passed_sha`, so it needs an approval submitted after it, as an enqueue conflict's does.
       if (after?.kind === "refuse") return await blockGraph(takenTarget, after.refusals);
       if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict");
       if (after?.kind === "maintainer") {
@@ -574,6 +658,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         if (r.ok) {
           reasons.push(`${t.unit}: PR #${pr} approved by ${approver}, enqueued at ${head}`);
           note(`${t.unit}: enqueued PR #${pr} at ${head}`);
+          // Recorded, a later ejection parks it for a fresh approval; unrecorded, an ejection is taken again once on the same one.
+          if (!(await fence({ passed_sha: head }))) note(`${t.unit}: the enqueue of PR #${pr} at ${head} is not recorded on the taken record`);
           return;
         }
         if (r.error.kind === "conflict") {
@@ -701,8 +787,14 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const settled = new Set<string>();
       for (const u of plan.markMerged) await item(`markMerged ${u}`, markMerged({ unit: u, by: identity, now: forgeNow() }));
       for (const t of plan.checkQueue) await checkQueue(t, settled);
-      for (const t of plan.checkGated) await checkGated(t);
-      await takeApprovedWork(plan.takeApproved, settled);
+      // A taken record the runner never enqueued joins this run's takes, on its standing approval.
+      const untaken: ApprovalTarget[] = [];
+      for (const t of plan.checkGated) {
+        const back = await checkGated(t);
+        if (back !== null) untaken.push(back);
+      }
+      for (const t of plan.checkUngated) await checkUngated(t);
+      await takeApprovedWork([...plan.takeApproved, ...untaken], settled);
       for (const t of plan.releaseDead) {
         if (!(await closeBranchPrs(t, settled))) continue;
         const done = await item(`releaseDeadReconcile ${t.unit}`, releaseDeadReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
@@ -881,7 +973,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const gatesText = Object.hasOwn(input.files, gatesPath) ? (input.files[gatesPath] as string) : null;
       const plan = planReconcile(snapshot, unit, statusText, gatesText);
       note(
-        `plan: ${plan.markMerged.length} to mark merged, ${plan.checkQueue.length} merging, ${plan.checkGated.length} gated merging, ` +
+        `plan: ${plan.markMerged.length} to mark merged, ${plan.checkQueue.length} merging, ${plan.checkGated.length} gated merging, ${plan.checkUngated.length} ungated merging, ` +
           `${plan.takeApproved.length} awaiting approval, ${plan.releaseDead.length} dead, ` +
           `${plan.deleteReleased.length} released, ${plan.deleteMerged.length} done on main; status ${plan.status.kind}; retro gates ${plan.retroGates.kind}`,
       );

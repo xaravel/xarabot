@@ -5,7 +5,7 @@ import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
 import { normalizeGlob } from "../core/manifests/globs.ts";
-import { markMerged, park, release, startMerging } from "../core/ledger/edits.ts";
+import { heartbeat, markMerged, park, release, startMerging, type HeartbeatSet } from "../core/ledger/edits.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroPrompt, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
@@ -70,7 +70,8 @@ import type { Workspace } from "./workspace.ts";
  *   check (a refusal parks `write-check`), the leased push, the PR, then a
  *   `record` beat that also stores the result as the record's
  *   `retro_result`, which `reconcile` writes to `retro-gates.yaml` after the
- *   merge. CI failing parks `verification`, timing out `ci-timeout`. After
+ *   merge; a PR that beat fails to record is closed, since no record carries
+ *   it. CI failing parks `verification`, timing out `ci-timeout`. After
  *   CI, fresh `main` is re-read; a path policy gates parks
  *   `awaiting-approval`, else the PR is fenced, written `merging` and
  *   enqueued at its head. A conflicting enqueue parks `awaiting-approval`
@@ -341,6 +342,21 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       }
     };
 
+    /**
+     * The `record` beat for the PR just opened. When it fails, no record
+     * carries the PR, so the next attempt would not adopt it and its own
+     * `openPr` would fail on it: the PR is closed, then the unit is lost or
+     * the attempt failed.
+     */
+    const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {
+      const recorded = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation, set }));
+      if (recorded.kind === "ok") return;
+      const closed = await call("closePr", (o) => forge.closePr(pr, o));
+      reasons.push(closed.ok ? `closed PR #${pr}, which no record carries` : `closePr PR #${pr} ${describeError(closed.error)}; it stays open with no record`);
+      if (recorded.kind === "lost") kit.lost("record", recorded.message);
+      await failed(`record: ${recorded.message}`);
+    };
+
     /** Best effort after a failed `openPr`: each open PR on the branch closed, behind a fence. */
     const closeOrphans = async (): Promise<void> => {
       const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
@@ -468,7 +484,7 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       const pr = opened.value.number;
       note(`opened PR #${pr}`);
       const retroResult: RetroRecordResult = { verdict: normalized.verdict, items: normalized.items };
-      await beat("record", { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha, retro_result: retroResult });
+      await recordPr(pr, { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha, retro_result: retroResult });
       return await ciAndGate(pr, head);
     };
 

@@ -17,6 +17,7 @@ import {
   heldGlobs,
   isDisposable,
   isStale,
+  isUngatedRetro,
   keepAlive,
   keepCoordinator,
   loopback,
@@ -26,6 +27,7 @@ import {
   release,
   releaseDeadReconcile,
   releaseDisposable,
+  releaseEjected,
   releaseStale,
   startMerging,
   STALE_AFTER_MS,
@@ -235,6 +237,20 @@ const CASES: readonly Case[] = [
   ["park with an unknown reason", park({ ...held, kind: "blocked", reason: "tired" as never }), [rec()], "invalid"],
   ["park merging awaiting-approval", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [rec({ state: "merging", approved_sha: SHA_A })], by(ALICE, NOW, { state: "parked", park: awaiting(["src/a.ts"]) })],
   ["park merging blocked", park({ ...held, kind: "blocked", reason: "other" }), [rec({ state: "merging" })], "precondition"],
+  [
+    "park merging awaiting-approval with passedSha: passed_sha set, so only a later approval re-takes it",
+    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: SHA_A }),
+    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A })],
+    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, passed_sha: SHA_A, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
+  ],
+  [
+    "park merging awaiting-approval with no passedSha keeps passed_sha",
+    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }),
+    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A, passed_sha: SHA_B })],
+    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, passed_sha: SHA_B, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
+  ],
+  ["park claimed with passedSha", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: SHA_A }), [rec()], "invalid"],
+  ["park merging with a bad passedSha", park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: "nope" }), [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })], "invalid"],
   ["park by another holder", park({ ...held, by: BOB, kind: "needs-approval" }), [rec()], "precondition"],
   // park: any coordinator lane moves a coordinator-held merging record on at its generation (AD-6)
   [
@@ -290,6 +306,12 @@ const CASES: readonly Case[] = [
     takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),
     [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7 })],
     by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7 }),
+  ],
+  [
+    "takeApproved clears passed_sha: only the taker's recorded enqueue sets it again",
+    takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),
+    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_D, passed_sha: SHA_D })],
+    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7, head_sha: SHA_D }),
   ],
   ["takeApproved by a builder", takeApproved({ ...base, generation: 1, approvedSha: SHA_D }), [rec({ state: "parked", park: awaiting([]) })], "precondition"],
   ["takeApproved needs-approval", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }), [rec({ state: "parked", park: needs })], "precondition"],
@@ -651,6 +673,51 @@ describe("reconcile record edits", () => {
       return;
     }
     expect(r.value).toEqual({ message: `ledger: ${name} ${R} [skip ci]`, writes: { [R_PATH]: serializeUnitRecord(want) }, deletes: [] });
+  });
+});
+
+describe("ungated retro records: an ejection is an attempt (Stories 2.9, 2.10)", () => {
+  const RI = "retro-item:epic-2-retro-item-1-fix";
+  const RI_PATH = "units/retro-item__epic-2-retro-item-1-fix.json";
+  /** `retro-item:<id>` merging under `who`, queued by its own step with no approval. */
+  const ri = (over: Partial<UnitRecord> = {}, who: LaneIdentity = COORD): UnitRecord =>
+    by(who, T0, { unit: RI, globs: ["src/x/**"], state: "merging", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, ...over });
+  const at = (over: Partial<{ unit: string; by: LaneIdentity; generation: number }> = {}) => ({ unit: RI, by: COORD, now: NOW, generation: 1, ...over });
+
+  test.each([
+    ["an ungated retro item", ri(), true],
+    ["an ungated retro", by(COORD, T0, { unit: "retro:2", globs: [] }), true],
+    ["a retro item taken on an approval", ri({ approved_sha: SHA_A }), false],
+    ["a Story", rec(), false],
+    ["a planning record", by(COORD, T0, { unit: "planning:graph.1", globs: [] }), false],
+  ] as const)("isUngatedRetro: %s → %p", (_name, record, want) => {
+    expect(isUngatedRetro(record)).toBe(want);
+  });
+
+  type Want = UnitRecord | "invalid" | "precondition";
+  test.each([
+    ["merging: released, attempts + 1, the PR kept", releaseEjected(at()), [ri({ attempts: 1 })], by(COORD, NOW, { unit: RI, globs: ["src/x/**"], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 2 })],
+    ["merging at the cap: parked blocked attempts-cap", releaseEjected(at()), [ri({ attempts: 2 })], by(COORD, NOW, { unit: RI, globs: ["src/x/**"], state: "parked", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 3, park: blocked("attempts-cap", "carol") })],
+    ["held by another coordinator identity", releaseEjected(at()), [ri({}, COORD_2)], by(COORD, NOW, { unit: RI, globs: ["src/x/**"], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 1 })],
+    ["taken on an approval", releaseEjected(at()), [ri({ approved_sha: SHA_A })], "precondition"],
+    ["claimed, not merging", releaseEjected(at()), [ri({ state: "claimed" })], "precondition"],
+    ["the wrong generation", releaseEjected(at({ generation: 2 })), [ri()], "precondition"],
+    ["a builder writer", releaseEjected(at({ by: ALICE })), [ri()], "precondition"],
+    ["a holder that is not a coordinator lane", releaseEjected(at()), [ri({}, ALICE)], "precondition"],
+    ["no record", releaseEjected(at()), [], "precondition"],
+    ["a Story unit", releaseEjected(at({ unit: U })), [rec({ state: "merging" })], "invalid"],
+  ] as readonly (readonly [string, LedgerEdit, readonly UnitRecord[], Want])[])("releaseEjected: %s", (_name, edit, records, want) => {
+    const r = edit(tip(records));
+    if (want === "invalid" || want === "precondition") {
+      expect(r.ok ? "ok" : r.error.kind).toBe(want);
+      return;
+    }
+    expect(r.ok && r.value).toEqual({ message: `ledger: releaseEjected ${RI} [skip ci]`, writes: { [RI_PATH]: serializeUnitRecord(want) }, deletes: [] });
+  });
+
+  test("releaseEjected releases an ungated retro too", () => {
+    const r = releaseEjected({ unit: "retro:2", by: COORD, now: NOW, generation: 1 })(tip([by(COORD, T0, { unit: "retro:2", globs: [], state: "merging", pr: 9, passed_sha: SHA_A })]));
+    expect(r.ok ? r.value?.message : r.error.message).toBe("ledger: releaseEjected retro:2 [skip ci]");
   });
 });
 

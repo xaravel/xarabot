@@ -1,4 +1,4 @@
-import { isDisposable, isStale } from "../ledger/edits.ts";
+import { isDisposable, isStale, isUngatedRetro } from "../ledger/edits.ts";
 import { RETRO_ITEM_ID_PATTERN, RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
 import { doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
 import { unitKind, type UnitRecord } from "../schemas/ledger.ts";
@@ -39,8 +39,10 @@ export type ApprovalTarget = {
    * `passed_sha`: the coordinator took it on approval, fenced it at its head
    * and parked it again), its `heartbeat_at`: an approval must be submitted
    * after it. `null` for a first park, a builder's or the coordinator's own
-   * (a planning or `reconcile` gate park has no `passed_sha`): any standing
-   * owner approval of the head counts.
+   * (a planning or `reconcile` gate park has no `passed_sha`), and for a
+   * taken record the runner never enqueued, returned to its park
+   * (`takeApproved` clears `passed_sha`): any standing owner approval of
+   * the head counts.
    */
   readonly parked_at: string | null;
   /** The paths the PR's diff changes (the park's `globs_held`). */
@@ -55,6 +57,11 @@ export type GatedTarget = {
   readonly pr_owner: string | null;
   readonly head_sha: string | null;
   readonly approved_sha: string | null;
+  /**
+   * The head the coordinator enqueued it at, or fenced before parking it
+   * again; `null` while the runner has not enqueued it since the take.
+   */
+  readonly passed_sha: string | null;
   /** The paths the PR's diff changes, kept since the first park. */
   readonly globs: readonly string[];
 };
@@ -88,8 +95,20 @@ export type ReconcilePlan = {
    * it is closed and its record released with no attempt.
    */
   readonly checkQueue: readonly PlanTarget[];
-  /** 3. Coordinator-held `merging` records that are not disposable, whose PR has not merged: their queue is checked, and a PR out of it parks again. */
+  /**
+   * 3. Coordinator-held `merging` records that are not disposable or
+   * ungated retros, whose PR has not merged: their queue is checked, and a
+   * PR out of it parks again; one the runner never enqueued (no
+   * `passed_sha`) is taken again on its standing approval.
+   */
   readonly checkGated: readonly GatedTarget[];
+  /**
+   * 3a. Coordinator-held `merging` ungated retro and retro-item records
+   * (`isUngatedRetro`), whose PR has not merged: their queue is checked, and
+   * a PR out of it is released with an attempt, never parked awaiting
+   * approval.
+   */
+  readonly checkUngated: readonly PlanTarget[];
   /** 4. `parked` `awaiting-approval` records whose PR is open at the record's head: taken on a standing owner approval (after the park only for a re-park of a record the coordinator took). */
   readonly takeApproved: readonly ApprovalTarget[];
   /** 5. Stale `claimed` `reconcile` records: the open PRs on their branch closed, then released with an attempt. */
@@ -258,12 +277,27 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     .filter((r) => r.state === "released" && (isReconcile(r) || (isPlanning(r) && prOf(r)?.state !== "open")))
     .map((r) => target(r, snapshot));
 
-  // 3. Approval-gated PRs the coordinator queued.
+  // 3. Approval-gated PRs the coordinator queued; 3a. ungated retro and retro-item PRs their step queued.
   const checkGated: GatedTarget[] = [];
+  const checkUngated: PlanTarget[] = [];
   for (const r of others) {
     if (marked.has(r.unit) || isDisposable(r) || r.state !== "merging" || r.lane !== "coordinator") continue;
-    if (r.pr === null || prOf(r)?.state === "merged") continue;
-    checkGated.push({ unit: r.unit, generation: r.generation, pr: r.pr, pr_owner: r.pr_owner, head_sha: r.head_sha, approved_sha: r.approved_sha, globs: r.globs });
+    if (prOf(r)?.state === "merged") continue;
+    if (isUngatedRetro(r)) {
+      checkUngated.push(target(r, snapshot));
+      continue;
+    }
+    if (r.pr === null) continue;
+    checkGated.push({
+      unit: r.unit,
+      generation: r.generation,
+      pr: r.pr,
+      pr_owner: r.pr_owner,
+      head_sha: r.head_sha,
+      approved_sha: r.approved_sha,
+      passed_sha: r.passed_sha,
+      globs: r.globs,
+    });
   }
 
   // 4. Parked PRs awaiting approval, still open at the head the lane parked.
@@ -316,6 +350,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     markMerged,
     checkQueue,
     checkGated,
+    checkUngated,
     takeApproved,
     releaseDead,
     deleteReleased,
