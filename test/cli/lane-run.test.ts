@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { ok } from "../../src/core/result.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
@@ -9,7 +9,10 @@ import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/c
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
 import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
 import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
+import type { ProcessInfo } from "../../src/core/lane/waits.ts";
+import type { ProcessTable } from "../../src/lane/processes.ts";
 import { forgeErr, type Forge } from "../../src/ports/forge.ts";
+import { hostTest } from "../support/sandbox.ts";
 import { cleanup, fakeConnect, HOST_ID, mainFiles, stubInstaller, world, writeCredential, type MainOpts, type World } from "./lane-fixture.ts";
 
 const dirs: string[] = [];
@@ -43,7 +46,23 @@ type Setup = {
   readonly botUserFails?: boolean;
   /** The ledger's files at the start. */
   readonly ledger?: Record<string, string>;
+  /** `lane.lock`'s text at the start, or `dir` for a folder in its place. */
+  readonly lockText?: string;
+  /** The lock's owner and process table; default `LOCK_OWNER` with no process for any PID. */
+  readonly lock?: LaneRunDeps["lock"];
 };
+
+/** This run's lock owner in the lane-run tests. */
+const LOCK_OWNER = { pid: 777, command: "bun", startedMs: Date.parse("2026-10-23T10:00:00.250Z") };
+const OWN_LOCK = "777\nbun\n2026-10-23T10:00:00.250Z\n";
+/** Another lane process's lock: pid 4242, started at 09:00. */
+const OTHER_LOCK = "4242\nbun\n2026-10-23T09:00:00.000Z\n";
+const OTHER_START = Date.parse("2026-10-23T09:00:00.000Z");
+
+/** A process table answering `inspect` from `procs`; nothing is ever killed. */
+function table(procs: Readonly<Record<number, ProcessInfo>> = {}): ProcessTable {
+  return { inspect: (pid) => procs[pid] ?? null, kill: () => false };
+}
 
 type Ran = {
   readonly code: number;
@@ -82,6 +101,8 @@ async function laneRunWith(
   if (o.failedStarts !== undefined) writeFileSync(join(laneDir, "failed-starts"), `${o.failedStarts}\n`);
   for (const v of o.installed ?? ["v1"]) mkdirSync(join(w.runnerRoot, v), { recursive: true });
   if (o.credential !== false) writeCredential(w);
+  if (o.lockText === "dir") mkdirSync(join(laneDir, "lane.lock"));
+  else if (o.lockText !== undefined) writeFileSync(join(laneDir, "lane.lock"), o.lockText);
   const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main), ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
   const conn = fakeConnect(fake, { ...(o.connectFail !== undefined ? { fail: o.connectFail } : {}), ...(o.botUserFails === true ? { botUserFails: true } : {}) });
   const installer = stubInstaller(o.installFails !== undefined ? { fail: o.installFails } : {});
@@ -108,6 +129,7 @@ async function laneRunWith(
       }),
     out: (l) => out.push(l),
     errOut: (l) => err.push(l),
+    lock: o.lock ?? { ...LOCK_OWNER, table: table() },
   };
   const code = await laneRun(args, deps);
   return {
@@ -143,6 +165,24 @@ describe("xarabot lane run: the lane and STOP", () => {
     expect(existsSync(join(w.laneDir, "failed-starts"))).toBe(false);
   });
 
+  test("a host STOP at a coordinator's start: exit 0, no count, no connect, no claim", async () => {
+    const w = world(dirs);
+    mkdirSync(join(w.xdg, "xarabot"), { recursive: true });
+    writeFileSync(w.hostYaml, hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] }));
+    mkdirSync(w.xarabot, { recursive: true });
+    writeFileSync(join(w.xarabot, "STOP"), "stop\n");
+    const fake = createFakeForge({ main: mainFiles() });
+    const conn = fakeConnect(fake);
+    const out: string[] = [];
+    expect(await laneRun([REPO, "coordinator"], { env: w.env, connect: conn.connect, out: (l) => out.push(l), errOut: () => {} })).toBe(0);
+    expect(out).toEqual([`${join(w.xarabot, "STOP")} present; not starting lane coordinator`]);
+    expect(conn.record.connects).toBe(0);
+    expect(fake.control.ledgerLog()).toHaveLength(1);
+    const coordDir = join(dirname(w.laneDir), "coordinator");
+    expect(existsSync(join(coordDir, "failed-starts"))).toBe(false);
+    expect(existsSync(join(coordDir, "lane.lock"))).toBe(false);
+  });
+
   test("a host STOP: exit 0, no count", async () => {
     const w = world(dirs);
     mkdirSync(join(w.xdg, "xarabot"), { recursive: true });
@@ -165,6 +205,125 @@ describe("xarabot lane run: the lane and STOP", () => {
     expect(r.err.join("\n")).toContain(why);
     expect(r.record.connects).toBe(0);
     expect(r.failedStarts()).toBeNull();
+  });
+});
+
+describe("xarabot lane run: lane.lock", () => {
+  const lockPath = (r: Ran) => join(r.laneDir, "lane.lock");
+
+  test("a live lock: exit 0 naming the PID, no connect, failed-starts untouched, nothing claimed, the lock left as it was", async () => {
+    const r = await laneRunWith({
+      lockText: OTHER_LOCK,
+      failedStarts: 2,
+      lock: { ...LOCK_OWNER, table: table({ 4242: { startMs: OTHER_START + 999, args: "/opt/homebrew/bin/bun /h/.xarabot/runner/v1/src/cli/main.ts lane run xaravel/xarabot builder-1" } }) },
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual(["lane builder-1 is already running (pid 4242, lane.lock); exiting without a claim"]);
+    expect(r.err).toEqual([]);
+    expect(r.record.connects).toBe(0);
+    expect(r.fake.control.trace()).toEqual([]);
+    expect(r.failedStarts()).toBe("2\n");
+    expect(r.starts).toEqual([]);
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+    expect(readFileSync(lockPath(r), "utf8")).toBe(OTHER_LOCK);
+  });
+
+  test.each([
+    ["a dead PID", {}, "no process has its PID"],
+    ["a reused PID", { 4242: { startMs: OTHER_START + 2000, args: "bun main.ts lane run" } }, "its PID's process started after the lock was taken (a reused PID)"],
+    ["another command", { 4242: { startMs: OTHER_START, args: "sleep 60" } }, "its PID runs another command"],
+  ] as const)("%s: taken over, the run proceeds, the lock removed at exit", async (_name, procs, why) => {
+    let during: string | null = null;
+    const r = await laneRunWith({ lockText: OTHER_LOCK, lock: { ...LOCK_OWNER, table: table(procs) } }, [REPO, "builder-1"], async (d) => {
+      during = read(join(d.laneDir, "lane.lock"));
+      return { outcome: "idle" };
+    });
+    expect(r.code).toBe(0);
+    expect(r.out[0]).toBe(`took over a stale lane.lock (pid 4242): ${why}`);
+    expect(during as string | null).toBe(OWN_LOCK);
+    expect(existsSync(lockPath(r))).toBe(false);
+    expect(r.failedStarts()).toBe("0\n");
+  });
+
+  test("a malformed lock: taken over, the run proceeds", async () => {
+    const r = await laneRunWith({ lockText: "garbage" });
+    expect(r.code).toBe(0);
+    expect(r.out[0]).toBe("took over a stale lane.lock (pid unknown): its text does not parse");
+    expect(r.starts).toHaveLength(1);
+    expect(existsSync(lockPath(r))).toBe(false);
+  });
+
+  test("held during the run with this process's PID and start, and removed after a run that throws", async () => {
+    let during: string | null = null;
+    let laneDir = "";
+    const run = laneRunWith({}, [REPO, "builder-1"], async (d) => {
+      laneDir = d.laneDir;
+      during = read(join(d.laneDir, "lane.lock"));
+      throw new Error("boom");
+    });
+    await expect(run).rejects.toThrow("boom");
+    expect(during as string | null).toBe(OWN_LOCK);
+    expect(existsSync(join(laneDir, "lane.lock"))).toBe(false);
+  });
+
+  test("released after a refused start and after a version switch", async () => {
+    const refused = await laneRunWith({ main: { unattended: [] } });
+    expect(refused.code).toBe(1);
+    expect(existsSync(lockPath(refused))).toBe(false);
+    const switched = await laneRunWith({ main: { runnerVersion: "v2" } });
+    expect(switched.code).toBe(0);
+    expect(existsSync(lockPath(switched))).toBe(false);
+  });
+
+  test("a lock held by another run is not removed at this run's exit", async () => {
+    const r = await laneRunWith({}, [REPO, "builder-1"], async (d) => {
+      // Another process replaced the lock mid-run (it judged this one stale).
+      writeFileSync(join(d.laneDir, "lane.lock"), OTHER_LOCK);
+      return { outcome: "idle" };
+    });
+    expect(r.code).toBe(0);
+    expect(readFileSync(lockPath(r), "utf8")).toBe(OTHER_LOCK);
+  });
+
+  test("an I/O error on the lock is a failed start", async () => {
+    const r = await laneRunWith({ lockText: "dir" });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("start refused: the lane lock: ");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.record.connects).toBe(0);
+    expect(r.starts).toEqual([]);
+  });
+
+  test("a coordinator lane takes its own lane.lock too: a live one exits 0 with no claim of coordinator.json", async () => {
+    const host = hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] });
+    const r = await laneRunWith(
+      { host, lockText: OTHER_LOCK, lock: { ...LOCK_OWNER, table: table({ 4242: { startMs: OTHER_START, args: "bun main.ts lane run" } }) } },
+      [REPO, "coordinator"],
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual(["lane coordinator is already running (pid 4242, lane.lock); exiting without a claim"]);
+    expect(r.record.connects).toBe(0);
+    expect(r.coordinatorStarts).toEqual([]);
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+
+  hostTest("by default the lock records this process (its PID, runtime and start, checked through ps), and a second start meanwhile exits 0", async () => {
+    let during: string | null = null;
+    let second: number | null = null;
+    const secondOut: string[] = [];
+    const r = await laneRunWith({ lock: {} }, [REPO, "builder-1"], async (d) => {
+      during = read(join(d.laneDir, "lane.lock"));
+      // The lane folder is <HOME>/.xarabot/repos/<owner>__<name>/lanes/<lane>; host.yaml is under <root>/config.
+      const home = resolve(d.laneDir, "../../../../..");
+      const env = { HOME: home, XDG_CONFIG_HOME: join(dirname(home), "config"), PATH: "/usr/bin:/bin" };
+      second = await laneRun([REPO, "builder-1"], { env, out: (l) => secondOut.push(l), errOut: (l) => secondOut.push(l), connect: async () => ({ ok: false, message: "never" }) });
+      return { outcome: "idle" };
+    });
+    expect(r.code).toBe(0);
+    expect(during as string | null).toBe(`${process.pid}\n${basename(process.execPath)}\n${new Date(Math.floor(performance.timeOrigin)).toISOString()}\n`);
+    expect(second as number | null).toBe(0);
+    expect(secondOut).toEqual([`lane builder-1 is already running (pid ${process.pid}, lane.lock); exiting without a claim`]);
+    expect(existsSync(join(r.laneDir, "lane.lock"))).toBe(false);
   });
 });
 

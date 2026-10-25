@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { err, ok } from "../core/result.ts";
 import { describeIssues } from "../core/schemas/common.ts";
 import { JournalRecordSchema, LaneOutcome } from "../core/schemas/journal.ts";
@@ -8,9 +9,10 @@ import { unitFileId } from "./clone.ts";
 
 /**
  * The filesystem `LaneStore` and the lane folder's layout (AR37). The lane
- * folder holds `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`,
- * `outcome`, `STOP` and `logs/`, plus the session folders `laneLayout`
- * names. Each write creates its parent folder.
+ * folder holds `lane.lock` (the lane process's exclusive lock, AR3),
+ * `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`, `outcome`, `STOP` and
+ * `logs/`, plus the session folders `laneLayout` names. Each write creates
+ * its parent folder.
  */
 
 export type LaneLayout = {
@@ -26,6 +28,8 @@ export type LaneLayout = {
   readonly journal: string;
   readonly outcome: string;
   readonly stop: string;
+  /** The lane process's exclusive lock (`src/lane/lane-lock.ts`). */
+  readonly lock: string;
 };
 
 /** The absolute paths inside a lane folder. */
@@ -43,6 +47,7 @@ export function laneLayout(laneDirIn: string): LaneLayout {
     journal: join(laneDir, "journal.jsonl"),
     outcome: join(laneDir, "outcome"),
     stop: join(laneDir, "STOP"),
+    lock: join(laneDir, LANE_LOCK_FILE),
   };
 }
 

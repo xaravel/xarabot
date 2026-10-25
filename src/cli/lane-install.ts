@@ -18,9 +18,14 @@ import { githubConnect, RUNNER_REPO_URL, type Connect, type LaneConnection } fro
 
 /**
  * `xarabot lane install <lane> --repo <o/n> --role <r> --owner <login>
- * --agent <a> [--model <m>] [--effort <e>]` (FR1, NFR15, AR26, AR34). It
- * checks the lane, reads `runner_version` from `main` and installs that
- * runner first; only then does it write `host.yaml`, the lane folder, its
+ * --agent <a> [--model <m>] [--effort <e>]` (FR1, NFR15, AR26, AR34, AR35).
+ * It checks the lane: a coordinator is named `coordinator`, a builder
+ * `builder-<n>` (n >= 1), and `claude`, `bun`, `git` and `uv` each resolve on
+ * the `PATH` the plist will carry. It refuses a name `host.yaml` already
+ * holds for another repo (the same name and repo is replaced) and a lane that
+ * would take the host over `XARABOT_MAX_BUILDERS`. It then reads
+ * `runner_version` from `main` and installs that runner first; only then
+ * does it write `host.yaml`, the lane folder, its
  * `runner` file, the fixed launcher and the lane's LaunchDaemon plist. It
  * never runs `sudo` or `launchctl`: it prints the two commands for the
  * Maintainer.
@@ -34,6 +39,24 @@ export const LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /** The one name a coordinator lane has, and only it. */
 export const COORDINATOR_LANE = "coordinator";
+
+/** A builder lane's name, as the ledger's lane-name rule takes it: `builder-<n>`, n >= 1. */
+export const BUILDER_LANE = /^builder-[1-9][0-9]*$/;
+
+/** The tools a lane runs, each of which must resolve on the `PATH` its plist carries. */
+export const LANE_TOOLS: readonly string[] = ["claude", "bun", "git", "uv"];
+
+/**
+ * `null` when every `LANE_TOOLS` entry resolves on `path` (the plist's
+ * `PATH`); else the refusal, naming each missing tool and the `PATH`.
+ */
+export function missingTools(path: string | undefined, which: (tool: string, path: string) => string | null = (t, p) => Bun.which(t, { PATH: p })): string | null {
+  const list = (tools: readonly string[]) => (tools.length === 1 ? (tools[0] as string) : `${tools.slice(0, -1).join(", ")} and ${tools.at(-1) as string}`);
+  if (path === undefined || path === "") return `PATH is not set, so the lane's plist gets none: ${list(LANE_TOOLS)} must each resolve on it`;
+  const missing = LANE_TOOLS.filter((t) => which(t, path) === null);
+  if (missing.length === 0) return null;
+  return `${list(missing)} ${missing.length === 1 ? "does" : "do"} not resolve on the PATH the lane's plist gets: ${path}`;
+}
 
 export const DEFAULT_CALL_TIMEOUT_MS = 60_000;
 /** The runner install's deadline: a shallow fetch and `bun install`. */
@@ -178,13 +201,23 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   // The coordinator's identity is `<owner>/<host>/coordinator` (AD-8), so the role and the name go together.
   if (lane.role === "coordinator" && name !== COORDINATOR_LANE) return fail(`a coordinator lane must be named ${COORDINATOR_LANE}, not ${JSON.stringify(name)}`);
   if (lane.role !== "coordinator" && name === COORDINATOR_LANE) return fail(`the lane name ${COORDINATOR_LANE} is only for role coordinator, not ${lane.role}`);
+  // The ledger takes only `builder-<n>` for a builder: any other name would stop the lane at its first snapshot.
+  if (lane.role === "builder" && !BUILDER_LANE.test(name)) return fail(`a builder lane must be named builder-<n> (n >= 1), not ${JSON.stringify(name)}`);
 
   const paths = hostPaths(deps.env);
   if (paths === null) return fail("HOME is not set");
+  // The lane runs on the PATH its plist carries, so the tools it needs must resolve there.
+  const tools = missingTools(plistEnv(deps.env)["PATH"]);
+  if (tools !== null) return fail(tools);
 
   // 2. host.yaml.
   const host = readHostConfig(paths.hostYaml);
   if (!host.ok) return fail(host.error.message);
+  // Lane names are unique per host: the same name for another repo would silently replace that lane.
+  const existing = host.value !== null && Object.hasOwn(host.value.lanes, name) ? host.value.lanes[name] : undefined;
+  if (existing !== undefined && existing.repo !== lane.repo) {
+    return fail(`lane ${name} is already installed on this host for ${existing.repo}; choose another name for ${lane.repo}`);
+  }
   // The new lane must not take the host over its builder limit, or every builder would refuse at start.
   const planned = withLane(host.value, name, lane, deps.newHostId ?? randomUUID);
   const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);

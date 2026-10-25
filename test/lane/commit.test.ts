@@ -64,7 +64,7 @@ describe("commitSession", () => {
     value(await rebuildClone(rebuild(repo, base)));
     writeFileSync(join(repo.clone, "b"), "b1\nSESSION\nb3\n");
     writeFileSync(join(repo.clone, "a"), "a1\nfine\na3\n");
-    expect(value(await commitSession(session(repo, base, onto)))).toEqual({ kind: "conflict", paths: ["b"] });
+    expect(value(await commitSession(session(repo, base, onto)))).toEqual({ kind: "conflict", paths: ["b"], start: base });
     expect(await rg(repo.gitDir, ["for-each-ref", "refs/xarabot/head/"])).toBe("");
   });
 

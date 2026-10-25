@@ -41,6 +41,7 @@ describe("laneLayout", () => {
       journal: "/x/lane/journal.jsonl",
       outcome: "/x/lane/outcome",
       stop: "/x/lane/STOP",
+      lock: "/x/lane/lane.lock",
     });
   });
 

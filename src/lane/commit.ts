@@ -14,7 +14,8 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
  * (an added one removed); then the write check (FR18, AR31), a
  * builder's or the coordinator's, runs on what is left, before any temp
  * commit; a refusal writes nothing. `merge-tree`
- * applies the change onto `ontoSha`. A conflict is returned, never resolved.
+ * applies the change onto `ontoSha`. A conflict is returned, never resolved,
+ * with the session's start, onto which the same change always applies.
  */
 
 export type CommitParams = {
@@ -36,7 +37,8 @@ export type CommitParams = {
 
 export type CommitOutcome =
   | { readonly kind: "committed"; readonly base_sha: string; readonly head_sha: string; readonly reverted?: readonly string[] }
-  | { readonly kind: "conflict"; readonly paths: readonly string[] }
+  /** `start` is the clone session's start: a commit onto it never conflicts (the PR step's fallback, Story 2.11). */
+  | { readonly kind: "conflict"; readonly paths: readonly string[]; readonly start: string }
   | { readonly kind: "empty"; readonly reverted?: readonly string[] }
   /** The write check refused the change: nothing is committed. */
   | { readonly kind: "refused"; readonly refusals: readonly WriteRefusal[]; readonly reverted: readonly string[] };
@@ -211,7 +213,7 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
   const [mergedTree = "", ...rest] = merged.value.stdout.split("\0");
   if (merged.value.code === 1) {
     const paths = [...new Set(rest.filter((p) => p !== ""))].sort();
-    return ok({ kind: "conflict", paths });
+    return ok({ kind: "conflict", paths, start });
   }
   if (merged.value.code !== 0) return failed(mergeArgs, merged.value);
 

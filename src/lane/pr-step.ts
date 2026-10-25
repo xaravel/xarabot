@@ -6,6 +6,7 @@ import { capText, FORGE_TEXT_LIMITS, redactSecrets, sanitizeAgentText } from "..
 import { unitPath, UnitRecordSchema, type LaneIdentity } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
+import type { CommitOutcome } from "./commit.ts";
 import type { Committer } from "./committer.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, type Sleep } from "./ledger-cas.ts";
 import { message, readsPath, stepKit, storySubject, type PrStep, type PrStepInput, type PrStepOutput } from "./session.ts";
@@ -14,7 +15,10 @@ import { message, readsPath, stepKit, storySubject, type PrStep, type PrStepInpu
  * The PR step after a `done` result (FR6, FR13, FR18, FR22, NFR10, AR7, AR16,
  * AR21, AR31, AR44): one fresh snapshot, the Standing Authority re-check on
  * its `main`, the bot commit onto that `main` behind the write check (a
- * refusal parks the unit `blocked` `write-check` and pushes nothing), a
+ * refusal parks the unit `blocked` `write-check` and pushes nothing; a
+ * conflict with that `main` commits onto the session's start instead, so the
+ * PR opens and the CI step's merge of `main` takes the conflict to a conflict
+ * session counted in `ci_fixes`, never an attempt, AR20), a
  * fencing heartbeat, a leased push, a second fence and the PR opened (or the
  * adopted one updated), the record's `pr` and SHAs, and one 🤖 status
  * comment. The lane's credential and token-shaped strings are redacted from
@@ -169,23 +173,34 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       });
 
       // 3. Commit, behind the write check.
-      const commitTimeout = AbortSignal.timeout(callTimeoutMs);
-      let committed: Awaited<ReturnType<Committer["commit"]>>;
-      try {
-        committed = await committer.commit({
-          unit,
-          ontoSha: onto,
-          message: `${story.story_id}: ${result.summary}`,
-          secrets,
-          rules,
-          signal: AbortSignal.any([input.signal, commitTimeout]),
-        });
-      } catch (e) {
-        committed = { ok: false, error: { kind: "transient", message: `commit threw: ${message(e)}` } };
+      const commitOnto = async (ontoSha: string): Promise<CommitOutcome> => {
+        let committed: Awaited<ReturnType<Committer["commit"]>>;
+        try {
+          committed = await committer.commit({
+            unit,
+            ontoSha,
+            message: `${story.story_id}: ${result.summary}`,
+            secrets,
+            rules,
+            signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+          });
+        } catch (e) {
+          committed = { ok: false, error: { kind: "transient", message: `commit threw: ${message(e)}` } };
+        }
+        if (!committed.ok) return await failed(`commit ${committed.error.kind}: ${committed.error.message}`);
+        return committed.value;
+      };
+      let c = await commitOnto(onto);
+      if (c.kind === "conflict") {
+        // A conflict with fresh main is the CI step's: committed onto the session's start, the PR's head
+        // conflicts with main exactly as this commit did, and the CI step's merge of main runs a conflict session.
+        const first = c;
+        note(`commit conflict onto ${onto}: ${first.paths.map(shown).join(", ")}; committing onto the session's start ${first.start} for the CI step's merge of main`);
+        c = await commitOnto(first.start);
+        if (c.kind === "conflict") {
+          return await failed(`commit conflict onto ${onto} (${first.paths.map(shown).join(", ")}), and again onto the session's start ${first.start}: ${c.paths.map(shown).join(", ")}`);
+        }
       }
-      if (!committed.ok) return await failed(`commit ${committed.error.kind}: ${committed.error.message}`);
-      const c = committed.value;
-      if (c.kind === "conflict") return await failed(`commit conflict onto ${onto}: ${c.paths.join(", ")}`);
       for (const path of c.reverted ?? []) note(`write-check: reverted ${shown(path)} (${rules.superseded.includes(path) ? "superseded spec" : "Epic context"})`);
       if (c.kind === "refused") {
         for (const r of c.refusals) note(`write-check: refused ${shown(r.path)} (${r.class})`);
