@@ -39,7 +39,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/ledger-cas.ts", "src/lane/session.ts", "src/lane/lane-process.ts", "src/lane/coordinator-process.ts", "src/core/ledger/**", "test/lane/ledger-cas.test.ts", "test/lane/session.test.ts", "test/lane/lane-process.test.ts", "test/lane/coordinator-process.test.ts", "test/core/ledger/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-5-decide-coordinator-status-file-write-rules"
         text: "Decide what coordinator sessions may change inside the status files (e.g. a retro only appends action_items and sets its retro key; status planning never sets a Story done) and whether the coordinator write check stops folding its own allow-list (C5)"
         route: maintainer
