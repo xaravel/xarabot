@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-4-recover-claims-after-outages",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -18,7 +18,7 @@
     "test/lane/ledger-cas.test.ts",
     "test/lane/session.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T20:24:22.001Z",
+  "heartbeat_at": "2026-10-25T20:26:07.174Z",
   "pr": 119,
   "pr_owner": "edanisko",
   "base_sha": "79d1bd838280ce3b743aa97876612ce445e16598",
@@ -29,7 +29,22 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/ledger/edits.ts",
+      "src/lane/coordinator-process.ts",
+      "src/lane/lane-process.ts",
+      "src/lane/ledger-cas.ts",
+      "src/lane/session.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/lane/coordinator-process.test.ts",
+      "test/lane/lane-process.test.ts",
+      "test/lane/ledger-cas.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
