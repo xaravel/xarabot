@@ -2,10 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Socket, TCPSocketListener } from "bun";
 import { decideConnect, MAX_HEAD_BYTES, startProxy, type Proxy, type ProxyOpts } from "../../src/sandbox/proxy.ts";
 import { liveTest } from "../support/live.ts";
+import { hostDescribe, hostTest, isSandboxed } from "../support/sandbox.ts";
 
 /**
  * The proxy against a local echo upstream: every allowed host is dialled to
- * 127.0.0.1, so these cases run on any host.
+ * 127.0.0.1, so these cases run on any host. Cases that bind a socket are
+ * host cases: inside a session (`XARABOT_SANDBOXED=1`) they report skipped.
  */
 
 const ESTABLISHED = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -15,7 +17,9 @@ let echo: TCPSocketListener<{ pending: Uint8Array | null }>;
 let echoPort = 0;
 let accepted = 0;
 
+// Binding a socket is denied inside a session: there only the cases that bind nothing run.
 beforeAll(() => {
+  if (isSandboxed) return;
   echo = Bun.listen<{ pending: Uint8Array | null }>({
     hostname: "127.0.0.1",
     port: 0,
@@ -174,7 +178,7 @@ describe("decideConnect", () => {
 });
 
 describe("startProxy", () => {
-  test("listens on 127.0.0.1 and names itself by URL", () => {
+  hostTest("listens on 127.0.0.1 and names itself by URL", () => {
     const { proxy } = start();
     try {
       expect(proxy.port).toBeGreaterThan(0);
@@ -197,7 +201,7 @@ describe("startProxy", () => {
   });
 });
 
-describe("the proxy", () => {
+hostDescribe("the proxy", () => {
   let s: Started;
   beforeAll(() => {
     s = start();
@@ -364,7 +368,7 @@ describe("the proxy", () => {
   );
 });
 
-describe("upstream down", () => {
+hostDescribe("upstream down", () => {
   test("an allowed host whose dial target refuses gets 502", async () => {
     const gone = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: () => {} } });
     const port = gone.port;
@@ -378,7 +382,7 @@ describe("upstream down", () => {
   });
 });
 
-describe("stop", () => {
+hostDescribe("stop", () => {
   test("closes open tunnels and the listener", async () => {
     const { proxy } = start();
     const c = await connect(proxy.port);
@@ -393,7 +397,7 @@ describe("stop", () => {
   });
 });
 
-describe("live", () => {
+hostDescribe("live", () => {
   liveTest("CONNECT pypi.org:443 gets 200", async () => {
     const r = startProxy({ allow: ["pypi.org"] });
     if (!r.ok) throw new Error(r.error.message);

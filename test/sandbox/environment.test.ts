@@ -37,6 +37,7 @@ describe("buildSessionEnv", () => {
       PATH: "/l/tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       HOME: "/l/tmp/home",
       TMPDIR: "/l/tmp",
+      TMPPREFIX: "/l/tmp/zsh",
       LANG: "en_US.UTF-8",
       LC_ALL: "C",
       LC_CTYPE: "UTF-8",
@@ -61,10 +62,30 @@ describe("buildSessionEnv", () => {
     expect(build({ ...LAUNCHING, CLAUDE_CODE_TMPDIR: "/tmp" })["CLAUDE_CODE_TMPDIR"]).toBe("/l/tmp/cli-tmp");
   });
 
+  test("TMPPREFIX is <tempDir>/zsh for every vendor, whatever the launching env holds", () => {
+    expect(build()["TMPPREFIX"]).toBe("/l/tmp/zsh");
+    expect(build({ ...LAUNCHING, TMPPREFIX: "/tmp/zsh" })["TMPPREFIX"]).toBe("/l/tmp/zsh");
+    for (const vendor of ["codex", "pi"] as const) {
+      expect(build({ ...LAUNCHING, TMPPREFIX: "/tmp/zsh" }, { ...PARTS, vendor, vendorHomeEnv: "CODEX_HOME" })["TMPPREFIX"]).toBe("/l/tmp/zsh");
+    }
+  });
+
+  test("a TMPPREFIX credential or vendor home name is refused as invalid, naming it", () => {
+    for (const parts of [
+      { ...PARTS, credential: { name: "TMPPREFIX", value: "x" } },
+      { ...PARTS, vendorHomeEnv: "TMPPREFIX" },
+    ]) {
+      const r = buildSessionEnv(LAUNCHING, parts);
+      if (r.ok) throw new Error("expected a refusal");
+      expect(r.error.kind).toBe("invalid");
+      expect(r.error.message).toContain("TMPPREFIX");
+    }
+  });
+
   test("LANG, LC_* and TERM are left out when the launching env lacks them", () => {
     const env = build({ HOME: "/Users/u" });
     expect(Object.keys(env).sort()).toEqual(
-      ["PATH", "HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "XARABOT_RESULT", "XARABOT_SANDBOXED", "UV_CACHE_DIR", "CLAUDE_CODE_TMPDIR"].sort(),
+      ["PATH", "HOME", "TMPDIR", "TMPPREFIX", "CLAUDE_CONFIG_DIR", "XARABOT_RESULT", "XARABOT_SANDBOXED", "UV_CACHE_DIR", "CLAUDE_CODE_TMPDIR"].sort(),
     );
   });
 
@@ -90,6 +111,8 @@ describe("buildSessionEnv", () => {
     ["a GH_ credential name", { ...PARTS, credential: { name: "GH_TOKEN", value: "x" } }],
     ["a CLAUDE_CODE_TMPDIR credential name", { ...PARTS, credential: { name: "CLAUDE_CODE_TMPDIR", value: "x" } }],
     ["a CLAUDE_CODE_TMPDIR vendor home name", { ...PARTS, vendorHomeEnv: "CLAUDE_CODE_TMPDIR" }],
+    ["a TMPPREFIX credential name", { ...PARTS, credential: { name: "TMPPREFIX", value: "x" } }],
+    ["a TMPPREFIX vendor home name", { ...PARTS, vendorHomeEnv: "TMPPREFIX" }],
     ["a GITHUB_ credential name", { ...PARTS, credential: { name: "GITHUB_TOKEN", value: "x" } }],
     ["a credential named like the vendor home", { ...PARTS, credential: { name: "CLAUDE_CONFIG_DIR", value: "x" } }],
   ])("refuses %s", (_name, parts) => {
@@ -98,7 +121,7 @@ describe("buildSessionEnv", () => {
 });
 
 describe("isReservedEnvName", () => {
-  test.each(["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy", "CLAUDE_CODE_TMPDIR"])(
+  test.each(["PATH", "HOME", "TMPDIR", "TMPPREFIX", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy", "CLAUDE_CODE_TMPDIR"])(
     "%s is reserved",
     (name) => expect(isReservedEnvName(name)).toBe(true),
   );

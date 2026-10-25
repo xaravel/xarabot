@@ -19,8 +19,8 @@ import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { Merger } from "../../src/lane/merger.ts";
 import { createPrStep } from "../../src/lane/pr-step.ts";
 import type { Workspace } from "../../src/lane/workspace.ts";
-import type { Agent } from "../../src/ports/agent.ts";
-import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
+import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
+import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
 
 // ------------------------------------------------------------------ world
@@ -653,7 +653,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     defaultModel: "claude-opus-5-5",
     minVersion: "2.1.304",
     launchSpec: (unit, settings, resultPath) =>
-      ok({ argv: ["stub-agent", settings.effort, resultPath], stdin: unit.kind === "fresh" ? unit.prompt : "resume", vendor: "claude", vendorHomeEnv: "STUB_HOME", credential: { file: "token", env: "STUB_TOKEN" }, apiHosts: ["api.example.com"] } as LaunchSpec),
+      ok({ argv: ["stub-agent", settings.effort, resultPath], stdin: unit.kind === "fresh" ? unit.prompt : "resume", vendor: "claude", vendorHomeEnv: "STUB_HOME", credential: { file: "token", env: "STUB_TOKEN" }, apiHosts: ["api.example.com"] } as AgentLaunchSpec),
     parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),

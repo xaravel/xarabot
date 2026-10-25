@@ -146,6 +146,41 @@ describe("seedVendorHome", () => {
     expect(seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", env: "T" }, vendorHome: s.vendorHome, keep: true }).ok).toBe(false);
   });
 
+  test("no credential: empties the home, writes nothing and returns {}", () => {
+    const s = setup();
+    mkdirSync(join(s.vendorHome, "old", "deep"), { recursive: true });
+    writeFileSync(join(s.vendorHome, ".credentials.json"), "stale");
+    const r = seedVendorHome({ launching: s.launching, vendor: "claude", vendorHome: s.vendorHome });
+    expect(r).toEqual({ ok: true, value: {} });
+    expect(readdirSync(s.vendorHome)).toEqual([]);
+  });
+
+  test.each<[string, string | null, number]>([
+    ["missing", null, 0o600],
+    ["mode 644", "tok", 0o644],
+    ["empty", "", 0o600],
+  ])("no credential: a %s credential file is never read, so no error", (_name, content, mode) => {
+    const s = setup(content, mode);
+    expect(seedVendorHome({ launching: s.launching, vendor: "claude", vendorHome: s.vendorHome })).toEqual({ ok: true, value: {} });
+    expect(readdirSync(s.vendorHome)).toEqual([]);
+  });
+
+  test("no credential: needs no config folder, and creates a missing vendor home", () => {
+    const s = setup(null);
+    expect(seedVendorHome({ launching: {}, vendor: "claude", vendorHome: s.vendorHome })).toEqual({ ok: true, value: {} });
+    expect(readdirSync(s.vendorHome)).toEqual([]);
+  });
+
+  test("no credential, keep (a resume): the home's contents stay and nothing is written", () => {
+    const s = setup(null);
+    mkdirSync(join(s.vendorHome, "projects"), { recursive: true });
+    writeFileSync(join(s.vendorHome, "projects", "session.jsonl"), "{}");
+    const r = seedVendorHome({ launching: s.launching, vendor: "claude", vendorHome: s.vendorHome, keep: true });
+    expect(r).toEqual({ ok: true, value: {} });
+    expect(readdirSync(s.vendorHome)).toEqual(["projects"]);
+    expect(readFileSync(join(s.vendorHome, "projects", "session.jsonl"), "utf8")).toBe("{}");
+  });
+
   test.each(["", "..", "a/b"])("refuses the home file name %j", (homeFile) => {
     const s = setup();
     expect(seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile }, vendorHome: s.vendorHome }).ok).toBe(false);

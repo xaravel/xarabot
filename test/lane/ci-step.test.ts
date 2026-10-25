@@ -27,7 +27,7 @@ import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { MergeOutcome, MergeRequest, Merger } from "../../src/lane/merger.ts";
 import { createPrStep } from "../../src/lane/pr-step.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
-import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
+import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck, ForgeError, ForgeOperation } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
@@ -683,7 +683,7 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
         credential: { file: "token", env: "STUB_TOKEN" },
         apiHosts: ["api.example.com"],
         unit,
-      } as LaunchSpec),
+      } as AgentLaunchSpec),
     parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
@@ -785,7 +785,7 @@ describe("runLaneProcess with createCiStep", () => {
     expect(e.asked[0]).not.toBe(e.asked[1]);
   });
 
-  test("a lockfile conflict with lockfile_command: the command runs in the sandbox with no stdin, and its lockfile text goes to the merge", async () => {
+  test("a lockfile conflict with lockfile_command: the command runs in the sandbox with no stdin and no credential, and its lockfile text goes to the merge", async () => {
     const candidate = "c".repeat(40);
     const e = await endToEnd([[success("test")]], {
       main: { lockfileCommand: ["bun", "install"] },
@@ -799,7 +799,9 @@ describe("runLaneProcess with createCiStep", () => {
     const regen = e.runs[1]?.spec;
     expect(regen?.argv).toEqual(["bun", "install"]);
     expect(regen?.stdin).toBeUndefined();
-    expect(regen?.credential).toEqual({ file: "token", env: "STUB_TOKEN" });
+    // A repo command the runner starts gets no vendor credential (AR19, A14).
+    expect(regen?.credential).toBeUndefined();
+    expect(regen).not.toHaveProperty("credential");
     expect(e.merger.requests[1]?.lockfiles).toEqual({ "bun.lock": "lock regenerated\n" });
     expect(e.record).toMatchObject({ state: "claimed", head_sha: "d".repeat(40), ci_fixes: 0 });
     expect(e.journal).toMatchObject({ sessions: 1 });

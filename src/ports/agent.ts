@@ -1,6 +1,6 @@
 import type { Result } from "../core/result.ts";
 import type { Lane } from "../core/schemas/host.ts";
-import type { LaunchSpec, Vendor } from "./sandbox.ts";
+import type { LaunchCredential, LaunchSpec, Vendor } from "./sandbox.ts";
 
 /**
  * The `Agent` port (AR1, FR7, AR15, AR22, AR30): turns one unit and a lane's
@@ -46,6 +46,12 @@ export type AgentUsage = {
   readonly usageLimit: { readonly resetAt: number | null } | null;
 };
 
+/**
+ * A `LaunchSpec` with its credential required: an agent session always
+ * carries one. Only the runner's own repo commands omit it (AR19).
+ */
+export type AgentLaunchSpec = LaunchSpec & { readonly credential: LaunchCredential };
+
 export type AgentErrorKind = "invalid" | "refused" | "model-mismatch";
 
 export type Agent = {
@@ -55,7 +61,7 @@ export type Agent = {
   /** The lowest CLI version the adapter accepts, e.g. `2.1.304`. */
   readonly minVersion: string;
   /** The session to run; `resultPath` is the absolute path the sandbox exposes as `XARABOT_RESULT`. */
-  launchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<LaunchSpec, "invalid">;
+  launchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<AgentLaunchSpec, "invalid">;
   /** Reads usage from the session's stdout; lines it can't read are skipped. */
   parseUsage(stdout: string): AgentUsage;
   /** The efforts the CLI offers for an exact model id; none for a model it doesn't know (fails closed). */

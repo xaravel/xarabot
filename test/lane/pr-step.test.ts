@@ -16,9 +16,9 @@ import { runLaneProcess, type PrStepInput } from "../../src/lane/lane-process.ts
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPrStep, prText, statusComment, type PrStepDeps } from "../../src/lane/pr-step.ts";
 import type { Workspace } from "../../src/lane/workspace.ts";
-import type { Agent } from "../../src/ports/agent.ts";
+import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import { FORGE_ERROR_KINDS, isLaneStopKind, type Forge, type ForgeError, type ForgeOperation } from "../../src/ports/forge.ts";
-import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
+import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
 // ------------------------------------------------------------------ world
@@ -822,7 +822,7 @@ async function endToEnd(
         vendorHomeEnv: "STUB_HOME",
         credential: { file: "token", env: "STUB_TOKEN" },
         apiHosts: ["api.example.com"],
-      } as LaunchSpec),
+      } as AgentLaunchSpec),
     parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),

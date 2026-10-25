@@ -7,6 +7,7 @@ import { parseLedger } from "../../src/core/ledger/codec.ts";
 import { laneCommand, laneDirFor, type LaneCommandDeps } from "../../src/cli/lane-commands.ts";
 import type { ProcessTable } from "../../src/lane/processes.ts";
 import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 const MAIN = join(import.meta.dir, "..", "..", "src", "cli", "main.ts");
 const HOST_ID = ALICE.host;
@@ -110,7 +111,7 @@ describe("xarabot stop", () => {
     expect(existsSync(join(w.laneDir, "STOP"))).toBe(false);
   });
 
-  test("stop --now with no host_id: STOP written, kills reported, nothing to release", async () => {
+  hostTest("stop --now with no host_id: STOP written, kills reported, nothing to release", async () => {
     const w = world({ hostId: false });
     mkdirSync(w.laneDir, { recursive: true });
     const wait = spawnSleep();
@@ -167,7 +168,7 @@ describe("xarabot stop", () => {
 });
 
 describe("xarabot wake", () => {
-  test("wakes a live recorded sleep: exit 0", async () => {
+  hostTest("wakes a live recorded sleep: exit 0", async () => {
     const w = world();
     mkdirSync(w.laneDir, { recursive: true });
     const p = spawnSleep();
@@ -185,7 +186,7 @@ describe("xarabot wake", () => {
     expect(r.err.join("\n")).toContain("no-pid-file");
   });
 
-  test("through the bin: wake and stop", async () => {
+  hostTest("through the bin: wake and stop", async () => {
     const w = world();
     mkdirSync(w.laneDir, { recursive: true });
     const p = spawnSleep();

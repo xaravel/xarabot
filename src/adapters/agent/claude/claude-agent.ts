@@ -1,6 +1,5 @@
 import { err, ok, type Result } from "../../../core/result.ts";
-import type { Agent, AgentSettings, AgentUnit, Effort } from "../../../ports/agent.ts";
-import type { LaunchSpec } from "../../../ports/sandbox.ts";
+import type { Agent, AgentLaunchSpec, AgentSettings, AgentUnit, Effort } from "../../../ports/agent.ts";
 import { parseClaudeUsage } from "./usage.ts";
 
 /**
@@ -80,7 +79,7 @@ function modelOf(settings: AgentSettings): string {
   return settings.model ?? CLAUDE_DEFAULT_MODEL;
 }
 
-export function claudeLaunchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<LaunchSpec, "invalid"> {
+export function claudeLaunchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<AgentLaunchSpec, "invalid"> {
   if (!resultPath.startsWith("/") || resultPath.includes("\0")) {
     return err("invalid", `claude: resultPath ${JSON.stringify(resultPath)} is not an absolute path`);
   }

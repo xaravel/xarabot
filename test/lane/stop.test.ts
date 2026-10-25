@@ -8,6 +8,7 @@ import type { UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { createPsProcessTable, type ProcessTable } from "../../src/lane/processes.ts";
 import { releaseHeld, stopNow, wakeLane, writeStop } from "../../src/lane/stop.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
 const children: { kill(): void }[] = [];
@@ -47,7 +48,7 @@ describe("writeStop", () => {
 });
 
 describe("wakeLane", () => {
-  test("kills a live recorded sleep", async () => {
+  hostTest("kills a live recorded sleep", async () => {
     const dir = laneDir();
     const p = spawn("sleep", "30");
     writeFileSync(join(dir, "wait.pid"), `${p.pid}\nsleep\n`);
@@ -56,7 +57,7 @@ describe("wakeLane", () => {
     expect(p.signalCode).toBe("SIGTERM");
   });
 
-  test("a PID file older than the live sleep: skipped started-later", () => {
+  hostTest("a PID file older than the live sleep: skipped started-later", () => {
     const dir = laneDir();
     const p = spawn("sleep", "30");
     const path = join(dir, "wait.pid");
@@ -67,7 +68,7 @@ describe("wakeLane", () => {
     expect(p.exitCode).toBeNull();
   });
 
-  test("wait.pid naming a live cat: not killed", () => {
+  hostTest("wait.pid naming a live cat: not killed", () => {
     const dir = laneDir();
     const p = spawn("cat");
     writeFileSync(join(dir, "wait.pid"), `${p.pid}\ncat\n`);
@@ -83,7 +84,7 @@ describe("wakeLane", () => {
 });
 
 describe("stopNow", () => {
-  test("writes STOP, kills lane, agent and wait in that order, then releases", async () => {
+  hostTest("writes STOP, kills lane, agent and wait in that order, then releases", async () => {
     const dir = laneDir();
     const lane = spawn("sleep", "31");
     const agent = spawn("sleep", "32");

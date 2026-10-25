@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realpathLoose, within } from "../../src/sandbox/macos.ts";
 import { cliVersion, resolveTools, uvPythonDir, which } from "../../src/sandbox/tools.ts";
+import { isSandboxed } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
 
@@ -131,12 +132,12 @@ describe("within", () => {
 });
 
 describe("realpathLoose", () => {
-  // /tmp is a symlink to /private/tmp on macOS only.
-  test.skipIf(process.platform !== "darwin")("resolves the existing prefix and keeps a missing tail", () => {
+  // /tmp is a symlink to /private/tmp on macOS only; a session's profile denies resolving it.
+  test.skipIf(process.platform !== "darwin" || isSandboxed)("resolves the existing prefix and keeps a missing tail", () => {
     expect(realpathLoose("/tmp/xarabot-no-such/dir/file")).toBe("/private/tmp/xarabot-no-such/dir/file");
   });
 
-  test.skipIf(process.platform !== "darwin")("resolves an existing path fully", () => {
+  test.skipIf(process.platform !== "darwin" || isSandboxed)("resolves an existing path fully", () => {
     expect(realpathLoose("/tmp")).toBe("/private/tmp");
   });
 });

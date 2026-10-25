@@ -26,17 +26,19 @@ cd ~/xarabot-switch && bun install --frozen-lockfile
 
 The nested cases run a real `sandbox-exec` session, so they report skipped
 inside a sandboxed session. The live cases reach PyPI only, never GitHub.
-The counts below were measured on the Xarabot host on 2026-10-23, outside a sandbox.
+The host rows below are the counts measured on the Xarabot host on 2026-10-23,
+outside a sandbox, plus the cases Story 2.5c added (to be re-measured on the
+host). The last row runs inside a sandboxed session instead.
 
 | Command | Expected result |
 |---|---|
-| `bun test test/sandbox/macos.test.ts` | `96 pass`, `1 skip`, `0 fail`. The skip is the live uv/PyPI case. |
-| `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `97 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
+| `bun test test/sandbox/macos.test.ts` | `100 pass`, `1 skip`, `0 fail`. The skip is the live uv/PyPI case. |
+| `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `101 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
 | `bun test test/sandbox/proxy.test.ts` | `50 pass`, `1 skip`, `0 fail`. The skip is the live `CONNECT pypi.org:443` case. |
 | `XARABOT_LIVE=1 bun test test/sandbox/proxy.test.ts` | `51 pass`, `0 skip`, `0 fail` |
-| `bun test test/sandbox/` | `268 pass`, `2 skip`, `0 fail` |
-| `XARABOT_LIVE=1 bun test test/sandbox/` | `270 pass`, `0 skip`, `0 fail` |
-| `XARABOT_SANDBOXED=1 bun test test/sandbox/` (what a sandboxed session sees) | `174 pass`, `96 skip`, `0 fail` |
+| `bun test test/sandbox/` | `283 pass`, `2 skip`, `0 fail` |
+| `XARABOT_LIVE=1 bun test test/sandbox/` | `285 pass`, `0 skip`, `0 fail` |
+| `bun test`, run from the clone inside a real sandboxed lane session (e.g. a Story session's own verification) | `0 fail`. The nested sandbox cases and the host cases (binding a socket, `ps`, signalling another process, resolving `/tmp`) report skipped. |
 
 If a nested case passes inside a sandboxed session, or is skipped on the host
 outside one, the switch is not safe. Stop and investigate before going on.

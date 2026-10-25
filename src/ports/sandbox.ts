@@ -33,7 +33,13 @@ export type LaunchSpec = {
   readonly vendor: Vendor;
   /** The variable that points the CLI at its vendor home, e.g. `CLAUDE_CONFIG_DIR`. */
   readonly vendorHomeEnv: string;
-  readonly credential: LaunchCredential;
+  /**
+   * The session's credential. Absent means a repo command the runner starts
+   * (AR19), such as the lockfile regeneration: nothing is seeded into the
+   * vendor home and no credential variable is set. Agent sessions always
+   * carry one (`AgentLaunchSpec`).
+   */
+  readonly credential?: LaunchCredential;
   /**
    * The vendor's API hosts, the session's only hosts besides the package
    * hosts and the repo's `proxy_hosts`. Never a GitHub host or an IP literal.
@@ -41,8 +47,8 @@ export type LaunchSpec = {
   readonly apiHosts: readonly string[];
   /**
    * A resume of the session that last ran in this vendor home: its contents
-   * (the transcript) are kept instead of emptied. The credential is still
-   * re-read and re-checked, and in `homeFile` mode rewritten. Default `false`.
+   * (the transcript) are kept instead of emptied. A credential, if any, is
+   * still re-read and re-checked, and in `homeFile` mode rewritten. Default `false`.
    */
   readonly resume?: boolean;
 };
