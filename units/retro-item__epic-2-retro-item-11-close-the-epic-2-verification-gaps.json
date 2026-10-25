@@ -1,0 +1,33 @@
+{
+  "schema_version": 4,
+  "unit": "retro-item:epic-2-retro-item-11-close-the-epic-2-verification-gaps",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "coordinator",
+  "generation": 1,
+  "globs": [
+    "test/cli/lane-run.test.ts",
+    "test/core/lane/write-check.test.ts",
+    "test/core/reconcile/**",
+    "test/lane/reconcile-step.test.ts",
+    "test/lane/retro-item-step.test.ts",
+    "test/lane/retro-step.test.ts"
+  ],
+  "heartbeat_at": "2026-10-25T21:48:22Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "fd4656c13f7f6c04fe4fd6f21cd28715364dc09b",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "approved_sha": null,
+  "approved_graph": null,
+  "retro_result": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
