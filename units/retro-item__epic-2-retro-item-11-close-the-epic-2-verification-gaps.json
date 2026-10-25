@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-11-close-the-epic-2-verification-gaps",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "test/cli/lane-run.test.ts",
@@ -13,7 +13,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T22:01:40.334Z",
+  "heartbeat_at": "2026-10-25T22:09:13Z",
   "pr": 125,
   "pr_owner": "edanisko",
   "base_sha": "fd4656c13f7f6c04fe4fd6f21cd28715364dc09b",
