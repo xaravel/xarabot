@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "unit": "story:2.6",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "builder-1",
+  "lane": "coordinator",
   "generation": 1,
   "globs": [
     "bun.lock",
@@ -13,7 +13,7 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-24T20:22:03Z",
+  "heartbeat_at": "2026-10-25T00:29:59Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "31408870c133c0b2ef781c23276fad83ad38db88",
@@ -22,12 +22,7 @@
   "passed_sha": null,
   "approved_sha": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "intent-gap",
-    "inbox_owner": "edanisko",
-    "globs_held": []
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
