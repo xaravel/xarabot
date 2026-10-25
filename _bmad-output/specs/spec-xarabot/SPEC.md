@@ -51,17 +51,17 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - **success:** The agent prompt carries no CI, merge or status instructions; every session's output validates against the result schema; a usage-limit hit makes the lane sleep until the reset instead of failing.
 - **CAP-7 · Agent adapters (0.x)**
   - **intent:**
-    - Each lane runs its coding agent through an adapter: `claude`, `codex` or `pi`.
+    - Each lane runs its coding agent through an adapter: `claude` or `codex` (0.x); `pi` follows in v1.
     - Every adapter takes the same three lane settings: `agent`, `model` and `effort`. `effort` is one scale for all adapters (`low`, `medium`, `high`, `xhigh`, `max`); each adapter maps it onto its CLI's own setting.
-    - `claude` and `codex` default to a top model; a `pi` lane sets its model explicitly. Lane config can change model and effort.
+    - `claude` and `codex` default to a top model. Lane config can change model and effort.
     - The consuming repo's policy says which adapters may run unattended.
   - **success:**
     - The same unit runs to a valid JSON result through each adapter.
-    - A `claude` or `codex` lane with no `model` set runs its adapter's default top model; a `pi` lane with no `model` refuses to start. Switching agent, model or effort is a config change only.
+    - A `claude` or `codex` lane with no `model` set runs its adapter's default top model; a lane with `agent: pi` refuses to start in 0.x, naming the deferral. Switching agent, model or effort is a config change only.
     - Each adapter maps `effort` per `agent-adapters.md` § Model and effort; a value an adapter cannot honor stops the lane at start instead of being dropped silently.
     - A lane whose adapter the repo's policy does not allow unattended refuses to start unattended.
 - **CAP-8 · Cross-vendor review (0.x)**
-  - **intent:** Before a diff merges, the runner has it reviewed by an agent whose model comes from a vendor other than every model that built it, whenever the repo's policy allows an adapter from such a vendor. Vendor means the model's vendor, never the adapter's: Codex reviews Anthropic-built diffs, and Claude reviews the rest (`agent-adapters.md`). When the policy allows no adapter from another vendor, as for a user with only a Claude or only a Codex subscription, a separate same-vendor review session reviews the diff instead, under the same rules. The review binds to the commit it reviewed; any later agent change, such as a CI fix or a conflict resolution, re-runs it. Its findings are blocking review loopbacks. BMAD's own review hook may run for earlier feedback but never counts as this review.
+  - **intent:** Before a diff merges, the runner has it reviewed by an agent whose model comes from a vendor other than every model that built it, whenever the repo's policy allows an adapter from such a vendor. Vendor means the model's vendor, never the adapter's: Codex reviews Anthropic-built diffs, and Claude reviews the rest (`agent-adapters.md`). When the policy allows no adapter from another vendor, as for a user with only a Claude or only a Codex subscription, a separate same-vendor review session reviews the diff instead, under the same rules. The review binds to the commit it reviewed; any later agent change, such as a CI fix or a conflict resolution, re-runs it. When the Story's spec recommends a follow-up review, a second review pass runs on the same commit before the PR parks or is enqueued, under the same rules. Runner-written `reconcile` PRs carry no agent change and get no review. Its findings are blocking review loopbacks. BMAD's own review hook may run for earlier feedback but never counts as this review.
   - **success:** Every builder PR carries a review naming the commit it reviewed: from a model vendor outside its builders' when the repo allows one, otherwise from a separate same-vendor session. No PR merges with blocking findings unresolved or with a diff other than the reviewed one. A repo that allows a single vendor merges its PRs on their required checks after the same-vendor review. After 2 loopbacks, the unit does not merge and is listed in its owner's inbox.
 - **CAP-9 · Inboxes (0.x)**
   - **intent:** Each owner sees everything waiting on them in one inbox and rules on it in one sitting a day: their bot's PRs awaiting approval and their blocked units. The Maintainer's inbox also holds rulings, Escalations, waiting retro items and Human Live Steps. On a solo repo the two are one list.
@@ -134,7 +134,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 **Stack**
 - **Toolchain:** Bun only: Bun 1.4.3, TypeScript 7 with `--strict`, oxlint. No Node, npm, pnpm, Jest, Vitest, ESLint or Prettier as tools.
-- **Models:** `claude` and `codex` default to a top model and `pi` lanes name theirs (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
+- **Models:** `claude` and `codex` default to a top model (`agent-adapters.md`); lane config can change them, and Xarabot enforces no model floor.
 - **Planning shape:** 0.x reads the classic BMAD shape only: `epics.md`, `sprint-status.yaml` and Story manifests, plus the Epic graph file. The spec-folder shape (`stories.yaml`) waits until a consumer uses it.
 - **No BMAD overrides:** Xarabot runs stock BMAD skills. Anything else it needs comes from its own prompt template, its own files or artifacts the runner reads; it never writes or requires `_bmad/custom/` in a consuming repo.
 - **Interactive skills stay with the Maintainer:** lanes drive only BMAD skills with a headless run (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`). `bmad-create-epics-and-stories` and `bmad-correct-course` are run by the Maintainer; when a retro or a blocked unit calls for a course correction, it goes to the Maintainer's inbox.
@@ -147,7 +147,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - Only the Xarabot runner holds the bot's private key, mints its tokens and talks to GitHub: claims, pushes, PRs, CI polling and merges. In local-only mode the same holds for the local `main` and the claims ref.
   - No session gets a GitHub token or reaches a GitHub host. A session that needs GitHub data, such as a retro reading PR history, reads files the runner fetched beforehand.
 - **Identity:** lanes act only as their owner's bot (CAP-13): never a shared bot, an org-owned App, a bot user account or a human's own account.
-- **No co-author markers:** no `Co-Authored-By` trailers or similar non-authoritative markers. The bot account is the only marker of lane-made work.
+- **No co-author markers:** no `Co-Authored-By` trailers or similar non-authoritative markers. The bot account is the only marker of lane-made work. The `Co-authored-by: <login>-xarabot[bot]` trailer that GitHub's squash merge adds itself is that marker, and is allowed (Maintainer, 2026-10-25).
 
 **Process and release**
 - **License and release:** open source as `xaravel/xarabot`, MIT license, published to npm as `@xaravel/xarabot` and installed with `bun add`. Consumers pin it exactly. Releases are cut only by the Maintainer, from CI.
@@ -172,11 +172,12 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - roles, tracks, Protected Paths, dependency-command list and Human Live Steps.
 
 **Operating limits**
-- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`; the 0.x write check (CAP-18) enforces it on builder diffs. Besides the coordinator, the Maintainer makes these bootstrap writes, all in Xarabot's own repo and each in a Maintainer PR:
+- **Write authority:** the coordinator lane is the only writer of `sprint-status.yaml` and `retro-gates.yaml`. Its runner-code unit, `reconcile`, alone sets a Story's or an Epic's (`epic-<N>`) status to `done`, writes retro verdicts and items, and opens PRs that are exempt from owner approval (Standing Authority). Its sessions are held to field rules: status planning only adds missing keys; a retro only appends its Epic's `action_items` and sets its own retro key. The 0.x write check (CAP-18) enforces all of this, on builder and coordinator diffs. Besides the coordinator, the Maintainer makes these bootstrap writes, all in Xarabot's own repo and each in a Maintainer PR:
   - at the self-host switch, running `bmad-sprint-planning` so that `sprint-status.yaml` has the bootstrapped Epic's Stories `done`, creating the file or updating it, and running Epic 1's retro, which writes its retro doc and its entry and action items in `sprint-status.yaml` (PR #53);
   - at the switch, Epic 2's Story manifests and Epic 2's Epic context file;
   - until the rulings Story merges, the go for a rejected retro, in `retro-gates.yaml`;
   - until graph planning units run (Story 2.7), in a correct-course PR, the `epics.md` section, Story manifest and `sprint-status.yaml` key (`backlog`) of each Story added to a started Epic.
+- **Live evidence:** an Epic's retro runs only once the Maintainer's live evidence file is on `main` and, for each live command config lists for that Epic (`live_evidence_checks`), holds that command and a passing result.
 - **Capacity:** a host runs at most `XARABOT_MAX_BUILDERS` builder lanes (Xaravel's host: 2).
 
 ## Non-goals
@@ -190,7 +191,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 
 ## Success signal
 
-- **Self-host:** Xarabot built the rest of its own 0.x (the `codex` and `pi` adapters, the TUI, claims and parallel lanes) with its own pinned runner before Xaravel adopts it.
+- **Self-host:** Xarabot built the rest of its own 0.x (the `codex` adapter, the TUI, claims and parallel lanes) with its own pinned runner before Xaravel adopts it.
 - **0.x:** in its adoption Epic (before Epic 9), Xaravel replaces `tools/orchestrator/` with a pinned Xarabot 0.x release.
   - A coordinator and 2 builder lanes on Xaravel's Xarabot host build Phase 1 Epics in parallel as `edanisko-xarabot`, choosing units with `next`, with no unit built twice and no admin merge.
   - edanisko approves the bot's Protected Path PRs directly.
@@ -200,7 +201,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
 ## Assumptions
 
 - **BMAD:** Xarabot drives the stock BMAD skills installed in the consuming repo that run headless (`bmad-build-auto`, `bmad-retrospective`, `bmad-sprint-planning`). "Product management" in scope means driving those planning artifacts (sprint status, retros) and routing course corrections to the Maintainer, not a separate tool.
-- **Same-vendor reviewer:** when the repo allows no adapter from another vendor, the reviewer is the first allowed adapter of `claude`, `codex`; with neither allowed (a pi-only repo), a `pi` session on the builder's model. Confirmed by the Maintainer (2026-10-21); pi as a reviewer is revisited for v1.
+- **Same-vendor reviewer:** when the repo allows no adapter from another vendor, the reviewer is the first allowed adapter of `claude`, `codex`. A repo that allows neither has no reviewer, and its lanes refuse to start (0.x has no `pi` adapter). pi as a builder and a reviewer comes with the v1 adapter.
 - **Bot cost:** an App takes no seat, on public or private org repos. It is marked public only so other orgs can install it.
 - **Decided in the architecture spine** (`../../planning-artifacts/architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`), including the mechanics the 2026-10-20 spec review raised and the Maintainer's decisions of 2026-10-21:
   - the claims ledger on the `xarabot/claims` branch, heartbeat, fencing and takeover (AD-4 to AD-8), with the ledger's `park` values (AD-5, AD-7);
@@ -219,8 +220,7 @@ Xarabot makes Xaravel's unattended delivery layer its own versioned, open-source
   - the write check (AD-30).
 - **Still open in the spine:**
   - which `PATCH git/refs` response means "retry the swap" (409 or 422);
-  - the adapter spikes: for `claude`, `codex` and `pi`, how `bmad-build-auto`'s outcomes map onto the `build` result and how session resume works; for `claude`, the output format that yields usage; for `codex` and `pi`, whether `bmad-build-auto` gets its subagents;
-  - AD-17's two assumptions, spiked in their Stories: pi's vendor-home override and the proxy's hostname allowlist.
+  - the `codex` adapter's outcome mapping, confirmed in Story 3.1 (the spike settled subagents, resume and usage: `../../planning-artifacts/notes/codex-ar42-spike-2026-10-25.md`).
   The local-only adapter (v1) is Deferred in the spine, not open.
 
 ## Open Questions

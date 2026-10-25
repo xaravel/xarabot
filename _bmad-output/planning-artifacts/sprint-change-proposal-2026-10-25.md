@@ -1,7 +1,9 @@
 ---
 title: Sprint Change Proposal, Epic 2 retro item 7
 date: 2026-10-25
-status: draft (for the Maintainer's review)
+status: approved (Maintainer, 2026-10-25)
+approved_by: edanisko
+approved_at: '2026-10-25'
 trigger: Epic 2 retro (`epic-2-retro-2026-10-25.md`) item 7 (A6–A9, E1, open questions); the Epic 2 follow-up reviews; the codex AR42 spike (`notes/codex-ar42-spike-2026-10-25.md`); Story 3.2's escalation (stock pi 1.4.0 gives `bmad-build-auto` no subagents) and the Maintainer's decision to defer the pi adapter for 0.x
 mode: batch
 scope: moderate
@@ -9,6 +11,19 @@ edits: SPEC and companions (through `bmad-spec`), spine, epics (requirements inv
 ---
 
 # Sprint Change Proposal: Epic 2 retro item 7
+
+## Approval (Maintainer, 2026-10-25)
+
+Ed approved this proposal as recommended, with the specifics below. This file records the approved form: C6 and every edit that depends on it (P17, P22, E7 and item 12 in 4g) carry the hash rule, not the commit-time rule of the draft.
+
+- **Q1, Q2, Q3 and Q5:** yes, as recommended. Q2 brings ledger `schema_version` 5 and a new `parked → parked` edge in the spine's normative state diagram.
+- **Q4:** no change. Keep closing an approved `reconcile` PR that the runner failed to enqueue, and record the rule.
+- **C1–C8:** as recommended, except C6, which changes to the hash rule:
+  - When a status planning unit compiles `epic-<N>-context.md`, it writes a header line `<!-- source: sha256:<hex> -->`. The hex is the SHA-256 of Epic N's own section of `epics.md`, from its `## Epic <N>:` heading up to the next `## Epic` heading, text as on `main`.
+  - Each coordinator round, `planningDue` recomputes that hash from the snapshot's `epics.md` text. The snapshot already reads both files, so no commit-history reads and no snapshot schema change are needed.
+  - A mismatch, or a missing source line, means the context is stale. A status planning unit is then due for an Epic with unfinished Stories. This extends Story 2.7's missing-or-invalid rule and does not replace it.
+  - Item 12 then becomes `route: lane`, with globs for `coordinator.ts` and `next`, the planning step and prompt, and their tests. It needs no snapshot schema or forge adapter globs.
+- **C9:** stays an open question to the Maintainer, with no plan change.
 
 ## 1. Issue summary
 
@@ -40,7 +55,7 @@ Epic 2 is done (17 of 17 Stories). Its retro was `rejected` on narrow grounds, a
 - **UX.** None exists, so N/A.
 - **AGENTS.md.** No change. #129 already allows GitHub's bot squash trailer.
 
-**Technical impact.** No merged code is reverted. All code changes go to Stories not yet built (3.1–3.6, 4.2, 7.5) and to six new lane retro items (20–25). The ledger gains fields in two places (Story 4.2's `park.text`; item 24's posted graph hash), and each bumps the ledger `schema_version` past 4.
+**Technical impact.** No merged code is reverted. All code changes go to Stories not yet built (3.1–3.6, 4.2, 7.5) and to six new lane retro items (20–25). The ledger gains fields in two places (Story 4.2's `park.text`; item 24's posted graph hash), and each bumps the ledger `schema_version` past 4 (item 24's to 5, Q2).
 
 ## 3. Recommended approach
 
@@ -78,10 +93,10 @@ Epic 2 is done (17 of 17 Stories). Its retro was `rejected` on narrow grounds, a
 | C3 | The committed-content credential scan (2.5a, medium; the spec says it needs a decision) | A new write-check class, `credential`: refuse any added or changed blob that contains the seeded vendor credential or a string the sanitizer would redact as token-shaped. The refusal names the path only, never the match. Item 20. |
 | C4 | The planning attempts cap across runs (A4; the spec says it needs a decision) | A new planning record starts with the `attempts` of the newest `released` record of its kind (status or graph), so the 3rd failed run in a row parks `attempts-cap`. A `done` or `nothing-due` run resets the count. Item 25. |
 | C5 | AR10's cross-owner close (spec-2-2: "one owner per repo holds until Epic 5") | 0.x stays one owner per repo. Story 7.5's lane start refuses while the ledger holds a live record of another owner. Close-and-reopen stays v1 (AD-9). |
-| C6 | Item 12: re-plan a stale Epic context (open, routed to the Maintainer) | "Older" means that `epics.md`'s last commit on `main` is newer than the context file's last commit. The snapshot carries a `stale` flag per Epic from the same tree reads. A status planning unit is due for an Epic with unfinished Stories whose context is stale. That extends Story 2.7's missing-or-invalid rule and does not replace it. Then set item 12 to `route: lane` with its globs (`src/core/next/**`, `src/core/schemas/snapshot.ts`, the forge adapters and their tests). |
+| C6 | Item 12: re-plan a stale Epic context (open, routed to the Maintainer) | **Approved as the hash rule (Maintainer, 2026-10-25; replaces the draft's commit-time rule).** When a status planning unit compiles `epic-<N>-context.md`, it writes a header line `<!-- source: sha256:<hex> -->`: the SHA-256 of Epic N's own section of `epics.md`, from its `## Epic <N>:` heading up to the next `## Epic` heading, text as on `main`. Each coordinator round, `planningDue` recomputes that hash from the snapshot's `epics.md` text; the snapshot already reads both files, so there are no commit-history reads and no snapshot schema change. A mismatch, or a missing source line, means the context is stale, and a status planning unit is due for an Epic with unfinished Stories whose context is stale. That extends Story 2.7's missing-or-invalid rule and does not replace it. Item 12 becomes `route: lane` with globs for `src/core/next/**` (`coordinator.ts`, `next`), the planning step and prompt, and their tests; no snapshot schema or forge adapter globs. |
 | C7 | The follow-up pass mechanics (E1, decided rule) | Every review round of a flagged Story runs two passes. This needs no record field. The other option, one pass per unit, needs a field and a schema bump. |
 | C8 | Codex token refresh (spike Q6, unverified) | A live case in Story 3.1 records whether a session rewrites `auth.json`. If it does, the lane journals it and the Maintainer decides any write-back. The lane never copies a session-written credential back without that decision. |
-| C9 | Retro open question 6, carried from Epic 1 item 14 | Were PRs #21 and #23–#28 an intended use of the admin bypass? A reply on the retro is enough; there is no plan change. |
+| C9 | Retro open question 6, carried from Epic 1 item 14 | Were PRs #21 and #23–#28 an intended use of the admin bypass? A reply on the retro is enough; there is no plan change. **Still open** (Maintainer, 2026-10-25). |
 
 ### 4c. SPEC and companions (through `bmad-spec`)
 
@@ -130,12 +145,12 @@ File: `architecture/architecture-xarabot-2026-10-20/ARCHITECTURE-SPINE.md`. Set 
 | P14 | AD-11 (line 293) | "When the Maintainer approves, the runner records `approved_graph`…" | "At `reconcile`'s take of the approved PR, the runner records `approved_graph`… A re-take at a different hash voids the approval (item 17). The posted hash binds the approval: a take whose current hash differs from `park.graph_posted` re-parks, posts the new delta and waits for a later approval (Q2)." | A5; item 17; Q2 |
 | P15 | AD-13, status planning unit | "It holds `sprint-status.yaml`, `retro-gates.yaml` and the configured Epic context path (`epic-<N>-context.md`)." | "…and every Epic's context path (the `epic_context_path` pattern for any `<N>`, Story 2.4)." | A7 |
 | P16 | AD-13, coordinator order step 1 | "1. `reconcile`:" | add: "It is due when the snapshot shows `reconcile` work (a record not `merged` whose PR merged; a `merged` record done on `main`; a PR parked `awaiting-approval` that the Maintainer approved at the parked head, read from the snapshot's own review decision; the digest time passed, from Story 4.2) or 10 minutes after the last run (Stories 2.4 and 2.5; amended 2026-10-25)." | 2.4 amendment |
-| P17 | AD-13, steps 3 and 4 | "no status unit is due while a `parked` (`readiness`) planning record exists." / "due once the Epic's live evidence file … is on `main`" | "no planning unit of a kind (status or graph) is due while a planning record of that kind is parked `blocked` for any reason. A status unit is also due for a stale Epic context (C6)." / "due once the Epic's live evidence file is on `main` and, for each command `live_evidence_checks` lists for the Epic, holds that command and a `bun test` summary with `0 fail`" | 2.7 decision; C6; item 14 |
+| P17 | AD-13, steps 3 and 4 | "no status unit is due while a `parked` (`readiness`) planning record exists." / "due once the Epic's live evidence file … is on `main`" | "no planning unit of a kind (status or graph) is due while a planning record of that kind is parked `blocked` for any reason. A status unit is also due for an Epic with unfinished Stories whose context is stale: its `<!-- source: sha256:<hex> -->` line is missing or differs from the SHA-256 of the Epic's own `epics.md` section on `main` (C6). A status planning unit writes that line when it compiles the file." / "due once the Epic's live evidence file is on `main` and, for each command `live_evidence_checks` lists for the Epic, holds that command and a `bun test` summary with `0 fail`" | 2.7 decision; C6; item 14 |
 | P18 | AD-15, Prevents | "wrong authors and co-author trailers;" | add: "GitHub's own squash trailer naming the bot is allowed (Maintainer, 2026-10-25)." | E7 |
 | P19 | AD-16 | "with neither allowed, a `pi` session on the builder's model. … pi as a reviewer is revisited for v1." / "pi lanes must set `model` explicitly." | "With neither allowed, there is no reviewer and the lane refuses to start (AD-21); pi returns with its v1 adapter." Delete the "pi lanes" line. Add: "**Follow-up pass.** When the Story's spec file at `head_sha` has `followup_review_recommended: true`, each review round runs a second session on the same checkout, prompted with the spec's named unverified risks. `passed_sha` is set only when both passes have no blocking findings; findings from either are loopbacks (Story 3.5)." | pi; E1 |
 | P20 | AD-17 | "`[ASSUMPTION: pi's directory override is confirmed in the pi adapter Story]`" / "`[ASSUMPTION: the proxy's hostname allowlist is proven by a spike in the sandbox Story]`" | delete both; pi's override moves to Deferred, and Story 1.12 built and tested the allowlist | pi; A8 |
 | P21 | AD-19, Conflicts / AD-21 | "Hand any other conflict to a builder session…" / "the host would run more builders than `XARABOT_MAX_BUILDERS`" / "**Effort mapping:** `claude --effort`, `pi --thinking`, …" | add "in 0.x a commit conflict's session starts at the CI step after the PR opens (Story 2.11)"; "the host has more builder lanes installed in `host.yaml` than `XARABOT_MAX_BUILDERS`, counted across all repos"; drop `pi --thinking` | A6; pi |
-| P22 | AD-20 config; AD-27 Snapshot; AD-30; Conventions Tests; Stack; diagram; Deferred | see "New" | AD-20: add "`live_evidence_checks` (optional): Epic number → the exact live commands its runbook requires (item 14)". AD-27: add "each parked PR's review decision; each Epic's live evidence text; each Epic's context staleness (C6)". AD-30: add the AR31 field rules, "the coordinator check does not case-fold its own allow-list", the `symlink` class (item 18) and the `credential` class (C3, item 20). Tests: "long-running live cases also need `XARABOT_LIVE_LONG=1`". Stack: pi row "(v1; deferred from 0.x)". State diagram: `parked --> parked: re-park with a new graph delta (Q2)`. Deferred: add "**The pi adapter (v1)**: stock pi 1.4.0 gives `bmad-build-auto` no subagents (Story 3.2's escalation, 2026-10-25); its directory override (AR41) and the same-vendor pi reviewer go with it". Open items: the codex half is settled by the spike, except outcome mapping (Story 3.1). | A6–A8; items 13, 14, 18; C3, C6; Q2; pi |
+| P22 | AD-20 config; AD-27 Snapshot; AD-30; Conventions Tests; Stack; diagram; Deferred | see "New" | AD-20: add "`live_evidence_checks` (optional): Epic number → the exact live commands its runbook requires (item 14)". AD-27: add "each parked PR's review decision; each Epic's live evidence text" (C6's staleness is recomputed from texts the snapshot already holds, so it adds no snapshot field). AD-30: add the AR31 field rules, "the coordinator check does not case-fold its own allow-list", the `symlink` class (item 18) and the `credential` class (C3, item 20). Tests: "long-running live cases also need `XARABOT_LIVE_LONG=1`". Stack: pi row "(v1; deferred from 0.x)". State diagram: `parked --> parked: re-park with a new graph delta (Q2)`. Deferred: add "**The pi adapter (v1)**: stock pi 1.4.0 gives `bmad-build-auto` no subagents (Story 3.2's escalation, 2026-10-25); its directory override (AR41) and the same-vendor pi reviewer go with it". Open items: the codex half is settled by the spike, except outcome mapping (Story 3.1). | A6–A8; items 13, 14, 18; C3; Q2; pi |
 
 ### 4e. Epics and Stories
 
@@ -151,7 +166,7 @@ File: `_bmad-output/planning-artifacts/epics.md`.
 | E4 | NFR20 | align with S6 (field rules, `reconcile`'s `done` writes) | A8 |
 | E5 | AR4 | "sprint status: coordinator" → "sprint status: coordinator, with field rules (AR31); `reconcile`'s runner code alone sets a Story or an Epic `done`" | item 16 |
 | E6 | AR6 | P5 and P6 (`readiness` for both kinds; `schema_version` 4; `park.text` from Story 4.2; `park.graph_posted` from item 24) | 2.7; A7; A3; Q2 |
-| E7 | AR14 | "due only when the snapshot shows `reconcile` work or 10 minutes have passed…" → add "or a PR parked `awaiting-approval` that the Maintainer approved at the parked head (2026-10-25)"; status planning holds every Epic's context path; P17's planning hold and evidence checks | 2.4 amendment; A7; item 14 |
+| E7 | AR14 | "due only when the snapshot shows `reconcile` work or 10 minutes have passed…" → add "or a PR parked `awaiting-approval` that the Maintainer approved at the parked head (2026-10-25)"; status planning holds every Epic's context path; P17's planning hold, stale-context rule (C6) and evidence checks | 2.4 amendment; A7; item 14 |
 | E8 | AR17, AR18, AR22, AR36 | drop pi (reviewer fallback, credential, `pi --thinking`, minimum version); AR18 codex credential "`auth.json` or `CODEX_API_KEY` (spike)"; AR22 "exceed `XARABOT_MAX_BUILDERS`" → "have more builder lanes installed than…" | pi; spike; A6 |
 | E9 | AR21 | add `live_evidence_checks` | item 14 |
 | E10 | AR31 | add after "does not case-fold its own allow-list": "Two further refusal classes come from retro items: `symlink` (a target outside the clone, item 18) and `credential` (a blob holding the seeded credential or a token-shaped string, item 20)." | items 18, 20 |
@@ -259,7 +274,7 @@ None of these changes an Epic edge, a checkpoint, the Epic set or an Epic's Stor
 ### 4g. `retro-gates.yaml` (Epic 2 items, a Maintainer PR as for items 13–19)
 
 - Item 7 → `status: done` once this proposal's edits merge.
-- Item 12 → `route: lane` with the C6 rule and globs, once C6 is confirmed.
+- Item 12 → `route: lane` with the C6 hash rule and its globs (C6 approved 2026-10-25): `src/core/next/**`, `src/lane/planning-step.ts`, `src/core/prompt/**`, `test/core/next/**`, `test/lane/planning-step.test.ts`, `test/core/prompt/**`.
 - New lane items, all `route: lane`, `blocking: false`, `status: open`:
 
 | Id | Text (short) | Globs | Routes |
@@ -267,7 +282,7 @@ None of these changes an Epic edge, a checkpoint, the Epic set or an Epic's Stor
 | `epic-2-retro-item-20-write-check-content-rules` | A `credential` refusal class for added or changed blobs (C3); the Story file's `status:` line accepts only BMAD status values (2.3 F1); a test pins the quoted `"status":` key as refused, fail-closed (2.3 F2, accepted) | `src/core/lane/write-check.ts`, `src/lane/commit.ts`, `src/core/sanitize.ts`, their tests | 2.5a medium; 2.3 F1, F2 |
 | `epic-2-retro-item-21-reconcile-pr-hygiene` | End a `reconcile` run while any `closeBranchPrs` failed, so two `reconcile` PRs are never open (2.5 F1); add `Forge.deleteBranch` (contents: write; contract cases) and delete the branches of closed `reconcile` and disposable planning PRs; a test pins Q4's close | `src/ports/forge.ts`, `src/adapters/forge/**`, `src/lane/reconcile-step.ts`, `src/lane/planning-step.ts`, `test/contracts/forge.contract.ts`, their tests | 2.5a low; 2.5 F1; Q4 |
 | `epic-2-retro-item-22-coordinator-claim-timing-and-fencing` | Seed the coordinator keeper's clock and `claimedMs` from the start snapshot's time (2.4 F1, C8b); end the unit keeper on the coordinator keeper's signal (2.4 F2); fence coordinator-unit edits on `coordinator.json` (Q5) | `src/cli/lane-run.ts`, `src/lane/coordinator-process.ts`, `src/lane/heartbeat.ts`, `src/core/ledger/**`, their tests | 2.4 F1, F2; C8; Q5 |
-| `epic-2-retro-item-23-harden-the-lane-lock` | Re-check `lane.lock`'s PID and start time at each heartbeat and end the unit on a mismatch (2.11 F1); treat a failing `ps` as "held" (2.11 F2); remove `lane.lock.stale-*` and `.tmp-*` files left by a SIGKILL (2.11) | `src/lane/lane-lock.ts`, `src/lane/processes.ts`, `src/lane/waits.ts`, `src/lane/heartbeat.ts`, their tests | 2.11 F1, F2, clutter |
+| `epic-2-retro-item-23-harden-the-lane-lock` | Re-check `lane.lock`'s PID and start time at each heartbeat and end the unit on a mismatch (2.11 F1); treat a failing `ps` as "held" (2.11 F2); remove `lane.lock.stale-*` and `.tmp-*` files left by a SIGKILL (2.11) | `src/lane/lane-lock.ts`, `src/lane/processes.ts`, `src/lane/wait.ts` (the draft's `waits.ts` does not exist), `src/lane/heartbeat.ts`, their tests | 2.11 F1, F2, clutter |
 | `epic-2-retro-item-24-bind-graph-approval-to-the-posted-delta` | Q1–Q3: an approval counts only after the delta comment; `park.graph_posted` and a re-park with a new delta on a hash change; stamp the re-park with the time before the reviews read | `src/lane/reconcile-step.ts`, `src/lane/graph-gate.ts`, `src/core/reconcile/**`, `src/core/ledger/**`, `src/core/schemas/ledger.ts`, their tests | spec-2-8 deferral; Q1–Q3 |
 | `epic-2-retro-item-25-planning-attempts-across-runs` | C4: a new planning record inherits the newest released record's `attempts` of its kind; 3 in a row parks `attempts-cap` | `src/core/next/coordinator.ts`, `src/core/reconcile/plan.ts`, `src/lane/planning-step.ts`, their tests | A4 |
 
@@ -309,7 +324,7 @@ Items 20–25 become retro-item units once merged. Untagged, they hold Epics at 
 
 **Codex spike open points (into Story 3.1).** The forced attribution trailer goes to 3.1's new trailer AC and AC 2. Closed stdin goes to AC 2. The unidentified host goes to AC 7. `resets_at` as the reset source goes to AC 5. Token refresh (C8) and subagent token totals become live cases in 3.1.
 
-**Retro open questions.** 1 is done (item 1). 2 is decided (AR31; item 14). 3 is decided (E1, Stories 3.4 and 3.5). 4 is decided (item 16). 5 is decided (#129, S5). 6 is still open (C9).
+**Retro open questions.** 1 is done (item 1). 2 is decided (AR31; item 14). 3 is decided (E1, Stories 3.4 and 3.5). 4 is decided (item 16). 5 is decided (#129, S5). 6 is still open (C9, Maintainer, 2026-10-25).
 
 ## 5. Implementation handoff
 
@@ -317,12 +332,12 @@ Items 20–25 become retro-item units once merged. Untagged, they hold Epics at 
 
 | Work | Who | How |
 |---|---|---|
-| Answers to Q1–Q5 and C1–C9 | Maintainer | reply on this proposal |
+| Answers to Q1–Q5 and C1–C9 | Maintainer | done 2026-10-25 (Approval, above); C9 stays open |
 | SPEC, `agent-adapters.md`, `releases.md`, glossary (S1–S18) | Maintainer | `bmad-spec`, one PR |
 | Spine, epics, manifests, `retro-gates.yaml` (4d–4g) | Maintainer | one planning PR; `graph check` must exit 0 |
 | Release Story 3.2 for its rebuild | Maintainer | `xarabot rule release story:3.2` |
 | Stories 3.1–3.6, 4.2, 7.5 as amended | builder lane | from `next` |
-| Items 20–25 (and 12 once routed) | coordinator lane | retro-item units |
+| Items 12 and 20–25 | coordinator lane | retro-item units |
 
 **Success criteria.**
 - `bun src/cli/main.ts graph check` exits 0. Epic 3 still has 6 Stories; 3.3 depends only on 3.1, and 7.3 depends on 3.1 and 7.1.
@@ -352,4 +367,4 @@ Items 20–25 become retro-item units once merged. Untagged, they hold Epics at 
 | 4.3 MVP review | [x] | only pi leaves 0.x |
 | 4.4 Path | [x] | section 3 |
 | 5.1–5.5 Proposal parts | [x] | sections 1–5 |
-| 6.1–6.5 Review and handoff | [!] | awaits the Maintainer's answers and approval |
+| 6.1–6.5 Review and handoff | [x] | approved by the Maintainer, 2026-10-25 (Approval, above) |

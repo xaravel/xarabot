@@ -7,7 +7,7 @@ paradigm: 'functional core, imperative shell, with ports and adapters'
 scope: 'Xarabot 0.x and v1: runner and lanes, next, claims ledger, CI and merge plumbing, agent and forge adapters, sandbox, config and policy, inbox and rulings, telemetry, TUI, bootstrap'
 status: final
 created: '2026-10-20'
-updated: '2026-10-24'
+updated: '2026-10-25'
 binds: [CAP-1, CAP-2, CAP-3, CAP-4, CAP-5, CAP-6, CAP-7, CAP-8, CAP-9, CAP-10, CAP-11, CAP-12, CAP-13, CAP-14, CAP-15, CAP-16, CAP-17, CAP-18, CAP-19, CAP-20, CAP-21, CAP-22, CAP-23, CAP-24]
 sources:
   - _bmad-output/specs/spec-xarabot/SPEC.md
@@ -28,7 +28,7 @@ Every lane that builds Xarabot follows this file. If it disagrees with `SPEC.md`
 | --- | --- | --- |
 | Core: pure decisions, schemas, types | `src/core/` | `src/core/` only |
 | Ports: interfaces | `src/ports/` | `src/core/` |
-| Adapters: forge (`github`; later `local`) and agent (`claude`, `codex`, `pi`) | `src/adapters/forge/*`, `src/adapters/agent/*` | `src/ports/`, `src/core/` |
+| Adapters: forge (`github`; later `local`) and agent (`claude`, `codex`; later `pi`) | `src/adapters/forge/*`, `src/adapters/agent/*` | `src/ports/`, `src/core/` |
 | Sandbox: profile, proxy, the only process launcher for agents | `src/sandbox/` | `src/ports/`, `src/core/` |
 | Shell: the lane process for one unit | `src/lane/` | everything above |
 | CLI: `xarabot <command>` | `src/cli/` | `src/lane/` and everything it may import |
@@ -54,8 +54,8 @@ graph TD
 
 | Port | Operations |
 | --- | --- |
-| `Forge` | `snapshot()` returns the ledger tip, `main` SHA, PR states and the server's `now`; it reads the contents of only the `main` paths its `read` filter passes, and returns `blob_shas` for them. Also `ledgerSwap(oldSha, edit)`, which returns `ok` or `conflict`; `pushBranch(lease)`; PR open, update and close; `listPrsByBranch(branch)`; `branchHead(branch)` (Story 2.6b); `reviews(pr)` (Story 2.6); `postReview`; `comment(pr, body)` for 🤖 status comments; `checks`; `enqueue(pr, expectedHead)`; `dequeue`; `queueState(pr)`; inbox `renderDigest`, `alert` and `readRulings(cursor)`; `prefetch(kind)`. There is no approve operation. |
-| `Agent` | `launchSpec(unit, settings, resultPath)` returns a `LaunchSpec`; `parseUsage(output)`; `effortValues(model)` |
+| `Forge` | `snapshot()` returns the ledger tip, `main` SHA, PR states, each parked PR's review decision (retro item 13) and the server's `now`; it reads the contents of only the `main` paths its `read` filter passes, and returns `blob_shas` for them. Also `ledgerSwap(oldSha, edit)`, which returns `ok` or `conflict`; `pushBranch(lease)`; PR open, update and close; `listPrsByBranch(branch)`; `branchHead(branch)` (Story 2.6b); `reviews(pr)` (Story 2.6); `postReview`; `comment(pr, body)` for 🤖 status comments; `checks`; `enqueue(pr, expectedHead)`; `dequeue`; `deleteBranch(branch)` for closed `reconcile` and disposable planning PRs (retro item 21); `queueState(pr)`; inbox `renderDigest`, `alert` and `readRulings(cursor)`; `prefetch(kind)`. There is no approve operation. |
+| `Agent` | `launchSpec(unit, settings, resultPath)` returns a `LaunchSpec`; `parseUsage(output, vendorHome)`, which may also read the CLI's session files in the lane's vendor home before it is re-seeded (codex: model, rate limits and `resets_at` are only there); `effortValues(model)` |
 | `Sandbox` | `run(LaunchSpec, profile)` returns the exit status, PID and timings. This is the only way any agent process is spawned. |
 | `LaneStore` | PIDs, the journal, the outcome and STOP, all inside the lane state folder |
 
@@ -98,7 +98,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 
 | State | Home | Writer |
 | --- | --- | --- |
-| Epic and Story planned or done | `sprint-status.yaml` on `main` | coordinator (its own PRs): a status planning unit, or `reconcile` marking units done and writing a merged graph planning unit's status entries (AD-13) |
+| Epic and Story planned or done | `sprint-status.yaml` on `main` | coordinator (its own PRs): a status planning unit, which only adds missing keys; a retro unit, which only appends its Epic's `action_items` and sets its own `epic-<N>-retrospective` key; or `reconcile`'s runner code, which alone sets a Story or an Epic (`epic-<N>`, once all its Stories are `done`) to `done`, and writes the status entries of a merged graph planning unit (AD-13, AD-30) |
 | Epic 1's Stories `done`, at Xarabot's self-host switch | `sprint-status.yaml` on `main` | the Maintainer, once, in a Maintainer PR, by running `bmad-sprint-planning`, which creates or updates the file so that Epic 1's Stories are `done`; the Maintainer also runs Epic 1's retro interactively. This is bootstrap write 1 above, an exception to the coordinator rule (AD-11, `bootstrapped_epics`). |
 | Retro verdicts and items | `retro-gates.yaml` on `main` | `reconcile`'s runner code only, once, from the retro unit's validated result (AD-12); then only rulings and status changes |
 | BMAD's copy of retro action items | `sprint-status.yaml` `action_items` | stock `bmad-retrospective`; used only to validate the retro result, never read by gates, `next` or the digest |
@@ -109,7 +109,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Bootstrapped Epics | `bootstrapped_epics` in `.xarabot/config.yaml` on `main` | the Maintainer (a Protected Path, AD-20) |
 | Ledger records in `claimed` or `merging` | ledger (AD-4) | the lane that holds the unit. Any lane may take over a stale record by compare-and-swap at `generation` + 1 (AD-6, AD-13). |
 | Ledger records in `parked` | ledger | the lane that parks the unit. The coordinator's `reconcile` unit may take a held record at `generation` + 1 to enqueue it. |
-| Ledger records in `released`; an Infrastructure approval | ledger | the lane releasing the unit, or the coordinator, or the Maintainer's `xarabot rule` on the host, applying a ruling (AD-28) |
+| Ledger records in `released`; an Infrastructure approval | ledger | the lane releasing the unit, or the coordinator, or the Maintainer's `xarabot rule` on the host, applying a ruling (AD-28); `xarabot rule` writes as the coordinator lane identity for a non-Story unit |
 | Ledger records in `merged` | ledger | any lane that sees the PR merged (an idempotent edit). Only the coordinator deletes the record, and only once the unit is done on `main` (AD-9). |
 | Branch, PR, CI and merge queue | forge | runner, through the `Forge` port |
 | Inbox digest body, the daily digest comment and its last post time | forge issue; `coordinator.json` | coordinator (`reconcile`, AD-23) |
@@ -144,13 +144,16 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
     - `pr`, `pr_owner`, `base_sha`, `head_sha`, `reviewed_sha`, `passed_sha`, `approved_sha`, `approved_graph` (Story 2.8)
     - `retro_result`: a retro unit's validated result (Story 2.9)
     - `builder_providers[]`: every model provider whose session changed the diff
-    - `park` (`kind`, `reason`, `inbox_owner`, `globs_held`). `kind` is `awaiting-approval`, `needs-approval` or `blocked`. `reason` is a `build.blocked.kind` (AD-14) or a runner cause: `review-cap`, `ci-fix-cap`, `ci-timeout`, `write-check`, `no-op`, `attempts-cap`, `unclaimable`, `graph-invalid` or `readiness` (a status planning unit's `planning` result `blocked`, Story 2.7). `unclaimable` only labels an inbox item: a Story whose globs resolve to nothing, or a heading with no manifest, gets no ledger record.
+    - `park` (`kind`, `reason`, `inbox_owner`, `globs_held`). `kind` is `awaiting-approval`, `needs-approval` or `blocked`. `reason` is a `build.blocked.kind` (AD-14) or a runner cause: `review-cap`, `ci-fix-cap`, `ci-timeout`, `write-check`, `no-op`, `attempts-cap`, `unclaimable`, `graph-invalid` or `readiness` (a planning unit's `planning` result `blocked`, status or graph, Story 2.7). `unclaimable` only labels an inbox item: a Story whose globs resolve to nothing, or a heading with no manifest, gets no ledger record.
+    - `park.text`: a sanitized, capped reason text for an inbox item (Story 4.2).
+    - `park.graph_posted`: the hash of the graph delta the runner last posted on the PR (retro item 24, AD-11).
     - `attempts`, `loopbacks`, `ci_fixes`. These counters live in the record, so a takeover never resets a cap.
     - `approval` (`by`, `manifest_sha`)
   - **States:** `claimed`, `merging`, `parked`, `released`, `merged`. The diagram in the Structural Seed is normative.
   - **Records are never deleted** except `merged` records, which the coordinator removes (AD-3), and superseded `released` `reconcile:<n>` and planning records, which a later `reconcile` run removes (Stories 2.5 and 2.7). `generation` only ever goes up, and `attempts` is kept on release.
   - **Time.** `now` is the forge server's time, returned by `Forge.snapshot()`. Local-only mode uses the host clock. The host clock is used only for local sleep lengths.
   - **Unknown schema.** A lane that meets a `schema_version` it doesn't know, or a newer one, stops before running `next` and posts an alert. Failing closed is the rule here.
+    - The ledger `schema_version` was 4 at the end of Epic 2 (Stories 2.7, 2.8 and 2.9 each bumped it); it is a ledger-only constant. `park.graph_posted` makes it 5 (retro item 24).
   - **`host`** is a UUID that `xarabot lane install` writes to `host.yaml`. It is not the machine's hostname.
 
 ### AD-6: Heartbeat every 5 minutes; fence each action with a compare-and-swap
@@ -158,7 +161,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 - **Binds:** CAP-3, CAP-6, CAP-15.
 - **Prevents:** a lane that went quiet and lost its claim pushing or merging over the lane that took over.
 - **Rule:**
-  - A heartbeat runs every 5 minutes, for `claimed` records and for `merging` records that a builder lane holds. `merging` records that `reconcile` holds have no heartbeat and can never be taken over (AD-7). Any coordinator lane may move them on (release a `reconcile` PR's record, or park an ejected gated PR's record), fencing on the record's `generation` rather than the exact holder, so a coordinator that moved hosts leaves nothing stuck (Stories 2.5 and 2.6).
+  - A heartbeat runs every 5 minutes, for `claimed` records and for `merging` records that a builder lane holds. A lane releases its own unit about 2 minutes before its heartbeat would lapse (Story 2.1's margin). A coordinator unit's fence also requires `coordinator.json`'s holder and generation unchanged (retro item 22). `merging` records that `reconcile` holds have no heartbeat and can never be taken over (AD-7). Any coordinator lane may move them on (release a `reconcile` PR's record, or park an ejected gated PR's record), fencing on the record's `generation` rather than the exact holder, so a coordinator that moved hosts leaves nothing stuck (Stories 2.5 and 2.6).
   - **A stale `claimed` record** (no heartbeat for 30 minutes) can be taken over by any lane: `generation` + 1, `attempts` + 1, and on the 3rd it becomes `parked` (blocked) instead.
   - **A stale `merging` record that a builder lane holds:**
     - If its PR merged, it becomes `merged`.
@@ -167,7 +170,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
   - `parked` records never expire.
   - **Retries.** The lane gives up a compare-and-swap retry loop after 10 tries or when the call's deadline passes, whichever comes first.
   - Right before each push, PR change, enqueue or merge, the lane does a heartbeat swap that requires its own `owner/host/lane` and `generation`. If the swap fails, the lane abandons the unit.
-  - Pushes use `--force-with-lease` against the record's `head_sha`.
+  - Pushes use `--force-with-lease` against the record's `head_sha`. The first push of a unit leases against `branchHead` read at that push (Story 2.6b).
   - Enqueue and merge pass the expected head SHA.
 
 ### AD-7: What each outcome does to the ledger
@@ -195,8 +198,8 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 Every move out of `merging` other than to `merged` dequeues the PR first. Every cap (`attempts`, `loopbacks`, `ci_fixes`) is tested with `>=`.
 
 **`merging` records the coordinator holds.** A `merging` record that `reconcile` holds is checked by later `reconcile` runs, not by heartbeat. If the PR merged, it becomes `merged`. If it is still queued, it is left unchanged. If it was ejected or dequeued, or its enqueue was refused because it conflicts, it depends on whose PR it is:
-- **An approval-gated PR** (a builder's or graph unit's, taken by `reconcile` after approval): the record becomes `parked` (`awaiting-approval`), holding only the paths its diff changes, with `approved_sha` cleared (the AD-7 row above). `reconcile` takes it again only for an approval submitted after the park, on the current head.
-- **`reconcile`'s own PR**: it holds only runner-written content, so it is disposable. The run closes the PR and the record becomes `released`; the next due run deletes that record and opens a fresh PR from fresh `main`.
+- **An approval-gated PR** (a builder's or graph unit's, taken by `reconcile` after approval): the record becomes `parked` (`awaiting-approval`), holding only the paths its diff changes, with `approved_sha` cleared (the AD-7 row above). `reconcile` takes it again only for an approval submitted after this re-park, on the current head. A builder's first park counts any approval from the owner on the current head (Story 2.6). A graph-change park counts only an approval submitted after the runner posted its delta (AD-11).
+- **`reconcile`'s own PR, and an ungated status planning PR** (Story 2.7): each holds only runner-written or regenerable content, so each is disposable. The run closes the PR and the record becomes `released`; the next due run deletes that record and opens a fresh PR from fresh `main`. A `reconcile` PR the runner failed to enqueue is closed and replaced the same way; it needs no approval, so closing it costs a CI run, not a human step (Maintainer, 2026-10-25). A planning PR whose CI fails parks `blocked` (`verification`) with no agent fix.
 
 No attempt is counted either way.
 
@@ -215,7 +218,7 @@ No attempt is counted either way.
 - **Prevents:** duplicate PRs, units built twice after a merge outside the process, and branch collisions between unit kinds.
 - **Rule:**
   - **Branch names.** Stories use `<story-namespace><story-id>` (Xarabot: `story/9.3`). Every other unit uses `<xarabot-namespace><kind>-<id>` (default `xarabot/retro-item-9.12`). Repo config sets both namespaces.
-  - **One-shot and recurring units.** `story`, `retro` and `retro-item` are one-shot. No `checkpoint` unit runs: `checkpoint:<epic>` is only the target of a `go` ruling (AD-12, AD-28). `planning` and `reconcile` recur, so each run's id carries a run number (`planning:<slug>.<n>`, `reconcile:<n>`), with `n` one more than the last on the ledger.
+  - **One-shot and recurring units.** `story`, `retro` and `retro-item` are one-shot. No `checkpoint` unit runs: `checkpoint:<epic>` is only the target of a `go` ruling (AD-12, AD-28). `planning` and `reconcile` recur, so each run's id carries a run number (`planning:status.<n>`, `planning:graph.<n>`, `reconcile:<n>`), with `n` one more than the highest of that slug on the ledger.
   - **Every claim** looks at the unit's branch and every PR on it, in any state:
     - A merged PR means write `merged`.
     - An open PR means adopt it. The record's `head_sha` is set to the PR's actual head.
@@ -229,6 +232,7 @@ No attempt is counted either way.
     - `reconcile` and a status planning unit: the PR merged; a graph planning unit: its status entries on `main` (Story 2.5).
   - **Wip.** Before any reset, the runner snapshots the clone's working tree as `wip/<unit>` in `runner.git` (AD-15). It never pushes wip.
   - **Restart.** A restarted lane resumes its wip only if it still holds the claim at the same generation.
+  - **One owner per repo (0.x).** A lane refuses to start while the ledger holds a live record (`claimed`, `merging` or `parked`) of another owner (Story 7.5).
   - **Cross-owner takeover (v1).** The previous owner's PR is closed with a comment, and a new PR is opened under the new owner's bot. `pr_owner` follows the new PR.
 
 ### AD-10: The Story manifest
@@ -287,10 +291,12 @@ No attempt is counted either way.
     - Before enqueue, the runner runs `resolveGraph` and the whole validation list above on the PR's merge result (the merge it recomputes for AD-16). A failure parks the PR blocked (`graph-invalid`).
     - Any change to the effective graph needs the Maintainer's approval, appends included. The effective graph covers edges (package edges included), checkpoints, the Epic set and numbers, and each Epic's Story set.
     - A PR whose merge result changes the resolved graph, whatever files it touches, takes `xarabot:graph` in its ledger record before enqueue; a second such PR waits.
+    - In 0.x the gate runs at the builder merge step, the graph planning step and `reconcile`'s take. Status planning and `reconcile` PRs cannot touch graph inputs (AD-30). A stale `merging` takeover was gated before its enqueue, and human-authored PRs wait for CAP-19 (Deferred).
     - An Epic with a retro verdict takes no new Stories; new work goes in a new Epic.
     - The same validator runs as `xarabot graph check`, so the Maintainer can check a graph change made in an interactive `bmad-create-epics-and-stories` or `bmad-correct-course` session before merging, and a consumer can run it in CI.
     - The runner posts the delta on the PR: changed edges and checkpoints, and the Epics each checkpoint without a go holds.
-    - When the Maintainer approves, the runner records `approved_graph`, the hash of the resolved graph of the approved head's merge result. Enqueue recomputes it against current `main`; on a mismatch the approval is void and requested again.
+    - At `reconcile`'s take of the approved PR, the runner records `approved_graph`, the hash of the resolved graph of the approved head's merge result. Enqueue recomputes it against current `main`; on a mismatch the approval is void and requested again. A re-take at a different hash voids the approval (retro item 17).
+    - **The posted hash binds the approval.** The park records the hash of the delta the runner posted (`park.graph_posted`, AD-5), and only an approval submitted after that delta comment counts. A take whose current hash differs from `park.graph_posted`, or with none posted, re-parks, stamped with the forge `now` of the snapshot taken before the reviews were read, posts the new delta and waits for a later approval (retro item 24).
   - **Fixed once used.** An Epic number or Story id can't be renumbered or removed once it has a status beyond `backlog` in `sprint-status.yaml`, a `retro-gates.yaml` record, a ledger record in any state, or a PR on its branch; such a PR parks blocked (`graph-invalid`).
   - **Retiring a checkpoint.** Only a checkpoint whose go is recorded may be retired, by removing `checkpoint: true`; the go record stays.
 
@@ -324,7 +330,7 @@ No attempt is counted either way.
   - **Globs for every unit kind.**
     - Every unit kind holds globs.
     - Planning comes in two kinds of unit:
-      - A *status* planning unit runs `bmad-sprint-planning` and compiles Epic context. It holds `sprint-status.yaml`, `retro-gates.yaml` and the configured Epic context path (`epic-<N>-context.md`). It is not approval-gated. It returns readiness findings in its result and never saves a findings file (AD-29), so it holds no findings path.
+      - A *status* planning unit runs `bmad-sprint-planning` and compiles Epic context. It holds `sprint-status.yaml`, `retro-gates.yaml` and every Epic's context path (the `epic_context_path` pattern for any `<N>`, `epic-<N>-context.md`; Story 2.4). It is not approval-gated. It returns readiness findings in its result and never saves a findings file (AD-29), so it holds no findings path.
       - A *graph* planning unit writes manifests, `epics.md` and `.xarabot/epics.yaml`. It holds the graph inputs (`epics.md`, `.xarabot/epics.yaml`, the manifest directory) and the pseudo-glob `xarabot:graph` (AD-11). It is approval-gated and never touches status files.
     - Retro units hold `sprint-status.yaml`, `retro-gates.yaml` and the Epic context path, never the graph inputs. A retro unit also holds the retro document path (`retro_doc_glob`, AD-20), so the stock `epic-<N>-retro-<date>.md` can land.
     - A retro item carries its `globs` in `retro-gates.yaml`. Without globs it can't be claimed. Its globs may not include graph inputs, status files, or anything the write check refuses a builder (AD-30).
@@ -337,10 +343,11 @@ No attempt is counted either way.
     - A Story with an open Escalation (AD-20) is never taken.
   - **Epic context.** An Epic's Stories are eligible only once its BMAD context file (`epic_context_path`, AD-20) exists on `main` and is valid: non-empty and starting with `# Epic <N> Context:`, the stock check in `bmad-build-auto` step-01. Epics in `bootstrapped_epics` are exempt. When only this holds a builder, `next` returns `idle` with a reason naming the Epic that waits for its context.
     - A status planning unit compiles the file by following the installed stock `bmad-build-auto` skill's `compile-epic-context.md`, given the Epic number, the epics path, the planning artifacts directory (the folder of `epics_path`) and the output path (AD-29).
+    - **Stale context** (Maintainer, 2026-10-25; retro item 12). When a status planning unit compiles the file, it writes a header line `<!-- source: sha256:<hex> -->`: the SHA-256 of the Epic's own section of `epics.md`, from its `## Epic <N>:` heading up to the next `## Epic` heading, text as on `main`. Each coordinator round, `planningDue` recomputes that hash from the snapshot's `epics.md` text. A mismatch, or a missing source line, makes the context stale, and a status planning unit is due for it (below). The file still starts with its `# Epic <N> Context:` heading (the validity rule above), so the source line goes below that heading.
     - In Xarabot's own repo, the Maintainer compiles Epic 2's context at the self-host switch (AD-3).
     - The runner reverts any change a builder session makes to it before squashing.
   - **The coordinator** works in this order:
-    1. `reconcile`:
+    1. `reconcile`. It is due when the snapshot shows `reconcile` work (a record not `merged` whose PR merged; a `merged` record done on `main`; a PR parked `awaiting-approval` that the Maintainer approved at the parked head, read from the snapshot's own review decision; the digest time passed, from Story 4.2) or 10 minutes after the last run (Stories 2.4 and 2.5; amended 2026-10-25). It does:
        - apply rulings;
        - take approved held PRs at `generation` + 1, fence, and enqueue them;
        - write `merged` records;
@@ -348,8 +355,8 @@ No attempt is counted either way.
        - route Maintainer-only retro items (`route: maintainer`) in batch;
        - rewrite each inbox body whose content changed, and post the daily digest comment once `digest_time` has passed (AD-23).
     2. Open coordinator PR.
-    3. Planning: a due graph unit before a due status unit; no status unit is due while a `parked` (`readiness`) planning record exists.
-    4. Retro (due once the Epic's live evidence file, `live_evidence_glob` (AD-20), is on `main`; until then `next` idles `waiting-on-maintainer`, naming the file).
+    3. Planning: a due graph unit before a due status unit; no planning unit of a kind (status or graph) is due while a planning record of that kind is parked `blocked` for any reason. A status unit is also due for an Epic with unfinished Stories whose context is stale (Epic context, above); this extends the missing-or-invalid rule and does not replace it.
+    4. Retro (due once the Epic's live evidence file, `live_evidence_glob` (AD-20), is on `main` and, for each command `live_evidence_checks` (AD-20) lists for the Epic, holds that command and a `bun test` summary with `0 fail`; until then `next` idles `waiting-on-maintainer`, naming the file or each missing or failing command).
     5. Retro items.
   - **Planning shape.** 0.x supports only BMAD's classic shape: `epics.md`, `sprint-status.yaml` and manifests, plus the Epic graph file (AD-11).
 
@@ -365,7 +372,7 @@ No attempt is counted either way.
     - `retro`: `verdict` (`accepted` | `accepted-with-open-items` | `rejected`, the stock retro document's frontmatter `verdict`, AD-12), `items[]` {`id`, `text`, `route` (`lane` | `maintainer`), `blocking`, `globs`}.
     - `planning`: `outcome` (`done` | `nothing-due` | `blocked`), `summary`.
     - Every kind also carries `denied_actions[]`, for actions the agent's permission mode refused. The agent reports them and never works around them.
-  - **A missing result** first gets one resume: every stock skill ends by telling the agent to stop, so the runner resumes the session once with a prompt that asks only for the result (`claude -p --resume`; codex and pi confirmed in their adapter Stories). For builds it also cross-checks the `status` and `## Auto Run Result` of the Story's spec file (AD-10); for a `blocked` result, only when `story_spec_path` has exactly one match.
+  - **A missing result** first gets one resume: every stock skill ends by telling the agent to stop, so the runner resumes the session once with a prompt that asks only for the result (`claude -p --resume`; `codex exec resume <thread_id>`, confirmed in Story 3.1; pi with its v1 adapter). For builds it also cross-checks the `status` and `## Auto Run Result` of the Story's spec file (AD-10); for a `blocked` result, only when `story_spec_path` has exactly one match.
   - **A result still missing, or invalid,** counts as a failed attempt. A `done` build result is invalid unless exactly one match is `done` and every other match is `blocked` (AD-10).
   - **Never taken from the agent:** agent, model, effort, tokens and cost (parsed by the adapter from the CLI's own output), timings, the diff, the files touched, authorship.
 
@@ -373,7 +380,7 @@ No attempt is counted either way.
 
 - **Binds:** CAP-6, CAP-13, CAP-18; SPEC "No co-author markers".
 - **Prevents:**
-  - wrong authors and co-author trailers;
+  - wrong authors and co-author trailers; GitHub's own squash trailer naming the bot (`Co-authored-by: <login>-xarabot[bot]`) is allowed (Maintainer, 2026-10-25);
   - diffs on a stale base that revert other Stories;
   - agent text closing issues or pinging people;
   - git config the agent planted running code as the runner.
@@ -397,10 +404,9 @@ No attempt is counted either way.
 - **Prevents:** a review the builder reports about itself, and a merged diff that differs from the reviewed one.
 - **Rule:**
   - **Picking the reviewer.** The reviewer must come from a provider not in the record's `builder_providers[]`.
-    - **A session's provider** is the vendor of the model it runs, never the adapter's name. `claude` is Anthropic and `codex` is OpenAI. A pi session's provider is the vendor named in its `<provider>/<id>` model; through OpenRouter, that is the vendor of the underlying model.
+    - **A session's provider** is the vendor of the model it runs, never the adapter's name. `claude` is Anthropic and `codex` is OpenAI.
     - **Which reviewer:** the first allowed adapter from (`claude`, `codex`) whose provider is not in the set.
-    - **Single vendor.** If the repo's policy allows no adapter whose provider is outside the set, a separate same-vendor session reviews instead, under every rule below. The reviewer is the first allowed of (`claude`, `codex`); with neither allowed, a `pi` session on the builder's model. Decided by the Maintainer (2026-10-21); pi as a reviewer is revisited for v1.
-    - pi lanes must set `model` explicitly.
+    - **Single vendor.** If the repo's policy allows no adapter whose provider is outside the set, a separate same-vendor session reviews instead, under every rule below. The reviewer is the first allowed of (`claude`, `codex`). Decided by the Maintainer (2026-10-21). With neither allowed, there is no reviewer and the lane refuses to start (AD-21); pi returns with its v1 adapter (Deferred).
     - If the model a session reports differs from its config, the attempt fails.
   - **The session.** The review runs over a fresh checkout of `head_sha` that the runner makes from `runner.git`, never in the builder's clone.
     - Agent config paths (AD-30) are restored from `main`, so nothing the builder wrote can configure the reviewer.
@@ -417,6 +423,7 @@ No attempt is counted either way.
     - a review-driven fix session counts as a loopback (`loopbacks`, at most 2);
     - a CI-fix session, or an agent session that resolves a merge conflict, counts as a CI fix (`ci_fixes`, at most 2, AD-19) and never as a loopback.
     - Past either cap, the unit parks blocked (`review-cap` or `ci-fix-cap`, AD-7).
+  - **Follow-up pass.** When the Story's spec file at `head_sha` (AD-10) has `followup_review_recommended: true`, each review round runs a second session on the same checkout, prompted with the spec's named unverified risks. `passed_sha` is set only when both passes have no blocking findings; findings from either are loopbacks, and every later round runs both passes again (Story 3.5). A unit with no spec, or with the flag `false`, gets the normal review only.
   - **Coordinator PRs** follow the same rule, except `reconcile` PRs (above).
   - **At lane start,** the lane refuses to run if the reviewer adapter isn't allowed.
   - **BMAD's own review hook** may run for earlier feedback, but it never counts as the gate.
@@ -428,12 +435,11 @@ No attempt is counted either way.
 - **Rule:**
   - **The only launcher.** Only `src/sandbox/` spawns agent and reviewer processes. A boundary test bans `Bun.spawn` under `src/adapters/agent/`.
   - **The mechanism.** On macOS, `sandbox-exec` with a generated profile, re-tested on every new macOS major version. On Linux, `bwrap` with `--unshare-pid`. Each agent's own sandbox is turned off inside it.
-  - **A private vendor home per session.** Each lane keeps its own vendor home under its state folder, re-seeded before every session (builder or reviewer) so that it holds only that vendor's credential. The adapter points the CLI at it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, pi's agent directory).
+  - **A private vendor home per session.** Each lane keeps its own vendor home under its state folder, re-seeded before every session (builder or reviewer) so that it holds only that vendor's credential. The adapter points the CLI at it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
     - On macOS, `claude` gets its credential as `CLAUDE_CODE_OAUTH_TOKEN`, because the keychain is unreadable.
     - The operator's own `~/.claude`, `~/.codex` and `~/.pi` are neither readable nor writable.
-    - `[ASSUMPTION: pi's directory override is confirmed in the pi adapter Story]`
-  - **Where credentials come from.** Each vendor's credential is in one mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (falling back to `~/.config`), next to the App key (AD-26), where `<vendor>` is the adapter name (`claude`, `codex` or `pi`), as for the vendor home. The operator writes it once.
-    - Each adapter Story confirms the exact form: for `claude`, the token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`; for `codex`, its auth file or API key; for pi, the OpenRouter key.
+  - **Where credentials come from.** Each vendor's credential is in one mode-600 file under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (falling back to `~/.config`), next to the App key (AD-26), where `<vendor>` is the adapter name (`claude` or `codex`), as for the vendor home. The operator writes it once.
+    - Each adapter Story confirms the exact form: for `claude`, the token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`; for `codex`, its `auth.json` (ChatGPT login) in the lane's `CODEX_HOME`, or an API key passed as `CODEX_API_KEY` (the AR42 spike). The pi adapter's credential comes with it in v1 (Deferred).
     - The lane process reads the file and seeds the vendor home, or sets the credential variable, before each session, builder or reviewer. The sandbox can't read it (below).
     - If the credential for the lane's agent, or for a reviewer adapter the lane may launch, is missing or unreadable, the lane refuses to start (AD-21).
   - **Reads** are denied by default. Allowed: system paths, the lane's clone, the lane's vendor home and its temp folder, and the resolved real paths of the agent CLI, `bun`, `uv`, `git` and the uv-managed Python install, computed at session start. `~/.xarabot/**`, `$XDG_CONFIG_HOME/xarabot` (or `~/.config/xarabot`), `~/.config/gh`, `~/.ssh`, `~/Library/Keychains`, `~/.git-credentials` and `~/.netrc` are always denied.
@@ -442,7 +448,7 @@ No attempt is counted either way.
     - The session's `HOME` is a fresh directory inside its temp folder.
     - **The CLI's temp folder.** Claude Code 2.1.309 ignores `TMPDIR` and writes to `/tmp/claude-<uid>`, which the profile denies, so it fails to start with `EPERM` unless `CLAUDE_CODE_TMPDIR` points inside the session's temp folder. Decided by the Maintainer (2026-10-23) over a general vendor-variables field on `LaunchSpec`.
     - `XARABOT_SANDBOXED=1` is set for every agent session, never for the lane process. A test suite that sees it skips the cases that would start a nested sandbox and reports them skipped; the Maintainer runs those cases live on the host.
-  - **Network** goes only through Xarabot's Bun proxy, to the vendor's API hosts, `pypi.org` and `files.pythonhosted.org` (stock skills run `uv run --no-cache` with Python 3.11+ and `ruamel.yaml`), plus hosts the repo adds. Reads of the uv-managed Python install are allowed. **A GitHub host is never allowed.** `[ASSUMPTION: the proxy's hostname allowlist is proven by a spike in the sandbox Story]`
+  - **Network** goes only through Xarabot's Bun proxy, to the vendor's API hosts, `pypi.org` and `files.pythonhosted.org` (stock skills run `uv run --no-cache` with Python 3.11+ and `ruamel.yaml`), plus hosts the repo adds. Reads of the uv-managed Python install are allowed. **A GitHub host is never allowed.** Story 1.12 built and tested the hostname allowlist.
   - **GitHub data.** A session that needs it reads files the runner fetched beforehand into the temp folder.
   - **Fail closed.** If the sandbox can't be set up, the session is refused.
 
@@ -473,7 +479,7 @@ No attempt is counted either way.
     - Merge `origin/main` into a conflicting PR before polling.
     - In status YAML, keep `main`'s lines and re-apply the PR's own entries.
     - Regenerate a lockfile inside the sandbox.
-    - Hand any other conflict to a builder session, which counts as a CI fix (`ci_fixes`, AD-16), not as a loopback.
+    - Hand any other conflict to a builder session, which counts as a CI fix (`ci_fixes`, AD-16), not as a loopback. In 0.x a commit conflict's session starts at the CI step after the PR opens (Story 2.11).
   - **Merging.**
     - Squash through the merge queue, never with `--delete-branch`.
     - If the queue ejects the PR, merge `main`, poll again and re-enqueue. This counts toward `attempts`.
@@ -493,6 +499,7 @@ No attempt is counted either way.
     - `retro_doc_glob` (`_bmad-output/implementation-artifacts/epic-<N>-retro-*.md`);
     - `epic_context_path` (`_bmad-output/implementation-artifacts/epic-<N>-context.md`);
     - `live_evidence_glob` (`docs/maintainer/evidence/epic-<N>.md`): the Maintainer's record of an Epic's live run, which its retro waits for (AD-13, Story 2.9);
+    - `live_evidence_checks` (optional): Epic number → the exact live commands its runbook requires; the retro waits for each in the evidence file (AD-13, retro item 14);
     - `bootstrapped_epics` (`[]`, AD-11);
     - `digest_time` (`08:00` UTC, AD-23);
     - the optional Escalation source (below).
@@ -525,14 +532,14 @@ No attempt is counted either way.
 - **Rule:**
   - **What a lane has.** Each lane in `host.yaml` has `repo`, `role`, `owner`, `agent`, `model` and `effort`. Its state lives under `~/.xarabot/repos/<owner>__<name>/lanes/<lane>/`.
   - **Defaults.** An unset `model` uses the adapter's default, and an unset `effort` is `high`.
-  - **Effort mapping:** `claude --effort`, `pi --thinking`, `codex -c model_reasoning_effort`, each with the same value names.
+  - **Effort mapping:** `claude --effort`, `codex -c model_reasoning_effort`, each with the same value names.
   - **The lane refuses to start** if:
     - its agent isn't allowed unattended;
     - its effort isn't offered by that adapter for that model;
     - the reviewer adapter isn't allowed;
     - the App installation doesn't cover the repo;
     - the credential for its agent, or for a reviewer adapter it may launch, is missing or unreadable (AD-17);
-    - the host would run more builders than `XARABOT_MAX_BUILDERS`, which counts across all repos.
+    - the host has more builder lanes installed in `host.yaml` than `XARABOT_MAX_BUILDERS`, counted across all repos.
 
 ### AD-22: Stopping, time limits and usage limits
 
@@ -625,6 +632,8 @@ No attempt is counted either way.
     - `sprint-status.yaml` and `retro-gates.yaml`
     - the Escalation statuses, when config names an Escalation source (AD-20)
     - for each Epic, whether its Epic context file on `main` is valid (AD-13)
+    - each parked PR's review decision (retro item 13)
+    - each Epic's live evidence text (retro item 14)
     - the PR state of every ledger unit
     - the lane's identity and role
   - **YAML and globs.** YAML is parsed with `Bun.YAML`, and globs are matched with `Bun.Glob`.
@@ -678,7 +687,9 @@ No attempt is counted either way.
       - an Infrastructure Story with a matching approval (AD-10). This covers the repo's Protected Paths only, never coordinator-owned files, manifests or `.xarabot/**`;
       - the unit's own BMAD Story spec file (AD-10), after superseded matches are dropped;
       - the `status:` line of the unit's own Story file.
-  - **Coordinator diffs** may touch only the paths their unit holds (AD-13). Only a graph planning unit may touch a graph input, and under `.xarabot/**` only `.xarabot/epics.yaml`. A diff touching both a graph input and `sprint-status.yaml` or `retro-gates.yaml` is refused.
+  - **Coordinator diffs** may touch only the paths their unit holds (AD-13). Only a graph planning unit may touch a graph input, and under `.xarabot/**` only `.xarabot/epics.yaml`. A diff touching both a graph input and `sprint-status.yaml` or `retro-gates.yaml` is refused. The coordinator check does not case-fold its own allow-list.
+  - **Status-file field rules** (Maintainer, 2026-10-25; retro item 15). In `sprint-status.yaml` a status planning session may only add missing keys and never change an existing value; a retro session may only append its Epic's `action_items` and set its own `epic-<N>-retrospective` key; no coordinator session sets a Story or an Epic `done`, which only `reconcile`'s runner code does (AD-3). A refusal names the key.
+  - **Content classes** (any agent diff). `symlink`: an added or changed symlink whose target is absolute, leaves the repo root or resolves into a refused class (retro item 18). `credential`: an added or changed blob that holds the seeded vendor credential or a string the sanitizer would redact as token-shaped; the refusal names the path only, never the match (retro item 20).
   - **Retro records.** Any agent diff, builder or coordinator, that changes a retro verdict, a retro item, a checkpoint go or a rejected retro's go in `retro-gates.yaml` is refused (AD-12, AD-28).
   - **Whose diff.** The diff checked is the agent session's own change, never runner-written content such as `reconcile`'s.
   - **A refusal** parks the unit as blocked (AD-7) and is logged with its reason.
@@ -720,14 +731,14 @@ No attempt is counted either way.
 | Concern | Convention |
 | --- | --- |
 | Epic and Story ids | The Epic key is an integer; Epic slugs are only metadata. `story_id` matches `^\d+\.\d+[a-z]?$` and sorts numerically by part, then by suffix. |
-| Unit ids | `story:<story_id>`, `retro:<epic>`, `retro-item:<bmad-action-item-id>`, `checkpoint:<epic>`, `planning:<slug>.<n>`, `reconcile:<n>`. A ledger file name replaces `:` with `__`. |
+| Unit ids | `story:<story_id>`, `retro:<epic>`, `retro-item:<bmad-action-item-id>`, `checkpoint:<epic>`, `planning:status.<n>`, `planning:graph.<n>`, `reconcile:<n>`, with `n` one more than the highest of that slug on the ledger. A ledger file name replaces `:` with `__`. |
 | Lane identity | `<owner>/<host-uuid>/<lane>`. Lane names are `coordinator` and `builder-1` … `builder-N`, unique per host and repo. |
 | Files and names | kebab-case files, `camelCase` functions, `PascalCase` types, one port per file in `src/ports/`. |
 | Errors | `src/core/` returns `{ ok: true, value } \| { ok: false, error: { kind, message } }` and never throws. The shell catches at the unit boundary. |
 | Timestamps | ISO 8601 UTC. |
 | Logs | `logs/<unit-file-id>-<start>.log` in the lane state folder; the journal is the structured record. |
 | Forge text | Written only by the runner, after sanitizing (AD-15). Status comments start with 🤖. |
-| Tests | `bun test`. Core tests are case tables with no mocks. Each gate and each input of `next` has its own test. Adapters are tested through the contract suites. Live cases run only when `XARABOT_LIVE=1` is set (`XARABOT_LIVE=1 bun test <suite>`) and otherwise report skipped. The Maintainer runs them on the host, outside the sandbox, with the credentials they need, before the Epic's retro. Inside a sandboxed session they report skipped, and so do nested sandbox cases and cases that bind sockets or need other access the profile denies (`XARABOT_SANDBOXED=1`, AD-17). |
+| Tests | `bun test`. Core tests are case tables with no mocks. Each gate and each input of `next` has its own test. Adapters are tested through the contract suites. Live cases run only when `XARABOT_LIVE=1` is set (`XARABOT_LIVE=1 bun test <suite>`) and otherwise report skipped; long-running live cases also need `XARABOT_LIVE_LONG=1`. The Maintainer runs them on the host, outside the sandbox, with the credentials they need, before the Epic's retro. Inside a sandboxed session they report skipped, and so do nested sandbox cases and cases that bind sockets or need other access the profile denies (`XARABOT_SANDBOXED=1`, AD-17). |
 | Lint and types | `bun --bun oxlint` and `bun --bun tsc` (TypeScript 7, where `--strict` is on by default). Never run them through Node. |
 
 ## Stack
@@ -740,7 +751,7 @@ No attempt is counted either way.
 | zod | 4.6.7 |
 | claude CLI (adapter target; minimum tested) | 2.1.304 |
 | codex-cli (adapter target; minimum tested) | 0.163.0 |
-| pi coding agent (adapter target; minimum tested) | 1.3.0 |
+| pi coding agent (adapter target; v1, deferred from 0.x) | 1.3.0 |
 | bubblewrap (Linux sandbox) | 0.13.1 |
 
 ## Structural Seed
@@ -781,6 +792,7 @@ stateDiagram-v2
   merging --> parked: approval-gated PR ejected or dequeued (held)
   merging --> released: stale and not queued (attempts + 1) / stop --now or budget (dequeue first) / reconcile PR ejected, dequeued or conflicting (closed, no attempt)
   parked --> merging: reconcile takes approved PR at approved_sha (generation + 1)
+  parked --> parked: re-park with a new graph delta (graph hash changed since the posted delta)
   parked --> merged: PR found merged
   parked --> released: ruling rebuild / release / approve
   merged --> [*]: coordinator deletes once done on main
@@ -812,7 +824,7 @@ src/
   ports/       # forge.ts, agent.ts, sandbox.ts, lane-store.ts
   adapters/
     forge/github/
-    agent/claude/  agent/codex/  agent/pi/
+    agent/claude/  agent/codex/        # agent/pi/ comes with the v1 adapter
   sandbox/     # seatbelt profile, bwrap args, proxy, launcher
   lane/        # the one-unit process, CAS retry loop
   cli/         # join, lane install, wake, stop, rule, status, tui, report, upgrade, graph
@@ -860,13 +872,11 @@ bootstrap/     # join.ts; the bootstrap loop copy runs as a dedicated macOS user
 - **Injecting Lessons (v1, CAP-21).** They come from fetched `origin/main` when each session starts.
 - **The Actor registry and generated CODEOWNERS and rulesets (v1, CAP-17).**
 - **Detecting Human Live Steps beyond `blocked.kind` (v1, CAP-23).**
+- **The pi adapter (v1).** Stock pi 1.4.0 gives `bmad-build-auto` no subagents (Story 3.2's escalation, Maintainer, 2026-10-25). Its agent-directory override (AR41), its credential, its `--thinking` effort mapping and the same-vendor pi reviewer go with it. In 0.x a lane or reviewer set to `pi` refuses to start (Story 3.2).
 - **Pipelining (CAP-16).** It must keep AD-6 fencing and merge in dependency order.
 - **Gathering telemetry across hosts, and journal backup (v1, CAP-14).**
 - **Rotating the App key.**
 - **Linux sandbox packaging:** the AppArmor user-namespace profile on Ubuntu 24.04+, and where `bwrap` comes from.
 - **Open items:**
   - **Which response from `PATCH git/refs` means "retry the swap"** (409 or 422). The contract suite settles it.
-  - **Adapter Story spikes**, `claude`'s in its first adapter Story, before the code that needs it:
-    - for each adapter, how `bmad-build-auto`'s outcomes (a `ready-for-dev` halt; it never yields `no-op`) map onto the `build` result, and session resume (AD-14);
-    - for `claude`, the `--output-format` that yields the session id, tokens, model and reset time for `parseUsage`;
-    - for `codex exec` and pi, whether they give `bmad-build-auto` the subagents it requires.
+  - **Adapter spikes.** `claude`'s settled in Story 1.14. The codex half is settled by the AR42 spike (`notes/codex-ar42-spike-2026-10-25.md`: subagents yes, resume by `codex exec resume <thread_id>`, usage from the session file), except how `bmad-build-auto`'s outcomes (a `ready-for-dev` halt; it never yields `no-op`) map onto the `build` result, which Story 3.1 confirms. The pi half is deferred with the pi adapter.
