@@ -39,10 +39,15 @@ describe("parseLstart", () => {
 });
 
 describe("createPsProcessTable", () => {
-  hostTest("inspects a live sleep: its start time and args", () => {
+  hostTest("inspects a live sleep: its start time and args", async () => {
     const before = Date.now();
     const p = spawnSleep();
-    const info = createPsProcessTable().inspect(p.pid);
+    // Linux names the new image before it sets its args: mid-exec, `ps` prints `[sleep]`.
+    let info = createPsProcessTable().inspect(p.pid);
+    for (let i = 0; i < 50 && info?.args.startsWith("["); i++) {
+      await Bun.sleep(20);
+      info = createPsProcessTable().inspect(p.pid);
+    }
     expect(info).not.toBeNull();
     expect(info?.args).toMatch(/^(\S*\/)?sleep 30$/);
     expect(info?.startMs).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 - 1000);
