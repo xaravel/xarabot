@@ -55,6 +55,10 @@ import type { Waiter, WaitResult } from "./wait.ts";
  * wait after `idle` is 10 min, matching the `reconcile` due rule; other
  * outcomes keep the builder's waits.
  *
+ * A session step (planning, Story 2.7) gets the unit's track and may end the
+ * run through a `Halt`: a STOP during its usage-limit sleep releases the unit
+ * and ends the run `stop` with no lane stop, as the lane process does.
+ *
  * The forge and ledger helpers, the unit keeper check (`checkHeld`), the
  * failed attempt (`failUnit`) and the unit journal record are the lane
  * process's own, from `session.ts` (Story 2.6a).
@@ -72,9 +76,19 @@ export type CoordinatorStepInput = {
   readonly signal: AbortSignal;
   /** Writes a note to the unit log. */
   readonly log: (text: string) => void;
+  /**
+   * The unit's track, for its journal record: a session step (planning)
+   * counts its sessions, tokens and cost here, and sets the record and state
+   * before it throws a `Halt`.
+   */
+  readonly track: UnitTrack;
 };
 
-/** One coordinator unit kind's work. Never throws. */
+/**
+ * One coordinator unit kind's work. Never throws, but for a `Halt` (a
+ * `MarkerStop` after a STOP during a usage-limit sleep, or an `Abandon`)
+ * from a session step, which ends the run as the lane process's would.
+ */
 export type CoordinatorStep = (input: CoordinatorStepInput) => Promise<PrStepOutput>;
 
 export type CoordinatorSteps = Partial<Readonly<Record<CoordinatorKind, CoordinatorStep>>>;
@@ -104,7 +118,7 @@ export type CoordinatorDeps = {
   readonly lane: Lane;
   /** The `coordinator.json` record the start check wrote. */
   readonly claim: CoordinatorRecord;
-  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5). */
+  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5) and `planning` (Story 2.7). */
   readonly steps: CoordinatorSteps;
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;
@@ -335,8 +349,10 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       const signal = AbortSignal.any([unitKeeper.signal, coordinatorKeeper.signal]);
       let out: PrStepOutput;
       try {
-        out = await step({ unit: u, record, snapshot: view, files: snap.main.files, signal, log: note });
+        out = await step({ unit: u, record, snapshot: view, files: snap.main.files, signal, log: note, track: t });
       } catch (e) {
+        // A `Halt` (a STOP during a usage-limit sleep, an abandoned unit) ends the run as it says.
+        if (e instanceof Halt) throw e;
         await failUnit(t, `${u.kind} step threw: ${message(e)}`);
         return "failed";
       }

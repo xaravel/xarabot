@@ -18,6 +18,7 @@ import { readsPath, runLaneProcess, type LaneDeps, type LaneProcessResult } from
 import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
 import { createGitMerger } from "../lane/merger.ts";
+import { createPlanningStep } from "../lane/planning-step.ts";
 import { createPrStep } from "../lane/pr-step.ts";
 import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
 import { createReconcileStep } from "../lane/reconcile-step.ts";
@@ -47,7 +48,7 @@ import { githubConnect, type Connect } from "./lane-connection.ts";
  * The count is reset only after a run that ends without a lane stop, so a
  * start check that heals between lane stops does not reset it. The PR step
  * redacts the vendor credential read at start from the text it sends to the
- * forge.
+ * forge, and so does the coordinator's planning step (Story 2.7).
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -290,9 +291,24 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
   const fetch = connection.fetchShas(runnerGit);
   if (claimed !== null) {
-    // Story 2.5 wires the reconcile step; planning, retro and retro-item units end idle, unclaimed, until their Stories.
+    // Story 2.5 wires the reconcile step and Story 2.7 the planning step; retro and retro-item units end idle, unclaimed, until their Stories.
+    const waiter = createSleepWaiter({ store });
     const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo });
-    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile }, waiter: createSleepWaiter({ store }) };
+    const planning = createPlanningStep({
+      forge,
+      agent,
+      sandbox: createMacSandbox({ launchingEnv: deps.env }),
+      store,
+      workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
+      waiter,
+      laneDir,
+      lane,
+      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+      diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+      identity,
+      secrets: [credential.value],
+    });
+    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile, planning }, waiter };
     return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
   }
 

@@ -104,8 +104,13 @@ describe("assembleSnapshot: errors", () => {
     { name: "missing config", world: { ...BASE, files: { [CONFIG_PATH]: null } }, kind: "missing" },
     { name: "config schema_version 2", world: { ...BASE, files: { [CONFIG_PATH]: "schema_version: 2\n" } }, kind: "unsupported-version" },
     {
-      name: "ledger schema_version 2",
-      world: { ...BASE, ledgerFiles: { "units/story__2.1.json": '{"schema_version": 2}' } },
+      name: "ledger schema_version 3",
+      world: { ...BASE, ledgerFiles: { "units/story__2.1.json": '{"schema_version": 3}' } },
+      kind: "stop",
+    },
+    {
+      name: "ledger schema_version 0",
+      world: { ...BASE, ledgerFiles: { "units/story__2.1.json": '{"schema_version": 0}' } },
       kind: "stop",
     },
     {

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 
-/** The only `schema_version` this package reads. */
+/** The `schema_version` of every versioned file but the ledger records, which have `LEDGER_SCHEMA_VERSION` (Story 2.7). */
 export const SCHEMA_VERSION = 1;
 
 export const SchemaVersion = z.literal(SCHEMA_VERSION);

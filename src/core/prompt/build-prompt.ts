@@ -2,7 +2,7 @@ import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues } from "../schemas/common.ts";
 import { HumanLiveStepSchema, type HumanLiveStep } from "../schemas/human-live-steps.ts";
-import { BuildResultSchema } from "../schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema } from "../schemas/session-result.ts";
 import { STORY_ID_PATTERN } from "../story-id.ts";
 import { PLACEHOLDERS, type Placeholder, type PromptTemplate } from "./template.ts";
 
@@ -37,6 +37,9 @@ export type BuildPromptError = "invalid-input" | "invalid-template";
 /** The `build` result's JSON Schema, embedded in the result step. */
 export const BUILD_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(BuildResultSchema), null, 2);
 
+/** The `planning` result's JSON Schema, embedded in a planning prompt's result step. */
+export const PLANNING_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(PlanningResultSchema), null, 2);
+
 const PATH_MESSAGE = "must be an absolute path with no control character or backtick";
 
 /** A C0 or C1 control character, a line or paragraph separator, or a backtick. */
@@ -52,6 +55,13 @@ const AbsolutePath = z
 
 const SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
 
+const SectionsSchema = z.array(
+  z.strictObject({
+    name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/, "must be a file name <name>.md"),
+    text: z.string(),
+  }),
+);
+
 const InputSchema = z.strictObject({
   unit: z.strictObject({
     kind: z.literal("story"),
@@ -63,12 +73,7 @@ const InputSchema = z.strictObject({
     z.strictObject({ mode: z.literal("loopback"), findings_path: AbsolutePath }),
     z.strictObject({ mode: z.literal("ci-fix"), log_path: AbsolutePath }),
   ]),
-  sections: z.array(
-    z.strictObject({
-      name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/, "must be a file name <name>.md"),
-      text: z.string(),
-    }),
-  ),
+  sections: SectionsSchema,
   human_live_steps: z.array(
     HumanLiveStepSchema.extend({
       id: HumanLiveStepSchema.shape.id.refine(
@@ -89,6 +94,9 @@ const TemplateSchema = z.strictObject({
   repo_sections: z.string(),
   result_build: z.string(),
   result_fix: z.string(),
+  planning_status: z.string(),
+  planning_graph: z.string(),
+  result_planning: z.string(),
 });
 
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
@@ -107,22 +115,54 @@ function firstDuplicate(names: readonly string[]): string | undefined {
   return undefined;
 }
 
+/** The strict template parse, then every part's placeholders checked against `PLACEHOLDERS`. */
+function checkTemplate(template: PromptTemplate): Result<z.infer<typeof TemplateSchema>, BuildPromptError> {
+  const parsed = TemplateSchema.safeParse(template);
+  if (!parsed.success) return err("invalid-template", `template: ${describeIssues(parsed.error)}`);
+  for (const [part, text] of Object.entries(parsed.data)) {
+    for (const m of text.matchAll(PLACEHOLDER)) {
+      const name = m[1] as string;
+      if (!isPlaceholder(name)) return err("invalid-template", `template.${part}: unknown placeholder {{${name}}}`);
+    }
+  }
+  return ok(parsed.data);
+}
+
+/** `parts` joined and filled from `values` in one pass; a placeholder with no value is an error naming `what`. */
+function fill(parts: readonly string[], values: Partial<Record<Placeholder, string>>, what: string): Result<string, BuildPromptError> {
+  const missing = new Set<string>();
+  const prompt = parts.join("\n\n").replace(PLACEHOLDER, (whole, name: string) => {
+    const value = isPlaceholder(name) ? values[name] : undefined;
+    if (value === undefined) {
+      missing.add(name);
+      return whole;
+    }
+    return value;
+  });
+  if (missing.size > 0) {
+    const names = [...missing].map((n) => `{{${n}}}`).join(", ");
+    return err("invalid-template", `template: ${names} has no value in ${what}`);
+  }
+  return ok(prompt);
+}
+
+/** The repo sections' texts, ordered by file name. */
+function sectionsText(sections: readonly PromptSection[]): string {
+  return [...sections]
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((s) => s.text)
+    .join("\n\n");
+}
+
 /**
  * Builds a `story` prompt: task, rules, Human Live Steps, repo sections, and
  * the result step last. Placeholders are filled in one pass, so a value that
  * contains `{{x}}` is never re-expanded.
  */
 export function buildPrompt(input: BuildPromptInput): Result<string, BuildPromptError> {
-  const template = TemplateSchema.safeParse(input.template);
-  if (!template.success) return err("invalid-template", `template: ${describeIssues(template.error)}`);
-  const t = template.data;
-
-  for (const [part, text] of Object.entries(t)) {
-    for (const m of text.matchAll(PLACEHOLDER)) {
-      const name = m[1] as string;
-      if (!isPlaceholder(name)) return err("invalid-template", `template.${part}: unknown placeholder {{${name}}}`);
-    }
-  }
+  const template = checkTemplate(input.template);
+  if (!template.ok) return template;
+  const t = template.value;
 
   const parsed = InputSchema.safeParse({
     unit: input.unit,
@@ -149,10 +189,7 @@ export function buildPrompt(input: BuildPromptInput): Result<string, BuildPrompt
     result_path,
     result_schema: BUILD_RESULT_JSON_SCHEMA,
     steps: steps.map((s) => `- \`${s.id}\`: ${s.text.replace(/\s+/g, " ")}`).join("\n"),
-    sections: [...sections]
-      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-      .map((s) => s.text)
-      .join("\n\n"),
+    sections: sectionsText(sections),
   };
   if (mode.mode === "loopback") values.findings_path = mode.findings_path;
   if (mode.mode === "ci-fix") values.log_path = mode.log_path;
@@ -164,18 +201,136 @@ export function buildPrompt(input: BuildPromptInput): Result<string, BuildPrompt
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(mode.mode === "build" ? t.result_build : t.result_fix);
 
-  const missing = new Set<string>();
-  const prompt = parts.join("\n\n").replace(PLACEHOLDER, (whole, name: string) => {
-    const value = isPlaceholder(name) ? values[name] : undefined;
-    if (value === undefined) {
-      missing.add(name);
-      return whole;
-    }
-    return value;
-  });
-  if (missing.size > 0) {
-    const names = [...missing].map((n) => `{{${n}}}`).join(", ");
-    return err("invalid-template", `template: ${names} has no value in ${mode.mode} mode`);
+  return fill(parts, values, `${mode.mode} mode`);
+}
+
+// ------------------------------------------------------------ planning prompts
+
+/** A planning heading: a Story heading in `epics_path` with no manifest. */
+export type PlanningPromptHeading = { readonly id: string; readonly epic: number; readonly line: number };
+
+/** A status planning unit: the Epics whose context file it compiles, each with its output path. */
+export type StatusPlanningPromptUnit = {
+  readonly kind: "status";
+  readonly id: string;
+  readonly epics_path: string;
+  readonly contexts: readonly { readonly epic: number; readonly output_path: string }[];
+};
+
+/** A graph planning unit: the headings it writes manifests for, and where. */
+export type GraphPlanningPromptUnit = {
+  readonly kind: "graph";
+  readonly id: string;
+  readonly epics_path: string;
+  readonly manifests_dir: string;
+  /** `manifests.path_key` and the `path_map` keys, or `null` when manifests carry `globs`. */
+  readonly path_key: { readonly key: string; readonly values: readonly string[] } | null;
+  readonly headings: readonly PlanningPromptHeading[];
+};
+
+export type PlanningPromptUnit = StatusPlanningPromptUnit | GraphPlanningPromptUnit;
+
+export type BuildPlanningPromptInput = {
+  readonly template: PromptTemplate;
+  readonly unit: PlanningPromptUnit;
+  readonly sections: readonly PromptSection[];
+  readonly result_path: string;
+};
+
+const SAFE_MESSAGE = "must be non-empty with no control character, line separator or backtick";
+
+/** Text that can sit inside backticks on one line. */
+const SafeText = z
+  .string()
+  .min(1, SAFE_MESSAGE)
+  .refine((p) => ![...p].some(isUnsafe), SAFE_MESSAGE);
+
+const planningId = (kind: "status" | "graph") =>
+  z.string().regex(new RegExp(`^planning:${kind}\\.[1-9][0-9]*$`), `must be planning:${kind}.<n>`);
+
+const PlanningInputSchema = z.strictObject({
+  unit: z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("status"),
+      id: planningId("status"),
+      epics_path: SafeText,
+      contexts: z.array(z.strictObject({ epic: z.int().positive(), output_path: SafeText })),
+    }),
+    z.strictObject({
+      kind: z.literal("graph"),
+      id: planningId("graph"),
+      epics_path: SafeText,
+      manifests_dir: SafeText,
+      path_key: z.strictObject({ key: SafeText, values: z.array(SafeText).min(1) }).nullable(),
+      headings: z
+        .array(
+          z.strictObject({
+            id: z.string().regex(STORY_ID_PATTERN, "must be a Story id like 1.7 or 1.17a"),
+            epic: z.int().positive(),
+            line: z.int().min(1),
+          }),
+        )
+        .min(1, "a graph unit needs at least one heading"),
+    }),
+  ]),
+  sections: SectionsSchema,
+  result_path: AbsolutePath,
+});
+
+/** The folder of a repo path: everything before its last `/`, or `.` at the top level. */
+function folderOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "." : path.slice(0, i);
+}
+
+/**
+ * Builds a planning prompt (Story 2.7): the unit's task (`planning_status`
+ * or `planning_graph`), the rules, the repo sections, and the `planning`
+ * result step with its JSON Schema last. Pure; placeholders are filled in
+ * one pass, as for a Story.
+ */
+export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<string, BuildPromptError> {
+  const template = checkTemplate(input.template);
+  if (!template.ok) return template;
+  const t = template.value;
+
+  const parsed = PlanningInputSchema.safeParse({ unit: input.unit, sections: input.sections, result_path: input.result_path });
+  if (!parsed.success) return err("invalid-input", describeIssues(parsed.error));
+  const { unit, sections, result_path } = parsed.data;
+  const dupSection = firstDuplicate(sections.map((s) => s.name));
+  if (dupSection !== undefined) return err("invalid-input", `sections: duplicate section "${dupSection}"`);
+
+  const values: Partial<Record<Placeholder, string>> = {
+    planning_unit: unit.id,
+    epics_path: unit.epics_path,
+    result_path,
+    result_schema: PLANNING_RESULT_JSON_SCHEMA,
+    sections: sectionsText(sections),
+  };
+  if (unit.kind === "status") {
+    const dup = firstDuplicate(unit.contexts.map((c) => String(c.epic)));
+    if (dup !== undefined) return err("invalid-input", `unit.contexts: duplicate Epic ${dup}`);
+    values.epics_dir = folderOf(unit.epics_path);
+    values.planning_contexts =
+      unit.contexts.length === 0
+        ? "- None: no Epic context file is due."
+        : [...unit.contexts]
+            .sort((a, b) => a.epic - b.epic)
+            .map((c) => `- Epic ${c.epic}: output path \`${c.output_path}\``)
+            .join("\n");
+  } else {
+    const dup = firstDuplicate(unit.headings.map((h) => h.id));
+    if (dup !== undefined) return err("invalid-input", `unit.headings: duplicate Story ${dup}`);
+    values.manifests_dir = unit.manifests_dir;
+    values.planning_headings = unit.headings.map((h) => `- Story ${h.id} (Epic ${h.epic}), line ${h.line}`).join("\n");
+    values.manifest_paths =
+      unit.path_key === null
+        ? "`globs`: a list of quoted repo-relative globs covering every file the Story's work changes."
+        : `\`${unit.path_key.key}\`: the area the Story's work changes, one of ${unit.path_key.values.map((v) => `\`${v}\``).join(", ")}.`;
   }
-  return ok(prompt);
+
+  const parts: string[] = [unit.kind === "status" ? t.planning_status : t.planning_graph, t.rules];
+  if (sections.length > 0) parts.push(t.repo_sections);
+  parts.push(t.result_planning);
+  return fill(parts, values, `a ${unit.kind} planning prompt`);
 }

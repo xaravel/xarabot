@@ -1,13 +1,15 @@
 import { z } from "zod";
 import { globsOverlap, normalizeGlob } from "../manifests/globs.ts";
 import { err, ok, type Result } from "../result.ts";
-import { describeIssues, GitHubLogin, IsoDateTime, NonEmpty, SCHEMA_VERSION } from "../schemas/common.ts";
+import { describeIssues, GitHubLogin, IsoDateTime, NonEmpty } from "../schemas/common.ts";
 import {
   CoordinatorRecordSchema,
   GitSha,
   LaneIdentity,
+  LEDGER_SCHEMA_VERSION,
   ParkReason,
   ParkSchema,
+  planningKindOf,
   unitKind,
   unitPath,
   UnitRecordSchema,
@@ -167,7 +169,7 @@ function requireStale(ctx: Ctx, generation: number, states: readonly UnitState[]
 
 /** `rec` with `changes`, written by `by` at `now`. */
 function stamp(ctx: Ctx, rec: UnitRecord, changes: Partial<UnitRecord>): UnitRecord {
-  return { ...rec, ...changes, owner: ctx.by.owner, host: ctx.by.host, lane: ctx.by.lane, heartbeat_at: ctx.now };
+  return { ...rec, ...changes, schema_version: LEDGER_SCHEMA_VERSION, owner: ctx.by.owner, host: ctx.by.host, lane: ctx.by.lane, heartbeat_at: ctx.now };
 }
 
 function to(state: UnitState, record: UnitRecord): Step<Change> {
@@ -198,7 +200,7 @@ export function heldGlobs(rec: UnitRecord): readonly string[] {
 /** A record with no PR, SHAs, providers, park, counters or approval. */
 function fresh(ctx: Ctx, state: UnitState, globs: string[], park: Park | null): UnitRecord {
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: LEDGER_SCHEMA_VERSION,
     unit: ctx.unit,
     state,
     owner: ctx.by.owner,
@@ -520,7 +522,7 @@ export type ParkParams = HeldParams & {
  * `claimed → parked` and, for an approval-gated ejection, `merging → parked`.
  * The record must be held by the writer at `generation`, except a `merging`
  * record held by a coordinator lane: any coordinator-lane writer may park it
- * at its `generation` (as `releaseReconcile` releases one), so a coordinator
+ * at its `generation` (as `releaseDisposable` releases one), so a coordinator
  * that moved hosts leaves nothing stuck (AD-6).
  */
 export function park(p: ParkParams): LedgerEdit {
@@ -739,7 +741,7 @@ export function deleteMerged(p: EditBase): LedgerEdit {
   });
 }
 
-// ---------------------------------------------------------------- reconcile records
+// ---------------------------------------------------------------- recurring records
 
 /** The writer is the coordinator lane and the unit a `reconcile:<n>` (an `invalid` unit kind otherwise). */
 function requireReconcileWriter(name: string, ctx: Ctx): Step<null> {
@@ -748,16 +750,31 @@ function requireReconcileWriter(name: string, ctx: Ctx): Step<null> {
 }
 
 /**
- * `merging → released`, no attempt counted: a disposable `reconcile` PR was
- * ejected, dequeued, closed or refused by the queue. The record must be held
- * by a coordinator lane at `generation`; its PR fields are kept.
+ * Whether `rec` is a disposable record (Story 2.7): a `reconcile:<n>`, or a
+ * status planning record the coordinator did not take on an approval
+ * (`approved_sha` is `null`: only `takeApproved` sets it).
  */
-export function releaseReconcile(p: HeldParams): LedgerEdit {
-  return makeEdit("releaseReconcile", p, (ctx) => {
-    const w = requireReconcileWriter("releaseReconcile", ctx);
-    if (!w.ok) return w;
+export function isDisposable(rec: Pick<UnitRecord, "unit" | "globs" | "approved_sha">): boolean {
+  const kind = unitKind(rec.unit);
+  if (kind === "reconcile") return true;
+  return kind === "planning" && planningKindOf(rec) === "status" && rec.approved_sha === null;
+}
+
+/**
+ * `merging → released`, no attempt counted: a disposable PR (`isDisposable`:
+ * a `reconcile` PR, or an ungated status planning PR) was ejected, dequeued,
+ * closed or refused by the queue. The record must be held by a coordinator
+ * lane at `generation`; its PR fields are kept.
+ */
+export function releaseDisposable(p: HeldParams): LedgerEdit {
+  return makeEdit("releaseDisposable", p, (ctx) => {
+    const kind = unitKind(ctx.unit);
+    if (kind !== "reconcile" && kind !== "planning") return bad(`releaseDisposable: ${ctx.unit} is not a reconcile or planning unit`);
+    const c = requireCoordinator(ctx);
+    if (!c.ok) return c;
     const rec = requireRecord(ctx);
     if (!rec.ok) return rec;
+    if (!isDisposable(rec.value)) return pre(`${ctx.unit} is not disposable: only a reconcile or an ungated status planning record is`);
     const s = requireState(rec.value, ["merging"]);
     if (!s.ok) return s;
     const g = requireGeneration(rec.value, p.generation);
@@ -778,11 +795,16 @@ export function releaseDeadReconcile(p: HeldParams): LedgerEdit {
   });
 }
 
-/** `released → none`: a later `reconcile` run deletes a superseded `released` `reconcile:<n>` record at `generation`. */
-export function deleteReleasedReconcile(p: HeldParams): LedgerEdit {
-  return makeEdit("deleteReleasedReconcile", p, (ctx) => {
-    const w = requireReconcileWriter("deleteReleasedReconcile", ctx);
-    if (!w.ok) return w;
+/**
+ * `released → none`: a later `reconcile` run deletes a superseded `released`
+ * recurring record (`reconcile:<n>` or `planning:<slug>.<n>`) at `generation`.
+ */
+export function deleteReleasedRecurring(p: HeldParams): LedgerEdit {
+  return makeEdit("deleteReleasedRecurring", p, (ctx) => {
+    const kind = unitKind(ctx.unit);
+    if (kind !== "reconcile" && kind !== "planning") return bad(`deleteReleasedRecurring: ${ctx.unit} is not a recurring unit`);
+    const c = requireCoordinator(ctx);
+    if (!c.ok) return c;
     if (ctx.current === undefined) return ok(null);
     const s = requireState(ctx.current, ["released"]);
     if (!s.ok) return s;
@@ -863,7 +885,7 @@ function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx
 /** The writer's record at `generation`, stamped `now`, keeping the current record's digest time and rulings cursor. */
 function coordinatorStamp(ctx: CoordinatorCtx, generation: number): CoordinatorRecord {
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: LEDGER_SCHEMA_VERSION,
     owner: ctx.by.owner,
     host: ctx.by.host,
     lane: "coordinator",
@@ -904,7 +926,7 @@ export function keepCoordinator(p: KeepCoordinatorParams): LedgerEdit {
     if (rec.generation !== g.value) {
       return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
     }
-    return ok({ ...rec, heartbeat_at: ctx.now });
+    return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, heartbeat_at: ctx.now });
   });
 }
 

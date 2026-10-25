@@ -342,7 +342,7 @@ describe("xarabot lane run: a coordinator lane", () => {
   const ARGS = [REPO, "coordinator"] as const;
   const IDENTITY = { owner: "alice", host: HOST_ID, lane: "coordinator" };
   const other = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
-    schema_version: 1,
+    schema_version: 2,
     owner: "dave",
     host: "44444444-4444-4444-8444-444444444444",
     lane: "coordinator",
@@ -361,7 +361,7 @@ describe("xarabot lane run: a coordinator lane", () => {
     return l.value.coordinator;
   };
 
-  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with the reconcile step only", async () => {
+  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with the reconcile and planning steps", async () => {
     const r = await laneRunWith({ host: COORD_HOST, failedStarts: 2 }, ARGS);
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
@@ -370,8 +370,9 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(r.coordinatorStarts).toHaveLength(1);
     const d = r.coordinatorStarts[0] as CoordinatorDeps;
     expect(d.identity).toEqual(IDENTITY);
-    expect(Object.keys(d.steps)).toEqual(["reconcile"]);
+    expect(Object.keys(d.steps)).toEqual(["reconcile", "planning"]);
     expect(typeof d.steps.reconcile).toBe("function");
+    expect(typeof d.steps.planning).toBe("function");
     expect(d.laneDir).toBe(r.laneDir);
     expect(d.claim).toMatchObject({ ...IDENTITY, generation: 1, heartbeat_at: "2026-10-23T10:00:00Z" });
     expect(await coordinatorOf(r)).toEqual(d.claim);

@@ -1,12 +1,16 @@
 /**
  * The package layer of the prompt (AR21, AR30): one template per part, with
- * `{{placeholder}}` slots that `buildPrompt` fills in one pass. This text
- * carries no selection, CI, merge or status instruction (the CI-fix part may
- * say "CI log" only); the runner does all of that.
+ * `{{placeholder}}` slots that `buildPrompt` and `buildPlanningPrompt` fill
+ * in one pass. The Story parts carry no selection, CI, merge or status
+ * instruction (the CI-fix part may say "CI log" only); the planning parts
+ * (Story 2.7) carry no CI, merge, queue, PR, push, approval, claim, `next`,
+ * ledger or selection word. The runner does all of that.
  *
  * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopback only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
- * `result_schema`.
+ * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`
+ * and `planning_contexts` (status), `planning_headings`, `manifests_dir`
+ * and `manifest_paths` (graph).
  */
 export type PromptTemplate = {
   /** A `story` first build: names the Story and runs `bmad-build-auto`. */
@@ -25,6 +29,12 @@ export type PromptTemplate = {
   readonly result_build: string;
   /** The result step after a loopback or CI fix: always the prompt's last part. */
   readonly result_fix: string;
+  /** A status planning unit: runs `bmad-sprint-planning` headless, then compiles the due Epic contexts. */
+  readonly planning_status: string;
+  /** A graph planning unit: writes the missing manifests; no skill. */
+  readonly planning_graph: string;
+  /** The result step of a planning unit: always the prompt's last part. */
+  readonly result_planning: string;
 };
 
 export const PLACEHOLDERS = [
@@ -36,6 +46,13 @@ export const PLACEHOLDERS = [
   "sections",
   "result_path",
   "result_schema",
+  "planning_unit",
+  "epics_path",
+  "epics_dir",
+  "planning_contexts",
+  "planning_headings",
+  "manifests_dir",
+  "manifest_paths",
 ] as const;
 export type Placeholder = (typeof PLACEHOLDERS)[number];
 
@@ -48,13 +65,15 @@ const RESULT_FIELDS = `The other fields:
 
 Write this file last, and do nothing after it.`;
 
-const RESULT_HEAD = `# Result
+const resultHead = (kind: string): string => `# Result
 
-Your last step: write your result as one JSON object to the file named by the environment variable \`$XARABOT_RESULT\`, which is \`{{result_path}}\`. The object must match this JSON Schema for a \`build\` result:
+Your last step: write your result as one JSON object to the file named by the environment variable \`$XARABOT_RESULT\`, which is \`{{result_path}}\`. The object must match this JSON Schema for a \`${kind}\` result:
 
 \`\`\`json
 {{result_schema}}
 \`\`\``;
+
+const RESULT_HEAD = resultHead("build");
 
 export const PACKAGE_TEMPLATE: PromptTemplate = {
   first_build: `# Task
@@ -112,4 +131,59 @@ Set \`outcome\` and \`blocked\`:
 - There was nothing to change: \`outcome\` \`no-op\`.
 
 ${RESULT_FIELDS}`,
+
+  planning_status: `# Task
+
+Plan the sprint for this repository (\`{{planning_unit}}\`).
+
+1. Run the stock \`bmad-sprint-planning\` skill headless, asking no questions, for its full sprint-planning flow: its readiness gate, then the tracking file. Never save a findings file. If its readiness gate fails, or the skill halts \`blocked\`, stop there: report its findings in your result, as the Result section says, and change nothing else.
+2. Then, for each Epic below, follow \`.claude/skills/bmad-build-auto/compile-epic-context.md\` with that Epic's number, the epics file \`{{epics_path}}\`, the planning artifacts folder \`{{epics_dir}}\` and the output path given:
+
+{{planning_contexts}}`,
+
+  planning_graph: `# Task
+
+Write the missing Story manifests for this repository (\`{{planning_unit}}\`).
+
+Run no skill, and never run \`bmad-sprint-planning\`. These Story headings in \`{{epics_path}}\` have no manifest:
+
+{{planning_headings}}
+
+For each one, write \`{{manifests_dir}}/<id>.md\`, where \`<id>\` is the Story id, holding only YAML frontmatter between two \`---\` lines, with these keys:
+
+- \`story_id\`: the Story id, quoted (\`"3.1"\`).
+- \`epic\`: the Epic number.
+- \`sprint_key\`: the Story id with its \`.\` as \`-\`, a \`-\`, then the heading's title in lowercase kebab case (\`3-1-some-title\`).
+- \`title\`: the heading's title, quoted.
+- {{manifest_paths}}
+- \`depends_on\`: the quoted ids of the Stories this one builds on: an earlier Story in the same Epic, or a Story in an Epic this Epic depends on. Set it on every Story that builds on an earlier one; \`[]\` when it builds on none.
+
+Besides those manifests you may edit only \`{{epics_path}}\` and \`.xarabot/epics.yaml\`, and only where the manifests need it. Change no other file.
+
+\`.xarabot/epics.yaml\` holds the Epic dependencies. Its schema, with no other key at either level:
+
+\`\`\`yaml
+version: 1
+epics:
+  "4":                 # an Epic number, as a quoted key
+    depends_on: [2, 3] # optional: the Epic numbers this Epic depends on
+    checkpoint: true   # optional: only ever the value true
+\`\`\`
+
+An Epic not listed there, or listed with no \`depends_on\`, depends on the nearest lower Epic number in \`{{epics_path}}\`.`,
+
+  result_planning: `${resultHead("planning")}
+
+Set \`outcome\`:
+
+- You finished the task and changed files: \`done\`.
+- Every file was already in place, so you changed nothing: \`nothing-due\`.
+- You cannot finish (a failed readiness gate, a halted skill, or anything else): \`blocked\`, with every finding or the reason in \`summary\`.
+
+The other fields:
+
+- \`summary\`: for \`done\`, one line saying what the change does (it becomes the commit title); for \`blocked\`, the findings; for \`nothing-due\`, one line saying why.
+- \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
+
+Write this file last, and do nothing after it.`,
 };

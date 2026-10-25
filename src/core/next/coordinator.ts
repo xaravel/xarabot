@@ -1,24 +1,25 @@
 import { EPICS_YAML_PATH } from "../config/load-repo-config.ts";
-import { isStale } from "../ledger/edits.ts";
+import { heldGlobs, isStale } from "../ledger/edits.ts";
+import { globsOverlap } from "../manifests/globs.ts";
 import type { Config } from "../schemas/config.ts";
-import { unitKind, type UnitKind, type UnitRecord } from "../schemas/ledger.ts";
+import { GRAPH_PSEUDO_GLOB, planningKindOf, planningSlug, unitKind, type PlanningKind, type UnitKind, type UnitRecord } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
 import type { Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
+import { epicHolds } from "./epic-gates.ts";
 import type { CoordinatorOutcome, Reason } from "./next.ts";
 import { epicContextPath } from "./snapshot.ts";
+
+export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
 
 /**
  * The coordinator's side of `next` (FR4, AR14, AD-8, AD-9, AD-13): the globs
  * each coordinator unit kind holds, when `reconcile` is due, and the
- * coordinator's order. Only `reconcile` and an open coordinator PR exist so
- * far; planning, retro and retro items join the order in Stories 2.7, 2.9 and
- * 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is only a `go`
- * target (AR14). Pure.
+ * coordinator's order: `reconcile`, an open coordinator PR, then planning
+ * (Story 2.7, graph before status); retro and retro items join the order in
+ * Stories 2.9 and 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is
+ * only a `go` target (AR14). Pure.
  */
-
-/** The pseudo-glob a graph planning unit holds, so graph changes go one at a time (AD-11). */
-export const GRAPH_PSEUDO_GLOB = "xarabot:graph";
 
 /** `reconcile` is due this long after its last run, by the forge's `now`. */
 export const RECONCILE_EVERY_MS = 10 * 60 * 1000;
@@ -89,6 +90,15 @@ export function reconcileNumber(unit: string): number | null {
   return m === null ? null : Number(m[1]);
 }
 
+/**
+ * A coordinator unit's PR branch: `<branches.xarabot>` plus the id with its
+ * `:` as `-`, so `reconcile:<n>` is `reconcile-<n>` and `planning:<slug>.<n>`
+ * is `planning-<slug>.<n>`.
+ */
+export function unitBranch(xarabotPrefix: string, unit: string): string {
+  return `${xarabotPrefix}${unit.replace(":", "-")}`;
+}
+
 /** The highest-numbered `reconcile:<n>` record in any state for which `keep` holds, or `null`. */
 function highestReconcile(snapshot: Snapshot, keep: (r: UnitRecord) => boolean): UnitRecord | null {
   let best: UnitRecord | null = null;
@@ -114,9 +124,28 @@ export function nextReconcileNumber(snapshot: Snapshot): number {
   return top === null ? 1 : (reconcileNumber(top.unit) as number) + 1;
 }
 
-/** A graph planning unit holds `xarabot:graph`. */
+/** A graph planning record: `planning:graph.<n>`, or another planning slug holding `xarabot:graph` (`planningKindOf`). */
 export function isGraphPlanning(record: Pick<UnitRecord, "unit" | "globs">): boolean {
-  return unitKind(record.unit) === "planning" && record.globs.includes(GRAPH_PSEUDO_GLOB);
+  return planningKindOf(record) === "graph";
+}
+
+const PLANNING_UNIT = /^planning:([a-z0-9]+(?:-[a-z0-9]+)*)\.([1-9][0-9]*)$/;
+
+/** The run number of a `planning:<slug>.<n>` id, or `null`. */
+export function planningNumber(unit: string): number | null {
+  const m = PLANNING_UNIT.exec(unit);
+  return m === null ? null : Number(m[2]);
+}
+
+/** The next `planning:<slug>.<n>` number: the highest `n` of that slug on the ledger, in any state, plus 1. */
+export function nextPlanningNumber(snapshot: Snapshot, slug: PlanningKind): number {
+  let top = 0;
+  for (const r of snapshot.ledger.units) {
+    if (planningSlug(r.unit) !== slug) continue;
+    const n = planningNumber(r.unit) ?? 0;
+    if (n > top) top = n;
+  }
+  return top + 1;
 }
 
 /** A `development_status` key the effective graph needs, and its Epic. */
@@ -246,6 +275,90 @@ export function reconcileDue(snapshot: Snapshot): ReconcileDue {
   return { due: false, why: `${last.unit} ran at ${last.heartbeat_at}, under 10 min ago, and the snapshot shows no reconcile work`, last };
 }
 
+/** A Story heading with no manifest, as the graph reports it. */
+export type PlanningHeading = { readonly id: string; readonly epic: number; readonly line: number };
+
+/** What is due for one planning kind, and why (or why not). */
+export type PlanningKindDue = { readonly due: boolean; readonly why: string };
+
+export type PlanningDue = {
+  /** Graph planning: the headings in Epics not bootstrapped that have no manifest. */
+  readonly graph: PlanningKindDue & { readonly headings: readonly PlanningHeading[] };
+  /**
+   * Status planning: the missing `development_status` entries of Epics not
+   * bootstrapped that this unit is due on (none while a `merged` graph
+   * planning record is not yet done on `main`: `reconcile` writes those
+   * keys), and the Epics whose context file is due.
+   */
+  readonly status: PlanningKindDue & { readonly entries: readonly StatusEntry[]; readonly contexts: readonly number[] };
+};
+
+/**
+ * What planning is due on `snapshot` (Story 2.7), per kind, for `next` and
+ * for the session's prompt. Graph: the graph resolved, `manifests` is
+ * configured and a Story heading in an Epic not in `bootstrapped_epics` has
+ * no manifest. Status: a missing
+ * `development_status` key of an Epic not bootstrapped (unless a `merged`
+ * graph planning record is not yet done on `main`), or an Epic not
+ * bootstrapped whose context is not `valid`, which has a manifested Story
+ * not `done` and which no `dependency-epic` or `retro-rejected` hold keeps
+ * back. Holds on records are not looked at here.
+ */
+export function planningDue(snapshot: Snapshot): PlanningDue {
+  if (!snapshot.graph.ok) {
+    const why = `the graph did not resolve: ${snapshot.graph.error.message}`;
+    return { graph: { due: false, why, headings: [] }, status: { due: false, why, entries: [], contexts: [] } };
+  }
+  const graph = snapshot.graph.value;
+  const { config } = snapshot;
+  const bootstrapped = new Set(config.bootstrapped_epics);
+
+  // With no `manifests` config there is no manifest directory to write to: graph planning is never due.
+  const headings =
+    config.manifests === undefined ? [] : graph.unmanifested.filter((u) => !bootstrapped.has(u.epic)).map((u) => ({ id: u.id, epic: u.epic, line: u.line }));
+  const graphWhy =
+    config.manifests === undefined
+      ? "no manifests directory is configured"
+      : headings.length === 0
+        ? "every Story heading outside the bootstrapped Epics has a manifest"
+        : headings.map((h) => `Story ${h.id} has a heading (${config.epics_path}:${h.line}) but no manifest`).join("; ");
+
+  const pendingGraph = snapshot.ledger.units.find((r) => r.state === "merged" && isGraphPlanning(r) && !doneOnMain(r, snapshot));
+  const missing = missingStatusEntries(snapshot).filter((e) => !bootstrapped.has(e.epic));
+  const entries = pendingGraph === undefined ? missing : [];
+
+  const status = snapshot.sprint_status.development_status;
+  const notDone = (epic: number) =>
+    snapshot.manifests.some((m) => m.epic === epic && !(Object.hasOwn(status, m.sprint_key) && status[m.sprint_key] === "done"));
+  const holdsOf = epicHolds(snapshot);
+  const contexts: number[] = [];
+  const contextWhy: string[] = [];
+  for (const e of [...graph.epics].sort((a, b) => a.number - b.number)) {
+    const n = e.number;
+    if (bootstrapped.has(n)) continue;
+    const state = snapshot.epic_context[String(n)] ?? "missing";
+    if (state === "valid" || !notDone(n) || holdsOf(n).length > 0) continue;
+    contexts.push(n);
+    contextWhy.push(`Epic ${n} context ${epicContextPath(config.epic_context_path, n)} is ${state}`);
+  }
+
+  const statusWhy: string[] = [];
+  if (entries.length > 0) statusWhy.push(`${entries.map((e) => e.key).join(", ")} missing from ${config.sprint_status_path}`);
+  statusWhy.push(...contextWhy);
+  if (statusWhy.length === 0) {
+    statusWhy.push(
+      pendingGraph !== undefined && missing.length > 0
+        ? `the missing status entries are ${pendingGraph.unit}'s, which reconcile writes`
+        : "every status entry and due Epic context is in place",
+    );
+  }
+
+  return {
+    graph: { due: headings.length > 0, why: graphWhy, headings },
+    status: { due: entries.length > 0 || contexts.length > 0, why: statusWhy.join("; "), entries, contexts },
+  };
+}
+
 /** The coordinator unit `next` picked. */
 export type CoordinatorUnit = {
   readonly unit: string;
@@ -268,7 +381,8 @@ const OPEN_PR_STATES: readonly UnitRecord["state"][] = ["claimed", "merging", "r
 
 /**
  * The coordinator's next unit from a validated snapshot whose graph resolved
- * (AD-13): `reconcile` when due, then an open coordinator PR, else `idle`.
+ * (AD-13): `reconcile` when due, then an open coordinator PR, then planning
+ * (`nextPlanning`), else `idle`.
  * Never a Story. The open-PR position never returns a `reconcile` record (a
  * released or dead run's PR is the next `reconcile` run's to close), but a
  * live one still makes later positions wait.
@@ -308,9 +422,74 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
     }
     reasons.push({ subject: rec.unit, code: "record-state", message: `${rec.unit} is ${rec.state} with coordinator PR #${pr.number} open` });
   }
-  const messages = reasons.map((x) => x.message);
-  if (open) return { kind: "idle", reason: ["waiting on an open coordinator PR", ...messages].join("; "), reasons };
+  if (open) return { kind: "idle", reason: ["waiting on an open coordinator PR", ...reasons.map((x) => x.message)].join("; "), reasons };
 
-  // 3. Planning, retro and retro items arrive in Stories 2.7, 2.9 and 2.10.
-  return { kind: "idle", reason: [NOTHING_DUE, ...messages].join("; "), reasons };
+  // 3. Planning: graph before status.
+  const planning = nextPlanning(snapshot, reasons);
+  if (planning !== null) return { kind: "coordinator", unit: planning, reasons };
+
+  // Retro and retro items arrive in Stories 2.9 and 2.10.
+  return { kind: "idle", reason: [NOTHING_DUE, ...reasons.map((x) => x.message)].join("; "), reasons };
+}
+
+const PLANNING_ORDER: readonly PlanningKind[] = ["graph", "status"];
+
+/** How a record of a planning kind stands: holding the kind, a stale claim to take over, or neither. */
+function planningHold(rec: UnitRecord, snapshot: Snapshot): "held" | "stale" | null {
+  if (rec.state === "parked" || rec.state === "merging") return "held";
+  if (rec.state !== "claimed") return null;
+  return isStale(rec, snapshot.now) && snapshot.prs[rec.unit]?.state !== "open" ? "stale" : "held";
+}
+
+function describeHold(rec: UnitRecord): string {
+  if (rec.state === "parked" && rec.park !== null) return `parked ${rec.park.kind}${rec.park.reason === null ? "" : ` ${rec.park.reason}`}`;
+  return rec.state;
+}
+
+/**
+ * The planning position (Story 2.7): for each kind, graph first, a parked,
+ * `merging` or live `claimed` record of the kind holds it (no new unit until
+ * it is released); a stale `claimed` one with no open PR is taken over, same
+ * id; else a due kind gets `planning:<kind>.<n>`. A unit whose globs overlap
+ * another record's held globs is passed over with an `overlap` reason.
+ */
+function nextPlanning(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | null {
+  const due = planningDue(snapshot);
+  for (const kind of PLANNING_ORDER) {
+    const d = due[kind];
+    const records = snapshot.ledger.units.filter((r) => planningKindOf(r) === kind);
+    const holder = records.find((r) => planningHold(r, snapshot) === "held");
+    if (holder !== undefined) {
+      if (d.due) {
+        reasons.push({
+          subject: holder.unit,
+          code: "planning-held",
+          message: `${kind} planning is due (${d.why}) but held: ${holder.unit} is ${describeHold(holder)}`,
+        });
+      }
+      continue;
+    }
+    const stale = records.find((r) => planningHold(r, snapshot) === "stale");
+    if (stale === undefined && !d.due) continue;
+    const unit = stale?.unit ?? `planning:${kind}.${nextPlanningNumber(snapshot, kind)}`;
+    const globs = coordinatorGlobs({ kind: "planning", planning: kind }, snapshot.config);
+    const hits: string[] = [];
+    for (const other of snapshot.ledger.units) {
+      if (other.unit === unit) continue;
+      for (const held of heldGlobs(other)) {
+        const hit = globs.find((g) => globsOverlap(g, held));
+        if (hit !== undefined) hits.push(`glob "${hit}" overlaps "${held}" held by ${other.unit}`);
+      }
+    }
+    if (hits.length > 0) {
+      reasons.push({ subject: unit, code: "overlap", message: `${unit} ${hits.join(", ")}` });
+      continue;
+    }
+    if (stale !== undefined) {
+      const why = `${stale.unit} is claimed and stale (heartbeat ${stale.heartbeat_at}) with no open PR`;
+      return { unit, kind: "planning", globs, expect_generation: stale.generation, take_over: "claimed", pr: null, why };
+    }
+    return { unit, kind: "planning", globs, expect_generation: null, take_over: null, pr: null, why: `${kind} planning is due: ${d.why}` };
+  }
+  return null;
 }

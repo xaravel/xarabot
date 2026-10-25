@@ -81,7 +81,7 @@ describe("UnitRecordSchema", () => {
 
   const reasons = [
     "escalation", "human-live-step", "intent-gap", "verification", "other",
-    "review-cap", "ci-fix-cap", "ci-timeout", "write-check", "no-op", "attempts-cap", "unclaimable", "graph-invalid",
+    "review-cap", "ci-fix-cap", "ci-timeout", "write-check", "no-op", "attempts-cap", "unclaimable", "graph-invalid", "readiness",
   ];
   for (const reason of reasons) {
     test(`park.reason ${reason} is valid for blocked`, () => {
@@ -110,7 +110,8 @@ describe("UnitRecordSchema", () => {
     ["unnormalized glob", rec({ globs: ["./src/**"] })],
     ["empty provider", rec({ builder_providers: [""] })],
     ["bad heartbeat", rec({ heartbeat_at: "yesterday" })],
-    ["schema_version 2", rec({ schema_version: 2 as never })],
+    ["schema_version 3", rec({ schema_version: 3 as never })],
+    ["schema_version 0", rec({ schema_version: 0 as never })],
   ];
   for (const [name, value] of invalid) {
     test(`rejects ${name}`, () => {
@@ -132,6 +133,8 @@ describe("CoordinatorRecordSchema", () => {
   };
   test("parses", () => {
     expect(CoordinatorRecordSchema.safeParse(good).success).toBe(true);
+    expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 2 }).success).toBe(true);
+    expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 3 }).success).toBe(false);
     expect(CoordinatorRecordSchema.safeParse({ ...good, digest_posted_at: T0, rulings_cursor: "123" }).success).toBe(true);
   });
   for (const [name, value] of [

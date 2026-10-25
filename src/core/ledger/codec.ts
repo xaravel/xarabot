@@ -1,8 +1,9 @@
 import type { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
-import { describeIssues, SCHEMA_VERSION } from "../schemas/common.ts";
+import { describeIssues } from "../schemas/common.ts";
 import {
   CoordinatorRecordSchema,
+  LEDGER_SCHEMA_VERSIONS,
   unitFromPath,
   UnitRecordSchema,
   type CoordinatorRecord,
@@ -34,8 +35,8 @@ function parseRecord<S extends z.ZodType>(path: string, text: string, schema: S)
     return err("invalid", `${path}: top level must be a JSON object`);
   }
   const version = (value as Record<string, unknown>)["schema_version"];
-  if (typeof version === "number" && Number.isInteger(version) && version !== SCHEMA_VERSION) {
-    return err("stop", `${path}: unsupported schema_version ${version} (this runner reads ${SCHEMA_VERSION})`);
+  if (typeof version === "number" && Number.isInteger(version) && !LEDGER_SCHEMA_VERSIONS.includes(version)) {
+    return err("stop", `${path}: unsupported schema_version ${version} (this runner reads ${LEDGER_SCHEMA_VERSIONS.join(" and ")})`);
   }
   const parsed = schema.safeParse(value);
   if (!parsed.success) return err("invalid", `${path}: ${describeIssues(parsed.error)}`);

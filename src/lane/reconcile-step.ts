@@ -3,20 +3,20 @@ import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import {
   deleteMerged,
-  deleteReleasedReconcile,
+  deleteReleasedRecurring,
   fenced,
   finishRecurring,
   heartbeat,
   markMerged,
   park,
   releaseDeadReconcile,
-  releaseReconcile,
+  releaseDisposable,
   startMerging,
   takeApproved,
   type HeartbeatSet,
   type LedgerEdit,
 } from "../core/ledger/edits.ts";
-import { reconcileNumber } from "../core/next/coordinator.ts";
+import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
@@ -39,14 +39,18 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
  * one's record deleted; before a dead or released record is touched, every
  * open PR on its branch is closed, found by listing the branch, so an orphan
  * PR no record carries is closed too); `merged` records done on `main` are
- * deleted.
+ * deleted. An ungated status planning PR (`approved_sha` `null`, Story 2.7)
+ * is disposable like a `reconcile` PR, and a `released` planning record
+ * whose PR is not open is deleted the same way (`deleteReleasedRecurring`).
  *
  * Approval-gated PRs (Story 2.6, FR13, AR8, AR17, AD-14): a `parked`
  * `awaiting-approval` record whose PR is open at the parked head is taken
  * once its owner's approval of that head stands (`standingApproval` over
  * `Forge.reviews`). A builder's first park counts any owner approval, even
- * one given while CI still ran; only a coordinator-written re-park (the
- * record's `lane` is `coordinator`) needs a review submitted after the park.
+ * one given while CI still ran, and so does the coordinator's own first park
+ * (a planning or `reconcile` gate park, with no `passed_sha`); only a re-park
+ * of a record the coordinator took (its `lane` is `coordinator` and it has a
+ * `passed_sha`) needs a review submitted after the park.
  * Before the first take the run re-checks the Standing Authority on fresh
  * `main`; it then takes the record at `generation` + 1 (`takeApproved`,
  * `approved_sha` = head), fences it (`passed_sha` = head) and enqueues the PR
@@ -91,9 +95,9 @@ function describeError(e: ForgeError): string {
   return `${e.kind}: ${e.message}`;
 }
 
-/** The `reconcile` PR's branch: `<branches.xarabot>reconcile-<n>`. */
+/** The `reconcile` PR's branch: `<branches.xarabot>reconcile-<n>` (`unitBranch`). */
 export function reconcileBranch(xarabotPrefix: string, unit: string): string {
-  return `${xarabotPrefix}reconcile-${reconcileNumber(unit) ?? 0}`;
+  return unitBranch(xarabotPrefix, unit);
 }
 
 /** The commit message, PR title and PR body for the changes in `summary`. */
@@ -272,7 +276,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * failed close) leaves the record for a later run.
      */
     const closeBranchPrs = async (t: PlanTarget, settled: Set<string>): Promise<boolean> => {
-      const branch = reconcileBranch(snapshot.config.branches.xarabot, t.unit);
+      const branch = unitBranch(snapshot.config.branches.xarabot, t.unit);
       const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
       if (!listed.ok) {
         reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}; ${t.unit} left for a later run`);
@@ -290,7 +294,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     };
 
     const release = (t: PlanTarget): Promise<boolean> =>
-      item(`releaseReconcile ${t.unit}`, releaseReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+      item(`releaseDisposable ${t.unit}`, releaseDisposable({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
 
     /** 2. An earlier run's `merging` record: left while queued at its head, else closed and released; either ending joins `settled`. */
     const checkQueue = async (t: PlanTarget, settled: Set<string>): Promise<void> => {
@@ -416,7 +420,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
             // A disposable reconcile PR: closed, and the record released with no attempt.
             if (!(await prChange(t.unit, "closePr", pr, (o) => forge.closePr(pr, o)))) return;
             settled.add(t.unit);
-            const released = await item(`releaseReconcile ${t.unit}`, releaseReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2 }));
+            const released = await item(`releaseDisposable ${t.unit}`, releaseDisposable({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2 }));
             if (released) reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}: closed, released`);
             return;
           }
@@ -494,7 +498,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       }
       for (const t of plan.deleteReleased) {
         if (!(await closeBranchPrs(t, settled))) continue;
-        const done = await item(`deleteReleasedReconcile ${t.unit}`, deleteReleasedReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
+        const done = await item(`deleteReleasedRecurring ${t.unit}`, deleteReleasedRecurring({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
         if (done) settled.add(t.unit);
       }
       for (const u of plan.deleteMerged) await item(`deleteMerged ${u}`, deleteMerged({ unit: u, by: identity, now: forgeNow() }));
@@ -646,7 +650,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           await beat("fence");
           const closed = await call("closePr", (o) => forge.closePr(pr, o));
           if (!closed.ok) reasons.push(`closePr PR #${pr} ${describeError(closed.error)}`);
-          await held("releaseReconcile", releaseReconcile({ unit, by: identity, now: forgeNow(), generation }));
+          await held("releaseDisposable", releaseDisposable({ unit, by: identity, now: forgeNow(), generation }));
           throw end("progress", kit.record.state);
         }
         if (!isBackoffKind(r.error.kind) || n + 1 >= ENQUEUE_TRIES) return await failed(`enqueue ${describeError(r.error)}`);
