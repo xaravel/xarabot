@@ -53,11 +53,11 @@ epics:
         globs: []
         status: done
       - id: "epic-2-retro-item-7-correct-course-for-epic-2-drift"
-        text: "Run bmad-correct-course for Epic 2's drift: reconcile spine, SPEC and glossary with the accepted deviations (A7, A8) and route the deferrals with no receiving Story: committed-content credential scan, reconcile branch cleanup, 2.7 attempts cap and inbox findings, 2.8 approved_graph timing and gate scope, AR10 cross-owner close (A3-A5, A9)"
+        text: "Run bmad-correct-course for Epic 2's drift: reconcile spine, SPEC and glossary with the accepted deviations (A7, A8) and route the deferrals with no receiving Story: committed-content credential scan, reconcile branch cleanup, 2.7 attempts cap and inbox findings, 2.8 approved_graph timing and gate scope, AR10 cross-owner close (A3-A5, A9). Done 2026-10-25: sprint-change-proposal-2026-10-25.md, approved by the Maintainer, applied to the SPEC and its companions, the spine, epics.md and the Story 3.2, 3.3 and 7.3 manifests; item 12 routed to a lane; new lane items 20-25"
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-2-retro-item-8-fix-the-build-prompt-context-and-denials"
         text: "Fix wasted and risky session work through the build prompt: tell build sessions the runner owns epic-<N>-context.md and reverts it so they skip the recompile, and state that a sandbox or permission denial is reported in denied_actions, never retried another way (E2, E3). Narrowed by the Maintainer on 2026-10-25: re-planning a stale Epic context moved to epic-2-retro-item-12"
         route: lane
@@ -83,10 +83,10 @@ epics:
         globs: ["test/lane/retro-step.test.ts", "test/cli/lane-run.test.ts", "test/lane/reconcile-step.test.ts", "test/core/lane/write-check.test.ts", "test/lane/retro-item-step.test.ts", "test/core/reconcile/**"]
         status: done
       - id: "epic-2-retro-item-12-replan-a-stale-epic-context"
-        text: "Make a status planning unit due when an Epic's context is older than epics.md (split from item 8 by the Maintainer on 2026-10-25). Needs a Maintainer decision and a Story: 'older' by last commit time on main (clone mtimes are checkout times), commit times or a stale context state in the snapshot, and a reconciliation with Story 2.7's missing-or-invalid rule"
-        route: maintainer
+        text: "Make a status planning unit due when an Epic's context is stale (split from item 8 by the Maintainer on 2026-10-25; rule decided by the Maintainer on 2026-10-25, C6 in sprint-change-proposal-2026-10-25.md): when a status planning unit compiles epic-<N>-context.md, it writes a header line <!-- source: sha256:<hex> --> directly below its '# Epic <N> Context:' heading (the heading stays first, so the context stays valid), where the hex is the SHA-256 of Epic N's own section of epics.md, from its '## Epic <N>:' heading up to the next '## Epic' heading or the end of the file for the last Epic, text as on main; the snapshot builder (src/core/next/snapshot.ts) recomputes that hash from the epics.md text it already reads, with no commit-history reads, and reports the context as a new epic_context state 'stale' (an in-memory snapshot state, no ledger or stored schema change), which planningDue treats as due; a mismatch, or a missing source line, means the context is stale, and a status planning unit is then due for an Epic with unfinished Stories; this extends Story 2.7's missing-or-invalid rule and does not replace it; tests for a matching hash, a changed section, a missing source line, a change to another Epic's section only, and an Epic whose Stories are all done"
+        route: lane
         blocking: false
-        globs: []
+        globs: ["src/core/next/**", "src/core/schemas/snapshot.ts", "src/lane/planning-step.ts", "src/core/prompt/**", "test/core/next/**", "test/core/schemas/**", "test/lane/planning-step.test.ts", "test/core/prompt/**"]
         status: open
       - id: "epic-2-retro-item-14-gate-the-retro-on-the-evidence-contents"
         text: "Make an Epic's retro due only when its live evidence file holds the required live results, not merely exists (A1; Maintainer decision 2026-10-25): an optional config key live_evidence_checks maps an Epic number to the exact commands its verification Story's runbook requires (the Maintainer sets the values in .xarabot/config.yaml); the snapshot carries the evidence file's text from its existing blob reads; the retro is due only when, for each listed command, the file holds that command verbatim followed by a bun test summary with '0 fail'; otherwise next idles waiting-on-maintainer naming each missing or failing command; with no checks listed for an Epic, existence alone is enough, as now; tests for all present, one missing, one with failures, none listed"
@@ -123,4 +123,40 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/schemas/retro-gates.ts", "src/core/retro/validate.ts", "test/core/graph/retro-gates.test.ts", "test/core/retro/**", "test/core/schemas/**"]
+        status: open
+      - id: "epic-2-retro-item-20-write-check-content-rules"
+        text: "Add content rules to the write check (Story 2.5a deferral, medium; Story 2.3 follow-up review F1, F2; Maintainer decision 2026-10-25, C3 in sprint-change-proposal-2026-10-25.md): a new refusal class credential refuses any added or changed blob in an agent diff that contains the seeded vendor credential or a string the sanitizer would redact as token-shaped, and the refusal names the path only, never the match; the Story file's status: line accepts only BMAD status values (2.3 F1); a test pins the quoted \"status\": key as refused, fail-closed (2.3 F2, accepted); tests for each"
+        route: lane
+        blocking: false
+        globs: ["src/core/lane/write-check.ts", "src/lane/commit.ts", "src/core/sanitize.ts", "test/core/lane/write-check.test.ts", "test/lane/commit.test.ts", "test/core/sanitize.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-21-reconcile-pr-hygiene"
+        text: "Keep reconcile PRs and branches tidy (Story 2.5a deferral, low; Story 2.5 follow-up review F1; Maintainer decision Q4, 2026-10-25): end a reconcile run while any closeBranchPrs call failed, so two reconcile PRs are never open (2.5 F1); add Forge.deleteBranch(branch) (contents: write, in the operation table, with fake and GitHub contract cases) and delete the branches of closed reconcile PRs and disposable planning PRs; a test pins Q4's rule that an approved reconcile PR the runner failed to enqueue is closed and replaced on the next run, never re-enqueued"
+        route: lane
+        blocking: false
+        globs: ["src/ports/forge.ts", "src/adapters/forge/**", "src/lane/reconcile-step.ts", "src/lane/planning-step.ts", "test/contracts/forge.contract.ts", "test/adapters/forge/**", "test/lane/reconcile-step.test.ts", "test/lane/planning-step.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-22-coordinator-claim-timing-and-fencing"
+        text: "Fix the coordinator claim's timing and fencing (Story 2.4 follow-up review F1, F2; Maintainer decision Q5, 2026-10-25): seed the coordinator keeper's clock and claimedMs from the start snapshot's forge time, not process start (2.4 F1); end the unit keeper when the coordinator keeper signals a lost coordinator claim (2.4 F2); fence every coordinator-unit ledger edit also on coordinator.json's holder and generation being unchanged at the tip, in the same pure edit, with no extra forge call (Q5); tests for each"
+        route: lane
+        blocking: false
+        globs: ["src/cli/lane-run.ts", "src/lane/coordinator-process.ts", "src/lane/heartbeat.ts", "src/core/ledger/**", "test/cli/lane-run.test.ts", "test/lane/coordinator-process.test.ts", "test/lane/heartbeat.test.ts", "test/core/ledger/**"]
+        status: open
+      - id: "epic-2-retro-item-23-harden-the-lane-lock"
+        text: "Harden the lane lock (Story 2.11 follow-up review F1, F2): re-check lane.lock's PID and start time at each heartbeat and end the unit on a mismatch, so two live holders never both run (F1); treat a failing ps as held, never as gone (F2); remove the lane.lock.stale-* and .tmp-* files a SIGKILL leaves; tests for each. Story 3.6's switch confirms this item is done before XARABOT_MAX_BUILDERS is raised"
+        route: lane
+        blocking: false
+        globs: ["src/lane/lane-lock.ts", "src/lane/processes.ts", "src/lane/wait.ts", "src/lane/heartbeat.ts", "test/lane/lane-lock.test.ts", "test/lane/processes.test.ts", "test/lane/wait.test.ts", "test/lane/heartbeat.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-24-bind-graph-approval-to-the-posted-delta"
+        text: "Bind a graph-change approval to the delta the runner posted (Story 2.8 follow-up review F2-F4 and spec-2-8's deferral; Maintainer decisions Q1-Q3, 2026-10-25): every graph-change park counts only an approval submitted after the runner's delta comment (Q1); store the hash of the posted delta in a new park field, park.graph_posted (ledger schema_version 5), and at reconcile's take, when the gate's current hash differs from it or none was posted, re-park (the spine's parked -> parked edge), post the new delta and wait for a later approval (Q2); stamp the re-park with the forge now of the snapshot taken before the reviews are read, never a later time (Q3); tests for an approval before the delta, one after it, a hash change between park and take, no posted delta, and an approval in the gap between the review read and the re-park"
+        route: lane
+        blocking: false
+        globs: ["src/lane/reconcile-step.ts", "src/lane/graph-gate.ts", "src/core/reconcile/**", "src/core/ledger/**", "src/core/schemas/ledger.ts", "test/lane/reconcile-step.test.ts", "test/core/reconcile/**", "test/core/ledger/**", "test/core/graph/graph-gate.test.ts"]
+        status: open
+      - id: "epic-2-retro-item-25-planning-attempts-across-runs"
+        text: "Make the planning attempts cap trip across runs (Story 2.7 deferral, A4; Maintainer decision C4, 2026-10-25): a new planning record starts with the attempts of the newest released record of its kind (status or graph), so the 3rd failed run in a row parks attempts-cap; a done or nothing-due run resets the count; tests for three failed runs in a row, a failure after a done run, and the two kinds counted apart"
+        route: lane
+        blocking: false
+        globs: ["src/core/next/coordinator.ts", "src/core/reconcile/plan.ts", "src/lane/planning-step.ts", "test/core/next/coordinator.test.ts", "test/core/reconcile/**", "test/lane/planning-step.test.ts"]
         status: open

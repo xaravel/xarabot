@@ -1,6 +1,6 @@
 # Glossary
 
-- **Unit:** one piece of work a lane takes: a Story, a retro, a retro action item, a planning step, or a checkpoint record.
+- **Unit:** one piece of work a lane takes: a Story, a retro, a retro action item, a planning step or a `reconcile` run. A checkpoint is only the target of a `go` ruling.
 - **Lane:** one long-running worker on a host, with its own full clone (never a linked worktree), state folder, scheduled job, agent and model.
 - **Coordinator lane (lane 0):** the only lane that runs retros, retro action items and planning, and the only writer of `sprint-status.yaml` and `retro-gates.yaml`, apart from the Maintainer's bootstrap writes (SPEC § Operating limits).
 - **Builder lane (lanes 1..N):** a lane that builds Stories only.
@@ -12,7 +12,8 @@
 - **Checkpoint Epic:** an Epic after whose retrospective the Maintainer must say "go" before the Epics that depend on it, directly or through others, start; Epics not depending on it keep running (Xaravel: Epic 8).
 - **Retro gate:** the record of an Epic's retrospective verdict and its open action items (`retro-gates.yaml`).
 - **Blocking action item:** a retro action item tagged `blocking`. It holds back every Epic depending on its Epic; an untagged open item holds back only Epics two or more dependency steps away (CAP-10).
-- **Write check:** the 0.x runner check that refuses a builder diff touching coordinator-owned files, manifests, agent config or Protected Paths before the squash (CAP-18).
+- **Write check:** the 0.x runner check that refuses, before the squash, a builder diff touching coordinator-owned files, manifests, agent config or Protected Paths, and a coordinator diff outside its unit's paths or its status-file field rules (CAP-18).
+- **`reconcile`:** the coordinator's runner-code unit. It records merges, marks units and Epics done, writes retro gates, applies rulings and enqueues approved PRs. Its PRs carry only runner-written content, get no agent review and need no owner approval.
 - **Inbox:** the single list of everything waiting on one human. Each owner has one; the Maintainer's also holds rulings, Escalations, retro items and Human Live Steps.
 - **Maintainer:** the human who owns the consuming repo's rulings, Protected Paths and releases.
 - **Protected Path:** a path in the consuming repo that changes only through a Maintainer-approved Infrastructure Story (Xaravel AD-16), or, for the Epic graph file, a Maintainer-approved planning PR.
