@@ -654,7 +654,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     minVersion: "2.1.304",
     launchSpec: (unit, settings, resultPath) =>
       ok({ argv: ["stub-agent", settings.effort, resultPath], stdin: unit.kind === "fresh" ? unit.prompt : "resume", vendor: "claude", vendorHomeEnv: "STUB_HOME", credential: { file: "token", env: "STUB_TOKEN" }, apiHosts: ["api.example.com"] } as AgentLaunchSpec),
-    parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
+    parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
   };

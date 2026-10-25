@@ -120,6 +120,35 @@ describe("fake forge", () => {
     expect(olds).toEqual([t0]);
   });
 
+  test("loseSwapAck: the next swap that lands reports transient, once; a swap that conflicts keeps it armed", async () => {
+    const { forge, control } = createFakeForge();
+    control.loseSwapAck();
+    const t0 = value(await forge.snapshot(live())).ledger.tip;
+    control.writeForeignLedger({ message: "foreign", writes: { b: "1" }, deletes: [] });
+    // A conflicting swap lands nothing, so the lost ack waits for one that lands.
+    expect(await forge.ledgerSwap(t0, { message: "stale", writes: {}, deletes: [] }, live())).toMatchObject({ ok: false, error: { kind: "conflict" } });
+    const t1 = value(await forge.snapshot(live())).ledger.tip;
+    expect(await forge.ledgerSwap(t1, { message: "m1", writes: { a: "1" }, deletes: [] }, live())).toEqual({
+      ok: false,
+      error: { kind: "transient", message: "ledgerSwap: ack lost" },
+    });
+    const after = value(await forge.snapshot(live())).ledger;
+    expect(after.tip).not.toBe(t1);
+    expect(after.files).toEqual({ a: "1", b: "1" });
+    expect(control.ledgerLog().at(-1)?.message).toBe("m1");
+    expect((await forge.ledgerSwap(after.tip, { message: "m2", writes: {}, deletes: [] }, live())).ok).toBe(true);
+  });
+
+  test("branchHead reads the pushed head; an unknown branch is null", async () => {
+    const { forge, control } = createFakeForge();
+    expect(value(await forge.branchHead("story/1.1", live()))).toBeNull();
+    const sha = control.makeCommit();
+    value(await forge.pushBranch({ branch: "story/1.1", expected_sha: null, sha }, live()));
+    expect(value(await forge.branchHead("story/1.1", live()))).toBe(sha);
+    control.injectError("branchHead", { kind: "transient", message: "down" });
+    expect(await forge.branchHead("story/1.1", live())).toEqual({ ok: false, error: { kind: "transient", message: "down" } });
+  });
+
   test("protected branches refuse pushes", async () => {
     const { forge, control } = createFakeForge();
     for (const branch of ["main", "xarabot/claims"]) {

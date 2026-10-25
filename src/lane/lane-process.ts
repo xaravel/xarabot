@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { storySpecGlob } from "../core/config/story-spec-path.ts";
-import { checkBuildSpec, pickSpec, specMatches, type SpecMatch } from "../core/lane/build-check.ts";
+import { checkBuildSpec, checkHumanLiveStep, pickSpec, specMatches, type SpecMatch } from "../core/lane/build-check.ts";
 import { staleMergingAction } from "../core/lane/takeover.ts";
 import { trailingWaitMs } from "../core/lane/waits.ts";
 import {
@@ -350,8 +350,12 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       },
     };
 
+    /** The human-live step ids the last builder prompt offered: a `human-live-step` result must name one. */
+    let promptedStepIds: readonly string[] = [];
+
     /** The builder prompt, after `prepare`: with `ciLog` in `ci-fix` mode, its log written to `tmp/ci-fix-log.md`. */
     const builderPrompt = (ciLog: string | null): PromptOutcome => {
+      promptedStepIds = [];
       let mode: PromptMode = { mode: "build" };
       if (ciLog !== null) {
         const logPath = join(layout.tmp, CI_FIX_LOG);
@@ -364,6 +368,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       }
       const repo = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
       if (!repo.ok) return { ok: false, reason: `config: ${repo.error.message}` };
+      const steps = repo.value.repo.humanLiveSteps.steps;
       const sections: PromptSection[] = [];
       for (const path of snap.main.tree) {
         const m = PROMPT_SECTION.exec(path);
@@ -375,10 +380,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         unit: { kind: "story", id: story.story_id, sprint_key: story.sprint_key },
         mode,
         sections,
-        human_live_steps: repo.value.repo.humanLiveSteps.steps,
+        human_live_steps: steps,
         result_path: layout.resultPath,
       });
       if (!prompt.ok) return { ok: false, reason: `prompt ${prompt.error.kind}: ${prompt.error.message}` };
+      promptedStepIds = steps.map((s) => s.id);
       return { ok: true, value: prompt.value };
     };
 
@@ -406,6 +412,9 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       const result = ran.result;
       if (ciLog === null) t.result = result;
       note(`result: ${result.outcome}`);
+      // A `human-live-step` must name a step the prompt offered (Story 2.6b).
+      const step = checkHumanLiveStep(result, promptedStepIds);
+      if (!step.ok) return fail(`result ${step.error.kind}: ${step.error.message}`);
 
       // A CI session's `blocked` or `no-op` result parks as it is: only a `done` fix needs a spec file.
       if (ciLog !== null && result.outcome !== "done") return { ok: true, result, specPath: null, specText: null, superseded: [] };
@@ -850,7 +859,22 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       outcome = e.outcome;
       haltReason = e.reason;
       if (e instanceof MarkerStop) markerStop = true;
-      if (unit !== null) addReason(unit as BuilderTrack, e.reason);
+      const t = unit as BuilderTrack | null;
+      if (t !== null) addReason(t, e.reason);
+      // A failed `Halt` after the claim fails the attempt at once (AD-7's crash row, Story 2.6b).
+      if (t !== null && e.outcome === "failed" && !(e instanceof Abandon) && t.state === "claimed" && t.record?.state === "claimed") {
+        try {
+          await failUnit(t, t.reason ?? e.reason);
+        } catch (inner) {
+          // An abandoned unit keeps the state the keeper's end gave it.
+          if (!(inner instanceof Abandon)) t.state = null;
+          if (inner instanceof Halt) {
+            outcome = inner.outcome;
+            haltReason = inner.reason;
+            addReason(t, inner.reason);
+          }
+        }
+      }
     } else {
       outcome = "failed";
       const t = unit as BuilderTrack | null;
@@ -894,6 +918,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         sessions: t.sessions,
         result: t.result,
         wipRef: wip,
+        reportedModel: t.reportedModel,
       });
     }
     reportStore(store.writeOutcome(outcome), "outcome");

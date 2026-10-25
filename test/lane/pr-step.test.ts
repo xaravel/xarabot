@@ -302,6 +302,7 @@ describe("createPrStep", () => {
     expect(list[0]).toMatchObject({ number: number, title: "Story 1.1: Story 1.1", body: "Did it", state: "open" });
     expect(list[0]?.head_sha).not.toBe(h0);
     expect(w.calls).not.toContain("openPr");
+    expect(w.calls).not.toContain("branchHead");
     expect(w.calls).toContain("updatePr");
     expect(await w.ledger()).toMatchObject({ pr: number, head_sha: list[0]?.head_sha, base_sha: w.main });
   });
@@ -351,14 +352,57 @@ describe("createPrStep", () => {
     expect(w.fake.control.comments(pr.number)[0]).toContain("Denied actions:\n- git push\n- bob rm\n");
   });
 
-  test("lease conflict: the branch is at another SHA, so no PR and the unit is released", async () => {
+  test("lease conflict: the branch moves after branchHead, so no PR and the unit is released", async () => {
     const w = await world();
-    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: w.fake.control.makeCommit() }, opts())).ok).toBe(true);
-    const out = await w.run();
+    const f = w.fake.forge;
+    // Another writer pushes to the branch between the head read and the push.
+    const forge: Forge = {
+      ...f,
+      branchHead: async (branch, o) => {
+        const head = await f.branchHead(branch, o);
+        if (!head.ok) return head;
+        expect((await f.pushBranch({ branch, expected_sha: head.value, sha: w.fake.control.makeCommit() }, opts())).ok).toBe(true);
+        return head;
+      },
+    };
+    const out = await w.run({}, { forge });
     expect(out.outcome).toBe("failed");
     expect(out.state).toBe("released");
     expect(out.reason).toContain("pushBranch conflict");
     expect(await prs(w.fake)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("a stale branch with no PR: the push leases from its real head and the PR opens (Story 2.6b)", async () => {
+    const w = await world();
+    const stale = w.fake.control.makeCommit();
+    expect((await w.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: stale }, opts())).ok).toBe(true);
+    const leases: (string | null)[] = [];
+    const f = w.fake.forge;
+    const forge: Forge = {
+      ...f,
+      pushBranch: (lease, o) => {
+        leases.push(lease.expected_sha);
+        return f.pushBranch(lease, o);
+      },
+    };
+    const out = await w.run({}, { forge });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(leases).toEqual([stale]);
+    const list = await prs(w.fake);
+    expect(list).toHaveLength(1);
+    expect(list[0]?.state).toBe("open");
+    expect(list[0]?.head_sha).not.toBe(stale);
+    expect(w.logs.some((l) => l.includes(`${BRANCH} is at ${stale}: the push leases from it`))).toBe(true);
+  });
+
+  test("a branchHead error is a failed attempt naming it; nothing is pushed", async () => {
+    const w = await world();
+    w.fake.control.injectError("branchHead", { kind: "transient", message: "branchHead: network down" });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out.reason).toContain("branchHead transient: branchHead: network down");
+    expect(w.calls).not.toContain("pushBranch");
     expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
   });
 
@@ -823,7 +867,7 @@ async function endToEnd(
         credential: { file: "token", env: "STUB_TOKEN" },
         apiHosts: ["api.example.com"],
       } as AgentLaunchSpec),
-    parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
+    parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
   };
@@ -893,14 +937,43 @@ async function ledgerRecord(fake: FakeForge): Promise<UnitRecord | undefined> {
 describe("runLaneProcess with createPrStep", () => {
   test("a lease conflict: the journal carries the step's record and reason", async () => {
     const { fake, journal, outcome } = await endToEnd([], {
-      before: async (f) => {
-        expect((await f.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: f.control.makeCommit() }, opts())).ok).toBe(true);
-      },
+      before: (f) => f.control.injectError("pushBranch", { kind: "conflict", message: `pushBranch: ${BRANCH} is at another SHA` }),
     });
     expect(outcome).toBe("failed");
     expect(journal).toMatchObject({ outcome: "failed", state: "released", attempts: 1 });
     expect(journal.reason).toContain("pushBranch conflict");
     expect(await prs(fake)).toEqual([]);
+  });
+
+  test("a re-claim with a stale branch and a closed PR: the push leases from the branch's head, the PR opens, no conflict (Story 2.6b)", async () => {
+    let stale = "";
+    let closed = 0;
+    const { fake, journal, outcome } = await endToEnd([], {
+      before: async (f) => {
+        stale = f.control.makeCommit();
+        expect((await f.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: stale }, opts())).ok).toBe(true);
+        const opened = await f.forge.openPr({ branch: BRANCH, base: "main", title: "old", body: "old" }, opts());
+        if (!opened.ok) throw new Error(opened.error.message);
+        closed = opened.value.number;
+        expect((await f.forge.closePr(closed, opts())).ok).toBe(true);
+        const released = rec({ unit: UNIT, state: "released", attempts: 1, globs: ["src/s0/**"], pr: closed, pr_owner: "alice", head_sha: stale, owner: BOB.owner, host: BOB.host, lane: BOB.lane });
+        f.control.writeForeignLedger({ message: "released [skip ci]", writes: tip([released]), deletes: [] });
+      },
+    });
+    expect(outcome).toBe("progress");
+    expect(journal).toMatchObject({ outcome: "progress", state: "claimed", generation: 2 });
+    expect(journal.reason ?? "").not.toContain("conflict");
+    const list = await prs(fake);
+    expect(list.map((p) => [p.number, p.state])).toEqual([
+      [closed, "closed"],
+      [closed + 1, "open"],
+    ]);
+    const head = list[1]?.head_sha;
+    expect(head).not.toBe(stale);
+    const branch = await fake.forge.branchHead(BRANCH, opts());
+    expect(branch).toEqual({ ok: true, value: head ?? null });
+    expect(await ledgerRecord(fake)).toMatchObject({ state: "claimed", pr: closed + 1, head_sha: head });
+    expect(readFileSync(journal.log, "utf8")).toContain(`${BRANCH} is at ${stale}: the push leases from it`);
   });
 
   test("a write-check refusal: the journal and unit log name each path; parked write-check, nothing pushed", async () => {

@@ -350,7 +350,19 @@ describe("runLaneProcess: a forge call that throws", () => {
 describe("createSessionRunner: session()", () => {
   const PLANNING = { kind: "planning", outcome: "done", summary: "Planned it", denied_actions: [] as string[] } as const;
 
-  function runnerWorld(prompt: () => PromptOutcome) {
+  /** One stub run: the model and usage limit it reports, whether it writes the result (default yes), whether it hangs until killed. */
+  type StubRun = { readonly model?: string | null; readonly usageLimit?: { readonly resetAt: number | null } | null; readonly result?: boolean; readonly hang?: boolean };
+
+  /**
+   * `reported`: the model each run reports (default the agent's default); `model`: the lane's configured model;
+   * `runs`: per-run behaviour, overriding `reported`; `sessionMs`: the session limit.
+   */
+  function runnerWorld(
+    prompt: () => PromptOutcome,
+    o: { readonly reported?: string | null; readonly model?: string; readonly runs?: readonly StubRun[]; readonly sessionMs?: number } = {},
+  ) {
+    let usageCalls = 0;
+    const waits: number[] = [];
     const root = mkdtempSync(join(tmpdir(), "xarabot-runner-"));
     dirs.push(root);
     const laneDir = join(root, "lanes", "coordinator");
@@ -371,14 +383,23 @@ describe("createSessionRunner: session()", () => {
           credential: { file: "token", env: "STUB_TOKEN" },
           apiHosts: ["api.example.com"],
         } as AgentLaunchSpec),
-      parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
+      parseUsage: () => {
+        const stub = o.runs?.[usageCalls++];
+        const model = stub?.model !== undefined ? stub.model : o.reported === undefined ? "claude-opus-5-5" : o.reported;
+        return { sessionId: null, model, tokens: null, cost: null, usageLimit: stub?.usageLimit ?? null };
+      },
       effortValues: () => ["high"],
       startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
     };
     const sandbox: Sandbox = {
-      async run(spec, profile) {
+      async run(spec, profile, signal) {
+        const stub = o.runs?.[runs.length];
         runs.push([...spec.argv]);
-        writeFileSync(profile.resultPath, JSON.stringify(PLANNING));
+        if (stub?.hang === true) {
+          await new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })));
+          return ok({ pid: 999, exitCode: null, signal: "SIGKILL", startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
+        }
+        if (stub?.result !== false) writeFileSync(profile.resultPath, JSON.stringify(PLANNING));
         return ok({ pid: 999, exitCode: 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
       },
     };
@@ -392,9 +413,15 @@ describe("createSessionRunner: session()", () => {
           return ok({ sha: p.start, resumed: false });
         },
       },
-      waiter: { wait: async () => ({ end: "elapsed" as const }) },
+      waiter: {
+        wait: async (p) => {
+          waits.push(p.ms);
+          return { end: "elapsed" as const };
+        },
+      },
       layout,
-      settings: { effort: "high" },
+      settings: { effort: "high", ...(o.model !== undefined ? { model: o.model } : {}) },
+      ...(o.sessionMs !== undefined ? { limits: { sessionMs: o.sessionMs, resultPollMs: 10 } } : {}),
       clock: Date.now,
       note: () => {},
       log: () => {},
@@ -419,7 +446,7 @@ describe("createSessionRunner: session()", () => {
       onLimitStop: async () => {},
     };
     const at = "a".repeat(40);
-    return { runner, ctx, track, runs, prepared, at, prompt };
+    return { runner, ctx, track, runs, prepared, at, prompt, waits };
   }
 
   test("a planning session: the result parsed as planning, one run", async () => {
@@ -429,6 +456,45 @@ describe("createSessionRunner: session()", () => {
     expect(w.track.sessions).toBe(1);
     expect(w.runs).toHaveLength(1);
     expect(w.prepared).toEqual([w.at]);
+  });
+
+  test("a run that reports the configured model: the track keeps it as reported", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }), { model: "claude-sonnet-5", reported: "claude-sonnet-5" });
+    expect((await w.runner.session(w.ctx, { at: w.at, kind: "planning", prompt: w.prompt })).ok).toBe(true);
+    expect(w.track.reportedModel).toBe("claude-sonnet-5");
+  });
+
+  test.each([
+    ["the lane's model set, the default reported", { model: "claude-sonnet-5" }, "claude-opus-5-5", "ran claude-opus-5-5, not the configured claude-sonnet-5"],
+    ["the default configured, another reported", { reported: "claude-sonnet-5-5" }, "claude-sonnet-5-5", "ran claude-sonnet-5-5, not the configured claude-opus-5-5"],
+    ["no model reported", { reported: null }, null, "reported no model; configured claude-opus-5-5"],
+  ] as const)("model-mismatch: %s", async (_name, o, reported, says) => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }), o);
+    const r = await w.runner.session(w.ctx, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toStartWith("model-mismatch: ");
+    expect(r.reason).toContain(says);
+    // The result file exists, but no resume and no parse follow the mismatch.
+    expect(w.runs).toHaveLength(1);
+    expect(w.track.reportedModel).toBe(reported);
+  });
+
+  test("a run that reported no model and hit a usage limit sleeps, then the session starts again", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }), { runs: [{ model: null, usageLimit: { resetAt: null }, result: false }, {}] });
+    const r = await w.runner.session(w.ctx, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(r).toEqual({ ok: true, result: PLANNING });
+    expect(w.waits).toHaveLength(1);
+    expect(w.runs).toHaveLength(2);
+  });
+
+  test("a run that reported no model and ran past the session limit fails with the session-limit reason", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }), { runs: [{ model: null, hang: true, result: false }], sessionMs: 50 });
+    const r = await w.runner.session(w.ctx, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toStartWith("agent session ran past ");
+    expect(w.runs).toHaveLength(1);
   });
 
   test("a prompt that fails: the session fails with its reason, and no sandbox run happens", async () => {

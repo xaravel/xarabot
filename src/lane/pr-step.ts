@@ -206,13 +206,20 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       note(`committed ${c.head_sha} onto ${c.base_sha}`);
       await overBudget();
 
-      // 4. Fence.
+      // 4. The lease: an adopted PR's head, else the branch's real head (a stale branch a closed PR left, Story 2.6b).
+      const branch = `${config.value.repo.config.branches.story}${story.story_id}`;
+      let expected = input.record.head_sha;
+      if (input.record.pr === null) {
+        const head = await call("branchHead", (o) => forge.branchHead(branch, o));
+        if (!head.ok) return await failed(`branchHead ${head.error.kind}: ${head.error.message}`);
+        expected = head.value;
+        if (expected !== null) note(`${branch} is at ${expected}: the push leases from it`);
+      }
+
+      // 5. Fence, then push with the lease.
       await beat("fence");
       await overBudget();
-
-      // 5. Push with a lease.
-      const branch = `${config.value.repo.config.branches.story}${story.story_id}`;
-      const pushed = await call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: input.record.head_sha, sha: c.head_sha }, o));
+      const pushed = await call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: expected, sha: c.head_sha }, o));
       if (!pushed.ok) return await failed(`pushBranch ${pushed.error.kind}: ${pushed.error.message}`);
       note(`pushed ${c.head_sha} to ${branch}`);
 

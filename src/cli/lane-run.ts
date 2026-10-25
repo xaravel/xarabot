@@ -290,7 +290,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
   const fetch = connection.fetchShas(runnerGit);
   if (claimed !== null) {
-    // Story 2.5 wires the reconcile step; planning, retro, retro-item and checkpoint units end idle, unclaimed, until their Stories.
+    // Story 2.5 wires the reconcile step; planning, retro and retro-item units end idle, unclaimed, until their Stories.
     const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo });
     const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile }, waiter: createSleepWaiter({ store }) };
     return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));

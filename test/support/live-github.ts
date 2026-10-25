@@ -52,6 +52,7 @@ export function prefixed(forge: Forge, prefix: string, touched: Set<string>): Fo
   return {
     ...forge,
     pushBranch: (lease, opts) => forge.pushBranch({ ...lease, branch: to(lease.branch) }, opts),
+    branchHead: (branch, opts) => forge.branchHead(to(branch), opts),
     openPr: async (req, opts) => mapPr(await forge.openPr({ ...req, branch: to(req.branch) }, opts)),
     updatePr: async (pr, req, opts) => mapPr(await forge.updatePr(pr, req, opts)),
     closePr: async (pr, opts) => mapPr(await forge.closePr(pr, opts)),

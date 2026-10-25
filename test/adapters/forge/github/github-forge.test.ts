@@ -327,6 +327,37 @@ describe("ledgerSwap", () => {
   });
 });
 
+describe("branchHead", () => {
+  const STORY_REF = /\/git\/ref\/heads\/story\/1\.1$/;
+
+  test("a missing branch is null; a present one is its SHA, from one ref read", async () => {
+    const { gh, forge } = setup();
+    expect(value(await forge.branchHead("story/1.1", live()))).toBeNull();
+    const sha = "b".repeat(40);
+    gh.control.setBranch("story/1.1", sha);
+    gh.control.clearLog();
+    expect(value(await forge.branchHead("story/1.1", live()))).toBe(sha);
+    expect(apiCalls(gh)).toEqual(["GET /git/ref/heads/story/1.1"]);
+  });
+
+  test("a server error is transient, a network error transient, and a reply with no object.sha malformed", async () => {
+    const { gh, forge } = setup();
+    gh.control.inject("GET", STORY_REF, { status: 502, body: { message: "Bad Gateway" } });
+    expect(kind(await forge.branchHead("story/1.1", live()))).toBe("transient");
+    gh.control.inject("GET", STORY_REF, "network-error");
+    expect(kind(await forge.branchHead("story/1.1", live()))).toBe("transient");
+    gh.control.inject("GET", STORY_REF, { status: 200, body: { ref: "refs/heads/story/1.1" } });
+    const r = await forge.branchHead("story/1.1", live());
+    expect(r.ok ? "ok" : r.error.message).toContain("malformed reply");
+  });
+
+  test("an uninstalled App is uninstalled, not null", async () => {
+    const { gh, forge } = setup();
+    gh.control.setInstalled(false);
+    expect(kind(await forge.branchHead("story/1.1", live()))).toBe("uninstalled");
+  });
+});
+
 describe("every operation", () => {
   const sha = "a".repeat(40);
   const calls = (f: Forge, signal: AbortSignal): Readonly<Record<ForgeOperation, () => Promise<ForgeResult<unknown>>>> => {
@@ -335,6 +366,7 @@ describe("every operation", () => {
       snapshot: () => f.snapshot(o),
       ledgerSwap: () => f.ledgerSwap(sha, { message: "m", writes: {}, deletes: [] }, o),
       pushBranch: () => f.pushBranch({ branch: "story/9.9", expected_sha: null, sha }, o),
+      branchHead: () => f.branchHead("story/9.9", o),
       openPr: () => f.openPr({ branch: "story/9.9", base: "main", title: "t", body: "b" }, o),
       updatePr: () => f.updatePr(1, { title: "t" }, o),
       closePr: () => f.closePr(1, o),

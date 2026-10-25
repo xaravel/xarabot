@@ -5,6 +5,7 @@ import {
   digestDue,
   doneOnMain,
   GRAPH_PSEUDO_GLOB,
+  isCoordinatorKind,
   missingStatusEntries,
   newestMergedReconcile,
   nextCoordinator,
@@ -13,7 +14,7 @@ import {
 } from "../../../src/core/next/coordinator.ts";
 import { next, type NextOutcome } from "../../../src/core/next/next.ts";
 import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
-import type { CoordinatorRecord, UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { UNIT_KINDS, unitKind, type CoordinatorRecord, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { PrState } from "../../../src/core/schemas/snapshot.ts";
 import { ALICE, COORD, tip } from "../ledger/fixtures.ts";
 import { EPICS_MD, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "./fixtures.ts";
@@ -212,6 +213,12 @@ describe("next(coordinator): an open coordinator PR", () => {
     expect(o.kind).toBe("idle");
   });
 
+  test("a checkpoint record with its PR open is never a coordinator unit: no checkpoint unit runs (AR14)", () => {
+    const o = pickC(base([coord("checkpoint:2", { state: "released", generation: 2, pr: 9 })], { "checkpoint:2": open(9) }));
+    expect(o.kind).toBe("idle");
+    expect(reasonOf(o).startsWith("no coordinator unit due")).toBe(true);
+  });
+
   test("a builder's released record with an open PR is not a coordinator PR", () => {
     const o = pickC(base([storyRec("2.1", { state: "released", pr: 7 })], { "story:2.1": open(7) }));
     expect(o.kind).toBe("idle");
@@ -277,6 +284,13 @@ describe("next(coordinator): idle, and roles never cross", () => {
   });
 });
 
+describe("coordinator kinds", () => {
+  test("every unit kind but story and checkpoint; checkpoint:<epic> still parses as a unit id", () => {
+    expect(UNIT_KINDS.filter(isCoordinatorKind)).toEqual(["retro", "retro-item", "planning", "reconcile"]);
+    expect(unitKind("checkpoint:2")).toBe("checkpoint");
+  });
+});
+
 describe("coordinatorGlobs", () => {
   const config = { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } };
   test.each([
@@ -287,7 +301,6 @@ describe("coordinatorGlobs", () => {
       { kind: "retro", epic: 3 },
       [STATUS, RETRO, "_bmad-output/implementation-artifacts/epic-3-context.md", "_bmad-output/implementation-artifacts/epic-3-retro-*.md"],
     ],
-    ["checkpoint:3", { kind: "checkpoint", epic: 3 }, [STATUS, RETRO, "_bmad-output/implementation-artifacts/epic-3-context.md"]],
     ["a retro item", { kind: "retro-item", globs: ["src/x/**", "docs/x.md"] }, ["src/x/**", "docs/x.md"]],
     ["reconcile", { kind: "reconcile" }, []],
   ] as const)("%s", (_name, spec, want) => {

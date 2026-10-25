@@ -552,6 +552,15 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     });
   }
 
+  /** `GET /git/ref/heads/{branch}`: a missing branch is `null`. */
+  async function branchHead(branch: string, opts: CallOpts): Promise<ForgeResult<GitSha | null>> {
+    return guarded<GitSha | null>("branchHead", opts, async (ctx) => {
+      const r = await readRef(ctx, branch);
+      if (!r.ok) return r.error.kind === "not-found" ? forgeOk(null) : r;
+      return r;
+    });
+  }
+
   // ------------------------------------------------------------ PRs
 
   /** A REST pull as a `ForgePr`; `undefined` when malformed. */
@@ -1005,6 +1014,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     snapshot,
     ledgerSwap,
     pushBranch,
+    branchHead,
     openPr,
     updatePr,
     closePr,

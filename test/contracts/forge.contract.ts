@@ -288,6 +288,7 @@ export function forgeContract(harness: ForgeHarness): void {
         snapshot: () => f.snapshot(aborted()),
         ledgerSwap: () => f.ledgerSwap(sha, { message: "m", writes: {}, deletes: [] }, aborted()),
         pushBranch: () => f.pushBranch({ branch: "story/9.9", expected_sha: null, sha }, aborted()),
+        branchHead: () => f.branchHead("story/9.9", aborted()),
         openPr: () => f.openPr({ branch: "story/9.9", base: "main", title: "t", body: "b" }, aborted()),
         updatePr: () => f.updatePr(1, { title: "t" }, aborted()),
         closePr: () => f.closePr(1, aborted()),
@@ -385,6 +386,26 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.pushBranch({ branch: "story/2.1", expected_sha: c, sha: b }, live()))).toBe("conflict");
       expect(kind(await fx.forge.pushBranch({ branch: "story/2.2", expected_sha: a, sha: b }, live()))).toBe("conflict");
       expect(value(await fx.forge.pushBranch({ branch: "story/2.1", expected_sha: a, sha: b }, live()))).toEqual({ sha: b });
+    });
+
+    // ------------------------------------------------------------ branchHead
+
+    scenario("branchHead of an unknown branch is null", ["branchHead", "pushBranch"], [], async (fx) => {
+      expect(value(await fx.forge.branchHead("story/7.7", live()))).toBeNull();
+    });
+
+    scenario("branchHead after a push is the pushed SHA, and follows the next push", ["branchHead", "pushBranch"], ["makeCommit"], async (fx) => {
+      const mk = need(fx, "makeCommit");
+      const [a, b] = [await mk(), await mk()];
+      value(await fx.forge.pushBranch({ branch: "story/7.8", expected_sha: null, sha: a }, live()));
+      expect(value(await fx.forge.branchHead("story/7.8", live()))).toBe(a);
+      value(await fx.forge.pushBranch({ branch: "story/7.8", expected_sha: a, sha: b }, live()));
+      expect(value(await fx.forge.branchHead("story/7.8", live()))).toBe(b);
+      expect(value(await fx.forge.branchHead("story/7.9", live()))).toBeNull();
+    });
+
+    scenario("branchHead with an aborted signal is transient", ["branchHead"], [], async (fx) => {
+      expect(kind(await fx.forge.branchHead("story/7.7", aborted()))).toBe("transient");
     });
 
     scenario("a push a rule refuses is rejected and moves nothing", OPEN_PR, ["makeCommit", "refusePushes"], async (fx) => {

@@ -8,7 +8,8 @@ import { AdapterName } from "./policy.ts";
  * The lane journal, `journal.jsonl` (AR25, AR28): one JSON line per unit a
  * lane process handled, plus idle and usage-limit spans. Timings come from the host clock;
  * model and effort are the lane's configured values, never what the agent
- * reported.
+ * reported; `reported_model` is the last model a run reported, when any run
+ * reported one (Story 2.6b).
  */
 
 /** How one lane process ended. */
@@ -42,6 +43,8 @@ export const UnitJournalRecordSchema = z.strictObject({
   duration_ms: Count,
   agent: AdapterName,
   model: NonEmpty,
+  /** The last model a run reported; absent when no run reported one. */
+  reported_model: NonEmpty.optional(),
   effort: Effort,
   /** Summed over the session's runs; `null` when no run reported usage. */
   tokens: JournalTokensSchema.nullable(),

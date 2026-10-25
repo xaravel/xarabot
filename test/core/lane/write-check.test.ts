@@ -499,7 +499,6 @@ const COORD_CASES: readonly CoordCase[] = [
   // outside-unit.
   { name: "a status unit writing src/a.ts: outside-unit", unit: STATUS_UNIT, changes: ["src/a.ts"], refused: [["src/a.ts", "outside-unit"]] },
   { name: "reconcile holds nothing: outside-unit", unit: { kind: "reconcile" }, changes: ["README.md"], refused: [["README.md", "outside-unit"]] },
-  { name: "a checkpoint writing another Epic's context: outside-unit", unit: { kind: "checkpoint", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-3-context.md"], refused: [["_bmad-output/implementation-artifacts/epic-3-context.md", "outside-unit"]] },
   { name: "a graph unit writing a status file: outside-unit", unit: GRAPH_UNIT, changes: [SPRINT], refused: [[SPRINT, "outside-unit"]] },
   { name: "outside-unit is case-folded: the unit's own file in other case passes", unit: STATUS_UNIT, changes: ["_bmad-output/IMPLEMENTATION-artifacts/Sprint-Status.yaml"], refused: [] },
   // graph-and-status.

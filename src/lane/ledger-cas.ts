@@ -13,6 +13,10 @@ import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
  * After a `transient` swap the next try compares tips: a re-fetched tip that
  * moved, and whose files equal the old files with the attempted commit
  * applied, is that swap, so the loop returns `ok` without writing again.
+ * The loop never gives up (`deadline`, `exhausted`) with a swap unacked: it
+ * first reads the tip once more under its own fresh deadline (`reconcileMs`),
+ * as the caller's signal may already be aborted, and returns `ok` if the swap
+ * landed (Story 2.6b).
  *
  * It also holds `writtenRecord` and the forge call deadline every lane module
  * shares, so `heartbeat.ts` and `session.ts` depend only on this module.
@@ -36,6 +40,8 @@ export function writtenRecord(commit: LedgerCommit | null, unit: string): UnitRe
 export const CAS_MAX_TRIES = 10;
 export const CAS_BACKOFF_BASE_MS = 100;
 export const CAS_BACKOFF_CAP_MS = 5_000;
+/** The reconciling read's own deadline. */
+export const CAS_RECONCILE_MS = 10_000;
 
 /** Waits `ms`, resolving early when `signal` aborts. */
 export type Sleep = (ms: number, signal: AbortSignal) => Promise<void>;
@@ -48,6 +54,8 @@ export type SwapLedgerParams = {
   /** Uniform in `[0, 1)`; default `Math.random`. */
   readonly random?: () => number;
   readonly maxTries?: number;
+  /** The deadline of the one read that reconciles an unacked swap before giving up; default 10 000 ms. */
+  readonly reconcileMs?: number;
 };
 
 export type SwapLedgerErrorKind = "edit" | "forge" | "exhausted" | "deadline";
@@ -109,6 +117,11 @@ function sameFiles(a: LedgerFiles, b: LedgerFiles): boolean {
 /** A swap that reported `transient` and may have landed. */
 type Unacked = { readonly oldTip: GitSha; readonly expected: LedgerFiles; readonly commit: LedgerCommit };
 
+/** Whether the ledger at `tip` with `files` shows the unacked swap landed. */
+function landed(unacked: Unacked, tip: GitSha, files: LedgerFiles): boolean {
+  return tip !== unacked.oldTip && sameFiles(files, unacked.expected);
+}
+
 export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOutcome> {
   const { forge, edit, signal } = params;
   const sleep = params.sleep ?? defaultSleep;
@@ -118,12 +131,31 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
     throw new RangeError(`swapLedger: maxTries must be a positive integer, got ${maxTries}`);
   }
 
-  const deadline = (tries: number): SwapLedgerOutcome => ({
-    ok: false,
-    error: { kind: "deadline", message: `ledger swap: deadline passed after ${tries} tries`, tries },
-  });
+  const reconcileMs = params.reconcileMs ?? CAS_RECONCILE_MS;
 
   let unacked: Unacked | null = null;
+
+  /**
+   * Gives up with `e`, unless the last swap is unacked and one fresh read of
+   * the tip, under its own deadline, shows it landed: then `ok`.
+   */
+  const giveUp = async (e: SwapLedgerError): Promise<SwapLedgerOutcome> => {
+    const u = unacked;
+    if (u === null) return { ok: false, error: e };
+    let snap: Awaited<ReturnType<Forge["snapshot"]>>;
+    try {
+      snap = await forge.snapshot({ signal: AbortSignal.timeout(reconcileMs) });
+    } catch {
+      return { ok: false, error: e };
+    }
+    if (snap.ok && landed(u, snap.value.ledger.tip, snap.value.ledger.files)) {
+      return { ok: true, value: { tip: snap.value.ledger.tip, commit: u.commit, tries: e.tries } };
+    }
+    return { ok: false, error: e };
+  };
+
+  const deadline = (tries: number): Promise<SwapLedgerOutcome> =>
+    giveUp({ kind: "deadline", message: `ledger swap: deadline passed after ${tries} tries`, tries });
 
   for (let tries = 1; ; tries += 1) {
     if (signal.aborted) return deadline(tries - 1);
@@ -135,8 +167,7 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
     } else {
       const tip = snap.value.ledger.tip;
       if (unacked !== null) {
-        const landed = tip !== unacked.oldTip && sameFiles(snap.value.ledger.files, unacked.expected);
-        if (landed) return { ok: true, value: { tip, commit: unacked.commit, tries } };
+        if (landed(unacked, tip, snap.value.ledger.files)) return { ok: true, value: { tip, commit: unacked.commit, tries } };
         unacked = null;
       }
       const applied = edit(snap.value.ledger.files);
@@ -159,15 +190,12 @@ export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOu
     }
     if (signal.aborted) return deadline(tries);
     if (tries >= maxTries) {
-      return {
-        ok: false,
-        error: {
-          kind: "exhausted",
-          message: `ledger swap: gave up after ${tries} tries: ${failure.message}`,
-          tries,
-          last: failure,
-        },
-      };
+      return giveUp({
+        kind: "exhausted",
+        message: `ledger swap: gave up after ${tries} tries: ${failure.message}`,
+        tries,
+        last: failure,
+      });
     }
     const wait = failure.kind === "rate-limited" ? failure.retry_after * 1000 : jitterDelay(tries, random);
     await sleep(wait, signal);
