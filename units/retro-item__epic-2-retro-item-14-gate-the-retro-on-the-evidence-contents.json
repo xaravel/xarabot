@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-14-gate-the-retro-on-the-evidence-contents",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -17,7 +17,7 @@
     "test/core/next/fixtures.ts",
     "test/core/next/snapshot.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T23:01:30.725Z",
+  "heartbeat_at": "2026-10-25T23:04:41.016Z",
   "pr": 131,
   "pr_owner": "edanisko",
   "base_sha": "53b824d1d2e6484672a4aa2856045e4d784a9474",
