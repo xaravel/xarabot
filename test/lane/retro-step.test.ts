@@ -650,6 +650,64 @@ describe("createRetroStep: a valid result", () => {
     expect(out.reason).toContain("which no record carries");
   });
 
+  test("an aborted signal (the unit lost) ends the step failed before the prefetch and any session, with no edit; nothing pushed", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const before = (await h.ledger()).get(U);
+    const lost = new AbortController();
+    lost.abort();
+    const out = await h.run({ signal: lost.signal });
+    expect(out.outcome).toBe("failed");
+    expect(out.reason).toContain("the unit or the coordinator claim was lost during the retro step");
+    expect(h.prompts).toEqual([]);
+    expect(h.commits).toEqual([]);
+    expect(swaps(h.events)).toEqual([]);
+    expect(h.events).not.toContain("listPrsByBranch");
+    expect(h.events).not.toContain("pushBranch");
+    expect(h.events).not.toContain("openPr");
+    expect((await h.ledger()).get(U)).toEqual(before);
+  });
+
+  test("the unit lost during the session: failed with no commit, push or PR, and no edit after the session", async () => {
+    const lost = new AbortController();
+    const h = harness({
+      behaviors: [
+        (ctx) => {
+          writes(retroResult())(ctx);
+          lost.abort();
+        },
+      ],
+    });
+    const out = await h.run({ signal: lost.signal });
+    expect(out.outcome).toBe("failed");
+    expect(h.prompts).toHaveLength(1);
+    expect(h.commits).toEqual([]);
+    expect(h.events).not.toContain("pushBranch");
+    expect(h.events).not.toContain("openPr");
+    expect(swaps(h.events)).toEqual([]);
+    expect(await prOnBranch(h, BRANCH)).toBeNull();
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "claimed", pr: null, retro_result: null });
+  });
+
+  test("the unit lost after the commit: the fence before the push ends the step failed; nothing pushed, no PR, no edit", async () => {
+    const lost = new AbortController();
+    const h = harness({
+      behaviors: [writes(retroResult())],
+      committer: (r, { head }) => {
+        lost.abort();
+        return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: head });
+      },
+    });
+    const out = await h.run({ signal: lost.signal });
+    expect(out.outcome).toBe("failed");
+    expect(out.reason).toContain("the unit or the coordinator claim was lost during the retro step");
+    expect(h.commits).toHaveLength(1);
+    expect(h.events).not.toContain("pushBranch");
+    expect(h.events).not.toContain("openPr");
+    expect(swaps(h.events)).toEqual([]);
+    expect(await prOnBranch(h, BRANCH)).toBeNull();
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "claimed", pr: null, retro_result: null });
+  });
+
   test("a STOP during a usage-limit sleep releases the unit and throws MarkerStop", async () => {
     const h = harness({ usageLimits: [{ resetAt: null }], waitEnds: ["stopped"] });
     let thrown: unknown;

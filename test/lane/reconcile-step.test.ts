@@ -1096,6 +1096,26 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     expect(f.events).toEqual(["reviews", "snapshot"]);
   });
 
+  test("Missing authority: the approval stands but fresh main has no Standing Authority; the step ends stop; story:1.1 stays parked; no enqueue", async () => {
+    const { f } = await parkedWorld((h) => [review(h, 5)]);
+    const base = spied(f.fake, f.events, true);
+    const { [AUTHORITY]: _gone, ...withoutAuthority } = mainFiles();
+    const forge: Forge = {
+      ...base,
+      reviews: (n, o) => {
+        f.fake.control.setMain(withoutAuthority);
+        return base.reviews(n, o);
+      },
+    };
+    const out = await f.run({ forge });
+    expect([out.outcome, out.state]).toEqual(["stop", "claimed"]);
+    expect(out.reason).toContain("config missing");
+    expect(out.reason).toContain(AUTHORITY);
+    expect(await stateOf(f, S)).toBe("parked");
+    expect(f.fake.control.queue()).toEqual([]);
+    expect(f.events).toEqual(["reviews", "snapshot"]);
+  });
+
   test("a failed fresh snapshot skips every take this run, with a note", async () => {
     let prs: { number: number; head: string }[] = [];
     const f = await setup({}, async (fake) => {
@@ -2298,5 +2318,96 @@ describe("createReconcileStep: an ungated retro or retro-item PR out of the queu
     const out = await f.run();
     expect(out.reason).toContain(`${UNIT_X}: queueState PR #${pr.number} transient: 502; left for a later run`);
     expect((await f.ledger()).get(UNIT_X)).toEqual(before);
+  });
+});
+
+// ------------------------------------------------------------------ a gated retro-item PR (Story 2.10's "Story 2.6's enqueue")
+
+describe("createReconcileStep: a retro-item PR parked awaiting approval takes Story 2.6's enqueue (Story 2.10)", () => {
+  const X = "epic-1-retro-item-1-wire-it";
+  const UNIT_X = `retro-item:${X}`;
+  const BRANCH_X = `xarabot/retro-item-${X}`;
+  const PARKED_AT = minutesBefore(20);
+  const DIFF = ["src/x/a.ts"];
+
+  /** The item's PR open at its head; the record parked awaiting-approval by its own step, in the coordinator owner's inbox; `reviews` added to the PR. */
+  async function parkedItem(reviews: (head: string) => readonly ForgeReview[]) {
+    let pr = { number: 0, head: "" };
+    const f = await setup({}, async (fake) => {
+      pr = await prOn(fake, BRANCH_X);
+      for (const r of reviews(pr.head)) fake.control.addReview(pr.number, r);
+      return [
+        coord(UNIT_X, {
+          state: "parked",
+          globs: DIFF,
+          pr: pr.number,
+          pr_owner: COORD.owner,
+          head_sha: pr.head,
+          base_sha: "c".repeat(40),
+          passed_sha: pr.head,
+          heartbeat_at: PARKED_AT,
+          park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: DIFF },
+        }),
+      ];
+    });
+    return { f, pr };
+  }
+
+  const approval = (head: string, minutesAgo: number): ForgeReview => ({ author: COORD.owner, state: "approved", commit_sha: head, submitted_at: minutesBefore(minutesAgo) });
+
+  test("approved by its owner at the parked head: taken merging at generation + 1, approved_sha = passed_sha = H, and enqueued at H", async () => {
+    const { f, pr } = await parkedItem((h) => [approval(h, 5)]);
+    const out = await f.run({ forge: spied(f.fake, f.events, true) });
+    expect(out.state).toBe("merged");
+    expect((await f.ledger()).get(UNIT_X)).toMatchObject({
+      state: "merging",
+      generation: 2,
+      approved_sha: pr.head,
+      passed_sha: pr.head,
+      head_sha: pr.head,
+      globs: DIFF,
+      park: null,
+      lane: "coordinator",
+      attempts: 0,
+    });
+    expect(f.fake.control.queue()).toEqual([pr.number]);
+    expect(f.events).toEqual([
+      "reviews",
+      "snapshot",
+      `ledgerSwap takeApproved ${UNIT_X}`,
+      `ledgerSwap heartbeat ${UNIT_X}`,
+      "enqueue",
+      `ledgerSwap heartbeat ${UNIT_X}`,
+      "ledgerSwap finishRecurring reconcile:5",
+    ]);
+    expect(out.reason).toContain(`${UNIT_X}: PR #${pr.number} approved by ${COORD.owner}, enqueued at ${pr.head}`);
+  });
+
+  test("no standing approval: not taken; stays parked; no fresh snapshot", async () => {
+    const { f, pr } = await parkedItem(() => []);
+    const before = (await f.ledger()).get(UNIT_X);
+    await f.run({ forge: spied(f.fake, f.events, true) });
+    expect((await f.ledger()).get(UNIT_X)).toEqual(before);
+    expect(f.fake.control.queue()).toEqual([]);
+    expect(f.events).toEqual(["reviews", "ledgerSwap finishRecurring reconcile:5"]);
+    expect(f.logs.join("\n")).toContain(`${UNIT_X}: no standing approval of ${pr.head} on PR #${pr.number}`);
+  });
+
+  test("taken on that approval, then ejected: parked awaiting approval again with the not-queued comment; no attempt, never released", async () => {
+    let pr = { number: 0, head: "" };
+    const f = await setup({}, async (fake) => {
+      pr = await prOn(fake, BRANCH_X);
+      expect((await fake.forge.enqueue(pr.number, pr.head, opts())).ok).toBe(true);
+      return [coord(UNIT_X, { state: "merging", generation: 2, globs: DIFF, pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, base_sha: "c".repeat(40), passed_sha: pr.head, approved_sha: pr.head })];
+    });
+    expect(f.fake.control.eject(pr.number)).toBe(true);
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(out.reason).toContain(`${UNIT_X}: PR #${pr.number} is not in the merge queue: parked awaiting approval again`);
+    const r = (await f.ledger()).get(UNIT_X);
+    expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, attempts: 0, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: DIFF } });
+    expect(Date.parse(r?.heartbeat_at ?? "")).toBe(T0);
+    expect(swaps(f.events).slice(0, 1)).toEqual([`park ${UNIT_X}`]);
+    expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(UNIT_X, "not-queued")]);
   });
 });

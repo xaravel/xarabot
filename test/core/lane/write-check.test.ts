@@ -221,6 +221,12 @@ const CLAUDE_CASES: readonly Case[] = [
 
   // Full case folding (toUpperCase().toLowerCase(), as APFS folds): `ſ` folds to `s`, `K` (Kelvin) to `k`.
   { name: "full fold: ſ in the sprint status", covers: ["coordinator-file"], changes: [p(SPRINT.replace("sprint", "ſprint"))], refused: [no(SPRINT.replace("sprint", "ſprint"), "coordinator-file")] },
+  {
+    name: "full fold: ſ in a live evidence file",
+    covers: ["live-evidence"],
+    changes: [p("Docſ/maintainer/evidence/epic-2.md")],
+    refused: [no("Docſ/maintainer/evidence/epic-2.md", "live-evidence")],
+  },
   { name: "full fold: ſ under .xarabot", covers: ["xarabot"], changes: [p(".XARABOT/epicſ.yaml")], refused: [no(".XARABOT/epicſ.yaml", "xarabot")] },
   { name: "full fold: ſ in the manifests dir", covers: ["manifest"], changes: [p("ſtories/1.1.md")], refused: [no("ſtories/1.1.md", "manifest")] },
   { name: "full fold: ſ in the Standing Authority", covers: ["standing-authority"], changes: [p("docſ/ſtanding-authority.md")], refused: [no("docſ/ſtanding-authority.md", "standing-authority")] },
@@ -385,6 +391,14 @@ describe("write-check table coverage", () => {
       expect([ex, tagged.some((c) => c.refused.length > 0)]).toEqual([ex, true]);
     }
   });
+
+  test.each(Object.keys(TABLE))("%s: a full fold case refuses with every class", (adapter) => {
+    const cases = TABLE[adapter as AdapterName] ?? [];
+    for (const cls of WRITE_CLASSES) {
+      const hit = cases.some((c) => c.name.startsWith("full fold:") && c.refused.some((r) => r.class === cls));
+      expect([cls, hit]).toEqual([cls, true]);
+    }
+  });
 });
 
 // ------------------------------------------------------------- the parts
@@ -525,6 +539,8 @@ const gates = (before: string | null, after: string | null): WriteChange => ({ p
 const STATUS_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "status" };
 const GRAPH_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "graph" };
 const CONTEXT_2 = "_bmad-output/implementation-artifacts/epic-2-context.md";
+/** `retro-gates.yaml` with `ſ` for its `s`: the same file once fully folded. */
+const RETRO_FOLDED = RETRO.replace("retro-gates", "retro-gateſ");
 
 /** The rules for a coordinator unit of `spec`. */
 const coordRules = (spec: CoordinatorUnitSpec): CoordinatorWriteRules =>
@@ -625,6 +641,11 @@ const COORD_CASES: readonly CoordCase[] = [
     ],
   },
   { name: "full fold: mode", unit: STATUS_UNIT, changes: [{ path: SPRINT.replace("sprint", "ſprint"), mode: "100755" }], refused: [[SPRINT.replace("sprint", "ſprint"), "mode"]] },
+  { name: "full fold: retro-verdict", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2.replace(GO, ""), GATES_2.replace(GO, "").replace("verdict: rejected", "verdict: accepted")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-verdict"]] },
+  { name: "full fold: retro-item", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-item"]] },
+  { name: "full fold: retro-go", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace(GO, "")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-go"]] },
+  { name: "full fold: checkpoint-go", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, `${GATES_2}${CHECKPOINT_3}`), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "checkpoint-go"]] },
+  { name: "full fold: retro-gates-invalid", unit: RETRO_UNIT, changes: [{ path: RETRO_FOLDED, mode: "100644" }], refused: [[RETRO_FOLDED, "retro-gates-invalid"]] },
 ];
 
 describe("checkWrite (coordinator)", () => {
@@ -637,6 +658,13 @@ describe("checkWrite (coordinator)", () => {
   test("a case refuses with every class", () => {
     for (const cls of COORDINATOR_WRITE_CLASSES) {
       const hit = COORD_CASES.some((c) => c.refused.some(([, x]) => x === cls));
+      expect([cls, hit]).toEqual([cls, true]);
+    }
+  });
+
+  test("a full fold case refuses with every class", () => {
+    for (const cls of COORDINATOR_WRITE_CLASSES) {
+      const hit = COORD_CASES.some((c) => c.name.startsWith("full fold:") && c.refused.some(([, x]) => x === cls));
       expect([cls, hit]).toEqual([cls, true]);
     }
   });
@@ -682,6 +710,7 @@ describe("checkWrite (a retro item: coordinator rules plus every builder refusal
     ["an agent config folder: agent-config", ["src/**"], ["src/.claude/settings.json"], [["src/.claude/settings.json", "agent-config"]]],
     ["a status file: coordinator-file", ALL, [SPRINT], [[SPRINT, "coordinator-file"]]],
     ["a live evidence file: live-evidence", ALL, ["docs/maintainer/evidence/epic-2.md"], [["docs/maintainer/evidence/epic-2.md", "live-evidence"]]],
+    ["a live evidence file, full fold: live-evidence", ALL, ["Docſ/Maintainer/Evidence/EPIC-2.MD"], [["Docſ/Maintainer/Evidence/EPIC-2.MD", "live-evidence"]]],
     ["the Standing Authority: standing-authority", ALL, [AUTHORITY], [[AUTHORITY, "standing-authority"]]],
     ["the Standing Authority, case-folded", ALL, [AUTHORITY.toUpperCase()], [[AUTHORITY.toUpperCase(), "standing-authority"]]],
     ["under .github: github", ALL, [".github/workflows/ci.yml"], [[".github/workflows/ci.yml", "github"]]],
