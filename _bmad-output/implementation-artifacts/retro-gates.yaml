@@ -93,7 +93,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/schemas/config.ts", "src/core/schemas/snapshot.ts", "src/core/next/snapshot.ts", "src/core/next/coordinator.ts", "src/adapters/forge/github/github-forge.ts", "src/adapters/forge/fake/fake-forge.ts", "test/core/schemas/**", "test/core/config/**", "test/core/next/**", "test/adapters/forge/**", "docs/maintainer/self-host.md"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-15-field-level-status-file-rules"
         text: "Make the coordinator write check enforce field-level rules in the status files (C5; Maintainer decision 2026-10-25, epics.md AR31): a status planning session may only add missing keys to sprint-status.yaml, never change an existing value; a retro session may only append its Epic's action_items and set its own epic-<N>-retrospective key; no coordinator session may set a Story's status to done (only reconcile's runner code does); a refusal parks write-check naming the key; pass the file's before and after text to the check as for the Story file and retro-gates.yaml; and stop the coordinator check case-folding its own allow-list, so case variants of a unit's globs are refused; tests for each rule and each case variant"
         route: lane
