@@ -1643,6 +1643,30 @@ So that Stories become eligible without me running sprint planning by hand (FR2,
 **Then** it gains the planning position's cases: a status unit due, a status unit due only for an Epic waiting on its context file, a graph unit due, both due with the graph unit first, and a Story heading with no manifest, or no Epic context file, in an Epic listed in `bootstrapped_epics`, which makes nothing due
 **And** it gains rows for a `readiness` park, a status unit held while the park stands, and the release.
 
+Decisions of 2026-10-25 for this Story's intent gap (the session's proposed readings, accepted by the Maintainer):
+
+**Given** a graph planning unit whose result is `blocked`
+**When** the runner parks it
+**Then** it parks `blocked` with reason `readiness`, and that park holds only later graph units, as a status unit's `readiness` park holds only status units.
+
+**Given** a planning record parked `blocked` for any reason (`readiness`, `write-check`, `verification`, `ci-timeout` or `attempts-cap`)
+**When** `next` reaches planning
+**Then** no new unit of that record's kind (status or graph) is due until the park is released, so a blocked planning unit never re-runs into the same park.
+
+**Given** a planning PR
+**When** its CI fails unexpectedly
+**Then** it parks `blocked` (`verification`) with no agent fix, as Story 2.5 decided for `reconcile`'s own PR
+**And** an ungated status planning PR that is ejected, dequeued or refused for a conflict is disposable, like `reconcile`'s PR: it is closed, the record released, and a later run re-plans from fresh `main`; a gated graph PR keeps Story 2.6's re-park.
+
+**Given** planning run ids
+**When** a planning unit is claimed
+**Then** the ids are `planning:status.<n>` and `planning:graph.<n>`, with `n` one more than the highest of that slug on the ledger; a reused `n` and branch name after records are deleted is accepted, because the claim reads only the record's own PR and the push leases from `branchHead`.
+
+**Given** the new `readiness` park reason and fields
+**When** the ledger schema goes up
+**Then** a ledger-only `schema_version` constant becomes 2; the reader accepts 1 and 2 (AD-5 stops only on an unknown or newer version) and every ledger write stamps 2
+**And** the Maintainer advances `runner_version` for every lane together right after this Story merges, since a lane on an older runner stops (`ledger-schema-version`) once it reads a v2 record, then restarts onto the new pin.
+
 ### Story 2.8: The graph-change gate
 
 As the Maintainer,
