@@ -286,6 +286,70 @@ describe("swapLedger", () => {
     expect(control.ledgerLog()).toHaveLength(3);
   });
 
+  /** The fake forge whose first swap lands, then `after` runs (another lane's write), then the ack is lost. */
+  function lostAckThen(fake: ReturnType<typeof createFakeForge>, after: () => void) {
+    const { forge } = fake;
+    let swaps = 0;
+    const lossy = {
+      ...forge,
+      ledgerSwap: async (...args: Parameters<typeof forge.ledgerSwap>) => {
+        swaps += 1;
+        const r = await forge.ledgerSwap(...args);
+        if (swaps !== 1 || !r.ok) return r;
+        after();
+        return { ok: false, error: { kind: "transient", message: "ack lost" } } as const;
+      },
+    };
+    return { lossy, swaps: () => swaps };
+  }
+
+  test("lost ack: a swap that lands, then another lane's write, is ok with its commit and no second write (C4)", async () => {
+    const fake = createFakeForge();
+    const { lossy, swaps } = lostAckThen(fake, () => fake.control.writeForeignLedger(foreign(1)));
+    const r = await swapLedger({ forge: lossy, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep });
+    const log = fake.control.ledgerLog();
+    expect(log.map((c) => c.message)).toEqual(["root", "ledger: claim story:1.5 [skip ci]", "bob 1 [skip ci]"]);
+    expect(swaps()).toBe(1);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.tries).toBe(2);
+    expect(r.value.tip).toBe(log[2]?.sha as string);
+    expect(r.value.commit?.message).toBe(log[1]?.message as string);
+  });
+
+  test("lost ack: a swap that lands, then another write changes the file it wrote, is not taken for it", async () => {
+    const fake = createFakeForge();
+    const bobs = rec({ owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2 });
+    const { lossy, swaps } = lostAckThen(fake, () => fake.control.writeForeignLedger({ message: "bob takes over [skip ci]", writes: tip([bobs]), deletes: [] }));
+    const r = await swapLedger({ forge: lossy, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep });
+    expect(swaps()).toBe(1);
+    expect(r.ok ? "ok" : r.error.kind).toBe("edit");
+    if (!r.ok && r.error.kind === "edit") expect(r.error.edit).toBe("precondition");
+  });
+
+  test("lost ack: a delete-only swap that lands, then another lane's write, needs the whole-file match", async () => {
+    const fake = createFakeForge();
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([rec({ state: "merged" })]), deletes: [] });
+    const { lossy, swaps } = lostAckThen(fake, () => fake.control.writeForeignLedger(foreign(1)));
+    const edit = deleteMerged({ unit: "story:1.5", by: COORD, now: NOW });
+    const r = await swapLedger({ forge: lossy, edit, signal: new AbortController().signal, sleep: recorder().sleep });
+    expect(swaps()).toBe(1);
+    // Not taken for the swap: the re-applied edit finds the record gone, so no commit.
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.commit).toBeNull();
+  });
+
+  test("reconcile: a swap that lands, then another lane's write, then the deadline, is ok with our commit", async () => {
+    const fake = createFakeForge();
+    const ac = new AbortController();
+    const { lossy } = lostAckThen(fake, () => fake.control.writeForeignLedger(foreign(1)));
+    const r = await swapLedger({ forge: lossy, edit: claimAlice, signal: ac.signal, sleep: async () => ac.abort() });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.tip).toBe(fake.control.ledgerLog()[2]?.sha as string);
+    expect(r.value.commit?.message).toBe("ledger: claim story:1.5 [skip ci]");
+  });
+
   /** The fake's snapshot calls so far: each one reads the ledger first. */
   const snapshots = (control: ReturnType<typeof createFakeForge>["control"]): number => control.trace().filter((t) => t === "ledger").length;
 

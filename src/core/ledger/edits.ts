@@ -630,8 +630,21 @@ function requireCoordinatorMerging(ctx: Ctx, generation: number): Step<UnitRecor
 
 /** A failed attempt: `claimed → released` (or `→ parked` at the attempts cap), `merging → released`. */
 export function failAttempt(p: HeldParams): LedgerEdit {
+  return failFrom(p, ["claimed", "merging"]);
+}
+
+/**
+ * `failAttempt` from `claimed` only: the lane's retry of a failed attempt the
+ * ledger did not take, which must never move a `merging` record out of the
+ * queue without its dequeue.
+ */
+export function failClaimed(p: HeldParams): LedgerEdit {
+  return failFrom(p, ["claimed"]);
+}
+
+function failFrom(p: HeldParams, states: readonly UnitState[]): LedgerEdit {
   return makeEdit("failAttempt", p, (ctx) => {
-    const rec = requireHeld(ctx, p.generation, ["claimed", "merging"]);
+    const rec = requireHeld(ctx, p.generation, states);
     if (!rec.ok) return rec;
     const attempts = rec.value.attempts + 1;
     if (rec.value.state === "claimed" && attempts >= ATTEMPTS_CAP) {

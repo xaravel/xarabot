@@ -13,6 +13,11 @@ import type { Forge, ForgeError, GitSha } from "../ports/forge.ts";
  * After a `transient` swap the next try compares tips: a re-fetched tip that
  * moved, and whose files equal the old files with the attempted commit
  * applied, is that swap, so the loop returns `ok` without writing again.
+ * Another lane may have written after the swap landed: a moved tip where
+ * every file the commit writes holds the text it wrote, and every file it
+ * deletes is gone, is that swap too (C4). A written record names its writer
+ * and carries its time, so no other write leaves the same text. A
+ * delete-only commit names neither and needs the whole-file match.
  * The loop never gives up (`deadline`, `exhausted`) with a swap unacked: it
  * first reads the tip once more under its own fresh deadline (`reconcileMs`),
  * as the caller's signal may already be aborted, and returns `ok` if the swap
@@ -117,9 +122,12 @@ function sameFiles(a: LedgerFiles, b: LedgerFiles): boolean {
 /** A swap that reported `transient` and may have landed. */
 type Unacked = { readonly oldTip: GitSha; readonly expected: LedgerFiles; readonly commit: LedgerCommit };
 
-/** Whether the ledger at `tip` with `files` shows the unacked swap landed. */
+/** Whether the ledger at `tip` with `files` shows the unacked swap landed, whatever other lanes wrote after it. */
 function landed(unacked: Unacked, tip: GitSha, files: LedgerFiles): boolean {
-  return tip !== unacked.oldTip && sameFiles(files, unacked.expected);
+  if (tip === unacked.oldTip) return false;
+  if (sameFiles(files, unacked.expected)) return true;
+  const writes = Object.entries(unacked.commit.writes);
+  return writes.length > 0 && writes.every(([path, text]) => files[path] === text) && unacked.commit.deletes.every((path) => !Object.hasOwn(files, path));
 }
 
 export async function swapLedger(params: SwapLedgerParams): Promise<SwapLedgerOutcome> {
