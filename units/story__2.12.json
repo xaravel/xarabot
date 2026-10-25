@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "story:2.12",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -15,7 +15,7 @@
     "test/sandbox/bun-install.test.ts",
     "test/support/live.ts"
   ],
-  "heartbeat_at": "2026-10-25T12:30:59.840Z",
+  "heartbeat_at": "2026-10-25T12:42:47.014Z",
   "pr": 100,
   "pr_owner": "edanisko",
   "base_sha": "09c6131a3439d3175550bdf3e8956fa98f28f6f4",
