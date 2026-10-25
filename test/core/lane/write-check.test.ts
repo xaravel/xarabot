@@ -5,17 +5,20 @@ import {
   COORDINATOR_WRITE_CLASSES,
   coordinatorWriteRules,
   epicContextMatch,
+  sprintStatusRefusals,
   statusLineOnly,
+  statusSession,
   WRITE_CLASSES,
   writeRules,
   type CoordinatorWriteClass,
   type CoordinatorWriteRules,
+  type StatusSession,
   type WriteChange,
   type WriteClass,
   type WriteRefusal,
   type WriteRules,
 } from "../../../src/core/lane/write-check.ts";
-import { coordinatorGlobs, type CoordinatorUnitSpec } from "../../../src/core/next/coordinator.ts";
+import { coordinatorGlobs, GRAPH_PSEUDO_GLOB, type CoordinatorUnitSpec } from "../../../src/core/next/coordinator.ts";
 import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
 import type { AdapterName } from "../../../src/core/schemas/policy.ts";
 
@@ -541,10 +544,55 @@ const GRAPH_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "graph" };
 const CONTEXT_2 = "_bmad-output/implementation-artifacts/epic-2-context.md";
 /** `retro-gates.yaml` with `ſ` for its `s`: the same file once fully folded. */
 const RETRO_FOLDED = RETRO.replace("retro-gates", "retro-gateſ");
+/** `sprint-status.yaml` with `ſ` for its first `s`. */
+const SPRINT_FOLDED = SPRINT.replace("sprint", "ſprint");
+/** A retro item holding every path, with no builder refusal: the coordinator classes alone, for paths in any case. */
+const ANY_UNIT: CoordinatorUnitSpec = { kind: "retro-item", globs: ["**"] };
 
-/** The rules for a coordinator unit of `spec`. */
-const coordRules = (spec: CoordinatorUnitSpec): CoordinatorWriteRules =>
-  coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs(spec, COORD_CONFIG), graphUnit: spec.kind === "planning" && spec.planning === "graph" });
+/** A unit id of `spec`'s kind: `commitSession` sets the rules' `unit` from the clone marker. */
+function unitOf(spec: CoordinatorUnitSpec): string {
+  switch (spec.kind) {
+    case "planning":
+      return `planning:${spec.planning}.1`;
+    case "retro":
+      return `retro:${spec.epic}`;
+    case "retro-item":
+      return "retro-item:epic-2-retro-item-1-fix";
+    case "reconcile":
+      return "reconcile:1";
+  }
+}
+
+/** The rules for a coordinator unit of `spec`, with its unit set. */
+const coordRules = (spec: CoordinatorUnitSpec): CoordinatorWriteRules => ({
+  ...coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs(spec, COORD_CONFIG), graphUnit: spec.kind === "planning" && spec.planning === "graph" }),
+  unit: unitOf(spec),
+});
+
+/** A sprint status as BMAD writes it: an Epic, its Stories and retrospective, and Epic 1's action item. */
+const S0 = [
+  "generated: 10-22-2026 00:43",
+  "last_updated: 10-22-2026 00:43",
+  "project: xarabot",
+  "development_status:",
+  "  epic-2: in-progress",
+  "  2-1-heartbeat: done",
+  "  2-2-takeover: review",
+  "  epic-2-retrospective: optional",
+  "action_items:",
+  '  - id: "epic-1-retro-item-1-x"',
+  "    epic: 1",
+  "    status: open",
+  "",
+].join("\n");
+/** `S0` with `development_status` keys added after `epic-2-retrospective`. */
+const withKeys = (...lines: readonly string[]) => S0.replace("  epic-2-retrospective: optional\n", `  epic-2-retrospective: optional\n${lines.map((l) => `  ${l}\n`).join("")}`);
+/** `S0` with action items appended. */
+const withItems = (...items: readonly (readonly [string, string])[]) => `${S0}${items.map(([id, epic]) => `  - id: "${id}"\n${epic === "" ? "" : `    epic: ${epic}\n`}    status: open\n`).join("")}`;
+/** A regular-file change to `sprint-status.yaml` with its two texts. */
+const sprint = (before: string | null, after: string | null, path: string = SPRINT): WriteChange => ({ path, mode: "100644", sprintStatus: { before, after } });
+/** The refusal path of one key of `sprint-status.yaml`. */
+const key = (k: string, path: string = SPRINT) => `${path}#${k}`;
 
 type CoordCase = {
   readonly name: string;
@@ -556,9 +604,18 @@ type CoordCase = {
 
 const COORD_CASES: readonly CoordCase[] = [
   // A unit inside its own globs.
-  { name: "status planning writes the status files and an Epic context", unit: STATUS_UNIT, changes: [SPRINT, gates(null, EMPTY_GATES), CONTEXT_2], refused: [] },
+  { name: "status planning writes the status files and an Epic context", unit: STATUS_UNIT, changes: [sprint(S0, withKeys("epic-3: backlog")), gates(null, EMPTY_GATES), CONTEXT_2], refused: [] },
   { name: "graph planning writes the graph inputs", unit: GRAPH_UNIT, changes: [EPICS, ".xarabot/epics.yaml", "stories/2.4.md"], refused: [] },
-  { name: "a graph unit is allowed its inputs, case-folded", unit: GRAPH_UNIT, changes: ["_BMAD-output/planning-artifacts/Epics.md", ".XARABOT/epics.YAML"], refused: [] },
+  {
+    name: "a graph unit's inputs in another case are refused, never folded into its globs",
+    unit: GRAPH_UNIT,
+    changes: ["_BMAD-output/planning-artifacts/Epics.md", ".XARABOT/epics.YAML", "Stories/2.4.md"],
+    refused: [
+      [".XARABOT/epics.YAML", "xarabot"],
+      ["Stories/2.4.md", "outside-unit"],
+      ["_BMAD-output/planning-artifacts/Epics.md", "outside-unit"],
+    ],
+  },
   { name: "a retro writes its retro document", unit: { kind: "retro", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-2-retro-2026-10-24.md", gates(EMPTY_GATES, `${EMPTY_GATES}# a comment\n`)], refused: [] },
   { name: "a retro item writes its own globs", unit: { kind: "retro-item", globs: ["src/x/**"] }, changes: ["src/x/a.ts"], refused: [] },
   // xarabot.
@@ -573,12 +630,12 @@ const COORD_CASES: readonly CoordCase[] = [
   { name: "a status unit writing src/a.ts: outside-unit", unit: STATUS_UNIT, changes: ["src/a.ts"], refused: [["src/a.ts", "outside-unit"]] },
   { name: "reconcile holds nothing: outside-unit", unit: { kind: "reconcile" }, changes: ["README.md"], refused: [["README.md", "outside-unit"]] },
   { name: "a graph unit writing a status file: outside-unit", unit: GRAPH_UNIT, changes: [SPRINT], refused: [[SPRINT, "outside-unit"]] },
-  { name: "outside-unit is case-folded: the unit's own file in other case passes", unit: STATUS_UNIT, changes: ["_bmad-output/IMPLEMENTATION-artifacts/Sprint-Status.yaml"], refused: [] },
+  { name: "outside-unit is exact: the unit's own file in another case is refused", unit: STATUS_UNIT, changes: ["_bmad-output/IMPLEMENTATION-artifacts/Sprint-Status.yaml"], refused: [["_bmad-output/IMPLEMENTATION-artifacts/Sprint-Status.yaml", "outside-unit"]] },
   // graph-and-status.
   {
     name: "status files with no graph input in the diff: no graph-and-status",
     unit: { kind: "retro-item", globs: ["_bmad-output/**"] },
-    changes: [SPRINT, gates(GATES_2, GATES_2), "_bmad-output/implementation-artifacts/notes.md"],
+    changes: [sprint(S0, S0), gates(GATES_2, GATES_2), "_bmad-output/implementation-artifacts/notes.md"],
     refused: [],
   },
   {
@@ -607,7 +664,7 @@ const COORD_CASES: readonly CoordCase[] = [
   { name: "mode: a status file made a gitlink", unit: STATUS_UNIT, changes: [{ path: RETRO, mode: "160000" }], refused: [[RETRO, "mode"]] },
   { name: "mode: a status file deleted has no mode", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "000000" }], refused: [[SPRINT, "mode"]] },
   { name: "mode: a change with no mode is refused", unit: STATUS_UNIT, changes: [{ path: SPRINT }], refused: [[SPRINT, "mode"]] },
-  { name: "mode: 100644 passes", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100644" }, gates(null, null)], refused: [] },
+  { name: "mode: 100644 passes", unit: STATUS_UNIT, changes: [sprint(S0, `# a comment\n${S0}`), gates(null, null)], refused: [] },
   // The retro records (Story 2.9): no agent diff changes a verdict, item or go, in any unit.
   { name: "retro-verdict: a verdict changed", unit: RETRO_UNIT, changes: [gates(GATES_2.replace(GO, ""), GATES_2.replace(GO, "").replace("verdict: rejected", "verdict: accepted"))], refused: [[RETRO, "retro-verdict"]] },
   { name: "retro-verdict: a retro added", unit: RETRO_UNIT, changes: [gates(null, GATES_2)], refused: [[RETRO, "retro-verdict"], [RETRO, "retro-item"], [RETRO, "retro-go"]] },
@@ -620,32 +677,83 @@ const COORD_CASES: readonly CoordCase[] = [
   { name: "retro-gates-invalid: the after side does not parse", unit: RETRO_UNIT, changes: [gates(GATES_2, "schema_version: 1\nepics: [\n")], refused: [[RETRO, "retro-gates-invalid"]] },
   { name: "retro-gates-invalid: the before side breaks the schema", unit: RETRO_UNIT, changes: [gates("schema_version: 2\nepics: {}\n", EMPTY_GATES)], refused: [[RETRO, "retro-gates-invalid"]] },
   { name: "retro-gates-invalid: a change with no texts", unit: RETRO_UNIT, changes: [{ path: RETRO, mode: "100644" }], refused: [[RETRO, "retro-gates-invalid"]] },
-  { name: "retro-gates: case-folded path", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO.toUpperCase() }], refused: [[RETRO.toUpperCase(), "retro-item"]] },
+  { name: "retro-gates: a case variant is outside the retro's globs", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2), path: RETRO.toUpperCase() }], refused: [[RETRO.toUpperCase(), "outside-unit"]] },
+  { name: "retro-gates: case-folded path in a unit whose globs hold it", unit: ANY_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO.toUpperCase() }], refused: [[RETRO.toUpperCase(), "retro-item"]] },
   { name: "retro-gates: an earlier class wins", unit: { kind: "retro-item", globs: ["src/**"] }, changes: [gates(GATES_2, EMPTY_GATES)], refused: [[RETRO, "outside-unit"]] },
   { name: "mode: a graph input made executable", unit: GRAPH_UNIT, changes: [{ path: "stories/2.4.md", mode: "100755" }], refused: [["stories/2.4.md", "mode"]] },
   { name: "mode: only status files and graph inputs are checked", unit: STATUS_UNIT, changes: [{ path: CONTEXT_2, mode: "100755" }], refused: [] },
   { name: "mode: an earlier class is reported first", unit: STATUS_UNIT, changes: [{ path: EPICS, mode: "120000" }], refused: [[EPICS, "graph-input"]] },
   // Full case folding: `ſ` folds to `s`.
-  { name: "full fold: .xarabot/epicſ.yaml is epics.yaml for a graph unit", unit: GRAPH_UNIT, changes: [".XARABOT/epicſ.yaml"], refused: [] },
+  { name: "full fold: .xarabot/epicſ.yaml is not epics.yaml for a graph unit", unit: GRAPH_UNIT, changes: [".XARABOT/epicſ.yaml"], refused: [[".XARABOT/epicſ.yaml", "xarabot"]] },
   { name: "full fold: xarabot", unit: GRAPH_UNIT, changes: [".xarabot/ſettings.yaml"], refused: [[".xarabot/ſettings.yaml", "xarabot"]] },
   { name: "full fold: graph-input", unit: STATUS_UNIT, changes: ["ſtories/2.1.md"], refused: [["ſtories/2.1.md", "graph-input"]] },
-  { name: "full fold: the unit's own file with ſ passes", unit: STATUS_UNIT, changes: [SPRINT.replace("sprint-status", "ſprint-ſtatus")], refused: [] },
-  { name: "full fold: outside-unit", unit: { kind: "retro-item", globs: ["src/**"] }, changes: ["ſrc/a.ts", "lib/ſ.ts"], refused: [["lib/ſ.ts", "outside-unit"]] },
+  { name: "full fold: the unit's own file with ſ is outside-unit", unit: STATUS_UNIT, changes: [SPRINT.replace("sprint-status", "ſprint-ſtatus")], refused: [[SPRINT.replace("sprint-status", "ſprint-ſtatus"), "outside-unit"]] },
+  { name: "full fold: outside-unit", unit: { kind: "retro-item", globs: ["src/**"] }, changes: ["ſrc/a.ts", "lib/ſ.ts"], refused: [["lib/ſ.ts", "outside-unit"], ["ſrc/a.ts", "outside-unit"]] },
   {
-    name: "full fold: graph-and-status in a status unit",
-    unit: STATUS_UNIT,
+    name: "full fold: graph-and-status in a unit holding every path",
+    unit: ANY_UNIT,
     changes: [EPICS.replace("epics", "epicſ"), SPRINT.replace("sprint", "ſprint")],
     refused: [
       [EPICS.replace("epics", "epicſ"), "graph-input"],
       [SPRINT.replace("sprint", "ſprint"), "graph-and-status"],
     ],
   },
-  { name: "full fold: mode", unit: STATUS_UNIT, changes: [{ path: SPRINT.replace("sprint", "ſprint"), mode: "100755" }], refused: [[SPRINT.replace("sprint", "ſprint"), "mode"]] },
-  { name: "full fold: retro-verdict", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2.replace(GO, ""), GATES_2.replace(GO, "").replace("verdict: rejected", "verdict: accepted")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-verdict"]] },
-  { name: "full fold: retro-item", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-item"]] },
-  { name: "full fold: retro-go", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace(GO, "")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-go"]] },
-  { name: "full fold: checkpoint-go", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, `${GATES_2}${CHECKPOINT_3}`), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "checkpoint-go"]] },
-  { name: "full fold: retro-gates-invalid", unit: RETRO_UNIT, changes: [{ path: RETRO_FOLDED, mode: "100644" }], refused: [[RETRO_FOLDED, "retro-gates-invalid"]] },
+  { name: "full fold: mode", unit: ANY_UNIT, changes: [{ path: SPRINT.replace("sprint", "ſprint"), mode: "100755" }], refused: [[SPRINT.replace("sprint", "ſprint"), "mode"]] },
+  { name: "full fold: retro-verdict", unit: ANY_UNIT, changes: [{ ...gates(GATES_2.replace(GO, ""), GATES_2.replace(GO, "").replace("verdict: rejected", "verdict: accepted")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-verdict"]] },
+  { name: "full fold: retro-item", unit: ANY_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-item"]] },
+  { name: "full fold: retro-go", unit: ANY_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace(GO, "")), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "retro-go"]] },
+  { name: "full fold: checkpoint-go", unit: ANY_UNIT, changes: [{ ...gates(GATES_2, `${GATES_2}${CHECKPOINT_3}`), path: RETRO_FOLDED }], refused: [[RETRO_FOLDED, "checkpoint-go"]] },
+  { name: "full fold: retro-gates-invalid", unit: ANY_UNIT, changes: [{ path: RETRO_FOLDED, mode: "100644" }], refused: [[RETRO_FOLDED, "retro-gates-invalid"]] },
+  // sprint-status.yaml, by key (AR31, Epic 2 retro C5): status planning only adds keys.
+  { name: "status planning adds missing keys and bumps last_updated", unit: STATUS_UNIT, changes: [sprint(S0, withKeys("epic-3: backlog", "3-1-x: backlog", "epic-3-retrospective: optional").replace("last_updated: 10-22-2026 00:43", "last_updated: 10-25-2026 10:00"))], refused: [] },
+  { name: "status planning adds a top-level key", unit: STATUS_UNIT, changes: [sprint(S0, `${S0}story_location: x\n`)], refused: [] },
+  { name: "status planning writes the whole file where none was", unit: STATUS_UNIT, changes: [sprint(null, S0.replace("2-1-heartbeat: done", "2-1-heartbeat: review"))], refused: [] },
+  { name: "status planning fills an empty file", unit: STATUS_UNIT, changes: [sprint("", S0.replace("2-1-heartbeat: done", "2-1-heartbeat: review"))], refused: [] },
+  { name: "status planning: comments and layout change no key", unit: STATUS_UNIT, changes: [sprint(S0, `# note\n${S0.replace("development_status:\n", "development_status:   \n")}`)], refused: [] },
+  { name: "status-key: status planning changes a Story's value", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: in-progress"))], refused: [[key("development_status.2-2-takeover"), "status-key"]] },
+  { name: "status-key: status planning changes an Epic's value", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("epic-2: in-progress", "epic-2: done"))], refused: [[key("development_status.epic-2"), "status-key"]] },
+  { name: "status-key: status planning removes a key", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("  2-1-heartbeat: done\n", ""))], refused: [[key("development_status.2-1-heartbeat"), "status-key"]] },
+  { name: "status-key: status planning sets an existing key null", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover:"))], refused: [[key("development_status.2-2-takeover"), "status-key"]] },
+  { name: "status-key: status planning changes another top-level value", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("generated: 10-22-2026 00:43", "generated: 10-25-2026 10:00"))], refused: [[key("generated"), "status-key"]] },
+  { name: "status-key: status planning appends an action item", unit: STATUS_UNIT, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", "2"]))], refused: [[key("action_items"), "status-key"]] },
+  { name: "status-key: one refusal per key, in key order", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: backlog").replace("project: xarabot", "project: other"))], refused: [[key("development_status.2-2-takeover"), "status-key"], [key("project"), "status-key"]] },
+  // A retro only appends its Epic's action items and sets its own retrospective key.
+  { name: "a retro appends its Epic's action items, sets its retrospective and bumps last_updated", unit: RETRO_UNIT, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", "2"], ["epic-2-retro-item-2-z", "2"]).replace("epic-2-retrospective: optional", "epic-2-retrospective: done").replace("last_updated: 10-22-2026 00:43", "last_updated: 10-25-2026 10:00"))], refused: [] },
+  { name: "a retro adds its retrospective key and the first action items", unit: RETRO_UNIT, changes: [sprint(S0.replace("  epic-2-retrospective: optional\n", "").replace(/action_items:\n[\s\S]*$/, ""), S0.replace(/action_items:\n[\s\S]*$/, `action_items:\n  - id: "epic-2-retro-item-1-y"\n    epic: 2\n`))], refused: [] },
+  { name: "status-key: a retro removes its retrospective key", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("  epic-2-retrospective: optional\n", ""))], refused: [[key("development_status.epic-2-retrospective"), "status-key"]] },
+  { name: "status-key: a retro sets another Epic's retrospective", unit: RETRO_UNIT, changes: [sprint(S0, withKeys("epic-1-retrospective: done"))], refused: [[key("development_status.epic-1-retrospective"), "status-key"]] },
+  { name: "status-key: a retro changes its Epic's status", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("epic-2: in-progress", "epic-2: done"))], refused: [[key("development_status.epic-2"), "status-key"]] },
+  { name: "status-key: a retro adds a key", unit: RETRO_UNIT, changes: [sprint(S0, withKeys("epic-3: backlog"))], refused: [[key("development_status.epic-3"), "status-key"]] },
+  { name: "status-key: a retro changes another top-level value", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("project: xarabot", "project: other"))], refused: [[key("project"), "status-key"]] },
+  { name: "status-key: a retro appends another Epic's action item", unit: RETRO_UNIT, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", "2"], ["epic-1-retro-item-2-z", "1"]))], refused: [[key("action_items[2]"), "status-key"]] },
+  { name: "status-key: a retro appends an action item with no Epic", unit: RETRO_UNIT, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", ""]))], refused: [[key("action_items[1]"), "status-key"]] },
+  { name: "status-key: a retro appends an action item whose Epic is a string", unit: RETRO_UNIT, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", '"2"']))], refused: [[key("action_items[1]"), "status-key"]] },
+  { name: "status-key: a retro changes an existing action item", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("    status: open", "    status: done"))], refused: [[key("action_items[0]"), "status-key"]] },
+  { name: "status-key: a retro removes an action item", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace(/action_items:\n[\s\S]*$/, "action_items: []\n"))], refused: [[key("action_items[0]"), "status-key"]] },
+  { name: "status-key: a retro inserts an action item before the others", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("action_items:\n", 'action_items:\n  - id: "epic-2-retro-item-1-y"\n    epic: 2\n'))], refused: [[key("action_items[0]"), "status-key"], [key("action_items[1]"), "status-key"]] },
+  { name: "status-key: a retro makes action_items a mapping", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace(/action_items:\n[\s\S]*$/, "action_items:\n  a: 1\n"))], refused: [[key("action_items"), "status-key"]] },
+  { name: "status-key: a retro of another Epic appends Epic 2's items", unit: { kind: "retro", epic: 3 }, changes: [sprint(S0, withItems(["epic-2-retro-item-1-y", "2"]).replace("epic-2-retrospective: optional", "epic-2-retrospective: done"))], refused: [[key("action_items[1]"), "status-key"], [key("development_status.epic-2-retrospective"), "status-key"]] },
+  // Any other session changes no key.
+  { name: "status-key: any other session changes no key, last_updated included", unit: ANY_UNIT, changes: [sprint(S0, withKeys("epic-3: backlog").replace("last_updated: 10-22-2026 00:43", "last_updated: 10-25-2026 10:00"))], refused: [[key("development_status.epic-3"), "status-key"], [key("last_updated"), "status-key"]] },
+  { name: "any other session: comments and layout change no key", unit: ANY_UNIT, changes: [sprint(S0, `# note\n${S0}`)], refused: [] },
+  // story-done: no coordinator session sets a Story done; only reconcile's runner code does.
+  { name: "story-done: status planning sets an existing Story done", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done"))], refused: [[key("development_status.2-2-takeover"), "story-done"]] },
+  { name: "story-done: status planning adds a Story as done", unit: STATUS_UNIT, changes: [sprint(S0, withKeys("3-1-x: done"))], refused: [[key("development_status.3-1-x"), "story-done"]] },
+  { name: "story-done: status planning writes a new file holding a done Story", unit: STATUS_UNIT, changes: [sprint(null, S0)], refused: [[key("development_status.2-1-heartbeat"), "story-done"]] },
+  { name: "story-done: a Story done before stays done", unit: STATUS_UNIT, changes: [sprint(S0, `${S0}# a comment\n`)], refused: [] },
+  { name: "story-done: a retro sets a Story done", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done"))], refused: [[key("development_status.2-2-takeover"), "story-done"]] },
+  { name: "story-done: any other session sets a Story done", unit: ANY_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done"))], refused: [[key("development_status.2-2-takeover"), "story-done"]] },
+  { name: "story-done: an Epic or a retrospective set done is not a Story", unit: RETRO_UNIT, changes: [sprint(S0, S0.replace("epic-2-retrospective: optional", "epic-2-retrospective: done"))], refused: [] },
+  { name: "story-done: with another key refused, one refusal each", unit: STATUS_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done").replace("epic-2: in-progress", "epic-2: done"))], refused: [[key("development_status.2-2-takeover"), "story-done"], [key("development_status.epic-2"), "status-key"]] },
+  // status-invalid.
+  { name: "status-invalid: a change with no texts", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100644" }], refused: [[SPRINT, "status-invalid"]] },
+  { name: "status-invalid: the after side does not parse", unit: STATUS_UNIT, changes: [sprint(S0, "development_status: [\n")], refused: [[SPRINT, "status-invalid"]] },
+  { name: "status-invalid: the before side is not a mapping", unit: RETRO_UNIT, changes: [sprint("- a\n", S0)], refused: [[SPRINT, "status-invalid"]] },
+  { name: "sprint-status: an earlier class wins", unit: STATUS_UNIT, changes: [{ ...sprint(S0, "x: ["), mode: "100755" }], refused: [[SPRINT, "mode"]] },
+  // Full case folding: a variant of sprint-status.yaml is still the file, in a unit whose globs hold it.
+  { name: "full fold: story-done", unit: ANY_UNIT, changes: [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done"), SPRINT_FOLDED)], refused: [[key("development_status.2-2-takeover", SPRINT_FOLDED), "story-done"]] },
+  { name: "full fold: status-key", unit: ANY_UNIT, changes: [sprint(S0, withKeys("epic-3: backlog"), SPRINT_FOLDED)], refused: [[key("development_status.epic-3", SPRINT_FOLDED), "status-key"]] },
+  { name: "full fold: status-invalid", unit: ANY_UNIT, changes: [{ path: SPRINT_FOLDED, mode: "100644" }], refused: [[SPRINT_FOLDED, "status-invalid"]] },
 ];
 
 describe("checkWrite (coordinator)", () => {
@@ -673,23 +781,85 @@ describe("checkWrite (coordinator)", () => {
     const rules = coordinatorWriteRules({ config: COORD_CONFIG, globs: [EPICS, SPRINT], graphUnit: true });
     const r = (path: string): WriteChange => ({ path, mode: "100644" });
     expect(checkWrite(rules, [r(EPICS)])).toEqual([]);
-    expect(checkWrite(rules, [r(SPRINT)])).toEqual([]);
-    expect(checkWrite(rules, [r(EPICS), r(SPRINT.toUpperCase())])).toEqual([
-      { path: SPRINT.toUpperCase(), class: "graph-and-status" },
+    expect(checkWrite(rules, [sprint(S0, S0)])).toEqual([]);
+    expect(checkWrite(rules, [r(EPICS), sprint(S0, S0)])).toEqual([
+      { path: SPRINT, class: "graph-and-status" },
       { path: EPICS, class: "graph-and-status" },
     ]);
   });
 
+  test("coordinatorWriteRules sets no unit: no key of sprint-status.yaml may change", () => {
+    const rules = coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs(STATUS_UNIT, COORD_CONFIG), graphUnit: false });
+    expect(rules.unit).toBeNull();
+    expect(checkWrite(rules, [sprint(S0, withKeys("epic-3: backlog"))])).toEqual([{ path: key("development_status.epic-3"), class: "status-key" }]);
+    expect(checkWrite({ ...rules, unit: "planning:status.1" }, [sprint(S0, withKeys("epic-3: backlog"))])).toEqual([]);
+  });
+
+  test.each([
+    ["planning:status.1", false, { kind: "status-planning" }],
+    ["planning:roadmap.2", false, { kind: "status-planning" }],
+    ["planning:graph.1", true, { kind: "other" }],
+    ["retro:2", false, { kind: "retro", epic: 2 }],
+    ["retro:12", false, { kind: "retro", epic: 12 }],
+    ["retro:0", false, { kind: "other" }],
+    ["retro-item:epic-2-retro-item-1-fix", false, { kind: "other" }],
+    ["reconcile:3", false, { kind: "other" }],
+    ["story:2.3", false, { kind: "other" }],
+    [null, false, { kind: "other" }],
+  ] as const)("statusSession(%p, graph %p)", (unit, graph, want) => {
+    expect(statusSession(unit, graph)).toEqual(want as StatusSession);
+  });
+
+  test("sprintStatusRefusals names each key it refuses, or none for the whole file", () => {
+    expect(sprintStatusRefusals({ kind: "status-planning" }, SPRINT, { before: S0, after: S0.replace("2-2-takeover: review", "2-2-takeover: done") })).toEqual([
+      { key: "development_status.2-2-takeover", class: "story-done" },
+    ]);
+    expect(sprintStatusRefusals({ kind: "retro", epic: 2 }, SPRINT, undefined)).toEqual([{ key: null, class: "status-invalid" }]);
+  });
+
   test("coordinatorWriteRules takes the graph inputs and status files from the config", () => {
-    expect(coordRules(STATUS_UNIT)).toEqual({
+    expect(coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs(STATUS_UNIT, COORD_CONFIG), graphUnit: false })).toEqual({
       role: "coordinator",
       globs: [SPRINT, RETRO, "_bmad-output/implementation-artifacts/epic-*-context.md"],
       graphUnit: false,
       graphInputs: [EPICS, ".xarabot/epics.yaml", "stories/*.md"],
       statusFiles: [SPRINT, RETRO],
       retroGatesPath: RETRO,
+      sprintStatusPath: SPRINT,
+      unit: null,
       refused: null,
     });
+  });
+});
+
+describe("checkWrite (coordinator): the unit's globs are matched exactly, never case-folded", () => {
+  /** A path a glob matches: each `**` as `a`, each other `*` as `2`. */
+  const sample = (glob: string) => glob.replaceAll("**", "a").replaceAll("*", "2");
+  /** Case variants of `path`: all upper case, its first lower-case letter upper-cased, and its first `s` as `ſ`. */
+  const variants = (path: string): string[] => {
+    const i = path.search(/[a-z]/);
+    const out = [path.toUpperCase(), `${path.slice(0, i)}${(path[i] as string).toUpperCase()}${path.slice(i + 1)}`];
+    if (path.includes("s")) out.push(path.replace("s", "ſ"));
+    return out;
+  };
+  const SPECS: readonly CoordinatorUnitSpec[] = [STATUS_UNIT, GRAPH_UNIT, RETRO_UNIT, { kind: "retro-item", globs: ["src/x/**", "docs/notes.md"] }];
+  const unitCases = SPECS.flatMap((spec) =>
+    coordinatorGlobs(spec, COORD_CONFIG)
+      .filter((g) => g !== GRAPH_PSEUDO_GLOB)
+      .flatMap((g) => variants(sample(g)).map((v) => [unitOf(spec), g, v, spec] as const)),
+  );
+
+  test.each(unitCases)("%s: a case variant of %s (%s) is refused", (_unit, glob, variant, spec) => {
+    const rules = coordRules(spec);
+    const own = sample(glob);
+    const change = (path: string): WriteChange => (path === SPRINT ? sprint(S0, S0) : path === RETRO ? gates(EMPTY_GATES, EMPTY_GATES) : { path, mode: "100644" });
+    expect(checkWrite(rules, [change(own)])).toEqual([]);
+    const cls = variant.toLowerCase().startsWith(".xarabot/") ? "xarabot" : "outside-unit";
+    expect(checkWrite(rules, [{ path: variant, mode: "100644" }])).toEqual([{ path: variant, class: cls }]);
+  });
+
+  test("every coordinator unit kind with globs has a case variant row", () => {
+    expect(new Set(unitCases.map(([, , , spec]) => spec.kind))).toEqual(new Set(["planning", "retro", "retro-item"]));
   });
 });
 
@@ -698,8 +868,10 @@ describe("checkWrite (a retro item: coordinator rules plus every builder refusal
     config: { ...COORD_CONFIG, standing_authority_path: AUTHORITY },
     policy: { protected_paths: ["secrets/**", "**/*.pem"] },
   };
-  const itemRules = (globs: readonly string[]): CoordinatorWriteRules =>
-    coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs({ kind: "retro-item", globs }, COORD_CONFIG), graphUnit: false, builderRefusals: BUILDER_REFUSALS });
+  const itemRules = (globs: readonly string[]): CoordinatorWriteRules => ({
+    ...coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs({ kind: "retro-item", globs }, COORD_CONFIG), graphUnit: false, builderRefusals: BUILDER_REFUSALS }),
+    unit: "retro-item:epic-2-retro-item-1-fix",
+  });
   const ALL = ["**"];
 
   test.each([
@@ -708,7 +880,9 @@ describe("checkWrite (a retro item: coordinator rules plus every builder refusal
     ["agent config inside a broad glob: agent-config", ["src/**"], ["src/CLAUDE.md"], [["src/CLAUDE.md", "agent-config"]]],
     ["agent config, case-folded", ["src/**"], ["src/claude.MD"], [["src/claude.MD", "agent-config"]]],
     ["an agent config folder: agent-config", ["src/**"], ["src/.claude/settings.json"], [["src/.claude/settings.json", "agent-config"]]],
-    ["a status file: coordinator-file", ALL, [SPRINT], [[SPRINT, "coordinator-file"]]],
+    ["a status file: coordinator-file", ALL, [sprint(S0, `# a comment\n${S0}`)], [[SPRINT, "coordinator-file"]]],
+    ["coordinator classes win: a sprint-status key change is status-key, not coordinator-file", ALL, [sprint(S0, withKeys("epic-3: backlog"))], [[key("development_status.epic-3"), "status-key"]]],
+    ["coordinator classes win: a sprint-status change with no texts is status-invalid", ALL, [{ path: SPRINT, mode: "100644" }], [[SPRINT, "status-invalid"]]],
     ["a live evidence file: live-evidence", ALL, ["docs/maintainer/evidence/epic-2.md"], [["docs/maintainer/evidence/epic-2.md", "live-evidence"]]],
     ["a live evidence file, full fold: live-evidence", ALL, ["Docſ/Maintainer/Evidence/EPIC-2.MD"], [["Docſ/Maintainer/Evidence/EPIC-2.MD", "live-evidence"]]],
     ["the Standing Authority: standing-authority", ALL, [AUTHORITY], [[AUTHORITY, "standing-authority"]]],
@@ -727,7 +901,8 @@ describe("checkWrite (a retro item: coordinator rules plus every builder refusal
   });
 
   test("every builder class the coordinator classes do not catch first is refused, with no exception", () => {
-    const hit = new Set(checkWrite(itemRules(ALL), [SPRINT, "docs/maintainer/evidence/epic-1.md", AUTHORITY, ".github/x", "a/AGENTS.md", "secrets/x"].map((path) => ({ path, mode: "100644" }))).map((r) => r.class));
+    const paths = ["docs/maintainer/evidence/epic-1.md", AUTHORITY, ".github/x", "a/AGENTS.md", "secrets/x"];
+    const hit = new Set(checkWrite(itemRules(ALL), [sprint(S0, S0), ...paths.map((path) => ({ path, mode: "100644" }))]).map((r) => r.class));
     expect([...hit].sort()).toEqual(["agent-config", "coordinator-file", "github", "live-evidence", "protected-path", "standing-authority"]);
   });
 

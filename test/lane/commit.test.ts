@@ -411,11 +411,13 @@ describe("commitSession: the write check", () => {
   describe("coordinator rules", () => {
     const config = { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } };
     const statusUnit = coordinatorWriteRules({ config, globs: coordinatorGlobs({ kind: "planning", planning: "status" }, config), graphUnit: false });
+    /** The clone session of a status planning unit: the check judges the marker's unit. */
+    const STATUS = { unit: "planning:status.1", branch: "xarabot/planning-status.1" };
 
     test("a status unit's Epic context change is committed, not reverted", async () => {
       const repo = await setup();
       const base = await commit(repo.gitDir, baseFiles);
-      value(await rebuildClone(rebuild(repo, base)));
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
       const added = "_bmad-output/implementation-artifacts/epic-2-context.md";
       write(repo, EPIC_CONTEXT, "# Epic 1 Context: recompiled\n");
       write(repo, added, "# Epic 2 Context: new\n");
@@ -432,7 +434,7 @@ describe("commitSession: the write check", () => {
     test("a refused path writes nothing: outside the unit, a graph input, .xarabot", async () => {
       const repo = await setup();
       const base = await commit(repo.gitDir, baseFiles);
-      value(await rebuildClone(rebuild(repo, base)));
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
       write(repo, SPRINT, "development_status:\n  epic-2: in-progress\n");
       write(repo, "src/a.ts", "SESSION\n");
       write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: done"));
@@ -453,7 +455,7 @@ describe("commitSession: the write check", () => {
     test("each change carries its new mode: a status file made executable, a symlink or deleted is refused mode", async () => {
       const repo = await setup();
       const base = await commit(repo.gitDir, baseFiles);
-      value(await rebuildClone(rebuild(repo, base)));
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
       chmodSync(join(repo.clone, SPRINT), 0o755);
       rmSync(join(repo.clone, RETRO));
       expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
@@ -479,6 +481,7 @@ describe("commitSession: the write check", () => {
     // Story 2.9: the retro records in retro-gates.yaml are reconcile's alone; the check reads both sides' texts.
     const GATES = 'schema_version: 1\nepics:\n  "1":\n    retro:\n      verdict: accepted\n      unit: "retro:1"\n      recorded_at: "2026-10-20T00:00:00Z"\n';
     const retroUnit = coordinatorWriteRules({ config, globs: coordinatorGlobs({ kind: "retro", epic: 2 }, config), graphUnit: false });
+    const RETRO_2 = { unit: "retro:2", branch: "xarabot/retro-2" };
 
     test.each([
       ["a verdict changed", GATES, GATES.replace("accepted", "rejected"), "retro-verdict"],
@@ -489,7 +492,7 @@ describe("commitSession: the write check", () => {
       const repo = await setup();
       const { [RETRO]: _drop, ...rest } = baseFiles;
       const base = await commit(repo.gitDir, before === null ? rest : { ...rest, [RETRO]: before });
-      value(await rebuildClone(rebuild(repo, base)));
+      value(await rebuildClone(rebuild(repo, base, RETRO_2)));
       if (after === null) rmSync(join(repo.clone, RETRO));
       else write(repo, RETRO, after);
       const r = value(await commitSession(session(repo, base, base, { rules: retroUnit })));
@@ -500,10 +503,57 @@ describe("commitSession: the write check", () => {
     test("retro-gates.yaml under coordinator rules: a change with the same data (a comment) is committed", async () => {
       const repo = await setup();
       const base = await commit(repo.gitDir, { ...baseFiles, [RETRO]: GATES });
-      value(await rebuildClone(rebuild(repo, base)));
+      value(await rebuildClone(rebuild(repo, base, RETRO_2)));
       write(repo, RETRO, `# note\n${GATES}`);
       const r = value(await commitSession(session(repo, base, base, { rules: retroUnit })));
       expect(r.kind).toBe("committed");
+    });
+
+    // AR31, Epic 2 retro C5: sprint-status.yaml is checked by key, from both sides' texts, for the marker's unit.
+    const STATUS_0 = "last_updated: 10-22-2026 00:43\ndevelopment_status:\n  epic-2: in-progress\n  2-1-x: review\n  epic-2-retrospective: optional\naction_items: []\n";
+
+    test.each([
+      ["status planning adds a key", STATUS, statusUnit, STATUS_0.replace("  epic-2-retrospective: optional\n", "  epic-2-retrospective: optional\n  epic-3: backlog\n"), []],
+      ["status planning changes a value", STATUS, statusUnit, STATUS_0.replace("epic-2: in-progress", "epic-2: done"), [[`${SPRINT}#development_status.epic-2`, "status-key"]]],
+      ["status planning sets a Story done", STATUS, statusUnit, STATUS_0.replace("2-1-x: review", "2-1-x: done"), [[`${SPRINT}#development_status.2-1-x`, "story-done"]]],
+      [
+        "a retro appends its item, sets its retrospective and bumps last_updated",
+        RETRO_2,
+        retroUnit,
+        STATUS_0.replace("optional", "done").replace("10-22-2026", "10-25-2026").replace("action_items: []", 'action_items:\n  - id: "epic-2-retro-item-1-y"\n    epic: 2\n'),
+        [],
+      ],
+      ["a retro sets a Story done", RETRO_2, retroUnit, STATUS_0.replace("2-1-x: review", "2-1-x: done"), [[`${SPRINT}#development_status.2-1-x`, "story-done"]]],
+      ["a retro appends another Epic's item", RETRO_2, retroUnit, STATUS_0.replace("action_items: []", 'action_items:\n  - id: "epic-1-retro-item-1-y"\n    epic: 1\n'), [[`${SPRINT}#action_items[0]`, "status-key"]]],
+      ["the marker's unit, not the rules', is judged: a Story session's marker changes no key", { unit: UNIT, branch: BRANCH }, { ...statusUnit, unit: "planning:status.1" }, STATUS_0.replace("  epic-2-retrospective: optional\n", "  epic-2-retrospective: optional\n  epic-3: backlog\n"), [[`${SPRINT}#development_status.epic-3`, "status-key"]]],
+    ] as const)("sprint-status.yaml under coordinator rules: %s", async (_name, marker, unitRules, after, refused) => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, { ...baseFiles, [SPRINT]: STATUS_0 });
+      value(await rebuildClone(rebuild(repo, base, marker)));
+      write(repo, SPRINT, after);
+      const r = value(await commitSession(session(repo, base, base, { rules: unitRules })));
+      if (refused.length === 0) {
+        if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+        expect((await files(repo.gitDir, r.head_sha))[SPRINT]).toBe(after.trimEnd());
+      } else {
+        expect(r).toEqual({ kind: "refused", refusals: refused.map(([path, cls]) => ({ path, class: cls })), reverted: [] });
+        await noHead(repo);
+      }
+    });
+
+    test("sprint-status.yaml written where none was: both texts reach the check, the absent side as none", async () => {
+      const repo = await setup();
+      const { [SPRINT]: _drop, ...rest } = baseFiles;
+      const base = await commit(repo.gitDir, rest);
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
+      write(repo, SPRINT, STATUS_0);
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit }))).kind).toBe("committed");
+      write(repo, SPRINT, STATUS_0.replace("2-1-x: review", "2-1-x: done"));
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
+        kind: "refused",
+        refusals: [{ path: `${SPRINT}#development_status.2-1-x`, class: "story-done" }],
+        reverted: [],
+      });
     });
   });
 });

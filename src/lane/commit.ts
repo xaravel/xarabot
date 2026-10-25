@@ -13,7 +13,8 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
  * files and to superseded spec files are reverted to `baseSha`'s version
  * (an added one removed); then the write check (FR18, AR31), a
  * builder's or the coordinator's, runs on what is left, before any temp
- * commit; a refusal writes nothing. `merge-tree`
+ * commit; a refusal writes nothing. Under coordinator rules the check
+ * judges the clone session's own unit, from its marker. `merge-tree`
  * applies the change onto `ontoSha`. A conflict is returned, never resolved,
  * with the session's start, onto which the same change always applies.
  */
@@ -112,18 +113,27 @@ async function sideText(gitDir: string, mode: string, sha: string, signal: Abort
 /**
  * The write check's input: each changed path and its new mode, with the own
  * manifest's texts when it is a regular file on both sides and, under
- * coordinator rules, `retro_gates_path`'s texts (`null` on a side where it
- * is absent; Story 2.9).
+ * coordinator rules, `retro_gates_path`'s and `sprint_status_path`'s texts
+ * (`null` on a side where it is absent; Story 2.9, AR31).
  */
 async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
   const out: WriteChange[] = [];
+  const texts = async (c: RawChange): Promise<CloneResult<{ before: string | null; after: string | null }>> => {
+    const before = await sideText(gitDir, c.oldMode, c.oldSha, signal);
+    if (!before.ok) return before;
+    const after = await sideText(gitDir, c.newMode, c.newSha, signal);
+    if (!after.ok) return after;
+    return ok({ before: before.value, after: after.value });
+  };
   for (const c of changes) {
     if (rules.role === "coordinator" && fold(c.path) === fold(rules.retroGatesPath)) {
-      const before = await sideText(gitDir, c.oldMode, c.oldSha, signal);
-      if (!before.ok) return before;
-      const after = await sideText(gitDir, c.newMode, c.newSha, signal);
-      if (!after.ok) return after;
-      out.push({ path: c.path, mode: c.newMode, retroGates: { before: before.value, after: after.value } });
+      const t = await texts(c);
+      if (!t.ok) return t;
+      out.push({ path: c.path, mode: c.newMode, retroGates: t.value });
+    } else if (rules.role === "coordinator" && fold(c.path) === fold(rules.sprintStatusPath)) {
+      const t = await texts(c);
+      if (!t.ok) return t;
+      out.push({ path: c.path, mode: c.newMode, sprintStatus: t.value });
     } else if (rules.role === "builder" && c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
       const before = await git(gitDir, ["cat-file", "blob", c.oldSha], { signal });
       if (!before.ok) return before;
@@ -191,9 +201,10 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
     if (!again.ok) return again;
     own = again.value;
   }
-  const changes = await writeChanges(gitDir, params.rules, own, signal);
+  const changes = await writeChanges(gitDir, rules, own, signal);
   if (!changes.ok) return changes;
-  const refusals = checkWrite(params.rules, changes.value);
+  // A coordinator session may change only its own unit's keys of the sprint status.
+  const refusals = checkWrite(rules.role === "coordinator" ? { ...rules, unit } : rules, changes.value);
   if (refusals.length > 0) return ok({ kind: "refused", refusals, reverted });
 
   const temp = await git(gitDir, ["commit-tree", squash, "-p", baseSha], { signal, identity: RUNNER_IDENTITY, stdin: "session snapshot\n" });
