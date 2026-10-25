@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "unit": "story:2.7",
-  "state": "released",
+  "state": "claimed",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
-  "generation": 1,
+  "lane": "builder-1",
+  "generation": 2,
   "globs": [
     "bun.lock",
     "docs/**",
@@ -13,10 +13,10 @@
     "src/**",
     "test/**"
   ],
-  "heartbeat_at": "2026-10-25T04:16:13Z",
+  "heartbeat_at": "2026-10-25T04:16:23Z",
   "pr": null,
   "pr_owner": null,
-  "base_sha": "3b4ff02eb4427d805158413dcabf00c6f48dfe63",
+  "base_sha": "fdcb807efa7eb7f069aa16e5b8288813f22983b8",
   "head_sha": null,
   "reviewed_sha": null,
   "passed_sha": null,
