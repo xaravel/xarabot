@@ -1,6 +1,6 @@
 import { err, ok, type Result } from "../../../core/result.ts";
 import type { Agent, AgentLaunchSpec, AgentSettings, AgentUnit, Effort } from "../../../ports/agent.ts";
-import { parseClaudeUsage } from "./usage.ts";
+import { checkModel, parseClaudeUsage } from "./usage.ts";
 
 /**
  * The `claude` adapter (FR7, AR15, AR22, AR30). It only describes a session;
@@ -163,6 +163,7 @@ export function createClaudeAgent(): Agent {
     minVersion: CLAUDE_MIN_VERSION,
     launchSpec: claudeLaunchSpec,
     parseUsage: parseClaudeUsage,
+    checkModel,
     effortValues: claudeEffortValues,
     startCheck: claudeStartCheck,
   };

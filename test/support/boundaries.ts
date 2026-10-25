@@ -379,23 +379,25 @@ export function findCycles(graph: ReadonlyMap<string, readonly string[]>): strin
 const LANE_DIR = "src/lane";
 
 /**
- * The import graph of `src/lane`'s files (file name -> source). Type-only
+ * The import graph of the files under `dir`, a repo-relative directory such
+ * as `src/core` (`files`: path relative to `dir` -> source). Type-only
  * imports count. Every relative specifier is resolved from the file's own
- * path (`src/lane/<name>`), so `../lane/b.ts` counts as `b.ts`; a target
- * directly in `src/lane` is kept, a `.js` ending read as `.ts` and `.ts`
- * appended when there is no extension. Anything else (another directory, a
- * package, a file not in `files`) is dropped.
+ * path (`<dir>/<name>`), so from `src/lane/a.ts`, `../lane/b.ts` counts as
+ * `b.ts`, and from `src/core/next/a.ts`, `../ledger/b.ts` as
+ * `ledger/b.ts`; a target under `dir` is kept, a `.js` ending read as `.ts`
+ * and `.ts` appended when there is no extension. Anything else (another
+ * directory, a package, a file not in `files`) is dropped.
  */
-export function laneGraph(files: Readonly<Record<string, string>>): Map<string, string[]> {
+export function importGraph(dir: string, files: Readonly<Record<string, string>>): Map<string, string[]> {
   const graph = new Map<string, string[]>();
   for (const [name, source] of Object.entries(files)) {
-    const file = posix.join(LANE_DIR, name);
+    const file = posix.join(dir, name);
     const targets: string[] = [];
     for (const specifier of importsOf(strip(source).code)) {
       if (!isRelative(specifier)) continue;
       const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
-      if (posix.dirname(resolved) !== LANE_DIR) continue;
-      let target = posix.basename(resolved);
+      if (!resolved.startsWith(`${dir}/`)) continue;
+      let target = resolved.slice(dir.length + 1);
       const ext = posix.extname(target);
       if (ext === ".js") target = `${target.slice(0, -ext.length)}.ts`;
       else if (ext === "") target = `${target}.ts`;
@@ -406,26 +408,74 @@ export function laneGraph(files: Readonly<Record<string, string>>): Map<string, 
   return graph;
 }
 
-const LANE_GLOB = new Bun.Glob("*.ts");
+/** The import graph of `src/lane`'s files (file name -> source): `importGraph` on `src/lane`. */
+export function laneGraph(files: Readonly<Record<string, string>>): Map<string, string[]> {
+  return importGraph(LANE_DIR, files);
+}
+
+const TS_GLOB = new Bun.Glob("**/*.ts");
+
+/** The sources of every `.ts` file under `<root>/<dir>`, by path relative to `dir`; throws if there are none. */
+export async function sourcesUnder(root: string, dir: string): Promise<Record<string, string>> {
+  const abs = posix.join(root, dir);
+  const files: Record<string, string> = {};
+  for await (const rel of TS_GLOB.scan({ cwd: abs })) {
+    const name = rel.split("\\").join("/");
+    files[name] = await Bun.file(posix.join(abs, name)).text();
+  }
+  if (Object.keys(files).length === 0) throw new Error(`no source files under ${abs}`);
+  return files;
+}
 
 /** The sources of `<root>/src/lane/*.ts` by file name; throws if there are none. */
 export async function laneSources(root: string): Promise<Record<string, string>> {
-  const dir = posix.join(root, LANE_DIR);
-  const files: Record<string, string> = {};
-  for await (const name of LANE_GLOB.scan({ cwd: dir })) files[name] = await Bun.file(posix.join(dir, name)).text();
-  if (Object.keys(files).length === 0) throw new Error(`no source files under ${dir}`);
-  return files;
+  return sourcesUnder(root, LANE_DIR);
+}
+
+/** The import cycles under `<root>/<dir>`, as paths relative to `dir`. */
+export async function cyclesUnder(root: string, dir: string): Promise<string[][]> {
+  return findCycles(importGraph(dir, await sourcesUnder(root, dir)));
 }
 
 /** The import cycles in `<root>/src/lane`. */
 export async function laneCycles(root: string): Promise<string[][]> {
-  return findCycles(laneGraph(await laneSources(root)));
+  return cyclesUnder(root, LANE_DIR);
 }
 
 // ------------------------------------------------------------ the step helpers' one home
 
-/** The session runner's step helpers, declared only in `src/lane/session.ts` (Story 2.6a). */
-export const SHARED_HELPERS: readonly string[] = ["call", "swap", "forgeNow", "laneStop", "held", "beat"];
+/**
+ * The session runner's step helpers, declared only in `src/lane/session.ts`:
+ * the kit's (Story 2.6a), then the step ops and error texts the CI step and
+ * the coordinator steps share (Epic 2 retro, D2).
+ */
+export const SHARED_HELPERS: readonly string[] = [
+  "call",
+  "swap",
+  "forgeNow",
+  "laneStop",
+  "held",
+  "beat",
+  "aborted",
+  "parkBlocked",
+  "freshMain",
+  "poll",
+  "closeOrphan",
+  "closeOrphans",
+  "recordPr",
+  "describeError",
+  "message",
+];
+
+/**
+ * The `src/lane` files that keep their own copy of a shared helper, with
+ * why: each is one `session.ts` imports, so importing the helper from
+ * `session.ts` would be an import cycle.
+ */
+export const OWN_COPIES: Readonly<Record<string, readonly string[]>> = {
+  "heartbeat.ts": ["message"],
+  "wait.ts": ["message"],
+};
 
 const HELPER = SHARED_HELPERS.join("|");
 const HELPER_FUNCTION = new RegExp(`\\bfunction\\s*\\*?\\s*(${HELPER})\\b`, "g");

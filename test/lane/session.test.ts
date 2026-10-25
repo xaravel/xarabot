@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
 import { park } from "../../src/core/ledger/edits.ts";
@@ -19,13 +20,15 @@ import {
   Halt,
   newTrack,
   stepKit,
+  stepOps,
   ZERO_SHA,
   type PromptOutcome,
   type SessionContext,
   type StepKit,
+  type StepOps,
 } from "../../src/lane/session.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
-import type { Forge } from "../../src/ports/forge.ts";
+import type { Forge, ForgeCheck } from "../../src/ports/forge.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
@@ -237,6 +240,174 @@ describe("the step kit: held, beat and run", () => {
   });
 });
 
+describe("stepOps: what the CI and coordinator steps share", () => {
+  const BRANCH = "xarabot/planning-status-1";
+  const success = (name: string): ForgeCheck => ({ name, status: "completed", conclusion: "success" });
+  const failure = (name: string): ForgeCheck => ({ name, status: "completed", conclusion: "failure" });
+  const running = (name: string): ForgeCheck => ({ name, status: "in_progress", conclusion: null });
+
+  type OpsWorld = KitWorld & { readonly k: StepKit; readonly ops: StepOps; readonly abort: AbortController; readonly sleeps: number[] };
+
+  /** `wrap` replaces the fake's forge, for both the kit and the ops. */
+  async function opsWorld(wrap?: (fake: FakeForge) => Forge): Promise<OpsWorld> {
+    const w = await kitWorld();
+    const forge = wrap?.(w.fake) ?? w.fake.forge;
+    const k = w.kit({ forge });
+    const abort = new AbortController();
+    const sleeps: number[] = [];
+    const ops = stepOps({
+      kit: k,
+      forge,
+      identity: ALICE,
+      repo: "xaravel/xarabot",
+      signal: abort.signal,
+      abortReason: "the unit was lost during the test step",
+      clock: () => w.host,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        w.host += ms;
+      },
+    });
+    return Object.assign(w, { k, ops, abort, sleeps });
+  }
+
+  /** An open PR on `branch`, as an earlier `openPr` left it. */
+  async function openPr(w: KitWorld, branch: string): Promise<number> {
+    const pushed = await w.fake.forge.pushBranch({ branch, expected_sha: null, sha: w.fake.control.makeCommit() }, opts());
+    if (!pushed.ok) throw new Error(pushed.error.message);
+    const opened = await w.fake.forge.openPr({ branch, base: "main", title: "t", body: "b" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    return opened.value.number;
+  }
+
+  test("aborted: nothing until the signal aborts, then End failed with the record left as it is", async () => {
+    const w = await opsWorld();
+    w.ops.aborted();
+    w.abort.abort();
+    const out = await ended(async () => w.ops.aborted());
+    expect(out).toEqual({ outcome: "failed", state: "claimed", record: w.record, reason: "the unit was lost during the test step" });
+    expect(await w.ledger()).toEqual(w.record);
+    expect(w.logs).toEqual(["test step: aborted: the unit was lost during the test step"]);
+  });
+
+  test("parkBlocked: the unit parked blocked for the reason, then End progress", async () => {
+    const w = await opsWorld();
+    const out = await ended(() => w.ops.parkBlocked("verification", "CI failed"));
+    expect(out).toMatchObject({ outcome: "progress", state: "parked", reason: "CI failed" });
+    expect(await w.ledger()).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "verification" } });
+  });
+
+  test("freshMain: a config that does not load ends the step stop, the record left as it is", async () => {
+    const w = await opsWorld();
+    const out = await ended(() => w.ops.freshMain());
+    expect(out.outcome).toBe("stop");
+    expect(out.state).toBe("claimed");
+    expect(out.reason).toStartWith("config ");
+    expect(await w.ledger()).toEqual(w.record);
+  });
+
+  test("freshMain: a failed snapshot is returned to the caller; an aborted signal ends the step first", async () => {
+    const w = await opsWorld();
+    w.fake.control.injectError("snapshot", { kind: "transient", message: "flaky" });
+    expect(await w.ops.freshMain()).toEqual({ ok: false, error: { kind: "transient", message: "flaky" } });
+    w.abort.abort();
+    expect((await ended(() => w.ops.freshMain())).outcome).toBe("failed");
+  });
+
+  test("poll: pending, then passed; the sleeps back off", async () => {
+    let polls = 0;
+    const w = await opsWorld((fake) => ({
+      ...fake.forge,
+      checks: async (sha, o) => {
+        polls += 1;
+        fake.control.setChecks(sha, [polls < 3 ? running("test") : success("test")]);
+        return fake.forge.checks(sha, o);
+      },
+    }));
+    expect(await w.ops.poll(w.fake.control.makeCommit(), 60 * 60_000, [])).toBe("passed");
+    expect(polls).toBe(3);
+    expect(w.sleeps).toEqual([30_000, 60_000]);
+  });
+
+  test("poll: failing checks are returned by name", async () => {
+    const w = await opsWorld();
+    const sha = w.fake.control.makeCommit();
+    w.fake.control.setChecks(sha, [failure("lint"), success("test")]);
+    expect(await w.ops.poll(sha, 60_000, [])).toEqual(["lint"]);
+  });
+
+  test("poll: a transient error counts as pending; still pending past the wait parks ci-timeout", async () => {
+    const w = await opsWorld();
+    const sha = w.fake.control.makeCommit();
+    w.fake.control.setChecks(sha, [running("test")]);
+    w.fake.control.injectError("checks", { kind: "transient", message: "flaky" });
+    const out = await ended(() => w.ops.poll(sha, 60_000, []));
+    expect(out).toMatchObject({ outcome: "progress", state: "parked", reason: `CI on ${sha} still pending after 1 min` });
+    expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "ci-timeout" } });
+    expect(w.logs).toContain("test step: checks transient: flaky: counted as pending");
+  });
+
+  test("poll: any other error is a failed attempt", async () => {
+    const w = await opsWorld();
+    const sha = w.fake.control.makeCommit();
+    w.fake.control.injectError("checks", { kind: "not-found", message: "no such commit" });
+    const out = await ended(() => w.ops.poll(sha, 60_000, []));
+    expect(out).toMatchObject({ outcome: "failed", state: "released", reason: "checks not-found: no such commit" });
+  });
+
+  test("closeOrphans: each open PR on the branch is closed behind a fence", async () => {
+    const w = await opsWorld();
+    const pr = await openPr(w, BRANCH);
+    await w.ops.closeOrphans(BRANCH);
+    expect(w.k.reasons).toEqual([`closed PR #${pr}, which no record carries`]);
+    const listed = await w.fake.forge.listPrsByBranch(BRANCH, opts());
+    expect(listed.ok && listed.value.map((p) => p.state)).toEqual(["closed"]);
+    expect((await w.ledger())?.heartbeat_at).not.toBe(w.record.heartbeat_at);
+  });
+
+  test("closeOrphans: a failed list is noted and closes nothing", async () => {
+    const w = await opsWorld();
+    await openPr(w, BRANCH);
+    w.fake.control.injectError("listPrsByBranch", { kind: "transient", message: "flaky" });
+    await w.ops.closeOrphans(BRANCH);
+    expect(w.k.reasons).toEqual([`listPrsByBranch ${BRANCH} transient: flaky`]);
+    expect(w.logs).toEqual([`test step: listPrsByBranch ${BRANCH} failed: transient: flaky`]);
+  });
+
+  test("closeOrphans: a fence that fails leaves the PR open and never ends the step", async () => {
+    const w = await opsWorld();
+    await openPr(w, BRANCH);
+    const theirs = rec({ unit: UNIT, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2, globs: ["src/s0/**"] });
+    w.fake.control.writeForeignLedger({ message: "taken [skip ci]", writes: { [unitPath(UNIT)]: serializeUnitRecord(theirs) }, deletes: [] });
+    await w.ops.closeOrphans(BRANCH);
+    expect(w.k.reasons).toHaveLength(1);
+    expect(w.k.reasons[0]).toMatch(/^fence before closing PR #\d+: .*; it stays open$/);
+    const listed = await w.fake.forge.listPrsByBranch(BRANCH, opts());
+    expect(listed.ok && listed.value.map((p) => p.state)).toEqual(["open"]);
+  });
+
+  test("recordPr: the PR and its SHAs on the record", async () => {
+    const w = await opsWorld();
+    const pr = await openPr(w, BRANCH);
+    const head = "c".repeat(40);
+    await w.ops.recordPr(pr, { pr, pr_owner: ALICE.owner, head_sha: head, base_sha: ZERO_SHA });
+    expect(await w.ledger()).toMatchObject({ pr, head_sha: head });
+    expect(w.k.record).toMatchObject({ pr, head_sha: head });
+  });
+
+  test("recordPr on a lost unit: the PR no record carries is closed, then End failed with no further edit", async () => {
+    const w = await opsWorld();
+    const pr = await openPr(w, BRANCH);
+    const theirs = rec({ unit: UNIT, owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2, globs: ["src/s0/**"] });
+    w.fake.control.writeForeignLedger({ message: "taken [skip ci]", writes: { [unitPath(UNIT)]: serializeUnitRecord(theirs) }, deletes: [] });
+    const out = await ended(() => w.ops.recordPr(pr, { pr, pr_owner: ALICE.owner, head_sha: "c".repeat(40), base_sha: ZERO_SHA }));
+    expect(out.outcome).toBe("failed");
+    expect(out.state).toBeNull();
+    expect(out.reason).toStartWith(`closed PR #${pr}, which no record carries; record: unit lost: `);
+    expect(await w.ledger()).toEqual(theirs);
+  });
+});
+
 describe("forgeClock", () => {
   test("the host time before any forge time; then the forge time plus the host time since", () => {
     let host = Date.parse("2001-01-01T00:00:00Z");
@@ -311,6 +482,7 @@ describe("runLaneProcess: a forge call that throws", () => {
       parseUsage: never("parseUsage"),
       effortValues: () => ["high"],
       startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
+      checkModel,
     };
     const sandbox: Sandbox = { run: never("sandbox") };
     const r = await runLaneProcess({
@@ -390,6 +562,7 @@ describe("createSessionRunner: session()", () => {
       },
       effortValues: () => ["high"],
       startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
+      checkModel,
     };
     const sandbox: Sandbox = {
       async run(spec, profile, signal) {

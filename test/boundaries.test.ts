@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import {
   ALLOWED,
   checkSource,
   checkTree,
+  cyclesUnder,
   findCycles,
   helperCopies,
+  importGraph,
+  importsOf,
   laneCycles,
   laneGraph,
   laneSources,
+  OWN_COPIES,
   SHARED_HELPERS,
+  strip,
   type Layer,
   type Violation,
 } from "./support/boundaries.ts";
@@ -275,11 +280,67 @@ describe("outside the layers", () => {
   });
 });
 
-describe("import cycles in src/lane", () => {
+describe("import cycles", () => {
   const cycles = (files: Record<string, string>): string[][] => findCycles(laneGraph(files));
+  const coreCycles = (files: Record<string, string>): string[][] => findCycles(importGraph("src/core", files));
 
-  test("the real tree has none", async () => {
+  test.each(["src/core", "src/lane", "src"])("the real %s tree has none", async (dir) => {
+    expect(await cyclesUnder(ROOT, dir)).toEqual([]);
+  });
+
+  test("laneCycles reads the real src/lane", async () => {
     expect(await laneCycles(ROOT)).toEqual([]);
+  });
+
+  test("cyclesUnder refuses a directory with no source files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xarabot-cycles-"));
+    try {
+      mkdirSync(join(dir, "src", "core"), { recursive: true });
+      await expect(cyclesUnder(dir, "src/core")).rejects.toThrow("no source files");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cyclesUnder reads nested files on disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "xarabot-cycles-"));
+    try {
+      mkdirSync(join(dir, "src", "core", "next"), { recursive: true });
+      writeFileSync(join(dir, "src", "core", "next", "a.ts"), 'import type { B } from "./b.ts";\n');
+      writeFileSync(join(dir, "src", "core", "next", "b.ts"), 'import type { A } from "../next/a.ts";\n');
+      writeFileSync(join(dir, "src", "core", "c.ts"), 'import { a } from "./next/a.ts";\n');
+      expect(await cyclesUnder(dir, "src/core")).toEqual([["next/a.ts", "next/b.ts", "next/a.ts"]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a type-only cycle across src/core subdirectories", () => {
+    expect(
+      coreCycles({
+        "next/next.ts": 'import { c } from "./coordinator.ts";\n',
+        "next/coordinator.ts": 'import { e } from "../ledger/edits";\n',
+        "ledger/edits.ts": 'import type { N } from "../next/next.ts";\n',
+      }),
+    ).toEqual([["ledger/edits.ts", "next/next.ts", "next/coordinator.ts", "ledger/edits.ts"]]);
+  });
+
+  test("an import leaving src/core is not an edge", () => {
+    expect(coreCycles({ "a.ts": 'import { l } from "../lane/a.ts";\n', "lane/a.ts": 'import { a } from "../a.ts";\n' })).toEqual([]);
+  });
+
+  test("the core/next modules as they were before the reasons moved out form cycles", () => {
+    expect(
+      coreCycles({
+        "next/next.ts": 'import { nextCoordinator } from "./coordinator.ts";\nimport { epicHolds } from "./epic-gates.ts";\n',
+        "next/coordinator.ts": 'import { epicHolds } from "./epic-gates.ts";\nimport type { CoordinatorOutcome, Reason } from "./next.ts";\n',
+        "next/epic-gates.ts": 'import type { Reason } from "./next.ts";\n',
+      }),
+    ).toEqual([
+      ["next/coordinator.ts", "next/epic-gates.ts", "next/next.ts", "next/coordinator.ts"],
+      ["next/coordinator.ts", "next/next.ts", "next/coordinator.ts"],
+      ["next/epic-gates.ts", "next/next.ts", "next/epic-gates.ts"],
+    ]);
   });
 
   test("a two-file cycle", () => {
@@ -362,13 +423,41 @@ describe("the step helpers live only in src/lane/session.ts", () => {
     expect(Object.keys(files)).toContain("session.ts");
     const copies = Object.entries(files)
       .filter(([name]) => name !== "session.ts")
-      .flatMap(([name, source]) => helperCopies(source).map((helper) => `${name}: ${helper}`));
+      .flatMap(([name, source]) => helperCopies(source).filter((helper) => !(OWN_COPIES[name] ?? []).includes(helper)).map((helper) => `${name}: ${helper}`));
     expect(copies).toEqual([]);
   });
 
   test("session.ts declares them", async () => {
     const files = await laneSources(ROOT);
     expect(helperCopies(files["session.ts"] ?? "")).toEqual([...SHARED_HELPERS, "End"].sort());
+  });
+
+  test("each file keeping its own copy declares it, and session.ts imports that file", async () => {
+    const files = await laneSources(ROOT);
+    const graph = laneGraph(files);
+    const reached = new Set<string>();
+    const visit = (name: string): void => {
+      for (const next of graph.get(name) ?? []) {
+        if (reached.has(next)) continue;
+        reached.add(next);
+        visit(next);
+      }
+    };
+    visit("session.ts");
+    for (const [name, helpers] of Object.entries(OWN_COPIES)) {
+      expect(helperCopies(files[name] ?? "")).toEqual([...helpers]);
+      expect(reached.has(name)).toBe(true);
+    }
+  });
+
+  test("no src/lane file imports an agent adapter: the session runner reaches the vendor only through the Agent port", async () => {
+    const files = await laneSources(ROOT);
+    const leaks = Object.entries(files).flatMap(([name, source]) =>
+      importsOf(strip(source).code)
+        .filter((specifier) => posix.normalize(posix.join("src/lane", specifier)).startsWith("src/adapters/agent/"))
+        .map((specifier) => `${name}: ${specifier}`),
+    );
+    expect(leaks).toEqual([]);
   });
 
   test.each([
@@ -381,6 +470,15 @@ describe("the step helpers live only in src/lane/session.ts", () => {
     ["const beat = <T,>(x: T) => x;", ["beat"]],
     ["const swap = async edit => edit;", ["swap"]],
     ["class End {}", ["End"]],
+    ["function describeError(e: ForgeError): string {}", ["describeError"]],
+    ["function message(e: unknown): string {}", ["message"]],
+    ["const aborted = (): void => {};", ["aborted"]],
+    ["const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {};", ["parkBlocked"]],
+    ["const freshMain = async (): Promise<ForgeResult<FreshMain>> => {};", ["freshMain"]],
+    ["const poll = async (sha: string, waitMs: number) => {};", ["poll"]],
+    ["const closeOrphan = async (pr: number) => {};", ["closeOrphan"]],
+    ["const closeOrphans = async (k: StepKit): Promise<void> => {};", ["closeOrphans"]],
+    ["const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {};", ["recordPr"]],
   ])("a copy is found: %s", (source, expected) => {
     expect(helperCopies(source)).toEqual(expected);
   });
@@ -393,6 +491,10 @@ describe("the step helpers live only in src/lane/session.ts", () => {
     "// const call = async () => {};",
     "class Ending {}",
     "const beats = (n: number) => n;",
+    "const { aborted, parkBlocked, freshMain, poll, closeOrphans, recordPr } = stepOps(params);",
+    "const message = `${unit}: ${result.summary}`;",
+    "const poll = setInterval(() => check(), 100);",
+    "const budgetPassed = async (): Promise<void> => {};",
   ])("not a copy: %s", (source) => {
     expect(helperCopies(source)).toEqual([]);
   });

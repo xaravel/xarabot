@@ -3,30 +3,26 @@ import { join } from "node:path";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { checkHumanLiveStep } from "../core/lane/build-check.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { heartbeat, park, release } from "../core/ledger/edits.ts";
+import { release } from "../core/ledger/edits.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroItemPrompt, type PromptSection, type RetroItemPromptMode } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { err, ok } from "../core/result.ts";
 import { FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { HumanLiveStep } from "../core/schemas/human-live-steps.ts";
-import type { Lane } from "../core/schemas/host.ts";
-import type { LaneIdentity, ParkReason, UnitRecord } from "../core/schemas/ledger.ts";
+import type { UnitRecord } from "../core/schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../core/schemas/retro-gates.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Snapshot } from "../core/schemas/snapshot.ts";
-import type { Agent, AgentSettings } from "../ports/agent.ts";
-import type { Forge, ForgeError, ForgeSnapshot } from "../ports/forge.ts";
-import type { LaneStore } from "../ports/lane-store.ts";
-import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
+import type { AgentSettings } from "../ports/agent.ts";
+import type { SandboxProfile } from "../ports/sandbox.ts";
 import { createCiStep, type CiSession, type CiUnit, type PushFix } from "./ci-step.ts";
 import type { CommitOutcome } from "./commit.ts";
 import type { Committer } from "./committer.ts";
-import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
-import type { DiffPaths } from "./diff-paths.ts";
+import type { CoordinatorStep, CoordinatorStepInput, SessionStepDeps } from "./coordinator-process.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { laneLayout } from "./lane-store.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep } from "./ledger-cas.ts";
 import { createMergeStep } from "./merge-step.ts";
 import type { Merger } from "./merger.ts";
 import { shown, statusComment } from "./pr-step.ts";
@@ -34,22 +30,20 @@ import { createRegenerate } from "./regenerate.ts";
 import {
   CI_FIX_LOG,
   createSessionRunner,
+  describeError,
   End,
   Halt,
   LIMIT_STOP_REASON,
   MarkerStop,
   message,
-  readsPath,
   stepKit,
+  stepOps,
   unitSubject,
   type PromptOutcome,
   type PrStepOutput,
   type SessionContext,
-  type SessionLimits,
   type StepUnit,
 } from "./session.ts";
-import type { Waiter } from "./wait.ts";
-import type { Workspace } from "./workspace.ts";
 
 /**
  * The retro-item step (Story 2.10, FR10, AR10, AR14): one open retro action
@@ -91,44 +85,15 @@ import type { Workspace } from "./workspace.ts";
  * reaches the coordinator process; anything else never throws.
  */
 
-export type RetroItemStepDeps = {
-  readonly forge: Forge;
-  readonly agent: Agent;
-  readonly sandbox: Sandbox;
-  readonly store: LaneStore;
-  readonly workspace: Workspace;
-  /** Runs the usage-limit sleeps. */
-  readonly waiter: Waiter;
-  /** The lane folder (AR37). */
-  readonly laneDir: string;
-  /** The lane's `host.yaml` settings: repo, agent, model, effort. */
-  readonly lane: Lane;
-  readonly committer: Committer;
+export type RetroItemStepDeps = SessionStepDeps & {
   /** Merges `main` into the PR in the CI step. */
   readonly merger: Merger;
-  readonly diffPaths: DiffPaths;
   /** `main`'s tree and the PR's merge tree, for the graph-change gate. */
   readonly graphTrees: GraphTrees;
-  /** Who writes the ledger records: the coordinator lane. */
-  readonly identity: LaneIdentity;
-  /** The lane's credentials, redacted from the commit message, the PR text and the comments; default none. */
-  readonly secrets?: readonly string[];
-  readonly limits?: SessionLimits;
-  /** Each forge call's (and the commit's) deadline; default 60 000 ms. */
-  readonly callTimeoutMs?: number;
-  /** The host clock in epoch ms; default `Date.now`. */
-  readonly now?: () => number;
-  /** The poll, enqueue retry and ledger back-off sleep. */
-  readonly sleep?: Sleep;
-  readonly random?: () => number;
 };
 
 const HOUR_MS = 60 * 60 * 1000;
 const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
-
-function describeError(e: ForgeError): string {
-  return `${e.kind}: ${e.message}`;
-}
 
 /** The item id of a `retro-item:<id>` unit. */
 export function retroItemId(unit: string): string {
@@ -195,26 +160,13 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
       ...(deps.random !== undefined ? { random: deps.random } : {}),
     };
     const kit = stepKit({ ...kitParams, name: "retro-item step", record: input.record, seen: snapshot.now, mainSha: snapshot.main_sha });
-    const { generation, reasons, note, end, forgeNow, failed, held } = kit;
+    const { generation, reasons, note, end, forgeNow, failed } = kit;
     const budget = AbortSignal.timeout(config.unit_budget_hours * HOUR_MS);
     const overBudget = () => `unit budget of ${config.unit_budget_hours} h passed`;
     /** The unit or the coordinator claim lost, or the unit budget passed. */
     const signal = AbortSignal.any([input.signal, budget]);
-
-    /** The unit or the coordinator claim was lost: end `failed`, the record left for the process to judge. */
-    const aborted = (): void => {
-      if (!input.signal.aborted) return;
-      reasons.push("the unit or the coordinator claim was lost during the retro-item step");
-      note("aborted");
-      throw end("failed", kit.record.state);
-    };
-
-    const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
-      reasons.push(why);
-      note(`parking blocked ${reason}: ${why}`);
-      await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason }));
-      throw end("progress", kit.record.state);
-    };
+    const opsParams = { forge, identity, repo: deps.lane.repo, signal: input.signal, clock, sleep };
+    const { aborted, parkBlocked } = stepOps({ ...opsParams, kit, abortReason: "the unit or the coordinator claim was lost during the retro-item step" });
 
     // ------------------------------------------------------------ the item
 
@@ -227,20 +179,6 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
 
     // ------------------------------------------------------------ the push
 
-    /** Best effort after a failed `openPr`: each open PR on the branch closed, behind a fence. */
-    const closeOrphans = async (k: ReturnType<typeof stepKit>): Promise<void> => {
-      const listed = await k.call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
-      if (!listed.ok) {
-        k.reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}`);
-        return;
-      }
-      for (const p of listed.value.filter((x) => x.state === "open")) {
-        await k.beat("fence");
-        const closed = await k.call("closePr", (o) => forge.closePr(p.number, o));
-        k.reasons.push(closed.ok ? `closed PR #${p.number}, which no record carries` : `closePr PR #${p.number} ${describeError(closed.error)}`);
-      }
-    };
-
     /**
      * A `done` result's commit onto fresh `main` behind the write check, the
      * leased push, then for a build the PR opened, for a fix the PR kept; the
@@ -248,44 +186,28 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
      */
     const publish = async (record: UnitRecord, result: BuildResult, kind: "build" | "fix"): Promise<PrStepOutput> => {
       const k = stepKit({ ...kitParams, name: "retro-item PR step", record });
+      const ops = stepOps({ ...opsParams, kit: k, abortReason: "the unit or the coordinator claim was lost before the push" });
       const guard = async (): Promise<void> => {
-        if (input.signal.aborted) {
-          k.reasons.push("the unit or the coordinator claim was lost before the push");
-          throw k.end("failed", k.record.state);
-        }
+        ops.aborted();
         if (budget.aborted) await k.failed(`${overBudget()} before the push`);
-      };
-      const parkK = async (reason: ParkReason, why: string): Promise<never> => {
-        k.reasons.push(why);
-        k.note(`parking blocked ${reason}: ${why}`);
-        await k.held("park", park({ unit, by: identity, now: k.forgeNow(), generation: k.generation, kind: "blocked", reason }));
-        throw k.end("progress", k.record.state);
       };
 
       return k.run(async () => {
         await guard();
         // 1. Fresh main and its config: the write check's rules come from it.
-        const snapped = await k.call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
-        if (!snapped.ok) return await k.failed(`snapshot ${describeError(snapped.error)}`);
-        const snap: ForgeSnapshot = snapped.value;
-        k.see(snap.now);
+        const fresh = await ops.freshMain();
+        if (!fresh.ok) return await k.failed(`snapshot ${describeError(fresh.error)}`);
+        const { snap, config: loaded } = fresh.value;
         const onto = snap.main.sha;
-        k.mainSha = onto;
         k.note(`fresh main ${onto}`);
-        const loaded = loadRepoConfig({ repo: deps.lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-        if (!loaded.ok) {
-          k.reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
-          k.note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-          throw k.end("stop", k.record.state);
-        }
-        const repoConfig = loaded.value.repo.config;
+        const repoConfig = loaded.repo.config;
 
         // 2. Commit, behind the coordinator rules of the record's globs and every builder refusal.
         const rules = coordinatorWriteRules({
           config: repoConfig,
           globs: k.record.globs,
           graphUnit: false,
-          builderRefusals: { config: repoConfig, policy: loaded.value.repo.policy },
+          builderRefusals: { config: repoConfig, policy: loaded.repo.policy },
         });
         const text = retroItemPrText(unit, item, result, secrets);
         const commitOnto = async (ontoSha: string): Promise<CommitOutcome> => {
@@ -312,9 +234,9 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
         }
         if (c.kind === "refused") {
           for (const r of c.refusals) k.note(`write-check: refused ${shown(r.path)} (${r.class})`);
-          return await parkK("write-check", `write-check: refused ${c.refusals.map((r) => `${shown(r.path)} (${r.class})`).join(", ")}`);
+          return await ops.parkBlocked("write-check", `write-check: refused ${c.refusals.map((r) => `${shown(r.path)} (${r.class})`).join(", ")}`);
         }
-        if (c.kind === "empty") return await parkK("no-op", "no-op: the commit onto main is empty");
+        if (c.kind === "empty") return await ops.parkBlocked("no-op", "no-op: the commit onto main is empty");
         const head = c.head_sha;
         k.note(`committed ${head} onto ${c.base_sha}`);
 
@@ -346,7 +268,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
           const opened = await k.call("openPr", (o) => forge.openPr({ branch, base: "main", title: text.title, body: text.body }, o));
           if (!opened.ok) {
             // The forge may have opened it anyway: no record carries it, so close any open PR on the branch.
-            await closeOrphans(k);
+            await ops.closeOrphans(branch);
             return await k.failed(`openPr ${describeError(opened.error)}`);
           }
           pr = opened.value.number;
@@ -356,16 +278,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
         // 6. Record the PR and SHAs, then the status comment.
         const set = { pr, pr_owner: identity.owner, head_sha: head, base_sha: c.base_sha };
         if (kept !== null) await k.beat("record", set);
-        else {
-          const recorded = await k.swap(heartbeat({ unit, by: identity, now: k.forgeNow(), generation: k.generation, set }));
-          if (recorded.kind !== "ok") {
-            // No record carries the new PR, so the next attempt would not adopt it, and its own openPr would fail on it: close it.
-            const closed = await k.call("closePr", (o) => forge.closePr(pr, o));
-            k.reasons.push(closed.ok ? `closed PR #${pr}, which no record carries` : `closePr PR #${pr} ${describeError(closed.error)}; it stays open with no record`);
-            if (recorded.kind === "lost") k.lost("record", recorded.message);
-            return await k.failed(`record: ${recorded.message}`);
-          }
-        }
+        else await ops.recordPr(pr, set);
         const body = statusComment({ subject: stepUnit.subject, headSha: head, lane: identity.lane, deniedActions: result.denied_actions, secrets });
         const commented = await k.call("comment", (o) => forge.comment(pr, body, o));
         if (!commented.ok) {

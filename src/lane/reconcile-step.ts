@@ -1,6 +1,5 @@
 import { approvalPaths } from "../core/ci/approval.ts";
-import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
-import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
+import { pollDelayMs } from "../core/ci/checks.ts";
 import {
   deleteMerged,
   deleteReleasedRecurring,
@@ -21,8 +20,8 @@ import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
-import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity, type ParkReason } from "../core/schemas/ledger.ts";
-import { isBackoffKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
+import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
 import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
@@ -30,7 +29,7 @@ import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
-import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
+import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOutput } from "./session.ts";
 
 /**
  * The `reconcile` step (FR2, NFR20, AR4, AR10, AR14, AD-9): runner code only,
@@ -137,10 +136,6 @@ export type ReconcileStepDeps = {
 
 const MINUTE_MS = 60_000;
 
-function describeError(e: ForgeError): string {
-  return `${e.kind}: ${e.message}`;
-}
-
 /** The `reconcile` PR's branch: `<branches.xarabot>reconcile-<n>` (`unitBranch`). */
 export function reconcileBranch(xarabotPrefix: string, unit: string): string {
   return unitBranch(xarabotPrefix, unit);
@@ -224,42 +219,16 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       mainSha: snapshot.main_sha,
     });
     const { generation, reasons, note, end, forgeNow, call, swap, failed, lost, held, beat } = kit;
-
-    /** The unit or the coordinator claim was lost: end `failed`, the record left for the process to judge. */
-    const aborted = (): void => {
-      if (!input.signal.aborted) return;
-      reasons.push("the unit or the coordinator claim was lost during the reconcile step");
-      note("aborted");
-      throw end("failed", kit.record.state);
-    };
-
-    const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
-      reasons.push(why);
-      note(`parking blocked ${reason}: ${why}`);
-      await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason }));
-      throw end("progress", kit.record.state);
-    };
-
-    /**
-     * Fresh `main`: one snapshot, then the config and Standing Authority
-     * loaded from it. An invalid one ends the step `stop`; a failed snapshot
-     * that does not stop the lane is returned for the caller to judge.
-     */
-    const freshMain = async (): Promise<ForgeResult<{ readonly snap: ForgeSnapshot; readonly config: RepoConfig }>> => {
-      aborted();
-      const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
-      if (!snapped.ok) return snapped;
-      const snap: ForgeSnapshot = snapped.value;
-      kit.see(snap.now);
-      kit.mainSha = snap.main.sha;
-      const loaded = loadRepoConfig({ repo: deps.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-      if (!loaded.ok) {
-        reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
-        note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-        throw end("stop", kit.record.state);
-      }
-      return { ok: true, value: { snap, config: loaded.value } };
-    };
+    const { aborted, parkBlocked, freshMain, poll, closeOrphan, closeOrphans } = stepOps({
+      kit,
+      forge,
+      identity,
+      repo: deps.repo,
+      signal: input.signal,
+      abortReason: "the unit or the coordinator claim was lost during the reconcile step",
+      clock,
+      sleep,
+    });
 
     // ------------------------------------------------------------ ledger work
 
@@ -295,37 +264,6 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       reasons.push(`${of}: ${what} PR #${pr} ${describeError(r.error)}; left for a later run`);
       note(`${of}: ${what} PR #${pr} failed: ${describeError(r.error)}`);
       return false;
-    };
-
-    /** Best effort: closes this run's own PR that no ledger record carries, noting the result. */
-    const closeOrphan = async (pr: number): Promise<void> => {
-      const r = await call("closePr", (o) => forge.closePr(pr, o));
-      if (r.ok) {
-        reasons.push(`closed PR #${pr}, which no record carries`);
-        note(`closed PR #${pr}, which no record carries`);
-      } else {
-        reasons.push(`closePr PR #${pr} ${describeError(r.error)}; it stays open with no record`);
-        note(`closePr PR #${pr} failed: ${describeError(r.error)}`);
-      }
-    };
-
-    /** Best effort after a failed `openPr`: each open PR on `branch` closed, behind a fence. */
-    const closeOrphans = async (branch: string): Promise<void> => {
-      const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
-      if (!listed.ok) {
-        reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}`);
-        note(`listPrsByBranch ${branch} failed: ${describeError(listed.error)}`);
-        return;
-      }
-      for (const p of listed.value.filter((x) => x.state === "open")) {
-        const fence = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation }));
-        if (fence.kind !== "ok") {
-          reasons.push(`fence before closing PR #${p.number}: ${fence.message}; it stays open`);
-          note(`fence before closing PR #${p.number} failed: ${fence.message}`);
-          return;
-        }
-        await closeOrphan(p.number);
-      }
     };
 
     /**
@@ -693,7 +631,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * another head is skipped.
      */
     const takeApprovedWork = async (targets: readonly ApprovalTarget[], settled: Set<string>): Promise<void> => {
-      let fresh: { readonly snap: ForgeSnapshot; readonly config: RepoConfig } | null = null;
+      let fresh: FreshMain | null = null;
       for (const t of targets) {
         aborted();
         const listed = await call("reviews", (o) => forge.reviews(t.pr, o));
@@ -826,29 +764,6 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         }
       }
       throw end("progress", kit.record.state);
-    };
-
-    /** Polls `sha` until it passes or fails; parks `ci-timeout` past the max wait. */
-    const poll = async (sha: string, waitMs: number, expected: readonly string[]): Promise<readonly string[] | "passed"> => {
-      const startedAt = clock();
-      for (let n = 0; ; n += 1) {
-        aborted();
-        const r = await call("checks", (o) => forge.checks(sha, o));
-        let delay = pollDelayMs(n);
-        if (!r.ok) {
-          if (!isBackoffKind(r.error.kind)) return await failed(`checks ${describeError(r.error)}`);
-          if (r.error.kind === "rate-limited") delay = Math.max(delay, r.error.retry_after * 1000);
-          note(`checks ${describeError(r.error)}: counted as pending`);
-        } else {
-          const c = classifyChecks(r.value.checks, expected);
-          if (c.kind === "passed") return "passed";
-          if (c.kind === "failed") return c.failing;
-        }
-        if (clock() - startedAt >= waitMs) {
-          return await parkBlocked("ci-timeout", `CI on ${sha} still pending after ${Math.round(waitMs / MINUTE_MS)} min`);
-        }
-        await sleep(delay, input.signal);
-      }
     };
 
     /** The PR path: commit, push, open, CI, the re-check and the gate, then `merging` and the enqueue. */

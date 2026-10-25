@@ -1,6 +1,6 @@
 import type { Snapshot, SnapshotManifest } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
-import type { Reason } from "./next.ts";
+import type { Reason } from "./reasons.ts";
 
 /**
  * The Epic-level holds the builder and the planning position share (FR2,

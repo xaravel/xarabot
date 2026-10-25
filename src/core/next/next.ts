@@ -5,26 +5,13 @@ import { describeIssues } from "../schemas/common.ts";
 import type { UnitRecord } from "../schemas/ledger.ts";
 import { LaneRole, SnapshotSchema, type Snapshot, type SnapshotManifest } from "../schemas/snapshot.ts";
 import { compareStoryIds, storyKey } from "../story-id.ts";
-import { nextCoordinator, type CoordinatorUnit } from "./coordinator.ts";
+import { nextCoordinator, type CoordinatorOutcome } from "./coordinator.ts";
 import { epicHolds } from "./epic-gates.ts";
+import type { Reason } from "./reasons.ts";
 import { epicContextPath } from "./snapshot.ts";
 
-export type ReasonCode =
-  | "reconcile-not-due"
-  | "unmanifested"
-  | "unclaimable"
-  | "dependency-epic"
-  | "retro-rejected"
-  | "epic-context"
-  | "record-state"
-  | "depends-on"
-  | "escalation"
-  | "overlap"
-  | "planning-held"
-  | "live-evidence";
-
-/** Why a Story or Epic was passed over. `subject` is `epic:<N>` or a unit id. */
-export type Reason = { readonly subject: string; readonly code: ReasonCode; readonly message: string };
+export type { CoordinatorOutcome } from "./coordinator.ts";
+export type { Reason, ReasonCode } from "./reasons.ts";
 
 /** The Story `next` picked. */
 export type NextStory = {
@@ -49,15 +36,11 @@ export type NextStory = {
 export type NextOutcome =
   | { readonly kind: "unit"; readonly story: NextStory; readonly reasons: readonly Reason[] }
   | { readonly kind: "park"; readonly park: "needs-approval"; readonly story: NextStory; readonly reasons: readonly Reason[] }
-  /** A coordinator unit; only the coordinator role gets one. */
-  | { readonly kind: "coordinator"; readonly unit: CoordinatorUnit; readonly reasons: readonly Reason[] }
-  | { readonly kind: "idle"; readonly reason: string; readonly reasons: readonly Reason[] }
-  | { readonly kind: "stop"; readonly reason: string };
+  /** A coordinator unit (only the coordinator role gets one), `idle` or `stop`. */
+  | CoordinatorOutcome;
 
 /** What a builder lane gets: never a coordinator unit. */
 export type BuilderOutcome = Exclude<NextOutcome, { readonly kind: "coordinator" }>;
-/** What the coordinator gets: never a Story. */
-export type CoordinatorOutcome = Exclude<NextOutcome, { readonly kind: "unit" | "park" }>;
 
 const NOTHING_LEFT = "no Story left to build";
 

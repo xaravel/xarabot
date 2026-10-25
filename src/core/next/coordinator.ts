@@ -8,7 +8,7 @@ import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../schemas/retro-gates.ts
 import type { Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import { epicHolds } from "./epic-gates.ts";
-import type { CoordinatorOutcome, Reason } from "./next.ts";
+import type { Reason } from "./reasons.ts";
 import { epicContextPath, liveEvidenceGlob } from "./snapshot.ts";
 
 export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
@@ -398,6 +398,12 @@ export type CoordinatorUnit = {
   /** Why it was picked. */
   readonly why: string;
 };
+
+/** What the coordinator gets from `next`: never a Story. */
+export type CoordinatorOutcome =
+  | { readonly kind: "coordinator"; readonly unit: CoordinatorUnit; readonly reasons: readonly Reason[] }
+  | { readonly kind: "idle"; readonly reason: string; readonly reasons: readonly Reason[] }
+  | { readonly kind: "stop"; readonly reason: string };
 
 const NOTHING_DUE = "no coordinator unit due";
 

@@ -1,14 +1,15 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { checkModel } from "../adapters/agent/claude/usage.ts";
+import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
+import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
-import { failAttempt, failClaimed, heartbeat, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import { failAttempt, failClaimed, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
-import type { LaneIdentity, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
+import type { LaneIdentity, ParkReason, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
 import { parseSessionResult, type BuildResult, type ResultKind, type SessionResultOf } from "../core/schemas/session-result.ts";
 import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
-import { isLaneStopKind, type CallOpts, type Forge, type ForgeResult } from "../ports/forge.ts";
+import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
@@ -32,6 +33,9 @@ import type { Workspace } from "./workspace.ts";
  *   best-effort alert and calls the caller's `stop`.
  * - `stepKit`: a step's ending (`End`), its reasons, and its fenced edits on
  *   its own record (`held`, `beat`, `failed`, `lost`), on top of `forgeOps`.
+ * - `stepOps`: what the CI step and the coordinator steps share on top of a
+ *   kit: the abort check, the `blocked` park, fresh `main`, the CI poll, and
+ *   closing the PRs no record carries; with `describeError` and `message`.
  * - The unit track both processes keep: the keeper check, a held edit on the
  *   unit, a failed attempt, its retry before the trailing wait when the
  *   ledger did not take it, and the unit's journal record.
@@ -48,7 +52,8 @@ export const MAX_CLAIM_ROUNDS = 3;
 /** The wait between the retries of a failed attempt the ledger did not take (C4b). */
 export const FAIL_RETRY_MS = 60 * 1000;
 export const ZERO_SHA = "0".repeat(40);
-const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 
 /**
  * Installed tool trees: skills for the agents and the BMAD install. The runner
@@ -159,6 +164,7 @@ export function readRegular(path: string): string | null {
   return readFileSync(path, "utf8");
 }
 
+/** A thrown value's text. */
 export function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -465,6 +471,168 @@ export function stepKit(p: StepKitParams): StepKit {
     run,
   };
   return kit;
+}
+
+// ------------------------------------------------------------ step ops
+
+/** A forge error in a step's reasons and notes: `<kind>: <message>`. */
+export function describeError(e: ForgeError): string {
+  return `${e.kind}: ${e.message}`;
+}
+
+/** Fresh `main`: its snapshot, and the config and Standing Authority loaded from it. */
+export type FreshMain = { readonly snap: ForgeSnapshot; readonly config: RepoConfig };
+
+export type StepOpsParams = {
+  /** The step's kit: every op reasons, notes, edits and ends through it. */
+  readonly kit: StepKit;
+  readonly forge: Forge;
+  /** Who writes the ledger records. */
+  readonly identity: LaneIdentity;
+  /** The repo slug, for the config and Standing Authority loaded from fresh `main`. */
+  readonly repo: string;
+  /**
+   * Aborts when the step must give up: the unit or the coordinator claim
+   * lost (a coordinator step), or the unit budget passed (the CI step). The
+   * CI poll's sleeps end on it too.
+   */
+  readonly signal: AbortSignal;
+  /** The reason `aborted` ends the step with. */
+  readonly abortReason: string;
+  /** The host clock in epoch ms. */
+  readonly clock: () => number;
+  /** The CI poll's sleep. */
+  readonly sleep: Sleep;
+};
+
+export type StepOps = {
+  /** Once `signal` aborted: ends the step `failed`, the record left as it is for the process (or the lane's budget rule) to judge. */
+  aborted(): void;
+  /** Parks the unit `blocked` for `reason`, then ends the step `progress`. */
+  parkBlocked(reason: ParkReason, why: string): Promise<never>;
+  /**
+   * Fresh `main`, after `aborted`: one snapshot, then the config and
+   * Standing Authority loaded from it. An invalid one ends the step `stop`;
+   * a failed snapshot that does not stop the lane is returned for the caller
+   * to judge.
+   */
+  freshMain(): Promise<ForgeResult<FreshMain>>;
+  /**
+   * Polls the checks on `sha` until they pass (`passed`) or fail (the failing
+   * names). A `transient` or `rate-limited` error counts as pending, any other
+   * is a failed attempt; past `waitMs` the unit parks `ci-timeout`.
+   */
+  poll(sha: string, waitMs: number, expected: readonly string[]): Promise<readonly string[] | "passed">;
+  /** Best effort: closes PR `pr`, which no ledger record carries, noting the result. */
+  closeOrphan(pr: number): Promise<void>;
+  /**
+   * Best effort after a failed `openPr`: each open PR on `branch` closed,
+   * each behind its own fence. A fence that fails leaves the rest open.
+   */
+  closeOrphans(branch: string): Promise<void>;
+  /**
+   * The `record` beat for the PR just opened. When it fails, no record
+   * carries the PR, so the next attempt would not adopt it and its own
+   * `openPr` would fail on it: the PR is closed, then the unit is lost or
+   * the attempt failed.
+   */
+  recordPr(pr: number, set: HeartbeatSet): Promise<void>;
+};
+
+export function stepOps(p: StepOpsParams): StepOps {
+  const { kit, forge, identity } = p;
+  const { unit, generation, reasons } = kit;
+
+  const aborted = (): void => {
+    if (!p.signal.aborted) return;
+    reasons.push(p.abortReason);
+    kit.note(`aborted: ${p.abortReason}`);
+    throw kit.end("failed", kit.record.state);
+  };
+
+  const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
+    reasons.push(why);
+    kit.note(`parking blocked ${reason}: ${why}`);
+    await kit.held("park", park({ unit, by: identity, now: kit.forgeNow(), generation, kind: "blocked", reason }));
+    throw kit.end("progress", kit.record.state);
+  };
+
+  const freshMain = async (): Promise<ForgeResult<FreshMain>> => {
+    aborted();
+    const snapped = await kit.call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
+    if (!snapped.ok) return snapped;
+    const snap: ForgeSnapshot = snapped.value;
+    kit.see(snap.now);
+    kit.mainSha = snap.main.sha;
+    const loaded = loadRepoConfig({ repo: p.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+    if (!loaded.ok) {
+      reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
+      kit.note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
+      throw kit.end("stop", kit.record.state);
+    }
+    return { ok: true, value: { snap, config: loaded.value } };
+  };
+
+  const poll = async (sha: string, waitMs: number, expected: readonly string[]): Promise<readonly string[] | "passed"> => {
+    const startedAt = p.clock();
+    for (let n = 0; ; n += 1) {
+      aborted();
+      const r = await kit.call("checks", (o) => forge.checks(sha, o));
+      let delay = pollDelayMs(n);
+      if (!r.ok) {
+        if (!isBackoffKind(r.error.kind)) return await kit.failed(`checks ${describeError(r.error)}`);
+        if (r.error.kind === "rate-limited") delay = Math.max(delay, r.error.retry_after * 1000);
+        kit.note(`checks ${describeError(r.error)}: counted as pending`);
+      } else {
+        const c = classifyChecks(r.value.checks, expected);
+        if (c.kind === "passed") return "passed";
+        if (c.kind === "failed") return c.failing;
+      }
+      if (p.clock() - startedAt >= waitMs) {
+        return await parkBlocked("ci-timeout", `CI on ${sha} still pending after ${Math.round(waitMs / MINUTE_MS)} min`);
+      }
+      await p.sleep(delay, p.signal);
+    }
+  };
+
+  const closeOrphan = async (pr: number): Promise<void> => {
+    const r = await kit.call("closePr", (o) => forge.closePr(pr, o));
+    if (r.ok) {
+      reasons.push(`closed PR #${pr}, which no record carries`);
+      kit.note(`closed PR #${pr}, which no record carries`);
+    } else {
+      reasons.push(`closePr PR #${pr} ${describeError(r.error)}; it stays open with no record`);
+      kit.note(`closePr PR #${pr} failed: ${describeError(r.error)}`);
+    }
+  };
+
+  const closeOrphans = async (branch: string): Promise<void> => {
+    const listed = await kit.call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
+    if (!listed.ok) {
+      reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}`);
+      kit.note(`listPrsByBranch ${branch} failed: ${describeError(listed.error)}`);
+      return;
+    }
+    for (const pr of listed.value.filter((x) => x.state === "open")) {
+      const fence = await kit.swap(heartbeat({ unit, by: identity, now: kit.forgeNow(), generation }));
+      if (fence.kind !== "ok") {
+        reasons.push(`fence before closing PR #${pr.number}: ${fence.message}; it stays open`);
+        kit.note(`fence before closing PR #${pr.number} failed: ${fence.message}`);
+        return;
+      }
+      await closeOrphan(pr.number);
+    }
+  };
+
+  const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {
+    const recorded = await kit.swap(heartbeat({ unit, by: identity, now: kit.forgeNow(), generation, set }));
+    if (recorded.kind === "ok") return;
+    await closeOrphan(pr);
+    if (recorded.kind === "lost") kit.lost("record", recorded.message);
+    await kit.failed(`record: ${recorded.message}`);
+  };
+
+  return { aborted, parkBlocked, freshMain, poll, closeOrphan, closeOrphans, recordPr };
 }
 
 // ------------------------------------------------------------ the unit track
@@ -896,7 +1064,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // A unit the keeper lost or released during the run is abandoned here, before any resume.
     await ctx.checkHeld();
     // A run that ran another model fails the session at once; one that reported none fails it in `after` (Story 2.6b).
-    const model = checkModel(usage, configuredModel);
+    const model = agent.checkModel(usage, configuredModel);
     if (!model.ok && usage.model !== null) return { fail: `model-mismatch: ${model.error.message}` };
     const noModel = model.ok ? null : `model-mismatch: ${model.error.message}`;
     return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut, noModel };

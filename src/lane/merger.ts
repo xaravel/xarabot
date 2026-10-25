@@ -4,6 +4,7 @@ import { isLockfile, mergeStatusYaml } from "../core/ci/status-merge.ts";
 import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { failed, git, gitRun, headRef, needCommit, RUNNER_IDENTITY, type CloneResult } from "./clone.ts";
+import { message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -55,10 +56,6 @@ export type GitMergerParams = {
   readonly bot: BotIdentity;
   readonly fetch: FetchShas;
 };
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 /** A blob's text at `rev:path`, or `null` when `rev` has no such blob. */
 async function blobText(gitDir: string, rev: string, path: string, signal: AbortSignal): Promise<CloneResult<string | null>> {
