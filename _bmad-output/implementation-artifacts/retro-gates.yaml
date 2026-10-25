@@ -99,7 +99,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/lane/write-check.ts", "src/core/retro/**", "src/lane/commit.ts", "test/core/lane/write-check.test.ts", "test/core/retro/**", "test/lane/commit.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-16-reconcile-writes-an-epic-done-key"
         text: "Make reconcile's runner code set an Epic's epic-<N> key to done in sprint-status.yaml once every Story of the Epic is done there (E6; Maintainer decision 2026-10-25), in the same status edit that marks the last Story done; never for an Epic in bootstrapped_epics whose key is absent, and never back from done; tests for the last Story done, a Story not yet done, an Epic already done, and a bootstrapped Epic"
         route: lane
