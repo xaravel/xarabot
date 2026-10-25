@@ -3,7 +3,7 @@ import { heldGlobs, isStale } from "../ledger/edits.ts";
 import { globsOverlap } from "../manifests/globs.ts";
 import type { Config } from "../schemas/config.ts";
 import { GRAPH_PSEUDO_GLOB, planningKindOf, planningSlug, unitKind, type PlanningKind, type UnitKind, type UnitRecord } from "../schemas/ledger.ts";
-import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
+import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../schemas/retro-gates.ts";
 import type { Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import { epicHolds } from "./epic-gates.ts";
@@ -16,9 +16,9 @@ export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
  * The coordinator's side of `next` (FR4, AR14, AD-8, AD-9, AD-13): the globs
  * each coordinator unit kind holds, when `reconcile` is due, and the
  * coordinator's order: `reconcile`, an open coordinator PR, then planning
- * (Story 2.7, graph before status), then retro (Story 2.9); retro items join
- * the order in Story 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is
- * only a `go` target (AR14). Pure.
+ * (Story 2.7, graph before status), then retro (Story 2.9), then retro items
+ * (Story 2.10). No `checkpoint` unit runs: `checkpoint:<epic>` is only a `go`
+ * target (AR14). Pure.
  */
 
 /** `reconcile` is due this long after its last run, by the forge's `now`. */
@@ -385,7 +385,8 @@ export const WAITING_ON_MAINTAINER = "waiting-on-maintainer: ";
 /**
  * The coordinator's next unit from a validated snapshot whose graph resolved
  * (AD-13): `reconcile` when due, then an open coordinator PR, then planning
- * (`nextPlanning`), then retro (`nextRetro`), else `idle`. An idle outcome
+ * (`nextPlanning`), then retro (`nextRetro`), then retro items
+ * (`nextRetroItem`), else `idle`. An idle outcome
  * with a `live-evidence` reason starts `waiting-on-maintainer: ` and those
  * reasons' messages.
  * Never a Story. The open-PR position never returns a `reconcile` record (a
@@ -418,6 +419,21 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
       continue;
     }
     const base = { unit: rec.unit, kind, globs: [...rec.globs], expect_generation: rec.generation, pr: pr.number } as const;
+    if (rec.state === "released" || (rec.state === "claimed" && isStale(rec, snapshot.now))) {
+      // The claim refuses an overlap with a held glob; a retro item's globs can overlap a Story's.
+      const hits: string[] = [];
+      for (const other of snapshot.ledger.units) {
+        if (other.unit === rec.unit) continue;
+        for (const held of heldGlobs(other)) {
+          const hit = rec.globs.find((g) => globsOverlap(g, held));
+          if (hit !== undefined) hits.push(`glob "${hit}" overlaps "${held}" held by ${other.unit}`);
+        }
+      }
+      if (hits.length > 0) {
+        reasons.push({ subject: rec.unit, code: "overlap", message: `${rec.unit} with PR #${pr.number} open ${hits.join(", ")}` });
+        continue;
+      }
+    }
     if (rec.state === "released") {
       return { kind: "coordinator", unit: { ...base, take_over: null, why: `${rec.unit} is released with PR #${pr.number} open` }, reasons };
     }
@@ -437,7 +453,10 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   const retro = nextRetro(snapshot, reasons);
   if (retro !== null) return { kind: "coordinator", unit: retro, reasons };
 
-  // Retro items arrive in Story 2.10.
+  // 5. Retro items, Epics in ascending order, items in file order.
+  const item = nextRetroItem(snapshot, reasons);
+  if (item !== null) return { kind: "coordinator", unit: item, reasons };
+
   const waiting = reasons.filter((x) => x.code === "live-evidence").map((x) => x.message);
   const head = waiting.length === 0 ? [] : [`${WAITING_ON_MAINTAINER}${waiting.join("; ")}`];
   const rest = reasons.filter((x) => x.code !== "live-evidence").map((x) => x.message);
@@ -534,6 +553,78 @@ function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | nul
     }
     const why = `${unit} is claimed and stale (heartbeat ${rec.heartbeat_at}) with no open PR`;
     return { unit, kind: "retro", globs, expect_generation: rec.generation, take_over: "claimed", pr: null, why };
+  }
+  return null;
+}
+
+/** An open retro item routed to a lane, and its Epic (Story 2.10). */
+export type RetroItemCandidate = { readonly epic: number; readonly item: RetroItem };
+
+/** A retro item's unit id: `retro-item:<id>`. */
+export function retroItemUnit(id: string): string {
+  return `retro-item:${id}`;
+}
+
+/**
+ * The retro items a lane may work (Story 2.10): `status: open` items with
+ * `route: lane`, Epics in ascending order, then items in file order. An item
+ * with no globs is a candidate too; `next` reports it `unclaimable`. Records
+ * are not looked at here.
+ */
+export function retroItemCandidates(snapshot: Snapshot): RetroItemCandidate[] {
+  const out: RetroItemCandidate[] = [];
+  const epics = Object.keys(snapshot.retro_gates.epics)
+    .map(Number)
+    .sort((a, b) => a - b);
+  for (const epic of epics) {
+    for (const item of snapshot.retro_gates.epics[String(epic)]?.items ?? []) {
+      if (item.status === "open" && item.route === "lane") out.push({ epic, item });
+    }
+  }
+  return out;
+}
+
+/**
+ * The retro-items position (Story 2.10, AD-13 step 5): for each candidate in
+ * order, an item with no globs is an `unclaimable` reason and no unit; else
+ * `retro-item:<id>`'s record decides, as in the retro position. None: a new
+ * claim. `released`: a re-claim at its generation. A stale `claimed` one with
+ * no open PR: a takeover. Any other holds (`record-state`). A unit whose globs
+ * overlap another record's held globs is passed over (`overlap`).
+ */
+function nextRetroItem(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | null {
+  for (const { epic, item } of retroItemCandidates(snapshot)) {
+    const unit = retroItemUnit(item.id);
+    if (item.globs.length === 0) {
+      reasons.push({ subject: unit, code: "unclaimable", message: `${unit} is unclaimable: the item has no globs` });
+      continue;
+    }
+    const rec = snapshot.ledger.units.find((r) => r.unit === unit);
+    const stale = rec !== undefined && rec.state === "claimed" && isStale(rec, snapshot.now) && snapshot.prs[unit]?.state !== "open";
+    if (rec !== undefined && rec.state !== "released" && !stale) {
+      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}` });
+      continue;
+    }
+    const globs = coordinatorGlobs({ kind: "retro-item", globs: item.globs }, snapshot.config);
+    const hits: string[] = [];
+    for (const other of snapshot.ledger.units) {
+      if (other.unit === unit) continue;
+      for (const held of heldGlobs(other)) {
+        const hit = globs.find((g) => globsOverlap(g, held));
+        if (hit !== undefined) hits.push(`glob "${hit}" overlaps "${held}" held by ${other.unit}`);
+      }
+    }
+    if (hits.length > 0) {
+      reasons.push({ subject: unit, code: "overlap", message: `${unit} ${hits.join(", ")}` });
+      continue;
+    }
+    const due = `Epic ${epic}'s retro item is open and routed to a lane`;
+    if (rec === undefined) return { unit, kind: "retro-item", globs, expect_generation: null, take_over: null, pr: null, why: `${unit} is due: ${due}` };
+    if (rec.state === "released") {
+      return { unit, kind: "retro-item", globs, expect_generation: rec.generation, take_over: null, pr: null, why: `${unit} is released and due: ${due}` };
+    }
+    const why = `${unit} is claimed and stale (heartbeat ${rec.heartbeat_at}) with no open PR`;
+    return { unit, kind: "retro-item", globs, expect_generation: rec.generation, take_over: "claimed", pr: null, why };
   }
   return null;
 }

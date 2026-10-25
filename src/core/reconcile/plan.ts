@@ -1,10 +1,10 @@
 import { isDisposable, isStale } from "../ledger/edits.ts";
-import { RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
+import { RETRO_ITEM_ID_PATTERN, RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
 import { doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
 import { unitKind, type UnitRecord } from "../schemas/ledger.ts";
 import type { PrState, Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
-import { editRetroGates, type RetroGatesAddition } from "./retro-gates-edit.ts";
+import { editRetroGates, type RetroGatesAddition, type RetroItemDone } from "./retro-gates-edit.ts";
 import { editDevelopmentStatus, type StatusAddition, type StatusChange, type StatusChanges } from "./status-edit.ts";
 
 /**
@@ -12,7 +12,8 @@ import { editDevelopmentStatus, type StatusAddition, type StatusChange, type Sta
  * read from one snapshot. Pure. The step does the ledger work it lists, one
  * fenced swap per item, then either finishes the run with no PR or opens one
  * PR with the new `sprint-status.yaml` text, the new `retro-gates.yaml` text
- * (Story 2.9), or both. The run's own unit is never a target.
+ * (Story 2.9: retro verdicts and items; Story 2.10: merged items `done`), or
+ * both. The run's own unit is never a target.
  */
 
 /** A record the run acts on, with its PR as the snapshot shows it. */
@@ -68,9 +69,9 @@ export type StatusPlan =
   /** The new text, and one line per change. */
   | { readonly kind: "edit"; readonly changes: StatusChanges; readonly text: string; readonly summary: readonly string[] };
 
-/** The `retro-gates.yaml` write for merged retro records (Story 2.9). */
+/** The `retro-gates.yaml` write for merged retro (Story 2.9) and retro-item (Story 2.10) records. */
 export type RetroGatesPlan =
-  /** No merged retro result to record. */
+  /** No merged retro result to record and no merged item to set `done`. */
   | { readonly kind: "none" }
   /** The new text, and one line per change. */
   | { readonly kind: "edit"; readonly text: string; readonly summary: readonly string[] }
@@ -115,11 +116,15 @@ export type ReconcilePlan = {
   readonly retroGatesPath: string;
   /**
    * The verdicts and items of `retro:<N>` records `merged` as of this run,
-   * with a `retro_result`, whose Epic has no `retro` entry on `main`.
+   * with a `retro_result`, whose Epic has no `retro` entry on `main`; then
+   * `status: done` for the item of each `retro-item:<id>` record `merged` as
+   * of this run whose item is listed on `main` and not `done`.
    */
   readonly retroGates: RetroGatesPlan;
   /** `merged` `retro:<N>` records with no `retro_result`: logged and skipped. */
   readonly retroWithoutResult: readonly string[];
+  /** `merged` `retro-item:<id>` records whose item `retro-gates.yaml` does not list: logged and skipped. */
+  readonly retroItemsMissing: readonly string[];
 };
 
 function target(r: UnitRecord, snapshot: Snapshot): PlanTarget {
@@ -202,6 +207,24 @@ function retroAdditions(effective: Snapshot, unit: string): { readonly additions
   return { additions, without };
 }
 
+/** The retro items to set `done`: each `merged` `retro-item:<id>` record of `effective` whose item is listed on `main` and not `done`. */
+function itemsDone(effective: Snapshot, unit: string): { readonly done: RetroItemDone[]; readonly missing: string[] } {
+  const done: RetroItemDone[] = [];
+  const missing: string[] = [];
+  for (const r of effective.ledger.units) {
+    if (r.unit === unit || r.state !== "merged" || unitKind(r.unit) !== "retro-item") continue;
+    const id = r.unit.slice(r.unit.indexOf(":") + 1);
+    const epic = RETRO_ITEM_ID_PATTERN.exec(id)?.[1];
+    const item = epic === undefined ? undefined : effective.retro_gates.epics[epic]?.items?.find((i) => i.id === id);
+    if (epic === undefined || item === undefined) {
+      missing.push(r.unit);
+      continue;
+    }
+    if (item.status !== "done") done.push({ epic: Number(epic), id });
+  }
+  return { done, missing };
+}
+
 /**
  * The plan for `reconcile` unit `unit` from `snapshot`. `statusText` is
  * `sprint_status_path`'s text on the snapshot's `main`, and `retroGatesText`
@@ -273,9 +296,10 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
 
   const retroGatesPath = snapshot.config.retro_gates_path;
   const { additions, without } = retroAdditions(effective, unit);
+  const { done, missing: itemsMissing } = itemsDone(effective, unit);
   let retroGates: RetroGatesPlan = { kind: "none" };
-  if (additions.length > 0) {
-    const edited = editRetroGates(retroGatesPath, retroGatesText, additions);
+  if (additions.length > 0 || done.length > 0) {
+    const edited = editRetroGates(retroGatesPath, retroGatesText, additions, done);
     retroGates = edited.ok ? { kind: "edit", text: edited.value.text, summary: edited.value.summary } : { kind: "invalid", message: edited.error.message };
   }
 
@@ -294,5 +318,6 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     retroGatesPath,
     retroGates,
     retroWithoutResult: without,
+    retroItemsMissing: itemsMissing,
   };
 }

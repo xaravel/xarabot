@@ -8,7 +8,7 @@ import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
 import type { Committer } from "./committer.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, type Sleep } from "./ledger-cas.ts";
-import { message, readsPath, stepKit, type PrStep, type PrStepInput, type PrStepOutput } from "./session.ts";
+import { message, readsPath, stepKit, storySubject, type PrStep, type PrStepInput, type PrStepOutput } from "./session.ts";
 
 /**
  * The PR step after a `done` result (FR6, FR13, FR18, FR22, NFR10, AR7, AR16,
@@ -58,7 +58,8 @@ export function prText(
 }
 
 export type StatusCommentParams = {
-  readonly storyId: string;
+  /** The unit's subject: `Story <id>`, or `Unit <unit>` for a coordinator unit. */
+  readonly subject: string;
   readonly headSha: string;
   readonly lane: string;
   readonly deniedActions: readonly string[];
@@ -67,13 +68,13 @@ export type StatusCommentParams = {
 };
 
 /**
- * The 🤖 status comment: the Story, the short head SHA, the lane, then the
+ * The 🤖 status comment: the subject, the short head SHA, the lane, then the
  * denied actions, each sanitized onto one line; capped at the comment limit.
  */
 export function statusComment(p: StatusCommentParams): string {
   const secrets = p.secrets ?? [];
   const clean = (s: string): string => sanitizeAgentText(s, { secrets });
-  const lines = [`🤖 Story ${clean(p.storyId)}: pushed ${p.headSha.slice(0, 7)} from lane ${clean(p.lane)}.`, ""];
+  const lines = [`🤖 ${clean(p.subject)}: pushed ${p.headSha.slice(0, 7)} from lane ${clean(p.lane)}.`, ""];
   // Secrets are redacted before whitespace collapses, so a secret holding whitespace still matches exactly.
   const actions = p.deniedActions.map((a) => clean(redactSecrets(a, secrets).replace(/\s+/g, " ").trim()).trim()).filter((a) => a !== "");
   if (actions.length === 0) {
@@ -246,7 +247,7 @@ export function createPrStep(deps: PrStepDeps): PrStep {
       await beat("record", { pr, pr_owner: identity.owner, head_sha: c.head_sha, base_sha: c.base_sha });
 
       // 8. The status comment.
-      const body = statusComment({ storyId: story.story_id, headSha: c.head_sha, lane: identity.lane, deniedActions: result.denied_actions, secrets });
+      const body = statusComment({ subject: storySubject(story.story_id), headSha: c.head_sha, lane: identity.lane, deniedActions: result.denied_actions, secrets });
       const commented = await call("comment", (o) => forge.comment(pr, body, o));
       if (!commented.ok) {
         reasons.push(`status comment on PR #${pr} failed: ${commented.error.kind}: ${commented.error.message}`);

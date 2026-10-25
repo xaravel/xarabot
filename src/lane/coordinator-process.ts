@@ -55,9 +55,13 @@ import type { Waiter, WaitResult } from "./wait.ts";
  * wait after `idle` is 10 min, matching the `reconcile` due rule; other
  * outcomes keep the builder's waits.
  *
- * A session step (planning, Story 2.7) gets the unit's track and may end the
- * run through a `Halt`: a STOP during its usage-limit sleep releases the unit
- * and ends the run `stop` with no lane stop, as the lane process does.
+ * A session step (planning, Story 2.7; retro, Story 2.9; a retro item, Story
+ * 2.10) gets the unit's track and may end the run through a `Halt`: a STOP
+ * during its usage-limit sleep releases the unit and ends the run `stop`
+ * with no lane stop, as the lane process does. A retro item's PR goes the
+ * Story path (CI with fix sessions, the graph and approval gates) up to its
+ * enqueue; the step then ends `merging` and later `reconcile` runs check the
+ * queue (Story 2.6).
  *
  * The forge and ledger helpers, the unit keeper check (`checkHeld`), the
  * failed attempt (`failUnit`) and the unit journal record are the lane
@@ -118,7 +122,7 @@ export type CoordinatorDeps = {
   readonly lane: Lane;
   /** The `coordinator.json` record the start check wrote. */
   readonly claim: CoordinatorRecord;
-  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5), `planning` (Story 2.7) and `retro` (Story 2.9). */
+  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5), `planning` (Story 2.7), `retro` (Story 2.9) and `retro-item` (Story 2.10). */
   readonly steps: CoordinatorSteps;
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;

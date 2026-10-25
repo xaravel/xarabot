@@ -660,6 +660,57 @@ describe("checkWrite (coordinator)", () => {
       graphInputs: [EPICS, ".xarabot/epics.yaml", "stories/*.md"],
       statusFiles: [SPRINT, RETRO],
       retroGatesPath: RETRO,
+      refused: null,
     });
+  });
+});
+
+describe("checkWrite (a retro item: coordinator rules plus every builder refusal, Story 2.10)", () => {
+  const BUILDER_REFUSALS = {
+    config: { ...COORD_CONFIG, standing_authority_path: AUTHORITY },
+    policy: { protected_paths: ["secrets/**", "**/*.pem"] },
+  };
+  const itemRules = (globs: readonly string[]): CoordinatorWriteRules =>
+    coordinatorWriteRules({ config: COORD_CONFIG, globs: coordinatorGlobs({ kind: "retro-item", globs }, COORD_CONFIG), graphUnit: false, builderRefusals: BUILDER_REFUSALS });
+  const ALL = ["**"];
+
+  test.each([
+    ["its own globs pass", ["src/x/**"], ["src/x/a.ts"], []],
+    ["a path outside the globs: outside-unit", ["src/x/**"], ["src/y.ts"], [["src/y.ts", "outside-unit"]]],
+    ["agent config inside a broad glob: agent-config", ["src/**"], ["src/CLAUDE.md"], [["src/CLAUDE.md", "agent-config"]]],
+    ["agent config, case-folded", ["src/**"], ["src/claude.MD"], [["src/claude.MD", "agent-config"]]],
+    ["an agent config folder: agent-config", ["src/**"], ["src/.claude/settings.json"], [["src/.claude/settings.json", "agent-config"]]],
+    ["a status file: coordinator-file", ALL, [SPRINT], [[SPRINT, "coordinator-file"]]],
+    ["a live evidence file: live-evidence", ALL, ["docs/maintainer/evidence/epic-2.md"], [["docs/maintainer/evidence/epic-2.md", "live-evidence"]]],
+    ["the Standing Authority: standing-authority", ALL, [AUTHORITY], [[AUTHORITY, "standing-authority"]]],
+    ["the Standing Authority, case-folded", ALL, [AUTHORITY.toUpperCase()], [[AUTHORITY.toUpperCase(), "standing-authority"]]],
+    ["under .github: github", ALL, [".github/workflows/ci.yml"], [[".github/workflows/ci.yml", "github"]]],
+    ["a policy Protected Path: protected-path", ALL, ["secrets/key.txt", "src/a.pem"], [["secrets/key.txt", "protected-path"], ["src/a.pem", "protected-path"]]],
+    ["coordinator classes win: xarabot before the builder's xarabot", ALL, [".xarabot/policy.yaml"], [[".xarabot/policy.yaml", "xarabot"]]],
+    ["coordinator classes win: a manifest is graph-input", ALL, ["stories/2.1.md"], [["stories/2.1.md", "graph-input"]]],
+    ["coordinator classes win: outside-unit before agent-config", ["src/**"], ["AGENTS.md"], [["AGENTS.md", "outside-unit"]]],
+    ["coordinator classes win: a retro record change, not coordinator-file", ALL, [gates(GATES_2, GATES_2.replace("status: open", "status: done"))], [[RETRO, "retro-item"]]],
+    ["a retro-gates change touching no record: coordinator-file", ALL, [gates(GATES_2, `${GATES_2}# a comment\n`)], [[RETRO, "coordinator-file"]]],
+  ] as const)("%s", (_name, globs, changes, refused) => {
+    const got = checkWrite(itemRules(globs), changes.map((x) => (typeof x === "string" ? { path: x, mode: "100644" } : x)));
+    const want = refused.map(([path, cls]) => ({ path, class: cls }));
+    expect(got).toEqual([...want].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
+  });
+
+  test("every builder class the coordinator classes do not catch first is refused, with no exception", () => {
+    const hit = new Set(checkWrite(itemRules(ALL), [SPRINT, "docs/maintainer/evidence/epic-1.md", AUTHORITY, ".github/x", "a/AGENTS.md", "secrets/x"].map((path) => ({ path, mode: "100644" }))).map((r) => r.class));
+    expect([...hit].sort()).toEqual(["agent-config", "coordinator-file", "github", "live-evidence", "protected-path", "standing-authority"]);
+  });
+
+  test("builderRefusals sets refused; without it, refused is null", () => {
+    expect(itemRules(["src/**"]).refused).toEqual({
+      coordinatorFiles: [SPRINT, RETRO, EPICS],
+      manifestsDir: "stories",
+      standingAuthorityPath: AUTHORITY,
+      protectedPaths: ["secrets/**", "**/*.pem"],
+      liveEvidenceGlob: "docs/maintainer/evidence/epic-*.md",
+    });
+    expect(coordRules({ kind: "retro-item", globs: ["src/**"] }).refused).toBeNull();
+    expect(checkWrite(coordRules({ kind: "retro-item", globs: ["src/**"] }), [{ path: "src/CLAUDE.md", mode: "100644" }])).toEqual([]);
   });
 });

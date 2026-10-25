@@ -5,15 +5,18 @@
  * instruction (the CI-fix part may say "CI log" only); the planning parts
  * (Story 2.7) carry no CI, merge, queue, PR, push, approval, claim, `next`,
  * ledger or selection word; the retro parts (Story 2.9) carry no CI, push,
- * queue, approval, claim, `next`, ledger, sprint-status or selection word.
- * The runner does all of that.
+ * queue, approval, claim, `next`, ledger, sprint-status or selection word;
+ * the retro-item parts (Story 2.10) carry no word the Story parts may not
+ * carry (the CI-fix part may say "CI log" only). The runner does all of that.
  *
  * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopback only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
  * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`
  * and `planning_contexts` (status), `planning_headings`, `manifests_dir`
  * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
- * `prs_path`.
+ * `prs_path`; for a retro item `retro_item_unit`, `retro_item_id`,
+ * `retro_item_epic`, `retro_item_text` and `retro_item_globs` (and
+ * `log_path` in its CI fix).
  */
 export type PromptTemplate = {
   /** A `story` first build: names the Story and runs `bmad-build-auto`. */
@@ -42,6 +45,12 @@ export type PromptTemplate = {
   readonly retro: string;
   /** The result step of a retro unit: always the prompt's last part. */
   readonly result_retro: string;
+  /** A retro-item unit (Story 2.10): does one retro action item; no skill. */
+  readonly retro_item: string;
+  /** A retro-item CI fix: applies the prefetched CI log; no skill. */
+  readonly retro_item_ci_fix: string;
+  /** The result step of a retro-item unit, in either mode: always the prompt's last part. */
+  readonly result_retro_item: string;
 };
 
 export const PLACEHOLDERS = [
@@ -63,6 +72,11 @@ export const PLACEHOLDERS = [
   "retro_unit",
   "retro_epic",
   "prs_path",
+  "retro_item_unit",
+  "retro_item_id",
+  "retro_item_epic",
+  "retro_item_text",
+  "retro_item_globs",
 ] as const;
 export type Placeholder = (typeof PLACEHOLDERS)[number];
 
@@ -219,4 +233,34 @@ Set the fields:
 - \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
 
 Write this file last, and do nothing after it.`,
+
+  retro_item: `# Task
+
+Do the action item \`{{retro_item_id}}\` from Epic {{retro_item_epic}}'s retrospective (\`{{retro_item_unit}}\`).
+
+Run no skill. The action item says:
+
+{{retro_item_text}}
+
+Do it in this clone, changing only files these globs cover: {{retro_item_globs}}. Never change agent configuration (such as a \`CLAUDE.md\` or \`AGENTS.md\` file), the tracking files, the planning artifacts, \`.xarabot/\`, \`.github/\`, the Standing Authority file, the Maintainer's evidence files or the repository's Protected Paths, even inside those globs. Then run the verification commands that cover your change.`,
+
+  retro_item_ci_fix: `# Task
+
+Repair the action item \`{{retro_item_id}}\` from Epic {{retro_item_epic}}'s retrospective (\`{{retro_item_unit}}\`).
+
+Run no skill. The action item says:
+
+{{retro_item_text}}
+
+The CI log for this item's latest change is prefetched in \`{{log_path}}\`, in your temp folder. Read it, find the cause of each failure it reports, fix it in this clone, changing only files these globs cover: {{retro_item_globs}}, and re-run the failing commands here. Never change agent configuration (such as a \`CLAUDE.md\` or \`AGENTS.md\` file), the tracking files, the planning artifacts, \`.xarabot/\`, \`.github/\`, the Standing Authority file, the Maintainer's evidence files or the repository's Protected Paths, even inside those globs.`,
+
+  result_retro_item: `${RESULT_HEAD}
+
+Set \`outcome\` and \`blocked\`:
+
+- You did the work and the verification commands pass: \`outcome\` \`done\`.
+- You cannot finish: \`outcome\` \`blocked\`, with the reason in \`blocked.text\` and \`blocked.kind\`: \`intent-gap\` when the action item does not settle what to do; \`verification\` when a verification command still fails; \`human-live-step\`, with \`blocked.step_id\` set to the id of a step listed under Human Live Steps, never one you make up, when the work needs one of those steps; \`escalation\` when it needs a decision from the Maintainer; \`other\` for anything else.
+- There was nothing to change: \`outcome\` \`no-op\`.
+
+${RESULT_FIELDS}`,
 };

@@ -8,7 +8,7 @@ import type { NextStory } from "../../src/core/next/next.ts";
 import { err, ok } from "../../src/core/result.ts";
 import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { DiffPaths, DiffPathsRequest } from "../../src/lane/diff-paths.ts";
-import { approvalComment, createMergeStep, gateComment, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
+import { createMergeStep, gateComment, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
 import type { Forge } from "../../src/ports/forge.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
@@ -172,7 +172,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
         },
         random: () => 0,
         ...deps,
-      })({ unit: STORY, record, signal: budget.signal, log: (text) => logs.push(text), ...input }),
+      })({ unit: { unit: STORY.unit, subject: `Story ${STORY.story_id}` }, record, signal: budget.signal, log: (text) => logs.push(text), ...input }),
     async ledger() {
       const snap = await fake.forge.snapshot(opts());
       if (!snap.ok) throw new Error(snap.error.message);
@@ -198,16 +198,16 @@ function dequeueBefore(events: readonly string[], edit: string): void {
 
 // -------------------------------------------------------------- texts
 
-describe("approvalComment", () => {
+describe("gateComment", () => {
   test("starts with 🤖, names the gated paths and says a coordinator lane running Story 2.6 queues it once the owner approves the current head", () => {
-    const text = approvalComment({ storyId: "1.1", paths: ["src/a.ts", ".github/x.yml"] });
+    const text = gateComment("Story 1.1", ["src/a.ts", ".github/x.yml"]);
     expect(text.startsWith("🤖 Story 1.1:")).toBe(true);
     expect(text).toContain("src/a.ts, .github/x.yml");
     expect(text).toContain("It is parked awaiting approval and was not queued. Once the owner approves the PR's current head, a coordinator lane running Story 2.6 adds it to the merge queue.");
   });
 
   test("sanitizes mentions and closing keywords out of path names", () => {
-    const text = approvalComment({ storyId: "1.1", paths: ["@someone/fixes #3.md"] });
+    const text = gateComment("Story 1.1", ["@someone/fixes #3.md"]);
     expect(text).not.toContain("@someone");
     expect(text).not.toMatch(/fixes #3/i);
   });
@@ -514,6 +514,40 @@ describe("enqueue", () => {
 });
 
 // -------------------------------------------------------------- watch
+
+describe("watch: false (a coordinator unit, Story 2.10)", () => {
+  const UNIT_SUBJECT = { unit: UNIT, subject: "Unit retro-item:epic-2-retro-item-1-x" };
+
+  test("an ungated PR: fence, startMerging, enqueue at its head, then the step ends merging with no queue read", async () => {
+    const w = await world();
+    const out = await w.run({ unit: UNIT_SUBJECT, watch: false });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(w.events).toEqual(["ledgerSwap heartbeat", "ledgerSwap startMerging", "enqueue"]);
+    expect(w.events).not.toContain("queueState");
+    expect(w.sleeps).toEqual([]);
+    expect(out.reason).toContain(`PR #${w.pr} enqueued at ${w.head}`);
+    const after = await w.ledger();
+    expect([after?.state, after?.passed_sha]).toEqual(["merging", w.head]);
+  });
+
+  test("a gated PR parks awaiting-approval with the gate comment naming the unit", async () => {
+    const w = await world({ ownerPaths: ["**"], diff: ["src/a.ts"] });
+    const out = await w.run({ unit: UNIT_SUBJECT, watch: false });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    const comments = w.fake.control.comments(w.pr);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toStartWith("🤖 Unit retro-item:epic-2-retro-item-1-x: this PR changes paths that need the owner's approval: src/a.ts.");
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("an enqueue error is a failed attempt, after leaving merging", async () => {
+    const w = await world();
+    w.fake.control.injectError("enqueue", { kind: "conflict", message: "head moved" });
+    const out = await w.run({ unit: UNIT_SUBJECT, watch: false });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    dequeueBefore(w.events, "failAttempt");
+  });
+});
 
 describe("a merging record (a stale takeover): watch only", () => {
   /**

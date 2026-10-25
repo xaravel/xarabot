@@ -21,8 +21,8 @@ import type { Workspace } from "./workspace.ts";
 /**
  * The one session runner and step helper set (Story 2.6a, AR1, AR3, AR23).
  * The lane process and the coordinator process use it, and so do the PR, CI,
- * merge and `reconcile` steps; Stories 2.7 and 2.9 (planning and retro
- * sessions) and Epic 3's reviews build on it next.
+ * merge and `reconcile` steps; Stories 2.7, 2.9 and 2.10 (planning, retro
+ * and retro-item sessions) and Epic 3's reviews build on it next.
  *
  * - The shared lane types: the PR step's input and output, the session
  *   limits, the run's result, and the `Halt` family a process ends through.
@@ -61,6 +61,23 @@ export function readsPath(path: string): boolean {
 
 /** The CI-fix session's log file in `tmp`. */
 export const CI_FIX_LOG = "ci-fix-log.md";
+
+/**
+ * The unit a PR, CI or merge step works on (Story 2.10): its id, and the
+ * subject its 🤖 comments and merge commits name: `Story <id>` for a Story
+ * (`storySubject`), `Unit <unit>` for a coordinator unit (`unitSubject`).
+ */
+export type StepUnit = { readonly unit: string; readonly subject: string };
+
+/** A Story's subject in step texts: `Story <id>`. */
+export function storySubject(storyId: string): string {
+  return `Story ${storyId}`;
+}
+
+/** A coordinator unit's subject in step texts: `Unit <unit>`. */
+export function unitSubject(unit: string): string {
+  return `Unit ${unit}`;
+}
 
 /** What the PR step gets after a `done` result whose spec checks out. */
 export type PrStepInput = {

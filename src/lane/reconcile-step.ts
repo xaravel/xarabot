@@ -86,6 +86,12 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
  * once; a merged retro record with no result is logged and skipped, and a
  * file that cannot be written fails the run.
  *
+ * Story 2.10: each `retro-item:<id>` record `merged` as of the run whose
+ * item `retro-gates.yaml` lists and not `done` has that item set `done`, in
+ * the same rewrite; a merged one whose item is not listed is logged and
+ * skipped (`retroItemsMissing`). Once that PR merges, the record is done on
+ * `main` and a later run deletes it.
+ *
  * With no status or retro-gates change, or another `reconcile` PR
  * open that the ledger work did not close or settle, the run finishes `merged` with no PR and the older `merged`
  * `reconcile` records are deleted. Otherwise it commits the changed files onto
@@ -882,6 +888,10 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       for (const u of plan.retroWithoutResult) {
         reasons.push(`${u} merged with no retro_result: skipped`);
         note(`${u} merged with no retro_result: no verdict to record, skipped`);
+      }
+      for (const u of plan.retroItemsMissing) {
+        reasons.push(`${u} merged but its item is not listed: skipped`);
+        note(`${u} merged but ${snapshot.config.retro_gates_path} does not list its item: nothing to set done, skipped`);
       }
       const settled = await ledgerWork(plan);
 

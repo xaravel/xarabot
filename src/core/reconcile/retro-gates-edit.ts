@@ -7,7 +7,8 @@ import type { Go, RetroGates, RetroGatesEntry, RetroItem, RetroRecordResult } fr
  * `reconcile`'s write of retro verdicts and items to `retro-gates.yaml`
  * (Story 2.9, AR4, AR13): the only writer of those records. Applying a
  * merged retro's result sets the Epic's `retro` and appends each item not
- * already listed with `status: open`; the file is then rewritten whole, in a
+ * already listed with `status: open`; a merged retro item's unit sets its
+ * item `status: done` (Story 2.10); the file is then rewritten whole, in a
  * fixed, deterministic form. Comments in a hand-edited file are not kept; its
  * data, a hand-recorded `go` included, is. Pure.
  */
@@ -21,6 +22,36 @@ export type RetroGatesAddition = {
   /** The run's snapshot `now`. */
   readonly recorded_at: string;
 };
+
+/** One merged `retro-item:<id>` record whose item to set `done` (Story 2.10). */
+export type RetroItemDone = {
+  readonly epic: number;
+  /** The item's id. */
+  readonly id: string;
+};
+
+/**
+ * `gates` with each listed item of `done` that is not `done` yet set to
+ * `status: done`; an item not listed is left out. One line per change is
+ * returned as the summary: `epics.<N>.items: <id> <old> -> done`.
+ */
+export function applyItemsDone(gates: RetroGates, done: readonly RetroItemDone[]): { readonly gates: RetroGates; readonly summary: string[] } {
+  const epics: Record<string, RetroGatesEntry> = { ...gates.epics };
+  const summary: string[] = [];
+  const sorted = [...done].sort((a, b) => a.epic - b.epic);
+  for (const d of sorted) {
+    const key = String(d.epic);
+    const entry = epics[key];
+    const items = entry?.items;
+    if (entry === undefined || items === undefined) continue;
+    const i = items.findIndex((x) => x.id === d.id);
+    const item = items[i];
+    if (item === undefined || item.status === "done") continue;
+    epics[key] = { ...entry, items: items.map((x, j) => (j === i ? { ...x, status: "done" as const } : x)) };
+    summary.push(`epics.${key}.items: ${d.id} ${item.status} -> done`);
+  }
+  return { gates: { schema_version: gates.schema_version, epics }, summary };
+}
 
 /**
  * `gates` with each addition applied: `epics.<N>.retro` = {`verdict`,
@@ -118,19 +149,28 @@ export function serializeRetroGates(gates: RetroGates): string {
 export type RetroGatesEdit = { readonly text: string; readonly summary: readonly string[] };
 
 /**
- * The new `retro-gates.yaml` text for `additions` over `text` (`null` when
- * the file is absent, read as `{schema_version: 1, epics: {}}`), or why it
- * cannot be written: the current text does not parse, or the new text does
- * not parse back (`parseRetroGates`) to the value it was made from.
+ * The new `retro-gates.yaml` text for `additions`, then the items `done`
+ * (Story 2.10), over `text` (`null` when the file is absent, read as
+ * `{schema_version: 1, epics: {}}`), or why it cannot be written: the
+ * current text does not parse, or the new text does not parse back
+ * (`parseRetroGates`) to the value it was made from.
  */
-export function editRetroGates(path: string, text: string | null, additions: readonly RetroGatesAddition[]): Result<RetroGatesEdit, "invalid"> {
+export function editRetroGates(
+  path: string,
+  text: string | null,
+  additions: readonly RetroGatesAddition[],
+  done: readonly RetroItemDone[] = [],
+): Result<RetroGatesEdit, "invalid"> {
   let current = emptyRetroGates();
   if (text !== null) {
     const parsed = parseRetroGates(path, text);
     if (!parsed.ok) return err("invalid", parsed.error.message);
     current = parsed.value;
   }
-  const { gates, summary } = applyRetroResults(current, additions);
+  const added = applyRetroResults(current, additions);
+  const finished = applyItemsDone(added.gates, done);
+  const gates = finished.gates;
+  const summary = [...added.summary, ...finished.summary];
   const out = serializeRetroGates(gates);
   const back = parseRetroGates(path, out);
   if (!back.ok) return err("invalid", `the new text does not parse: ${back.error.message}`);

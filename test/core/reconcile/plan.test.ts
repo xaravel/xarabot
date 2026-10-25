@@ -474,3 +474,79 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     expect([p.status.kind, p.retroGates.kind]).toEqual(["edit", "edit"]);
   });
 });
+
+describe("planReconcile: retro items done (Story 2.10)", () => {
+  const X = "epic-2-retro-item-1-fix-x";
+  const UNIT_X = `retro-item:${X}`;
+  const gatesWith = (status: string) =>
+    [
+      "schema_version: 1",
+      "epics:",
+      '  "2":',
+      "    retro:",
+      "      verdict: accepted-with-open-items",
+      '      unit: "retro:2"',
+      "      recorded_at: 2026-10-20T00:00:00Z",
+      "    items:",
+      `      - id: ${X}`,
+      "        text: Fix x",
+      "        route: lane",
+      "        blocking: false",
+      '        globs: ["src/x/**"]',
+      `        status: ${status}`,
+      "",
+    ].join("\n");
+  const itemRec = (over: Partial<UnitRecord> = {}) => coord(UNIT_X, { state: "merging", globs: ["src/x/**"], pr: 9, head_sha: HEAD, passed_sha: HEAD, ...over });
+  const planWith = (w: Partial<World>) => {
+    const full = world(w);
+    const files = input(full).files;
+    const text = (p: string) => (Object.hasOwn(files, p) ? (files[p] as string) : null);
+    return planReconcile(snapshotOf(full), U, text(STATUS), text(RETRO));
+  };
+  const statusOf = (p: ReconcilePlan) => {
+    if (p.retroGates.kind !== "edit") return p.retroGates.kind;
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    return parsed.ok ? parsed.value.epics["2"]?.items?.[0]?.status : `unparsed: ${parsed.error.message}`;
+  };
+
+  test("its PR merged this run, the item open: marked merged and the item set done; the record is not deleted yet", () => {
+    const p = planWith({ files: { [RETRO]: gatesWith("open") }, records: [itemRec()], prs: { [UNIT_X]: merged(9) } });
+    expect(p.markMerged).toEqual([UNIT_X]);
+    expect(statusOf(p)).toBe("done");
+    expect(p.retroGates.kind === "edit" ? p.retroGates.summary : []).toEqual([`epics.2.items: ${X} open -> done`]);
+    expect(p.deleteMerged).not.toContain(UNIT_X);
+    expect(p.retroItemsMissing).toEqual([]);
+  });
+
+  test("merged on the ledger, the item deferred: set done", () => {
+    const p = planWith({ files: { [RETRO]: gatesWith("deferred") }, records: [itemRec({ state: "merged" })] });
+    expect(statusOf(p)).toBe("done");
+    expect(p.retroGates.kind === "edit" ? p.retroGates.summary : []).toEqual([`epics.2.items: ${X} deferred -> done`]);
+  });
+
+  test("the next run, the item done on main: no write, and the record is deleted", () => {
+    const p = planWith({ files: { [RETRO]: gatesWith("done") }, records: [itemRec({ state: "merged" })] });
+    expect(p.retroGates).toEqual({ kind: "none" });
+    expect(p.deleteMerged).toContain(UNIT_X);
+  });
+
+  test("not merged as of the run: nothing written", () => {
+    const p = planWith({ files: { [RETRO]: gatesWith("open") }, records: [itemRec()], prs: { [UNIT_X]: open(9) } });
+    expect(p.retroGates).toEqual({ kind: "none" });
+  });
+
+  test("the item absent from retro-gates.yaml: listed as missing and skipped", () => {
+    const p = planWith({ records: [itemRec({ state: "merged" })] });
+    expect(p.retroGates).toEqual({ kind: "none" });
+    expect(p.retroItemsMissing).toEqual([UNIT_X]);
+    expect(p.deleteMerged).not.toContain(UNIT_X);
+  });
+
+  test("in the same rewrite as a merged retro's additions", () => {
+    const retro3 = coord("retro:3", { state: "merged", retro_result: { verdict: "accepted", items: [{ id: "epic-3-retro-item-1-z", text: "Z", route: "lane", blocking: false, globs: ["src/z/**"] }] } });
+    const p = planWith({ epics: { 1: [], 2: ["1", "2"], 3: ["1"] }, files: { [RETRO]: gatesWith("open") }, records: [itemRec({ state: "merged" }), retro3] });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    expect(p.retroGates.summary).toEqual(["epics.3.retro: accepted (retro:3)", "epics.3.items: epic-3-retro-item-1-z added as open", `epics.2.items: ${X} open -> done`]);
+    expect(statusOf(p)).toBe("done");
+  });
+});

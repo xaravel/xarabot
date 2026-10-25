@@ -19,6 +19,7 @@ import {
   type CiSessionRequest,
   type CiStepDeps,
   type CiStepInput,
+  type CiUnit,
   type RegenerateRequest,
 } from "../../src/lane/ci-step.ts";
 import type { Committer } from "../../src/lane/committer.ts";
@@ -92,6 +93,9 @@ const STORY: NextStory = {
   expect_generation: null,
   take_over: null,
 };
+
+/** The Story as the CI step names it. */
+const CI_UNIT: CiUnit = { unit: UNIT, subject: "Story 1.1", branch: (c) => `${c.branches.story}1.1`, needsSpec: true };
 
 function buildResult(outcome: BuildResult["outcome"] = "done"): BuildResult {
   const base = { kind: "build" as const, summary: "Fixed it", body: "", verification: ["bun test"], denied_actions: [] };
@@ -244,13 +248,25 @@ async function world(o: WorldOpts = {}): Promise<World> {
     logs,
     run: (input = {}, deps = {}) =>
       createCiStep({ forge: spied.forge, merger, identity: ALICE, repo: "xaravel/xarabot", now: c.now, sleep: c.sleep, random: () => 0, ...deps })({
-        unit: STORY,
+        unit: CI_UNIT,
         record,
         clone: "/nonexistent/clone",
         signal: AbortSignal.timeout(60_000),
         log: (t) => logs.push(t),
         scratchDir: scratch,
-        prStep: async (i) => {
+        // The lane process's own: the fix through the Story's PR step.
+        pushFix: async (f) => {
+          const i: PrStepInput = {
+            unit: STORY,
+            record: f.record,
+            result: f.result,
+            specPath: f.specPath ?? "",
+            superseded: f.superseded,
+            clone: "/nonexistent/clone",
+            signal: AbortSignal.timeout(60_000),
+            log: (t) => logs.push(t),
+            kind: "fix",
+          };
           prSteps.push(i);
           return realPrStep(i);
         },
@@ -290,13 +306,15 @@ describe("ciLogText and conflictLogText", () => {
   test("the conflict log lists the paths and says the clone is main merged into the PR", () => {
     const text = conflictLogText({ mainSha: "m".repeat(40), headSha: "h".repeat(40), paths: ["src/a.ts", "src/b.ts"] });
     expect(text).toContain(`The clone is main (${"m".repeat(40)}) merged into this Story's PR`);
+    expect(conflictLogText({ mainSha: "m".repeat(40), headSha: "h".repeat(40), paths: [], subject: "Story 1.1" })).toContain("merged into this Story's PR");
+    expect(conflictLogText({ mainSha: "m".repeat(40), headSha: "h".repeat(40), paths: [], subject: "Unit retro-item:x" })).toContain("merged into this unit's PR");
     expect(text).toContain("conflict markers");
     expect(text).toContain("- src/a.ts\n- src/b.ts\n");
     expect(text).not.toContain("lockfiles conflicted");
   });
 
   test("the merge comment is capped at the comment limit", () => {
-    const text = mergeComment({ storyId: "1.1", mainSha: "m".repeat(40), headSha: "h".repeat(40), resolved: Array.from({ length: 5000 }, (_, i) => `path/${i}/${"r".repeat(20)}`) });
+    const text = mergeComment({ subject: "Story 1.1", mainSha: "m".repeat(40), headSha: "h".repeat(40), resolved: Array.from({ length: 5000 }, (_, i) => `path/${i}/${"r".repeat(20)}`) });
     expect(text.length).toBe(65_536);
     expect(text.endsWith("\n\n[truncated by xarabot]")).toBe(true);
   });
@@ -537,6 +555,22 @@ describe("createCiStep", () => {
     expect(w.prSteps).toEqual([]);
   });
 
+  test("a unit that needs no spec file (a retro item): a done fix with none is pushed, and the merge names the unit", async () => {
+    const unit: CiUnit = { unit: UNIT, subject: "Unit retro-item:epic-1-retro-item-1-x", branch: () => BRANCH, needsSpec: false };
+    const w = await world({ checks: [[failure("lint")], [success("lint")]], sessions: [ok({ result: buildResult(), specPath: null, superseded: [] })] });
+    const out = await w.run({ unit });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.prSteps).toHaveLength(1);
+    expect(w.merger.requests[0]?.message).toBe(`Merge main ${w.main} into the PR for Unit retro-item:epic-1-retro-item-1-x`);
+  });
+
+  test("a conflict session's log names the unit's PR", async () => {
+    const unit: CiUnit = { unit: UNIT, subject: "Unit retro-item:epic-1-retro-item-1-x", branch: () => BRANCH, needsSpec: false };
+    const w = await world({ merges: [{ kind: "needs-session", candidate_sha: "c".repeat(40), paths: ["src/a.ts"], lockfiles: [] }, { kind: "up-to-date" }], sessions: [ok({ result: buildResult("no-op"), specPath: null, superseded: [] })] });
+    await w.run({ unit });
+    expect(w.sessions[0]?.logText).toContain("merged into this unit's PR");
+  });
+
   test("fix no-op: parked blocked no-op", async () => {
     const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("no-op"), specPath: null, superseded: [] })] });
     const out = await w.run();
@@ -767,6 +801,8 @@ describe("runLaneProcess with createCiStep", () => {
     expect(prompt).not.toMatch(/\bCI\b/);
     expect(prompt).not.toContain(CI_FIX_LOG);
     expect(e.asked).toEqual([e.record?.head_sha as string]);
+    // The lane process names the Story to the CI step.
+    expect(e.merger.requests[0]?.message).toMatch(/ into the PR for Story 1\.1$/);
   });
 
   test("a failing check runs a real fix session through the sandbox: ci-fix mode, the prefetched log at log_path, ci_fixes 1", async () => {
