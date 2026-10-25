@@ -196,8 +196,43 @@ export function forgeContract(harness: ForgeHarness): void {
         ),
       );
       const s = value(await fx.forge.snapshot(live()));
-      expect(s.prs).toEqual({ "story:1.5": { number: pr.number, state: "open", head_sha: pr.head_sha } });
+      expect(s.prs).toEqual({ "story:1.5": { number: pr.number, state: "open", head_sha: pr.head_sha, reviews: [] } });
     });
+
+    scenario(
+      "snapshot carries each reviewer's latest decisive review of a unit's PR",
+      [...OPEN_PR, "snapshot", "ledgerSwap"],
+      ["makeCommit", "addReview"],
+      async (fx) => {
+        const pr = await openOn(fx, "story/1.7");
+        const old = await need(fx, "makeCommit")();
+        const list: ForgeReview[] = [
+          { author: "alice", state: "approved", commit_sha: old, submitted_at: "2026-10-24T10:00:00Z" },
+          { author: "bob", state: "changes_requested", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:05:00Z" },
+          { author: "alice", state: "commented", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:10:00Z" },
+          { author: "carol", state: "approved", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:12:00Z" },
+          { author: "Alice", state: "approved", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:15:00Z" },
+          { author: "carol", state: "dismissed", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:20:00Z" },
+          { author: "dave", state: "pending", commit_sha: pr.head_sha, submitted_at: null },
+        ];
+        for (const r of list) await need(fx, "addReview")(pr.number, r);
+        const tip = value(await fx.forge.snapshot(live())).ledger.tip;
+        const withPr = rec({ unit: "story:1.7", pr: pr.number, pr_owner: "alice", head_sha: pr.head_sha });
+        value(await fx.forge.ledgerSwap(tip, { message: "claims [skip ci]", writes: { [unitPath("story:1.7")]: serializeUnitRecord(withPr) }, deletes: [] }, live()));
+        expect(value(await fx.forge.snapshot(live())).prs).toEqual({
+          "story:1.7": {
+            number: pr.number,
+            state: "open",
+            head_sha: pr.head_sha,
+            reviews: [
+              { author: "bob", state: "changes_requested", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:05:00Z" },
+              { author: "Alice", state: "approved", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:15:00Z" },
+              { author: "carol", state: "dismissed", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:20:00Z" },
+            ],
+          },
+        });
+      },
+    );
 
     scenario(
       "snapshot reports merged and closed PR states",
@@ -224,8 +259,8 @@ export function forgeContract(harness: ForgeHarness): void {
         ),
       );
       expect(value(await fx.forge.snapshot(live())).prs).toEqual({
-        "story:1.8": { number: merged.number, state: "merged", head_sha: merged.head_sha },
-        "story:1.9": { number: closed.number, state: "closed", head_sha: closed.head_sha },
+        "story:1.8": { number: merged.number, state: "merged", head_sha: merged.head_sha, reviews: [] },
+        "story:1.9": { number: closed.number, state: "closed", head_sha: closed.head_sha, reviews: [] },
       });
       },
     );

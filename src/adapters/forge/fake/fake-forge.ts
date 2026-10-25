@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseLedger } from "../../../core/ledger/codec.ts";
 import type { LedgerCommit } from "../../../core/ledger/edits.ts";
-import type { PrState } from "../../../core/schemas/snapshot.ts";
+import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
   forgeErr,
@@ -211,6 +211,22 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     }
   }
 
+  /**
+   * Each reviewer's latest decisive review (logins compared
+   * case-insensitively), oldest first, as GitHub's `latestOpinionatedReviews`
+   * reports them; a review with no `submitted_at` never counts.
+   */
+  function latestDecisive(list: readonly ForgeReview[]): PrReview[] {
+    const latest = new Map<string | null, PrReview>();
+    for (const r of list) {
+      if (r.submitted_at === null || !(PR_REVIEW_DECISIONS as readonly string[]).includes(r.state)) continue;
+      const key = r.author?.toLowerCase() ?? null;
+      latest.delete(key);
+      latest.set(key, { author: r.author, state: r.state as PrReview["state"], commit_sha: r.commit_sha, submitted_at: r.submitted_at });
+    }
+    return [...latest.values()];
+  }
+
   function findPr(pr: number, operation: string): ForgeResult<PrRecord> {
     const p = prs.get(pr);
     return p === undefined ? forgeErr("not-found", `${operation}: no PR #${pr}`) : forgeOk(p);
@@ -243,7 +259,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
           for (const [unit, record] of parsed.value.units) {
             if (record.pr === null) continue;
             const p = prs.get(record.pr);
-            if (p !== undefined) states[unit] = { number: p.number, state: p.state, head_sha: p.head_sha };
+            if (p !== undefined) states[unit] = { number: p.number, state: p.state, head_sha: p.head_sha, reviews: latestDecisive(reviews.get(p.number) ?? []) };
           }
         }
         return forgeOk({ now, ledger, main, prs: states });

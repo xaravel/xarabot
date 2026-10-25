@@ -86,8 +86,10 @@ export type SnapshotOpts = CallOpts & {
 
 /**
  * One forge read: the ledger tip and files (read first), then `main`, then
- * the PR state of every unit record whose `pr` is set, keyed by unit id.
- * `now` is the forge's server time. The parts feed `assembleSnapshot`.
+ * the PR state of every unit record whose `pr` is set, keyed by unit id,
+ * each with `reviews` (every reviewer's latest decisive review) from the same
+ * PR read, never one more call per PR. `now` is the forge's server time. The
+ * parts feed `assembleSnapshot`.
  */
 export type ForgeSnapshot = {
   readonly now: AssembleInput["now"];
