@@ -4,6 +4,31 @@ The Maintainer's record of Epic 2's live run on the Xarabot host, for `retro:2` 
 
 Sources: GitHub (PRs, reviews, check runs, merge-queue events); the runner tags; the lanes' `journal.jsonl` and unit logs on the host; the Story specs on `main`; the Maintainer's working session. Facts that could not be checked are marked unverified.
 
+## Live runs (Story 2.12)
+
+Run per `self-host.md` § "Epic 2's live evidence", after `retro:2` had run (the first version of this file left them out, and the retro rejected Epic 2 for it: retro item 1).
+
+- **Date:** 2026-10-25, from 17:45:10Z. **Host:** the Xarabot host (`m1`), as `edanisko-xarabot`, outside any sandbox (`XARABOT_SANDBOXED` unset).
+- **Checkout:** `~/xarabot-switch` at `main` 730c9df (the runner-8 pin merge, one commit after tag `runner-8` at e9f95ec; no `src/` or `test/` change between them). `bun 1.4.3`.
+
+| Command | Result | Time |
+|---|---|---|
+| `XARABOT_LIVE=1 XARABOT_LIVE_LONG=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/claims-race.test.ts` | 20 pass, 0 skip, 0 fail | 1944 s |
+| `XARABOT_LIVE=1 bun test test/sandbox/bun-install.test.ts` | 1 pass, 0 skip, 0 fail | 1 s (cache warm; the case took 655 ms) |
+| `XARABOT_LIVE=1 bun test test/contracts/` | 107 pass, 72 skip, 0 fail | 16 s |
+
+- **Claims race, the four live cases:**
+  - one unit, two hosts: exactly one claim wins, only its session starts, and the loser idles (25.6 s);
+  - overlapping globs, asymmetric views: exactly one of 1.1 and 1.2 is claimed, and the loser takes 1.3 (32.9 s);
+  - same lane, two OS processes: one holds `lane.lock` and claims once, and the other exits 0 (24.6 s);
+  - killed mid-unit: the takeover happens 30 minutes after the last heartbeat, and the late push is fenced (the long case; it took most of the 1944 s).
+- **Agent contract:** both required cases passed, not skipped: `the real CLI passes the start check and starts in the sandbox without EPERM` (3.4 s) and `live: a smoke session writes a result and reports its usage` (6.0 s).
+- **A failed run, kept on the record:** the first contracts run added the optional scratch variables (`XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/contracts/`). It gave 116 pass, 43 skip, 20 fail in 144 s.
+  - The 20 failures are the GitHub forge contract's live cases (`Forge contract: github (live) > …`, `live: a stale PATCH git/refs answers SWAP_CONFLICT_STATUS`, `live: checks reads a pushed commit`). Each ends `this test timed out after 5000ms`: Bun's default per-test timeout, which these live cases do not raise for real GitHub round trips.
+  - The two agent cases passed in that run too.
+  - Nothing was changed. The run above is the runbook's command, without the optional variables.
+  - The forge live cases' timeout is a test defect, listed under the open follow-ups.
+
 ## Window and totals
 
 - **First claim:** Story 2.1, 2026-10-24 about 06:05Z. **Last merge:** Story 2.12, #100, 2026-10-25 12:33:01Z. About 30.5 hours.
@@ -98,6 +123,7 @@ Seven intent-gap stops across 2.4, 2.5, 2.6 and 2.7, all answered by Maintainer 
 - **Sandbox escape attempts:** see 2.6b above.
 - **Docs:** the SPEC glossary still mentions a checkpoint record, and SPEC write 1 does not cover the `epic-1` key.
 - **Infrastructure:** the macOS CI job (D29) needs a `.github/` change.
+- **Forge contract live cases:** they run under Bun's default 5 s per-test timeout and time out against real GitHub, so with the scratch variables set, 20 of them fail (see "Live runs").
 
 ## Not verified
 
