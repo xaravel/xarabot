@@ -17,7 +17,7 @@
     "test/core/next/fixtures.ts",
     "test/core/next/snapshot.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T23:01:18.137Z",
+  "heartbeat_at": "2026-10-25T23:01:24.099Z",
   "pr": 131,
   "pr_owner": "edanisko",
   "base_sha": "53b824d1d2e6484672a4aa2856045e4d784a9474",
