@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { checkModel } from "../adapters/agent/claude/usage.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
-import { failAttempt, heartbeat, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import { failAttempt, failClaimed, heartbeat, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
 import type { LaneIdentity, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
@@ -33,7 +33,8 @@ import type { Workspace } from "./workspace.ts";
  * - `stepKit`: a step's ending (`End`), its reasons, and its fenced edits on
  *   its own record (`held`, `beat`, `failed`, `lost`), on top of `forgeOps`.
  * - The unit track both processes keep: the keeper check, a held edit on the
- *   unit, a failed attempt and the unit's journal record.
+ *   unit, a failed attempt, its retry before the trailing wait when the
+ *   ledger did not take it, and the unit's journal record.
  * - `createSessionRunner`: prepare, the sandboxed run under the unit budget
  *   and the session limit, the kill `RESULT_LINGER_MS` after the result file
  *   first appears, the fresh run plus one resume, the usage-limit sleep with
@@ -44,6 +45,8 @@ import type { Workspace } from "./workspace.ts";
  */
 
 export const MAX_CLAIM_ROUNDS = 3;
+/** The wait between the retries of a failed attempt the ledger did not take (C4b). */
+export const FAIL_RETRY_MS = 60 * 1000;
 export const ZERO_SHA = "0".repeat(40);
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -515,6 +518,27 @@ export type TrackOps = {
   held(t: UnitTrack, make: (now: string, generation: number) => LedgerEdit, what: string): Promise<boolean>;
   /** A failed attempt: released, or parked at the attempts cap. */
   failUnit(t: UnitTrack, reason: string): Promise<LaneOutcome>;
+  /**
+   * Before the journal record and the trailing wait (C4b): a `failed` run
+   * that left its unit's state unknown, the record last seen `claimed` and
+   * its keeper still beating, tries the failed attempt again (`failClaimed`),
+   * at once and then every `FAIL_RETRY_MS` through `waiter`, until it lands,
+   * the unit is lost or the keeper ends, or `waitMs` has passed. So an outage
+   * that ends within the trailing wait releases the unit, instead of the
+   * keeper holding the claim through the wait and the record then going
+   * stale. Returns the trailing wait left to wait: `null` for none, as when a
+   * retry's wait ended early (woken, a STOP, a failed sleep). A lane-stop
+   * condition throws its `Halt`; nothing else throws.
+   */
+  retryFail(t: UnitTrack, outcome: LaneOutcome, p: RetryFailParams): Promise<number | null>;
+};
+
+export type RetryFailParams = {
+  readonly waiter: Waiter;
+  /** The outcome's trailing wait; `null` for none (one retry, no wait). */
+  readonly waitMs: number | null;
+  /** The host clock in epoch ms. */
+  readonly clock: () => number;
 };
 
 export function trackOps(p: TrackOpsParams): TrackOps {
@@ -564,7 +588,54 @@ export function trackOps(p: TrackOpsParams): TrackOps {
     return "failed";
   };
 
-  return { checkHeld, held, failUnit };
+  /** One retry of the failed attempt; `true` when there is nothing more to try. */
+  const retryOnce = async (t: UnitTrack, n: number): Promise<boolean> => {
+    const end = p.keeper()?.end() ?? null;
+    const generation = t.record?.generation;
+    if (end !== null || generation === undefined) return true;
+    let r: Swapped;
+    try {
+      r = await ops.swap(failClaimed({ unit: t.unit, by: identity, now: await ops.freshNow(), generation }), t.unit);
+    } catch (e) {
+      if (e instanceof Halt) throw e;
+      note(`failAttempt retry ${n} threw: ${message(e)}`);
+      return true;
+    }
+    if (r.kind === "ok") {
+      if (r.record !== null) t.record = r.record;
+      t.state = r.record?.state ?? null;
+      addReason(t, `failAttempt recorded on retry ${n}`);
+      note(`failAttempt retry ${n}: ${t.state ?? "unknown"}`);
+      return true;
+    }
+    note(`failAttempt retry ${n} ${r.kind === "lost" ? "lost the unit" : "failed"}: ${r.message}`);
+    return r.kind === "lost";
+  };
+
+  const retryFail = async (t: UnitTrack, outcome: LaneOutcome, r: RetryFailParams): Promise<number | null> => {
+    const keeper = p.keeper();
+    if (outcome !== "failed" || t.state !== null || t.record?.state !== "claimed" || keeper === null || keeper.end() !== null) return r.waitMs;
+    const until = r.clock() + (r.waitMs ?? 0);
+    note(`failAttempt not recorded: retrying every ${FAIL_RETRY_MS} ms for up to ${r.waitMs ?? 0} ms`);
+    for (let n = 1; ; n += 1) {
+      if (await retryOnce(t, n)) break;
+      const left = until - r.clock();
+      if (left <= 0) break;
+      let waited: WaitResult;
+      try {
+        waited = await r.waiter.wait({ ms: Math.min(FAIL_RETRY_MS, left) });
+      } catch (e) {
+        waited = { end: "failed", message: message(e) };
+      }
+      if (waited.end !== "elapsed") {
+        note(`failAttempt retries end: the wait ended ${waited.end}${waited.message === undefined ? "" : ` (${waited.message})`}`);
+        return null;
+      }
+    }
+    return r.waitMs === null ? null : Math.max(0, until - r.clock());
+  };
+
+  return { checkHeld, held, failUnit, retryFail };
 }
 
 export type JournalDeps = {

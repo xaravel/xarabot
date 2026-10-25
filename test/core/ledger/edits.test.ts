@@ -11,6 +11,7 @@ import {
   deleteReleasedRecurring,
   ejected,
   failAttempt,
+  failClaimed,
   fenced,
   finishRecurring,
   heartbeat,
@@ -275,6 +276,11 @@ const CASES: readonly Case[] = [
   ["failAttempt claimed, attempts 2", failAttempt(held), [rec({ attempts: 2 })], by(ALICE, NOW, { state: "parked", attempts: 3, park: blocked("attempts-cap") })],
   ["failAttempt merging, attempts 2", failAttempt(held), [rec({ state: "merging", attempts: 2, pr: 7 })], by(ALICE, NOW, { state: "released", attempts: 3, pr: 7 })],
   ["failAttempt released", failAttempt(held), [rec({ state: "released" })], "precondition"],
+  // failClaimed: failAttempt from claimed only
+  ["failClaimed claimed, attempts 1", failClaimed(held), [rec({ attempts: 1 })], by(ALICE, NOW, { state: "released", attempts: 2 }), `failAttempt ${U}`],
+  ["failClaimed claimed, attempts 2", failClaimed(held), [rec({ attempts: 2 })], by(ALICE, NOW, { state: "parked", attempts: 3, park: blocked("attempts-cap") }), `failAttempt ${U}`],
+  ["failClaimed merging", failClaimed(held), [rec({ state: "merging", attempts: 2, pr: 7 })], "precondition"],
+  ["failClaimed another holder", failClaimed(held), [rec({ owner: BOB.owner, host: BOB.host, lane: BOB.lane })], "precondition"],
   // release
   ["release claimed", release(held), [rec({ attempts: 1 })], by(ALICE, NOW, { state: "released", attempts: 1 })],
   ["release merging", release(held), [rec({ state: "merging" })], by(ALICE, NOW, { state: "released" })],

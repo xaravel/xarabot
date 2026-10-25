@@ -332,6 +332,8 @@ describe("runCoordinatorProcess", () => {
     };
     expect((await h.run({ forge, steps: { reconcile: step } })).outcome).toBe("failed");
     expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "claimed", attempts: 0 });
+    // The coordinator claim is lost: no retry, the unit is left to go stale for the new coordinator.
+    expect(h.waits.map((w) => w.ms)).toEqual([15 * MIN]);
     const unit = h.journal().find((j) => j.type === "unit");
     expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: null });
     const reason = unit?.type === "unit" ? (unit.reason ?? "") : "";
@@ -517,6 +519,34 @@ describe("runCoordinatorProcess: the shared track helpers (Story 2.6a)", () => {
     const unit = h.journal().find((j) => j.type === "unit");
     expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released" });
     expect(unit?.type === "unit" ? unit.reason : "").toContain("reconcile step threw: boom");
+  });
+
+  test("a failed attempt the ledger did not take is retried before the trailing wait: released, then what is left of the wait", async () => {
+    let down = true;
+    let clock = T0;
+    const h = harness({
+      waiter: async (p) => {
+        clock += p.ms;
+        down = false;
+        return { end: "elapsed" };
+      },
+    });
+    // failAttempt meets an outage that ends during the first retry wait.
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) =>
+        down && commit.message.startsWith("ledger: failAttempt reconcile:1 ") ? forgeErr("transient", "ECONNRESET") : h.fake.forge.ledgerSwap(oldSha, commit, o),
+    };
+    const step: CoordinatorStep = async () => {
+      throw new Error("boom");
+    };
+    expect((await h.run({ forge, now: () => clock, steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.commits("ledger: failAttempt reconcile:1 ")).toBe(1);
+    expect(h.waits.map((w) => w.ms)).toEqual([MIN, 14 * MIN]);
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released", attempts: 1 });
+    expect(unit?.type === "unit" ? unit.reason : "").toContain("failAttempt recorded on retry 2");
   });
 
   test("an unexpected error after the claim: one failed attempt, the journal reason names it", async () => {

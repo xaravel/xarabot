@@ -767,6 +767,129 @@ describe("runLaneProcess", () => {
     expect(rec.reason).toContain("failAttempt: ");
   });
 
+  /** The fake forge with `failAttempt` swaps failing transient while `down.on` (an outage only the ledger write meets). */
+  const failAttemptOutage = (h: Harness, down: { on: boolean }): Forge => {
+    const f = h.fake.forge;
+    return {
+      ...f,
+      ledgerSwap: (old, commit, o) =>
+        down.on && commit.message.startsWith("ledger: failAttempt ")
+          ? Promise.resolve({ ok: false as const, error: { kind: "transient" as const, message: "ledgerSwap: ECONNRESET" } })
+          : f.ledgerSwap(old, commit, o),
+    };
+  };
+
+  test("a failed attempt the ledger did not take is retried before the trailing wait: released, then what is left of the wait", async () => {
+    const h = harness();
+    await pr(h.fake, "1.1", "merged");
+    // The claim lands; markMerged fails not-found, a failed Halt; failAttempt meets an outage that ends during the first retry wait.
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 1) h.fake.control.injectError("ledgerSwap", { kind: "not-found", message: "ledgerSwap: gone" });
+    });
+    const down = { on: true };
+    let clock = T0;
+    const waits: number[] = [];
+    const r = await h.run({
+      forge: failAttemptOutage(h, down),
+      now: () => clock,
+      waiter: {
+        async wait(p) {
+          waits.push(p.ms);
+          clock += p.ms;
+          down.on = false;
+          return { end: "elapsed" };
+        },
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.fake.control.ledgerLog().map((c) => c.message)).toEqual(["root", "ledger: claim story:1.1 [skip ci]", "ledger: failAttempt story:1.1 [skip ci]"]);
+    // One retry wait, then the rest of the 15-minute trailing wait.
+    expect(waits).toEqual([60_000, 14 * 60_000]);
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "failed", state: "released", attempts: 1 });
+    expect(rec.reason).toContain("failAttempt: ");
+    expect(rec.reason).toContain("failAttempt recorded on retry 2");
+  });
+
+  test("a failed attempt the ledger never takes is retried until the trailing wait has passed, then the record is left claimed", async () => {
+    const h = harness();
+    await pr(h.fake, "1.1", "merged");
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 1) h.fake.control.injectError("ledgerSwap", { kind: "not-found", message: "ledgerSwap: gone" });
+    });
+    let clock = T0;
+    const waits: number[] = [];
+    const r = await h.run({
+      forge: failAttemptOutage(h, { on: true }),
+      now: () => clock,
+      waiter: {
+        async wait(p) {
+          waits.push(p.ms);
+          clock += p.ms;
+          return { end: "elapsed" };
+        },
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", attempts: 0 });
+    // Fifteen one-minute retry waits fill the trailing wait; none is left after them.
+    expect(waits).toEqual(Array.from({ length: 15 }, () => 60_000));
+    expect(h.unitRecord()).toMatchObject({ outcome: "failed", state: null });
+  });
+
+  test("a retry wait that ends early (woken) ends the retries and the trailing wait", async () => {
+    const h = harness({ waitEnds: ["woken"] });
+    await pr(h.fake, "1.1", "merged");
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 1) h.fake.control.injectError("ledgerSwap", { kind: "not-found", message: "ledgerSwap: gone" });
+    });
+    expect((await h.run({ forge: failAttemptOutage(h, { on: true }) })).outcome).toBe("failed");
+    expect(h.waits.map((w) => w.ms)).toEqual([60_000]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", attempts: 0 });
+    expect(h.unitRecord()).toMatchObject({ outcome: "failed", state: null });
+  });
+
+  test("a lost unit: the one retry finds it lost and writes nothing, and the trailing wait is whole", async () => {
+    const h = harness({ behaviors: [finishes("no-op")] });
+    // Another lane takes the record over after the claim: the park is refused, the unit lost.
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 2) {
+        const taken = rec({ unit: "story:1.1", owner: BOB.owner, host: BOB.host, lane: BOB.lane, generation: 2, globs: ["src/s0/**"] });
+        h.fake.control.writeForeignLedger({ message: "bob takes over [skip ci]", writes: tip([taken]), deletes: [] });
+      }
+    });
+    expect((await h.run({ now: () => T0 })).outcome).toBe("failed");
+    expect(h.waits.map((w) => w.ms)).toEqual([15 * 60_000]);
+    expect(h.fake.control.ledgerLog().some((c) => c.message.startsWith("ledger: failAttempt "))).toBe(false);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ owner: BOB.owner, generation: 2 });
+    expect(h.unitRecord()).toMatchObject({ outcome: "failed", state: null });
+  });
+
+  test("a claim whose ack is lost, with another lane's write after it, is this lane's claim: the session runs", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const f = h.fake.forge;
+    let swaps = 0;
+    const forge: Forge = {
+      ...f,
+      ledgerSwap: async (old, commit, o) => {
+        const r = await f.ledgerSwap(old, commit, o);
+        if (++swaps !== 1 || !r.ok) return r;
+        // The claim landed; another lane claims another unit before this lane reads the tip again.
+        const bobs = rec({ unit: "story:2.1", owner: BOB.owner, host: BOB.host, lane: BOB.lane, globs: ["src/other/**"] });
+        h.fake.control.writeForeignLedger({ message: "bob claims [skip ci]", writes: tip([bobs]), deletes: [] });
+        return { ok: false as const, error: { kind: "transient" as const, message: "ledgerSwap: ack lost" } };
+      },
+    };
+    expect((await h.run({ forge })).outcome).toBe("progress");
+    expect(h.runs).toHaveLength(1);
+    const messages = h.fake.control.ledgerLog().map((c) => c.message);
+    expect(messages.filter((m) => m.startsWith("ledger: claim "))).toEqual(["ledger: claim story:1.1 [skip ci]"]);
+    expect(messages).toContain("bob claims [skip ci]");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", owner: "alice", lane: "builder-1", generation: 1 });
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "claimed", generation: 1 });
+  });
+
   test("no-op: parked blocked no-op, checked against a done spec", async () => {
     const h = harness({ behaviors: [finishes("no-op")] });
     expect((await h.run()).outcome).toBe("progress");

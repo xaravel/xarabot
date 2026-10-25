@@ -83,7 +83,8 @@ export { CI_FIX_LOG, readsPath, type LaneProcessResult, type PrStep, type PrStep
  * Every sandboxed run is bounded by the unit budget, the session limit and
  * the result linger; a usage limit sleeps through the `Waiter` and starts
  * the session again. After the outcome the process waits its trailing wait,
- * then clears `lane.pid` (Story 1.18).
+ * then clears `lane.pid` (Story 1.18). A failed attempt the ledger did not
+ * take is retried first, within that wait (`retryFail`, C4b).
  *
  * From the claim until the process ends, one heartbeat keeper stamps the
  * record every 5 minutes (Story 2.1). When it loses the unit, or releases it
@@ -261,7 +262,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   /** The keeper's signal, to join into a run's or a wait's signal. */
   const keeperSignals = (): AbortSignal[] => (keeper === null ? [] : [keeper.signal]);
 
-  const { checkHeld, held, failUnit } = trackOps({ ops, identity, note, keeper: () => keeper });
+  const { checkHeld, held, failUnit, retryFail } = trackOps({ ops, identity, note, keeper: () => keeper });
 
   /** Appends one unit journal record, after flushing the unit's log. */
   const journal = (e: JournalEntry): void =>
@@ -878,6 +879,19 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
   try {
     const t = unit as BuilderTrack | null;
+    // A failed attempt the ledger did not take is retried before the journal record and the trailing wait (C4b).
+    let waitMs = trailingWaitMs(outcome);
+    if (t !== null) {
+      try {
+        waitMs = await retryFail(t, outcome, { waiter: deps.waiter, waitMs, clock });
+      } catch (inner) {
+        if (!(inner instanceof Halt)) throw inner;
+        outcome = inner.outcome;
+        haltReason = inner.reason;
+        addReason(t, inner.reason);
+        waitMs = trailingWaitMs(outcome);
+      }
+    }
     if (t !== null) {
       note(`outcome ${outcome}`);
       // A blocked park after a session: the work stays on this host only, saved when the lane next rebuilds its clone.
@@ -903,8 +917,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     reportStore(store.writeOutcome(outcome), "outcome");
 
     // The keeper goes on through the trailing wait while the record is still claimed or merging.
-    const waitMs = trailingWaitMs(outcome);
-    if (waitMs !== null) {
+    if (waitMs !== null && waitMs > 0) {
       let waited: WaitResult;
       try {
         waited = await deps.waiter.wait({ ms: waitMs });

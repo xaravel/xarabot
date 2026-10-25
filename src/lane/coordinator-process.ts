@@ -64,8 +64,9 @@ import type { Waiter, WaitResult } from "./wait.ts";
  * queue (Story 2.6).
  *
  * The forge and ledger helpers, the unit keeper check (`checkHeld`), the
- * failed attempt (`failUnit`) and the unit journal record are the lane
- * process's own, from `session.ts` (Story 2.6a).
+ * failed attempt (`failUnit`), its retry before the trailing wait
+ * (`retryFail`) and the unit journal record are the lane process's own, from
+ * `session.ts` (Story 2.6a).
  */
 
 /** What a coordinator step gets: the claimed unit and the snapshot it was picked from. */
@@ -247,7 +248,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   };
 
   /** The unit keeper's end decides through the shared track helpers: `checkHeld` and `failUnit` (Story 2.6a). */
-  const { checkHeld, failUnit } = trackOps({ ops, identity, note, keeper: () => unitKeeper });
+  const { checkHeld, failUnit, retryFail } = trackOps({ ops, identity, note, keeper: () => unitKeeper });
 
   const idleSpan = (reason: string, startedMs: number): void => {
     const span = store.appendJournal({ schema_version: 1, type: "span", span: "idle", reason, started_at: iso(startedMs), ended_at: iso(clock()) });
@@ -430,6 +431,21 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
 
   try {
     const t = track as UnitTrack | null;
+    // A failed attempt the ledger did not take is retried before the journal record and the trailing wait (C4b),
+    // unless the coordinator claim is lost or lapsed: then the unit is left to go stale for the new coordinator.
+    let waitMs = coordinatorTrailingWaitMs(outcome);
+    const claimBefore = (coordinatorKeeper as Heartbeat | null)?.end() ?? null;
+    if (t !== null && (claimBefore === null || claimBefore.kind === "moved-on")) {
+      try {
+        waitMs = await retryFail(t, outcome, { waiter: deps.waiter, waitMs, clock });
+      } catch (inner) {
+        if (!(inner instanceof Halt)) throw inner;
+        outcome = inner.outcome;
+        haltReason = inner.reason;
+        addReason(t, inner.reason);
+        waitMs = coordinatorTrailingWaitMs(outcome);
+      }
+    }
     if (t !== null) {
       note(`outcome ${outcome}`);
       journalUnit(
@@ -455,8 +471,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
     // unless the coordinator claim is lost or lapsed: then the unit is left to go stale for the new coordinator.
     const claimEnd = (coordinatorKeeper as Heartbeat | null)?.end() ?? null;
     if (claimEnd !== null && claimEnd.kind !== "moved-on") await (unitKeeper as Heartbeat | null)?.stop();
-    const waitMs = coordinatorTrailingWaitMs(outcome);
-    if (waitMs !== null) {
+    if (waitMs !== null && waitMs > 0) {
       let waited: WaitResult;
       try {
         waited = await deps.waiter.wait({ ms: waitMs });
