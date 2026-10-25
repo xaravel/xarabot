@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-15-field-level-status-file-rules",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/core/retro/**",
     "test/lane/commit.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T22:42:53.068Z",
+  "heartbeat_at": "2026-10-25T22:44:16.164Z",
   "pr": 134,
   "pr_owner": "edanisko",
   "base_sha": "43cdad1ff4e96c7feba592d49f66f81549460019",
@@ -25,7 +25,17 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/lane/write-check.ts",
+      "src/lane/commit.ts",
+      "test/core/lane/write-check.test.ts",
+      "test/lane/commit.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
