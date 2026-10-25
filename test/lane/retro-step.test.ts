@@ -696,14 +696,18 @@ describe("createRetroStep: validation", () => {
   });
 });
 
+/** The retro PR opened on its branch at `head` (default a new commit, its CI passing). */
+async function openRetroPr(h: Harness, head = h.fake.control.makeCommit()): Promise<{ pr: number; head: string }> {
+  h.fake.control.setChecks(head, PASS);
+  expect((await h.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts())).ok).toBe(true);
+  const opened = await h.fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts());
+  if (!opened.ok) throw new Error(opened.error.message);
+  return { pr: opened.value.number, head };
+}
+
 describe("createRetroStep: resuming an adopted PR", () => {
-  const adopt = async (h: Harness, over: Partial<UnitRecord>) => {
-    const head = h.fake.control.makeCommit();
-    h.fake.control.setChecks(head, PASS);
-    expect((await h.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts())).ok).toBe(true);
-    const opened = await h.fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts());
-    if (!opened.ok) throw new Error(opened.error.message);
-    const pr = opened.value.number;
+  const adopt = async (h: Harness, over: Partial<UnitRecord>, at?: string) => {
+    const { pr, head } = await openRetroPr(h, at);
     h.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([coord(U, { globs: RETRO_GLOBS, generation: 2, pr, pr_owner: COORD.owner, head_sha: head, ...over })]), deletes: [] });
     return { pr, head };
   };
@@ -718,6 +722,71 @@ describe("createRetroStep: resuming an adopted PR", () => {
     expect(out.state).toBe("merging");
     expect(h.fake.control.queue()).toEqual([pr]);
     expect(h.diffs[0]?.headSha).toBe(head);
+    expect(h.trees).toEqual([]);
+  });
+
+  /** The result the record held at `VALIDATED` before the claim adopted the PR at the harness head, which dropped it. */
+  const VALIDATED = "9".repeat(40);
+  const KEPT = { verdict: "accepted-with-open-items" as const, items: ITEMS };
+  const runMoved = async (h: Harness) => {
+    const { pr } = await adopt(h, { retro_result: null }, h.head);
+    const i = await h.input();
+    const units = i.snapshot.ledger.units.map((r) => (r.unit === U ? { ...r, state: "released" as const, generation: 1, head_sha: VALIDATED, retro_result: KEPT } : r));
+    h.events.length = 0;
+    const out = await createRetroStep(h.deps())({ ...i, snapshot: { ...i.snapshot, ledger: { ...i.snapshot.ledger, units } } });
+    return { pr, out, mainSha: i.snapshot.main_sha };
+  };
+
+  test("the head moved, its doc and items unchanged: the result checked again against the moved head onto main, recorded with it, then CI and the gate (C1)", async () => {
+    const h = harness();
+    const { pr, out, mainSha } = await runMoved(h);
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(h.prompts).toEqual([]);
+    expect(h.commits).toEqual([]);
+    expect(h.trees.map((t) => t.sha)).toEqual([mainSha, h.head]);
+    expect(h.logs.some((l) => l.includes(`head moved from ${VALIDATED} to ${h.head}`))).toBe(true);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", head_sha: h.head, passed_sha: h.head, retro_result: KEPT });
+    expect(h.fake.control.queue()).toEqual([pr]);
+  });
+
+  test.each([
+    ["its doc now rejected", { ...defaultHead(), [DOC]: doc("rejected") }, /moved head .*frontmatter verdict is "rejected", not the result's "accepted-with-open-items"/],
+    ["an item dropped from its action items", { ...defaultHead(), [STATUS]: statusText([OLD_ITEM, A]) }, /moved head .*are not the action items the commit appends/],
+    ["a second item appended", { ...defaultHead(), [STATUS]: statusText([OLD_ITEM, A, B, "epic-2-retro-item-3-new"]) }, /moved head .*are not the action items the commit appends/],
+    ["its retro document removed", (({ [DOC]: _d, ...rest }) => rest)(defaultHead()), /moved head .*adds or changes 0 retro documents/],
+  ] as const)("the head moved, %s: a failed attempt, the stale result neither recorded nor queued (C1)", async (_name, headFiles, why) => {
+    const h = harness({ headFiles });
+    const { out } = await runMoved(h);
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toMatch(why);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "released", head_sha: h.head, retro_result: null });
+    expect(h.fake.control.queue()).toEqual([]);
+    expect(h.events).not.toContain("checks");
+  });
+
+  test("the head moved, a tree read failing: a failed attempt, nothing queued", async () => {
+    const h = harness();
+    const { pr } = await adopt(h, { retro_result: null }, h.head);
+    const i = await h.input();
+    const units = i.snapshot.ledger.units.map((r) => (r.unit === U ? { ...r, head_sha: VALIDATED, retro_result: KEPT } : r));
+    const out = await createRetroStep(h.deps({ treeFiles: async () => ({ ok: false, error: { kind: "fetch", message: "offline" } }) }))({
+      ...i,
+      snapshot: { ...i.snapshot, ledger: { ...i.snapshot.ledger, units } },
+    });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("tree files fetch: offline");
+    expect(h.fake.control.queue()).not.toContain(pr);
+  });
+
+  test("a result before the claim on another PR is not re-checked: no result on the record is a failed attempt", async () => {
+    const h = harness();
+    const { pr } = await adopt(h, { retro_result: null }, h.head);
+    const i = await h.input();
+    const units = i.snapshot.ledger.units.map((r) => (r.unit === U ? { ...r, pr: pr + 1, head_sha: VALIDATED, retro_result: KEPT } : r));
+    const out = await createRetroStep(h.deps())({ ...i, snapshot: { ...i.snapshot, ledger: { ...i.snapshot.ledger, units } } });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("has no retro_result on the record");
+    expect(h.trees).toEqual([]);
   });
 
   test("without a retro_result: a failed attempt, no session", async () => {
@@ -758,5 +827,42 @@ describe("retro through the coordinator process", () => {
     const unit = h.journal().find((x) => x.type === "unit") as UnitJournalRecord;
     expect(unit).toMatchObject({ unit: U, outcome: "progress", state: "merging", sessions: 1 });
     expect(swaps(h.events).length).toBeGreaterThan(0);
+  });
+
+  const runProcess = (h: Harness) => {
+    let clock = 0;
+    return runCoordinatorProcess({
+      forge: h.fake.forge,
+      agent: { vendor: "claude", defaultModel: "claude-opus-5-5" } as Agent,
+      store: createFsLaneStore({ laneDir: h.laneDir, hostStop: join(h.laneDir, "..", "STOP") }),
+      laneDir: h.laneDir,
+      identity: COORD,
+      lane: LANE,
+      claim: claimRec(),
+      steps: { retro: createRetroStep(h.deps()) },
+      pid: 12345,
+      now: () => T0 + 1000 * clock++,
+      sleep: async () => {},
+      random: () => 0,
+      heartbeat: { sleep: (_ms, signal) => new Promise<void>((resolve) => (signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true }))) },
+      waiter: { wait: async () => ({ end: "elapsed" }) },
+    });
+  };
+
+  test.each([
+    ["its doc and items unchanged: re-checked, recorded with the moved head, merging and enqueued", defaultHead(), "merging"],
+    ["its doc now rejected: a failed attempt, the stale result dropped", { ...defaultHead(), [DOC]: doc("rejected") }, "released"],
+  ] as const)("a released retro whose open PR's head moved past its validated one is adopted, %s (C1)", async (_name, headFiles, state) => {
+    const h = harness({ records: [RECENT], headFiles });
+    const { pr } = await openRetroPr(h, h.head);
+    const validated = "9".repeat(40);
+    const result = { verdict: "accepted-with-open-items" as const, items: ITEMS };
+    const released = coord(U, { state: "released", globs: RETRO_GLOBS, pr, pr_owner: COORD.owner, head_sha: validated, passed_sha: validated, retro_result: result });
+    h.fake.control.writeForeignLedger({ message: "released [skip ci]", writes: tip([RECENT, released]), deletes: [] });
+    await runProcess(h);
+    const after = (await h.ledger()).get(U);
+    expect(h.prompts).toEqual([]);
+    expect(after).toMatchObject({ state, generation: 2, pr, head_sha: h.head, retro_result: state === "merging" ? result : null });
+    expect(h.fake.control.queue()).toEqual(state === "merging" ? [pr] : []);
   });
 });
