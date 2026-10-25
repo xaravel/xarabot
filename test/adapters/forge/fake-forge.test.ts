@@ -183,8 +183,9 @@ describe("fake forge", () => {
     value(await forge.enqueue(a.number, a.head_sha, live()));
     expect(control.queue()).toEqual([b.number, a.number]);
     const main0 = value(await forge.snapshot(live())).main.sha;
-    expect(control.mergeQueueHead()).toEqual({ ...b, state: "merged" });
+    const merged = control.mergeQueueHead();
     const main1 = value(await forge.snapshot(live())).main.sha;
+    expect(merged).toEqual({ ...b, state: "merged", merge_sha: main1 });
     expect(main1).not.toBe(main0);
     expect(control.queue()).toEqual([a.number]);
     expect(control.mergeQueueHead()?.number).toBe(a.number);

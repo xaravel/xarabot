@@ -37,6 +37,17 @@ export function epicContextPath(pattern: string, epic: number): string {
   return pattern.replaceAll("<N>", String(epic));
 }
 
+/** An Epic's live evidence glob: `live_evidence_glob` with every `<N>` replaced. */
+export function liveEvidenceGlob(pattern: string, epic: number): string {
+  return pattern.replaceAll("<N>", String(epic));
+}
+
+/** Whether some path of `tree` matches Epic `epic`'s live evidence glob. */
+export function hasLiveEvidence(pattern: string, epic: number, tree: readonly string[]): boolean {
+  const glob = new Bun.Glob(liveEvidenceGlob(pattern, epic));
+  return tree.some((p) => glob.match(p));
+}
+
 /**
  * The state of Epic `epic`'s context file from its text (`null` when the
  * file is not in the tree): `missing`, `empty` (blank text), `wrong-heading`
@@ -83,6 +94,7 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
   let graph: unknown;
   const manifests: unknown[] = [];
   const epicContext: Record<string, EpicContextState> = {};
+  const liveEvidence: Record<string, boolean> = {};
   let retroGates = emptyRetroGates();
   if (!resolved.ok) {
     graph = { ok: false, error: { kind: resolved.error.kind, message: resolved.error.message } };
@@ -101,6 +113,7 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
       const text = readListed(repoSnap, path);
       if (!text.ok) return text;
       epicContext[String(e.number)] = epicContextState(e.number, text.value);
+      liveEvidence[String(e.number)] = hasLiveEvidence(config.live_evidence_glob, e.number, repoSnap.tree);
     }
   }
 
@@ -121,6 +134,7 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
     retro_gates: retroGates,
     escalations: input.escalations,
     epic_context: epicContext,
+    live_evidence: liveEvidence,
     prs: input.prs,
     lane: input.lane,
     role: input.role,

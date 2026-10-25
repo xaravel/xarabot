@@ -118,7 +118,7 @@ export type CoordinatorDeps = {
   readonly lane: Lane;
   /** The `coordinator.json` record the start check wrote. */
   readonly claim: CoordinatorRecord;
-  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5) and `planning` (Story 2.7). */
+  /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5), `planning` (Story 2.7) and `retro` (Story 2.9). */
   readonly steps: CoordinatorSteps;
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;

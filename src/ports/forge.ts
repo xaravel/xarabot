@@ -111,6 +111,8 @@ export type ForgePr = {
   readonly head_sha: GitSha;
   readonly title: string;
   readonly body: string;
+  /** The commit the PR's merge made on its base; `null` unless the PR is `merged` (Story 2.9). */
+  readonly merge_sha: GitSha | null;
 };
 
 /** A push with a lease: `expected_sha: null` means the branch must not exist yet. */

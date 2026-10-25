@@ -427,9 +427,30 @@ export function forgeContract(harness: ForgeHarness): void {
       const sha = await need(fx, "makeCommit")();
       value(await fx.forge.pushBranch({ branch: "story/3.1", expected_sha: null, sha }, live()));
       const pr = value(await fx.forge.openPr({ branch: "story/3.1", base: "main", title: "T", body: "B" }, live()));
-      expect(pr).toEqual({ number: pr.number, branch: "story/3.1", base: "main", state: "open", head_sha: sha, title: "T", body: "B" });
+      expect(pr).toEqual({ number: pr.number, branch: "story/3.1", base: "main", state: "open", head_sha: sha, title: "T", body: "B", merge_sha: null });
       expect(kind(await fx.forge.openPr({ branch: "story/3.1", base: "main", title: "T2", body: "B2" }, live()))).toBe("conflict");
     });
+
+    scenario(
+      "a merged PR carries the merge SHA main moved to; an open or closed one carries null",
+      [...OPEN_PR, "enqueue", "listPrsByBranch", "closePr", "snapshot"],
+      ["makeCommit", "mergeQueueHead"],
+      async (fx) => {
+        const f = fx.forge;
+        const merged = await openOn(fx, "story/3.9");
+        const closed = await openOn(fx, "story/3.10");
+        value(await f.closePr(closed.number, live()));
+        value(await f.enqueue(merged.number, merged.head_sha, live()));
+        const done = await need(fx, "mergeQueueHead")();
+        const main = value(await f.snapshot(live())).main.sha;
+        expect(done?.merge_sha).toBe(main);
+        const [listed] = value(await f.listPrsByBranch("story/3.9", live()));
+        expect([listed?.state, listed?.merge_sha]).toEqual(["merged", main]);
+        expect(value(await f.listPrsByBranch("story/3.10", live())).map((p) => [p.state, p.merge_sha])).toEqual([["closed", null]]);
+        const open = await openOn(fx, "story/3.11");
+        expect(open.merge_sha).toBeNull();
+      },
+    );
 
     scenario("a push moves an open PR's head", [...OPEN_PR, "listPrsByBranch"], ["makeCommit"], async (fx) => {
       const pr = await openOn(fx, "story/3.2");

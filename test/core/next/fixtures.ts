@@ -58,7 +58,13 @@ export type World = {
   readonly coordinator?: CoordinatorRecord | null;
   /** Config `digest_time`; default the package default (08:00). */
   readonly digestTime?: string;
+  /** Config `live_evidence_glob`; default the package default. */
+  readonly liveEvidenceGlob?: string;
+  /** Epics whose default live evidence file (`docs/maintainer/evidence/epic-<N>.md`) is on `main`. */
+  readonly evidence?: readonly number[];
 };
+
+export const evidencePath = (n: number) => `docs/maintainer/evidence/epic-${n}.md`;
 
 export const manifestPath = (id: string) => `stories/${id}.md`;
 
@@ -89,6 +95,7 @@ function config(w: World): string {
     `standing_authority_path: ${AUTHORITY}`,
     `bootstrapped_epics: [${(w.bootstrapped ?? []).join(", ")}]`,
     ...(w.digestTime === undefined ? [] : [`digest_time: "${w.digestTime}"`]),
+    ...(w.liveEvidenceGlob === undefined ? [] : [`live_evidence_glob: "${w.liveEvidenceGlob}"`]),
     "manifests:",
     "  dir: stories",
   ];
@@ -133,6 +140,7 @@ export function input(w: World): AssembleInput {
   for (const n of Object.keys(w.epics).map(Number)) files[contextPath(n)] = `# Epic ${n} Context: Epic ${n}\n\nGoal.\n`;
   for (const [n, text] of Object.entries(w.contexts ?? {})) files[contextPath(Number(n))] = text;
   for (const m of specs) files[manifestPath(m.id)] = manifest(m);
+  for (const n of w.evidence ?? []) files[evidencePath(n)] = `# Epic ${n} live evidence\n`;
   Object.assign(files, w.files ?? {});
   const present = Object.entries(files).filter((e): e is [string, string] => e[1] !== null);
   const blob_shas: Record<string, string> = {};

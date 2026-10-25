@@ -16,6 +16,10 @@ describe("unit ids", () => {
     ["story:1.17a", "story", "units/story__1.17a.json"],
     ["retro:2", "retro", "units/retro__2.json"],
     ["retro-item:epic-2-retro-item-1-fix-polling", "retro-item", "units/retro-item__epic-2-retro-item-1-fix-polling.json"],
+    // The stock retro's `_slugify` keeps `_` (even doubled) and Unicode letters, marks and digits (Story 2.9).
+    ["retro-item:epic-2-retro-item-3-add-a-retro_result-test", "retro-item", "units/retro-item__epic-2-retro-item-3-add-a-retro_result-test.json"],
+    ["retro-item:epic-2-retro-item-5-a__b", "retro-item", "units/retro-item__epic-2-retro-item-5-a__b.json"],
+    ["retro-item:epic-2-retro-item-4-réviser-l-écran-日本", "retro-item", "units/retro-item__epic-2-retro-item-4-réviser-l-écran-日本.json"],
     ["checkpoint:3", "checkpoint", "units/checkpoint__3.json"],
     ["planning:sprint-review.4", "planning", "units/planning__sprint-review.4.json"],
     ["reconcile:12", "reconcile", "units/reconcile__12.json"],
@@ -35,6 +39,10 @@ describe("unit ids", () => {
     "retro:01",
     "retro:x",
     "retro-item:item-1",
+    "retro-item:epic-2-retro-item-1-",
+    "retro-item:epic-2-retro-item-1-a--b",
+    "retro-item:epic-2-retro-item-1-a b",
+    "retro-item:epic-2-retro-item-1-a.b",
     "checkpoint:-1",
     "planning:Sprint.1",
     "planning:sprint",
@@ -110,7 +118,7 @@ describe("UnitRecordSchema", () => {
     ["unnormalized glob", rec({ globs: ["./src/**"] })],
     ["empty provider", rec({ builder_providers: [""] })],
     ["bad heartbeat", rec({ heartbeat_at: "yesterday" })],
-    ["schema_version 4", rec({ schema_version: 4 as never })],
+    ["schema_version 5", rec({ schema_version: 5 as never })],
     ["schema_version 0", rec({ schema_version: 0 as never })],
   ];
   for (const [name, value] of invalid) {
@@ -135,7 +143,8 @@ describe("CoordinatorRecordSchema", () => {
     expect(CoordinatorRecordSchema.safeParse(good).success).toBe(true);
     expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 2 }).success).toBe(true);
     expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 3 }).success).toBe(true);
-    expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 4 }).success).toBe(false);
+    expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 4 }).success).toBe(true);
+    expect(CoordinatorRecordSchema.safeParse({ ...good, schema_version: 5 }).success).toBe(false);
     expect(CoordinatorRecordSchema.safeParse({ ...good, digest_posted_at: T0, rulings_cursor: "123" }).success).toBe(true);
   });
   for (const [name, value] of [

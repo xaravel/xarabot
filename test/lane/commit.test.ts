@@ -475,6 +475,36 @@ describe("commitSession: the write check", () => {
       });
       await noHead(repo);
     });
+
+    // Story 2.9: the retro records in retro-gates.yaml are reconcile's alone; the check reads both sides' texts.
+    const GATES = 'schema_version: 1\nepics:\n  "1":\n    retro:\n      verdict: accepted\n      unit: "retro:1"\n      recorded_at: "2026-10-20T00:00:00Z"\n';
+    const retroUnit = coordinatorWriteRules({ config, globs: coordinatorGlobs({ kind: "retro", epic: 2 }, config), graphUnit: false });
+
+    test.each([
+      ["a verdict changed", GATES, GATES.replace("accepted", "rejected"), "retro-verdict"],
+      ["a retro added to an absent file", null, GATES, "retro-verdict"],
+      ["the file deleted (an earlier class, mode, wins)", GATES, null, "mode"],
+      ["text that does not parse", GATES, "schema_version: 1\nepics: [\n", "retro-gates-invalid"],
+    ] as const)("retro-gates.yaml under coordinator rules: %s", async (_name, before, after, cls) => {
+      const repo = await setup();
+      const { [RETRO]: _drop, ...rest } = baseFiles;
+      const base = await commit(repo.gitDir, before === null ? rest : { ...rest, [RETRO]: before });
+      value(await rebuildClone(rebuild(repo, base)));
+      if (after === null) rmSync(join(repo.clone, RETRO));
+      else write(repo, RETRO, after);
+      const r = value(await commitSession(session(repo, base, base, { rules: retroUnit })));
+      expect(r.kind === "refused" ? r.refusals.filter((x) => x.path === RETRO).map((x) => x.class) : r.kind).toContain(cls);
+      await noHead(repo);
+    });
+
+    test("retro-gates.yaml under coordinator rules: a change with the same data (a comment) is committed", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, { ...baseFiles, [RETRO]: GATES });
+      value(await rebuildClone(rebuild(repo, base)));
+      write(repo, RETRO, `# note\n${GATES}`);
+      const r = value(await commitSession(session(repo, base, base, { rules: retroUnit })));
+      expect(r.kind).toBe("committed");
+    });
   });
 });
 

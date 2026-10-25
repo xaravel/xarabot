@@ -36,6 +36,7 @@ const RULES: WriteRules = writeRules({
     manifests: { dir: "stories" },
     standing_authority_path: AUTHORITY,
     epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+    live_evidence_glob: CONFIG_DEFAULTS.live_evidence_glob,
   },
   policy: { protected_paths: ["secrets/**", "**/*.pem"] },
   specPath: SPEC,
@@ -86,6 +87,35 @@ const CLAUDE_CASES: readonly Case[] = [
     rules: { coordinatorFiles: [".xarabot/sprint-status.yaml", RETRO, EPICS] },
     changes: [p(".xarabot/sprint-status.yaml")],
     refused: [no(".xarabot/sprint-status.yaml", "coordinator-file")],
+  },
+
+  // live-evidence (Story 2.9).
+  {
+    name: "a live evidence file",
+    covers: ["live-evidence"],
+    changes: [p("docs/maintainer/evidence/epic-2.md")],
+    refused: [no("docs/maintainer/evidence/epic-2.md", "live-evidence")],
+  },
+  {
+    name: "a live evidence file, case-folded and any Epic",
+    covers: ["live-evidence"],
+    changes: [p("Docs/Maintainer/Evidence/EPIC-12.MD")],
+    refused: [no("Docs/Maintainer/Evidence/EPIC-12.MD", "live-evidence")],
+  },
+  { name: "another file in the evidence folder is not live evidence", covers: [], changes: [p("docs/maintainer/evidence/notes.md")], refused: [] },
+  {
+    name: "Infrastructure approved never covers live evidence",
+    covers: ["live-evidence"],
+    rules: { infrastructureApproved: true },
+    changes: [p("docs/maintainer/evidence/epic-2.md")],
+    refused: [no("docs/maintainer/evidence/epic-2.md", "live-evidence")],
+  },
+  {
+    name: "a live evidence file under a Protected Path is reported as live-evidence",
+    covers: ["live-evidence"],
+    rules: { protectedPaths: ["docs/**"] },
+    changes: [p("docs/maintainer/evidence/epic-3.md")],
+    refused: [no("docs/maintainer/evidence/epic-3.md", "live-evidence")],
   },
 
   // xarabot.
@@ -368,6 +398,7 @@ describe("writeRules", () => {
       standingAuthorityPath: AUTHORITY,
       protectedPaths: ["secrets/**", "**/*.pem"],
       epicContextPath: CONFIG_DEFAULTS.epic_context_path,
+      liveEvidenceGlob: "docs/maintainer/evidence/epic-*.md",
       specPath: SPEC,
       superseded: [],
       storyFile: STORY,
@@ -384,6 +415,7 @@ describe("writeRules", () => {
       manifests: { dir: "stories" },
       standing_authority_path: AUTHORITY,
       epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+      live_evidence_glob: CONFIG_DEFAULTS.live_evidence_glob,
     };
     expect(writeRules({ config, policy: { protected_paths: [] }, specPath: SPEC, superseded: [old], storyFile: STORY, infrastructureApproved: false }).superseded).toEqual([old]);
   });
@@ -465,6 +497,31 @@ describe("statusLineOnly", () => {
 // ------------------------------------------------------------- coordinator
 
 const COORD_CONFIG = { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } };
+const RETRO_UNIT: CoordinatorUnitSpec = { kind: "retro", epic: 2 };
+const EMPTY_GATES = "schema_version: 1\nepics: {}\n";
+const GO = '      go:\n        by: edanisko\n        at: "2026-10-21T00:00:00Z"\n        ruling: maintainer-pr\n';
+const GATES_2 = [
+  "schema_version: 1",
+  "epics:",
+  '  "2":',
+  "    retro:",
+  "      verdict: rejected",
+  '      unit: "retro:2"',
+  '      recorded_at: "2026-10-20T00:00:00Z"',
+  GO.trimEnd(),
+  "    items:",
+  '      - id: "epic-2-retro-item-1-fix"',
+  "        text: Fix it",
+  "        route: lane",
+  "        blocking: true",
+  '        globs: ["src/x/**"]',
+  "        status: open",
+  "",
+].join("\n");
+const ITEM_2 = '      - id: "epic-2-retro-item-2-more"\n        text: More\n        route: maintainer\n        blocking: false\n        globs: []\n        status: open\n';
+const CHECKPOINT_3 = '  "3":\n    checkpoint:\n      go:\n        by: edanisko\n        at: "2026-10-22T00:00:00Z"\n        ruling: maintainer-pr\n';
+/** A regular-file change to `retro-gates.yaml` with its two texts. */
+const gates = (before: string | null, after: string | null): WriteChange => ({ path: RETRO, mode: "100644", retroGates: { before, after } });
 const STATUS_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "status" };
 const GRAPH_UNIT: CoordinatorUnitSpec = { kind: "planning", planning: "graph" };
 const CONTEXT_2 = "_bmad-output/implementation-artifacts/epic-2-context.md";
@@ -483,10 +540,10 @@ type CoordCase = {
 
 const COORD_CASES: readonly CoordCase[] = [
   // A unit inside its own globs.
-  { name: "status planning writes the status files and an Epic context", unit: STATUS_UNIT, changes: [SPRINT, RETRO, CONTEXT_2], refused: [] },
+  { name: "status planning writes the status files and an Epic context", unit: STATUS_UNIT, changes: [SPRINT, gates(null, EMPTY_GATES), CONTEXT_2], refused: [] },
   { name: "graph planning writes the graph inputs", unit: GRAPH_UNIT, changes: [EPICS, ".xarabot/epics.yaml", "stories/2.4.md"], refused: [] },
   { name: "a graph unit is allowed its inputs, case-folded", unit: GRAPH_UNIT, changes: ["_BMAD-output/planning-artifacts/Epics.md", ".XARABOT/epics.YAML"], refused: [] },
-  { name: "a retro writes its retro document", unit: { kind: "retro", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-2-retro-2026-10-24.md", RETRO], refused: [] },
+  { name: "a retro writes its retro document", unit: { kind: "retro", epic: 2 }, changes: ["_bmad-output/implementation-artifacts/epic-2-retro-2026-10-24.md", gates(EMPTY_GATES, `${EMPTY_GATES}# a comment\n`)], refused: [] },
   { name: "a retro item writes its own globs", unit: { kind: "retro-item", globs: ["src/x/**"] }, changes: ["src/x/a.ts"], refused: [] },
   // xarabot.
   { name: "under .xarabot but epics.yaml: xarabot", unit: GRAPH_UNIT, changes: [".xarabot/config.yaml"], refused: [[".xarabot/config.yaml", "xarabot"]] },
@@ -505,7 +562,7 @@ const COORD_CASES: readonly CoordCase[] = [
   {
     name: "status files with no graph input in the diff: no graph-and-status",
     unit: { kind: "retro-item", globs: ["_bmad-output/**"] },
-    changes: [SPRINT, RETRO, "_bmad-output/implementation-artifacts/notes.md"],
+    changes: [SPRINT, gates(GATES_2, GATES_2), "_bmad-output/implementation-artifacts/notes.md"],
     refused: [],
   },
   {
@@ -534,7 +591,21 @@ const COORD_CASES: readonly CoordCase[] = [
   { name: "mode: a status file made a gitlink", unit: STATUS_UNIT, changes: [{ path: RETRO, mode: "160000" }], refused: [[RETRO, "mode"]] },
   { name: "mode: a status file deleted has no mode", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "000000" }], refused: [[SPRINT, "mode"]] },
   { name: "mode: a change with no mode is refused", unit: STATUS_UNIT, changes: [{ path: SPRINT }], refused: [[SPRINT, "mode"]] },
-  { name: "mode: 100644 passes", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100644" }, { path: RETRO, mode: "100644" }], refused: [] },
+  { name: "mode: 100644 passes", unit: STATUS_UNIT, changes: [{ path: SPRINT, mode: "100644" }, gates(null, null)], refused: [] },
+  // The retro records (Story 2.9): no agent diff changes a verdict, item or go, in any unit.
+  { name: "retro-verdict: a verdict changed", unit: RETRO_UNIT, changes: [gates(GATES_2.replace(GO, ""), GATES_2.replace(GO, "").replace("verdict: rejected", "verdict: accepted"))], refused: [[RETRO, "retro-verdict"]] },
+  { name: "retro-verdict: a retro added", unit: RETRO_UNIT, changes: [gates(null, GATES_2)], refused: [[RETRO, "retro-verdict"], [RETRO, "retro-item"], [RETRO, "retro-go"]] },
+  { name: "retro-verdict: a recorded_at changed", unit: STATUS_UNIT, changes: [gates(GATES_2, GATES_2.replace("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"))], refused: [[RETRO, "retro-verdict"]] },
+  { name: "retro-item: an item's status changed", unit: RETRO_UNIT, changes: [gates(GATES_2, GATES_2.replace("status: open", "status: done"))], refused: [[RETRO, "retro-item"]] },
+  { name: "retro-item: an item appended", unit: STATUS_UNIT, changes: [gates(GATES_2, `${GATES_2}${ITEM_2}`)], refused: [[RETRO, "retro-item"]] },
+  { name: "retro-go: a go removed", unit: RETRO_UNIT, changes: [gates(GATES_2, GATES_2.replace(GO, ""))], refused: [[RETRO, "retro-go"]] },
+  { name: "retro-go: only the go changed is not retro-verdict", unit: RETRO_UNIT, changes: [gates(GATES_2, GATES_2.replace("by: edanisko", "by: alice"))], refused: [[RETRO, "retro-go"]] },
+  { name: "checkpoint-go: a checkpoint go added", unit: RETRO_UNIT, changes: [gates(GATES_2, `${GATES_2}${CHECKPOINT_3}`)], refused: [[RETRO, "checkpoint-go"]] },
+  { name: "retro-gates-invalid: the after side does not parse", unit: RETRO_UNIT, changes: [gates(GATES_2, "schema_version: 1\nepics: [\n")], refused: [[RETRO, "retro-gates-invalid"]] },
+  { name: "retro-gates-invalid: the before side breaks the schema", unit: RETRO_UNIT, changes: [gates("schema_version: 2\nepics: {}\n", EMPTY_GATES)], refused: [[RETRO, "retro-gates-invalid"]] },
+  { name: "retro-gates-invalid: a change with no texts", unit: RETRO_UNIT, changes: [{ path: RETRO, mode: "100644" }], refused: [[RETRO, "retro-gates-invalid"]] },
+  { name: "retro-gates: case-folded path", unit: RETRO_UNIT, changes: [{ ...gates(GATES_2, GATES_2.replace("status: open", "status: done")), path: RETRO.toUpperCase() }], refused: [[RETRO.toUpperCase(), "retro-item"]] },
+  { name: "retro-gates: an earlier class wins", unit: { kind: "retro-item", globs: ["src/**"] }, changes: [gates(GATES_2, EMPTY_GATES)], refused: [[RETRO, "outside-unit"]] },
   { name: "mode: a graph input made executable", unit: GRAPH_UNIT, changes: [{ path: "stories/2.4.md", mode: "100755" }], refused: [["stories/2.4.md", "mode"]] },
   { name: "mode: only status files and graph inputs are checked", unit: STATUS_UNIT, changes: [{ path: CONTEXT_2, mode: "100755" }], refused: [] },
   { name: "mode: an earlier class is reported first", unit: STATUS_UNIT, changes: [{ path: EPICS, mode: "120000" }], refused: [[EPICS, "graph-input"]] },
@@ -588,6 +659,7 @@ describe("checkWrite (coordinator)", () => {
       graphUnit: false,
       graphInputs: [EPICS, ".xarabot/epics.yaml", "stories/*.md"],
       statusFiles: [SPRINT, RETRO],
+      retroGatesPath: RETRO,
     });
   });
 });

@@ -89,6 +89,8 @@ export const SnapshotSchema = z.strictObject({
   retro_gates: RetroGatesSchema,
   escalations: z.strictObject({ open: z.array(StoryId) }).nullable(),
   epic_context: z.record(EpicKey, EpicContextState),
+  /** Each graph Epic: whether a `main` path matches `live_evidence_glob` with `<N>` set to it (Story 2.9). */
+  live_evidence: z.record(EpicKey, z.boolean()),
   prs: z.record(UnitId, PrStateSchema),
   lane: LaneIdentity,
   role: LaneRole,

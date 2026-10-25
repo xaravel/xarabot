@@ -2,7 +2,9 @@ import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues, RepoPath } from "./common.ts";
 import { GitSha } from "./ledger.ts";
-import { RETRO_ITEM_ID_PATTERN } from "./retro-gates.ts";
+import { RetroResultItemSchema, RetroVerdict } from "./retro-gates.ts";
+
+export { RetroResultItemSchema };
 
 /**
  * Session results (AR15, AD-14): the JSON a session writes to
@@ -63,17 +65,9 @@ export const ReviewResultSchema = z.strictObject({
   denied_actions: DeniedActions,
 });
 
-export const RetroResultItemSchema = z.strictObject({
-  id: z.string().regex(RETRO_ITEM_ID_PATTERN, "must be epic-<N>-retro-item-<seq>-<slug>"),
-  text: Text,
-  route: z.enum(["lane", "maintainer"]),
-  blocking: z.boolean(),
-  globs: z.array(z.string()),
-});
-
 export const RetroResultSchema = z.strictObject({
   kind: z.literal("retro"),
-  verdict: z.enum(["accepted", "accepted-with-open-items", "rejected"]),
+  verdict: RetroVerdict,
   items: z.array(RetroResultItemSchema),
   denied_actions: DeniedActions,
 });

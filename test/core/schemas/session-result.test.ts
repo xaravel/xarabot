@@ -269,3 +269,12 @@ describe("parseSessionResult", () => {
     });
   }
 });
+
+describe("retro item ids the stock slug makes (Story 2.9)", () => {
+  test.each(["epic-2-retro-item-3-add-a-retro_result-test", "epic-2-retro-item-4-réviser-l-écran-日本", "epic-1-retro-item-2-0a1b2c3d"])("%s is accepted", (id) => {
+    expect(accepts(with_("retro", { items: [{ id, text: "t", route: "lane", blocking: true, globs: [] }] }))).toBe(true);
+  });
+  test.each(["epic-2-retro-item-1-a--b", "epic-2-retro-item-1-a b", "epic-2-retro-item-1-"])("%s is refused", (id) => {
+    expect(accepts(with_("retro", { items: [{ id, text: "t", route: "lane", blocking: true, globs: [] }] }))).toBe(false);
+  });
+});

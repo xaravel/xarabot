@@ -43,6 +43,11 @@ describe("parseRetroGates", () => {
     expect(r.value.epics["3"]?.checkpoint?.go.ruling).toBe("maintainer-pr");
   });
 
+  test.each(["epic-2-retro-item-3-add-a-retro_result-test", "epic-2-retro-item-4-réviser-l-écran-日本"])("an item id the stock slug makes: %s", (id) => {
+    const r = parseRetroGates(P, file(undefined, ["epic-2-retro-item-1-fix-polling", `"${id}"`]));
+    expect(r.ok && r.value.epics["2"]?.items?.[0]?.id).toBe(id);
+  });
+
   test("retro with no go yet, and an empty file shape", () => {
     const noGo = parseRetroGates(P, file(undefined, ['      go:\n        by: edanisko\n        at: 2026-11-02T09:00:00Z\n        ruling: "4512345"\n', ""]));
     expect(noGo.ok && noGo.value.epics["2"]?.retro).toEqual({ verdict: "rejected", unit: "retro:2", recorded_at: "2026-11-01T10:00:00Z" });

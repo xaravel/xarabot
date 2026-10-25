@@ -66,6 +66,8 @@ export type FakePull = {
   readonly title?: string;
   /** `null` as GitHub sends for an empty body; default `""`. */
   readonly body?: string | null;
+  /** The merge commit GitHub reports for a merged PR; default `null`. */
+  readonly merge_commit_sha?: string | null;
 };
 
 /** A check run: a `ForgeCheck` plus what GitHub reports beside it. */
@@ -226,6 +228,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     base: string;
     title: string;
     body: string | null;
+    merge_commit_sha: string | null;
   };
   const pulls = new Map<number, PullRecord>();
   const comments = new Map<number, FakeComment[]>();
@@ -336,6 +339,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       merged_at: p.merged ? "2026-01-01T00:00:00Z" : null,
       title: p.title,
       body: p.body,
+      merge_commit_sha: p.merge_commit_sha,
       head: { ref: p.branch, sha: headOf(p), label: `${owner}:${p.branch}` },
       base: { ref: p.base, label: `${owner}:${p.base}` },
     };
@@ -651,7 +655,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
         }
       }
       const n = nextNumber();
-      const p: PullRecord = { state: "open", merged: false, head_sha: refs.get(branch) as string, branch, base, title, body: typeof text === "string" ? text : null };
+      const p: PullRecord = { state: "open", merged: false, head_sha: refs.get(branch) as string, branch, base, title, body: typeof text === "string" ? text : null, merge_commit_sha: null };
       pulls.set(n, p);
       return json(201, pullJson(n, p));
     }
@@ -844,6 +848,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
         base: pull.base ?? mainBranch,
         title: pull.title ?? `PR ${number}`,
         body: pull.body === undefined ? "" : pull.body,
+        merge_commit_sha: pull.merge_commit_sha ?? null,
       });
     },
     pull: (number) => {
@@ -882,8 +887,10 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       p.merged = true;
       p.state = "closed";
       const parent = refs.get(mainBranch);
-      refs.set(mainBranch, putCommit({ tree: commits.get(parent ?? "")?.tree ?? EMPTY_TREE, parents: parent === undefined ? [] : [parent], message: `merge #${entry.number}` }));
-      return { number: entry.number, branch: p.branch, base: p.base, state: "merged", head_sha: p.head_sha, title: p.title, body: p.body ?? "" };
+      const merge = putCommit({ tree: commits.get(parent ?? "")?.tree ?? EMPTY_TREE, parents: parent === undefined ? [] : [parent], message: `merge #${entry.number}` });
+      refs.set(mainBranch, merge);
+      p.merge_commit_sha = merge;
+      return { number: entry.number, branch: p.branch, base: p.base, state: "merged", head_sha: p.head_sha, title: p.title, body: p.body ?? "", merge_sha: merge };
     },
     setStatuses(sha, list) {
       statuses.set(

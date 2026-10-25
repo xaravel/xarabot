@@ -1,16 +1,18 @@
 import { isDisposable, isStale } from "../ledger/edits.ts";
+import { RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
 import { doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
 import { unitKind, type UnitRecord } from "../schemas/ledger.ts";
 import type { PrState, Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
+import { editRetroGates, type RetroGatesAddition } from "./retro-gates-edit.ts";
 import { editDevelopmentStatus, type StatusAddition, type StatusChange, type StatusChanges } from "./status-edit.ts";
 
 /**
  * The `reconcile` planner (FR2, NFR20, AR4, AR10, AR14): what one run does,
  * read from one snapshot. Pure. The step does the ledger work it lists, one
  * fenced swap per item, then either finishes the run with no PR or opens one
- * PR with the new `sprint-status.yaml` text. The run's own unit is never a
- * target.
+ * PR with the new `sprint-status.yaml` text, the new `retro-gates.yaml` text
+ * (Story 2.9), or both. The run's own unit is never a target.
  */
 
 /** A record the run acts on, with its PR as the snapshot shows it. */
@@ -66,6 +68,15 @@ export type StatusPlan =
   /** The new text, and one line per change. */
   | { readonly kind: "edit"; readonly changes: StatusChanges; readonly text: string; readonly summary: readonly string[] };
 
+/** The `retro-gates.yaml` write for merged retro records (Story 2.9). */
+export type RetroGatesPlan =
+  /** No merged retro result to record. */
+  | { readonly kind: "none" }
+  /** The new text, and one line per change. */
+  | { readonly kind: "edit"; readonly text: string; readonly summary: readonly string[] }
+  /** The file cannot be written; `message` says why. The run fails. */
+  | { readonly kind: "invalid"; readonly message: string };
+
 export type ReconcilePlan = {
   /** 1. Records not `merged` whose PR merged. */
   readonly markMerged: readonly string[];
@@ -100,6 +111,15 @@ export type ReconcilePlan = {
   readonly openPrs: readonly { readonly unit: string; readonly pr: number }[];
   /** The other `merged` `reconcile` records left after step 7, deleted once this run finishes `merged`. */
   readonly supersededMerged: readonly string[];
+  /** `retro_gates_path`. */
+  readonly retroGatesPath: string;
+  /**
+   * The verdicts and items of `retro:<N>` records `merged` as of this run,
+   * with a `retro_result`, whose Epic has no `retro` entry on `main`.
+   */
+  readonly retroGates: RetroGatesPlan;
+  /** `merged` `retro:<N>` records with no `retro_result`: logged and skipped. */
+  readonly retroWithoutResult: readonly string[];
 };
 
 function target(r: UnitRecord, snapshot: Snapshot): PlanTarget {
@@ -163,12 +183,31 @@ function statusChanges(effective: Snapshot, unit: string): { readonly changes: S
   return { changes: { set: sets, add: additions }, summary };
 }
 
+/** The retro results to record: each `merged` `retro:<N>` record of `effective` with a result and no `retro` entry on `main`. */
+function retroAdditions(effective: Snapshot, unit: string): { readonly additions: RetroGatesAddition[]; readonly without: string[] } {
+  const additions: RetroGatesAddition[] = [];
+  const without: string[] = [];
+  for (const r of effective.ledger.units) {
+    if (r.unit === unit || r.state !== "merged") continue;
+    const m = RETRO_UNIT_PATTERN.exec(r.unit);
+    if (m === null) continue;
+    const epic = m[1] as string;
+    if (effective.retro_gates.epics[epic]?.retro !== undefined) continue;
+    if (r.retro_result === null) {
+      without.push(r.unit);
+      continue;
+    }
+    additions.push({ epic: Number(epic), unit: r.unit, result: r.retro_result, recorded_at: effective.now });
+  }
+  return { additions, without };
+}
+
 /**
  * The plan for `reconcile` unit `unit` from `snapshot`. `statusText` is
- * `sprint_status_path`'s text on the snapshot's `main`, or `null` when the
- * file is absent.
+ * `sprint_status_path`'s text on the snapshot's `main`, and `retroGatesText`
+ * `retro_gates_path`'s; each `null` when the file is absent.
  */
-export function planReconcile(snapshot: Snapshot, unit: string, statusText: string | null): ReconcilePlan {
+export function planReconcile(snapshot: Snapshot, unit: string, statusText: string | null, retroGatesText: string | null = null): ReconcilePlan {
   const others = snapshot.ledger.units.filter((r) => r.unit !== unit);
   const prOf = (r: UnitRecord) => snapshot.prs[r.unit];
   const isReconcile = (r: UnitRecord) => unitKind(r.unit) === "reconcile";
@@ -232,5 +271,28 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     status = edited.ok ? { kind: "edit", changes, text: edited.value, summary } : { kind: "invalid", changes, message: edited.error.message };
   }
 
-  return { markMerged, checkQueue, checkGated, takeApproved, releaseDead, deleteReleased, deleteMerged, path, status, openPrs, supersededMerged };
+  const retroGatesPath = snapshot.config.retro_gates_path;
+  const { additions, without } = retroAdditions(effective, unit);
+  let retroGates: RetroGatesPlan = { kind: "none" };
+  if (additions.length > 0) {
+    const edited = editRetroGates(retroGatesPath, retroGatesText, additions);
+    retroGates = edited.ok ? { kind: "edit", text: edited.value.text, summary: edited.value.summary } : { kind: "invalid", message: edited.error.message };
+  }
+
+  return {
+    markMerged,
+    checkQueue,
+    checkGated,
+    takeApproved,
+    releaseDead,
+    deleteReleased,
+    deleteMerged,
+    path,
+    status,
+    openPrs,
+    supersededMerged,
+    retroGatesPath,
+    retroGates,
+    retroWithoutResult: without,
+  };
 }

@@ -30,6 +30,7 @@ export function rules(over: Partial<WriteRules> = {}): WriteRules {
         manifests: { dir: "stories" },
         standing_authority_path: "docs/standing-authority.md",
         epic_context_path: CONFIG_DEFAULTS.epic_context_path,
+        live_evidence_glob: CONFIG_DEFAULTS.live_evidence_glob,
       },
       policy: { protected_paths: [] },
       specPath: SPEC_PATH,

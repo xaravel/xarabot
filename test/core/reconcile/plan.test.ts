@@ -5,7 +5,8 @@ import { parseSprintStatus } from "../../../src/core/next/sprint-status.ts";
 import type { UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { PrState } from "../../../src/core/schemas/snapshot.ts";
 import { COORD } from "../ledger/fixtures.ts";
-import { EPICS_MD, input, NOW, STATUS, rec, snapshotOf, storyRec, type World } from "../next/fixtures.ts";
+import { parseRetroGates } from "../../../src/core/graph/retro-gates.ts";
+import { EPICS_MD, input, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "../next/fixtures.ts";
 
 const HEAD = "e".repeat(40);
 const minutesBefore = (m: number) => new Date(Date.parse(NOW) - m * 60_000).toISOString();
@@ -360,5 +361,116 @@ describe("planReconcile: planning records (Story 2.7)", () => {
   ] as const)("a planning record %s is left alone", (_name, over) => {
     const p = plan({ records: [status({ pr: null, head_sha: null, ...over } as Partial<UnitRecord>)] });
     expect(shape(p)).toEqual(EMPTY);
+  });
+});
+
+describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
+  const RESULT = {
+    verdict: "accepted-with-open-items" as const,
+    items: [
+      { id: "epic-2-retro-item-1-fix", text: "Fix it", route: "lane" as const, blocking: true, globs: ["./src/x/**"] },
+      { id: "epic-2-retro-item-2-ask", text: "Ask the Maintainer", route: "maintainer" as const, blocking: false, globs: [] },
+    ],
+  };
+  const retroRec = (over: Partial<UnitRecord> = {}) => coord("retro:2", { state: "merging", pr: 9, head_sha: HEAD, passed_sha: HEAD, retro_result: RESULT, ...over });
+  const planWith = (w: Partial<World>) => {
+    const full = world(w);
+    const files = input(full).files;
+    const text = (p: string) => (Object.hasOwn(files, p) ? (files[p] as string) : null);
+    return planReconcile(snapshotOf(full), U, text(STATUS), text(RETRO));
+  };
+
+  test("retro:2 merged with a result, the file absent: a new file with schema_version 1, the verdict and the items open", () => {
+    const p = planWith({ records: [retroRec()], prs: { "retro:2": merged(9) } });
+    expect(p.markMerged).toEqual(["retro:2"]);
+    expect(p.deleteMerged).toEqual([]);
+    expect(p.retroGatesPath).toBe(RETRO);
+    if (p.retroGates.kind !== "edit") throw new Error(`expected an edit, got ${p.retroGates.kind}`);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value).toEqual({
+      schema_version: 1,
+      epics: {
+        "2": {
+          retro: { verdict: "accepted-with-open-items", unit: "retro:2", recorded_at: NOW },
+          items: [
+            { id: "epic-2-retro-item-1-fix", text: "Fix it", route: "lane", blocking: true, globs: ["src/x/**"], status: "open" },
+            { id: "epic-2-retro-item-2-ask", text: "Ask the Maintainer", route: "maintainer", blocking: false, globs: [], status: "open" },
+          ],
+        },
+      },
+    });
+    expect(p.retroGates.summary).toEqual([
+      "epics.2.retro: accepted-with-open-items (retro:2)",
+      "epics.2.items: epic-2-retro-item-1-fix added as open",
+      "epics.2.items: epic-2-retro-item-2-ask added as open",
+    ]);
+  });
+
+  test("a rejected verdict is written like any other, with no go", () => {
+    const p = planWith({ records: [retroRec({ state: "merged", retro_result: { verdict: "rejected", items: [] } })] });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    expect(parsed.ok && parsed.value.epics["2"]).toEqual({ retro: { verdict: "rejected", unit: "retro:2", recorded_at: NOW } });
+  });
+
+  test("an existing file keeps its other Epics and a hand-recorded go", () => {
+    const p = planWith({ retro: { 1: "rejected-go" }, records: [retroRec({ state: "merged" })] });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.epics["1"]?.retro?.go).toEqual({ by: "edanisko", at: "2026-10-21T00:00:00Z", ruling: "maintainer-pr" });
+    expect(Object.keys(parsed.value.epics)).toEqual(["1", "2"]);
+  });
+
+  test("recorded once: an Epic with a retro entry on main is not written again, and the record is done on main", () => {
+    const p = planWith({ retro: { 2: "accepted" }, records: [retroRec({ state: "merged" })] });
+    expect(p.retroGates).toEqual({ kind: "none" });
+    expect(p.deleteMerged).toEqual(["retro:2"]);
+  });
+
+  test("a retro record not merged as of the run writes nothing", () => {
+    expect(planWith({ records: [retroRec()], prs: { "retro:2": open(9) } }).retroGates).toEqual({ kind: "none" });
+  });
+
+  test("a merged retro record with no retro_result is listed and skipped", () => {
+    const p = planWith({ records: [retroRec({ state: "merged", retro_result: null })] });
+    expect(p.retroGates).toEqual({ kind: "none" });
+    expect(p.retroWithoutResult).toEqual(["retro:2"]);
+  });
+
+  test("an invalid retro-gates.yaml text: the plan is invalid", () => {
+    const full = world({ records: [retroRec({ state: "merged" })] });
+    const files = input(full).files;
+    const p = planReconcile(snapshotOf(full), U, files[STATUS] as string, "schema_version: 1\nepics: [\n");
+    expect(p.retroGates.kind).toBe("invalid");
+  });
+
+  test("an item already listed is not appended again", () => {
+    const listed = [
+      "schema_version: 1",
+      "epics:",
+      '  "2":',
+      "    items:",
+      '      - id: "epic-2-retro-item-1-fix"',
+      "        text: Fix it",
+      "        route: lane",
+      "        blocking: true",
+      "        globs: []",
+      "        status: done",
+      "",
+    ].join("\n");
+    const p = planWith({ files: { [RETRO]: listed }, records: [retroRec({ state: "merged" })] });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    expect(parsed.ok && parsed.value.epics["2"]?.items?.map((i) => [i.id, i.status])).toEqual([
+      ["epic-2-retro-item-1-fix", "done"],
+      ["epic-2-retro-item-2-ask", "open"],
+    ]);
+  });
+
+  test("both files change in one run", () => {
+    const p = planWith({ records: [retroRec({ state: "merged" }), storyRec("2.1", { state: "parked", pr: 7 })], prs: { "story:2.1": merged(7) }, status: { "2.1": "backlog" } });
+    expect([p.status.kind, p.retroGates.kind]).toEqual(["edit", "edit"]);
   });
 });

@@ -20,6 +20,8 @@ import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
 import { createGitMerger } from "../lane/merger.ts";
 import { createPlanningStep } from "../lane/planning-step.ts";
+import { createRetroStep } from "../lane/retro-step.ts";
+import { createGitTreeFiles } from "../lane/tree-files.ts";
 import { createPrStep } from "../lane/pr-step.ts";
 import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
 import { createReconcileStep } from "../lane/reconcile-step.ts";
@@ -293,7 +295,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
   const fetch = connection.fetchShas(runnerGit);
   const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
   if (claimed !== null) {
-    // Story 2.5 wires the reconcile step and Story 2.7 the planning step; retro and retro-item units end idle, unclaimed, until their Stories.
+    // Story 2.5 wires the reconcile step, Story 2.7 the planning step and Story 2.9 the retro step; retro-item units end idle, unclaimed, until Story 2.10.
     const waiter = createSleepWaiter({ store });
     const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
     const planning = createPlanningStep({
@@ -311,7 +313,22 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       identity,
       secrets: [credential.value],
     });
-    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile, planning }, waiter };
+    const retro = createRetroStep({
+      forge,
+      agent,
+      sandbox: createMacSandbox({ launchingEnv: deps.env }),
+      store,
+      workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
+      waiter,
+      laneDir,
+      lane,
+      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+      diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+      treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }),
+      identity,
+      secrets: [credential.value],
+    });
+    const coordinatorDeps: CoordinatorDeps = { forge, agent, store, laneDir, identity, lane, claim: claimed, steps: { reconcile, planning, retro }, waiter };
     return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
   }
 
