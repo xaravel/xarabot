@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { ok } from "../../src/core/result.ts";
+import { redactSecrets } from "../../src/core/sanitize.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
 import { laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
@@ -12,11 +13,65 @@ import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
 import type { ProcessInfo } from "../../src/core/lane/waits.ts";
 import type { ProcessTable } from "../../src/lane/processes.ts";
 import { forgeErr, type Forge } from "../../src/ports/forge.ts";
+import * as planningStep from "../../src/lane/planning-step.ts";
+import * as reconcileStep from "../../src/lane/reconcile-step.ts";
+import * as retroItemStep from "../../src/lane/retro-item-step.ts";
+import * as retroStep from "../../src/lane/retro-step.ts";
+import type { CoordinatorStep } from "../../src/lane/coordinator-process.ts";
 import { hostTest } from "../support/sandbox.ts";
 import { cleanup, fakeConnect, HOST_ID, mainFiles, stubInstaller, world, writeCredential, type MainOpts, type World } from "./lane-fixture.ts";
 
 const dirs: string[] = [];
 afterEach(() => cleanup(dirs));
+
+/**
+ * Each coordinator step factory `lane run` calls, with the deps it was given
+ * and the step it returned. The factories are wrapped in place: each wrapper
+ * records the call and returns the real factory's step, so every other test
+ * runs the real steps.
+ */
+const built = {
+  reconcile: [] as { deps: reconcileStep.ReconcileStepDeps; step: CoordinatorStep }[],
+  planning: [] as { deps: planningStep.PlanningStepDeps; step: CoordinatorStep }[],
+  retro: [] as { deps: retroStep.RetroStepDeps; step: CoordinatorStep }[],
+  retroItem: [] as { deps: retroItemStep.RetroItemStepDeps; step: CoordinatorStep }[],
+};
+const realReconcile = reconcileStep.createReconcileStep;
+const realPlanning = planningStep.createPlanningStep;
+const realRetro = retroStep.createRetroStep;
+const realRetroItem = retroItemStep.createRetroItemStep;
+mock.module("../../src/lane/reconcile-step.ts", () => ({
+  ...reconcileStep,
+  createReconcileStep: (deps: reconcileStep.ReconcileStepDeps) => {
+    const step = realReconcile(deps);
+    built.reconcile.push({ deps, step });
+    return step;
+  },
+}));
+mock.module("../../src/lane/planning-step.ts", () => ({
+  ...planningStep,
+  createPlanningStep: (deps: planningStep.PlanningStepDeps) => {
+    const step = realPlanning(deps);
+    built.planning.push({ deps, step });
+    return step;
+  },
+}));
+mock.module("../../src/lane/retro-step.ts", () => ({
+  ...retroStep,
+  createRetroStep: (deps: retroStep.RetroStepDeps) => {
+    const step = realRetro(deps);
+    built.retro.push({ deps, step });
+    return step;
+  },
+}));
+mock.module("../../src/lane/retro-item-step.ts", () => ({
+  ...retroItemStep,
+  createRetroItemStep: (deps: retroItemStep.RetroItemStepDeps) => {
+    const step = realRetroItem(deps);
+    built.retroItem.push({ deps, step });
+    return step;
+  },
+}));
 
 const REPO = "xaravel/xarabot";
 
@@ -538,6 +593,59 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(d.claim).toMatchObject({ ...IDENTITY, generation: 1, heartbeat_at: "2026-10-23T10:00:00Z" });
     expect(await coordinatorOf(r)).toEqual(d.claim);
     expect(r.out.at(-1)).toBe("lane coordinator: idle");
+  });
+
+  test("the steps' wiring: each session step gets the coordinator's forge, agent, store, waiter, lane and identity, one shared sandbox, workspace, committer and diff paths, and the vendor credential as its secret", async () => {
+    for (const list of Object.values(built)) list.length = 0;
+    const r = await laneRunWith({ host: COORD_HOST }, ARGS);
+    const CREDENTIAL = readFileSync(join(r.w.xdg, "xarabot", "vendors", "claude", "oauth-token"), "utf8");
+    expect(r.code).toBe(0);
+    const d = r.coordinatorStarts[0] as CoordinatorDeps;
+    expect([built.reconcile.length, built.planning.length, built.retro.length, built.retroItem.length]).toEqual([1, 1, 1, 1]);
+    const reconcile = built.reconcile[0] as (typeof built.reconcile)[number];
+    const planning = built.planning[0] as (typeof built.planning)[number];
+    const retro = built.retro[0] as (typeof built.retro)[number];
+    const retroItem = built.retroItem[0] as (typeof built.retroItem)[number];
+
+    // The steps the process runs are the ones these factories built.
+    expect(d.steps.reconcile).toBe(reconcile.step);
+    expect(d.steps.planning).toBe(planning.step);
+    expect(d.steps.retro).toBe(retro.step);
+    expect(d.steps["retro-item"]).toBe(retroItem.step);
+
+    // reconcile: the coordinator's forge and identity, this repo, and no session.
+    expect(reconcile.deps.forge).toBe(d.forge);
+    expect(reconcile.deps.identity).toEqual(IDENTITY);
+    expect(reconcile.deps.repo).toBe(REPO);
+    expect(typeof reconcile.deps.committer.commit).toBe("function");
+    expect(reconcile.deps.committer).not.toBe(planning.deps.committer);
+
+    const sessions = [planning.deps, retro.deps, retroItem.deps];
+    for (const s of sessions) {
+      expect(s.forge).toBe(d.forge);
+      expect(s.agent).toBe(d.agent);
+      expect(s.store).toBe(d.store);
+      expect(s.waiter).toBe(d.waiter);
+      expect(s.laneDir).toBe(r.laneDir);
+      expect(s.lane).toBe(d.lane);
+      expect(s.identity).toEqual(IDENTITY);
+      // The vendor credential read at start, redacted from every text a step sends to the forge.
+      expect(s.secrets).toEqual([CREDENTIAL]);
+      expect(redactSecrets(`token ${CREDENTIAL.trim()} here`, s.secrets)).toBe("token [REDACTED] here");
+      expect(s.sandbox).toBe(planning.deps.sandbox);
+      expect(s.workspace).toBe(planning.deps.workspace);
+      expect(s.committer).toBe(planning.deps.committer);
+      expect(s.diffPaths).toBe(planning.deps.diffPaths);
+    }
+    expect(typeof planning.deps.sandbox.run).toBe("function");
+    expect(typeof planning.deps.workspace.prepare).toBe("function");
+    expect(typeof planning.deps.committer.commit).toBe("function");
+
+    // Each step's own extra: the graph-change gate's trees, the retro's tree reads, the retro item's merger.
+    expect(planning.deps.graphTrees).toBe(reconcile.deps.graphTrees);
+    expect(retroItem.deps.graphTrees).toBe(reconcile.deps.graphTrees);
+    expect(typeof retro.deps.treeFiles).toBe("function");
+    expect(typeof retroItem.deps.merger.merge).toBe("function");
   });
 
   test("the same identity re-claims at the same generation", async () => {
