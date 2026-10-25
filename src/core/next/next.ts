@@ -6,6 +6,7 @@ import type { UnitRecord } from "../schemas/ledger.ts";
 import { LaneRole, SnapshotSchema, type Snapshot, type SnapshotManifest } from "../schemas/snapshot.ts";
 import { compareStoryIds, storyKey } from "../story-id.ts";
 import { nextCoordinator, type CoordinatorUnit } from "./coordinator.ts";
+import { epicHolds } from "./epic-gates.ts";
 import { epicContextPath } from "./snapshot.ts";
 
 export type ReasonCode =
@@ -18,7 +19,8 @@ export type ReasonCode =
   | "record-state"
   | "depends-on"
   | "escalation"
-  | "overlap";
+  | "overlap"
+  | "planning-held";
 
 /** Why a Story or Epic was passed over. `subject` is `epic:<N>` or a unit id. */
 export type Reason = { readonly subject: string; readonly code: ReasonCode; readonly message: string };
@@ -129,24 +131,7 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
   }
 
   const epics = [...graph.epics].sort((a, b) => a.number - b.number);
-  const epicByNumber = new Map(epics.map((e) => [e.number, e]));
-  const depsOf = (n: number) => epicByNumber.get(n)?.depends_on ?? [];
-  const reaches = (from: number, target: number): boolean => {
-    const seen = new Set<number>();
-    const stack = [...depsOf(from)];
-    while (stack.length > 0) {
-      const n = stack.pop() as number;
-      if (n === target) return true;
-      if (seen.has(n)) continue;
-      seen.add(n);
-      stack.push(...depsOf(n));
-    }
-    return false;
-  };
-  const rejected = epics
-    .map((e) => ({ epic: e.number, retro: snap.retro_gates.epics[String(e.number)]?.retro }))
-    .filter((r) => r.retro?.verdict === "rejected" && r.retro.go === undefined)
-    .map((r) => r.epic);
+  const holdsOf = epicHolds(snap);
 
   const reasons: Reason[] = [];
   const candidates: SnapshotManifest[] = [];
@@ -168,36 +153,9 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
       if (why !== undefined) reasons.push({ subject: storyUnit(id), code: "unclaimable", message: why });
     }
 
-    let held = false;
-    for (const x of epic.depends_on) {
-      if (bootstrapped.has(x)) continue;
-      const dep = epicByNumber.get(x);
-      const causes: string[] = [];
-      const unmanifested = graph.unmanifested.filter((u) => u.epic === x);
-      if ((dep?.stories.length ?? 0) === 0 && unmanifested.length === 0) causes.push("it has no Stories");
-      for (const u of unmanifested) causes.push(`Story ${u.id} has no manifest`);
-      for (const id of dep?.stories ?? []) {
-        const m = manifestOf(id);
-        if (m === undefined || !isDone(m)) {
-          causes.push(`Story ${id} is not done (${m === undefined ? "no manifest" : (statusOf(m) ?? "no status")})`);
-        }
-      }
-      if (snap.retro_gates.epics[String(x)]?.retro === undefined) causes.push("its retro is not recorded");
-      if (causes.length > 0) {
-        held = true;
-        reasons.push({ subject, code: "dependency-epic", message: `Epic ${n} waits on Epic ${x}: ${causes.join(", ")}` });
-      }
-    }
-
-    for (const e of rejected) {
-      if (!reaches(n, e)) continue;
-      held = true;
-      reasons.push({
-        subject,
-        code: "retro-rejected",
-        message: `Epic ${n} is held by Epic ${e}'s rejected retro (retro:${e}), which has no go`,
-      });
-    }
+    const holds = holdsOf(n);
+    reasons.push(...holds);
+    let held = holds.length > 0;
 
     const context = snap.epic_context[String(n)] ?? "missing";
     if (context !== "valid") {

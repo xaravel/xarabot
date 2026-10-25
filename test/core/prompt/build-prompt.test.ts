@@ -1,9 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { z } from "zod";
-import { buildPrompt, type BuildPromptInput, type PromptMode } from "../../../src/core/prompt/build-prompt.ts";
+import {
+  buildPlanningPrompt,
+  buildPrompt,
+  type BuildPlanningPromptInput,
+  type BuildPromptInput,
+  type GraphPlanningPromptUnit,
+  type PromptMode,
+  type StatusPlanningPromptUnit,
+} from "../../../src/core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE, type PromptTemplate } from "../../../src/core/prompt/template.ts";
-import { BuildResultSchema } from "../../../src/core/schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema } from "../../../src/core/schemas/session-result.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const KEY = "1-7-forge-port-fake-forge-and-contract-suite";
@@ -273,8 +281,9 @@ describe("banned instructions", () => {
       });
     }
   }
-  test("every part of the package template", () => {
+  test("every Story part of the package template", () => {
     for (const [part, text] of Object.entries(PACKAGE_TEMPLATE)) {
+      if (PLANNING_PARTS.includes(part)) continue;
       expect({ part, hits: BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
     }
   });
@@ -303,5 +312,201 @@ describe("_bmad/custom", () => {
     }
     expect(count).toBeGreaterThan(0);
     expect(offenders).toEqual([]);
+  });
+});
+
+// ------------------------------------------------------------ planning prompts
+
+/** The template parts only planning prompts use (Story 2.7). */
+const PLANNING_PARTS: readonly string[] = ["planning_status", "planning_graph", "result_planning"];
+
+/** No CI, merge, queue, PR, push, approval, claim, `next`, ledger or selection word in a planning prompt. */
+const PLANNING_BANNED: readonly { readonly what: string; readonly pattern: RegExp }[] = [
+  { what: "CI", pattern: /\bCI\b/ },
+  { what: "CI: continuous integration", pattern: /continuous integration/i },
+  { what: "CI: GitHub Actions", pattern: /github actions|workflow run/i },
+  { what: "merge", pattern: /\bmerg/i },
+  { what: "queue", pattern: /\bqueue/i },
+  { what: "PR", pattern: /pull request|\bPRs?\b/ },
+  { what: "push", pattern: /\bpush/i },
+  { what: "approval", pattern: /\bapprov/i },
+  { what: "claim", pattern: /\bclaim/i },
+  { what: "next", pattern: /\bnext\b/i },
+  { what: "ledger", pattern: /\bledger\b/i },
+  { what: "selection", pattern: /\b(?:select|pick|choose)/i },
+  { what: "gh", pattern: /\bgh\b/ },
+];
+
+const STATUS_UNIT: StatusPlanningPromptUnit = {
+  kind: "status",
+  id: "planning:status.3",
+  epics_path: "_bmad-output/planning-artifacts/epics.md",
+  contexts: [
+    { epic: 4, output_path: "_bmad-output/implementation-artifacts/epic-4-context.md" },
+    { epic: 2, output_path: "_bmad-output/implementation-artifacts/epic-2-context.md" },
+  ],
+};
+
+const GRAPH_UNIT: GraphPlanningPromptUnit = {
+  kind: "graph",
+  id: "planning:graph.1",
+  epics_path: "_bmad-output/planning-artifacts/epics.md",
+  manifests_dir: "stories",
+  path_key: null,
+  headings: [
+    { id: "3.1", epic: 3, line: 120 },
+    { id: "3.2", epic: 3, line: 140 },
+  ],
+};
+
+function planningInput(patch: Partial<BuildPlanningPromptInput> = {}): BuildPlanningPromptInput {
+  return { template: PACKAGE_TEMPLATE, unit: STATUS_UNIT, sections: [], result_path: RESULT, ...patch };
+}
+
+function planning(patch: Partial<BuildPlanningPromptInput> = {}): string {
+  const r = buildPlanningPrompt(planningInput(patch));
+  if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+  return r.value;
+}
+
+function planningFailure(patch: Partial<BuildPlanningPromptInput>): { kind: string; message: string } {
+  const r = buildPlanningPrompt(planningInput(patch));
+  if (r.ok) throw new Error("expected an error");
+  return r.error;
+}
+
+describe("planning prompt: status", () => {
+  const p = planning();
+  test("runs stock bmad-sprint-planning headless, then compiles each due Epic context", () => {
+    expect(p).toContain("(`planning:status.3`)");
+    expect(p).toContain("Run the stock `bmad-sprint-planning` skill headless");
+    expect(p).toContain("Never save a findings file.");
+    expect(p).toContain("follow `.claude/skills/bmad-build-auto/compile-epic-context.md`");
+    expect(p).toContain("the epics file `_bmad-output/planning-artifacts/epics.md`, the planning artifacts folder `_bmad-output/planning-artifacts`");
+    expect(p).toContain("- Epic 2: output path `_bmad-output/implementation-artifacts/epic-2-context.md`\n- Epic 4: output path `_bmad-output/implementation-artifacts/epic-4-context.md`");
+  });
+  test("no due context: says so", () => {
+    expect(planning({ unit: { ...STATUS_UNIT, contexts: [] } })).toContain("- None: no Epic context file is due.");
+  });
+  test("an epics file at the top level: its folder is .", () => {
+    expect(planning({ unit: { ...STATUS_UNIT, epics_path: "epics.md" } })).toContain("the planning artifacts folder `.`");
+  });
+  test("readiness findings go in the result, as blocked with the findings in summary", () => {
+    const r = resultSection(p);
+    expect(r).toContain("`blocked`, with every finding or the reason in `summary`");
+    expect(r).toContain("a failed readiness gate");
+  });
+});
+
+describe("planning prompt: graph", () => {
+  const p = planning({ unit: GRAPH_UNIT });
+  test("runs no skill and never bmad-sprint-planning", () => {
+    expect(p).toContain("Run no skill, and never run `bmad-sprint-planning`.");
+    expect(p).not.toContain("compile-epic-context");
+  });
+  test("names each heading with no manifest: id, Epic and line", () => {
+    expect(p).toContain("- Story 3.1 (Epic 3), line 120\n- Story 3.2 (Epic 3), line 140");
+  });
+  test("asks for a manifest per heading with its frontmatter and depends_on", () => {
+    expect(p).toContain("write `stories/<id>.md`");
+    for (const key of ["story_id", "epic", "sprint_key", "title", "globs", "depends_on"]) expect(p).toContain(`- \`${key}\`:`);
+    expect(p).toContain("an earlier Story in the same Epic, or a Story in an Epic this Epic depends on");
+  });
+  test("a path_key config asks for the key, naming its values", () => {
+    const q = planning({ unit: { ...GRAPH_UNIT, path_key: { key: "area", values: ["core", "lane"] } } });
+    expect(q).toContain("- `area`: the area the Story's work changes, one of `core`, `lane`.");
+    expect(q).not.toContain("- `globs`:");
+  });
+  test("allows edits to epics_path and .xarabot/epics.yaml only, and states that file's schema", () => {
+    expect(p).toContain("you may edit only `_bmad-output/planning-artifacts/epics.md` and `.xarabot/epics.yaml`");
+    expect(p).toContain("Change no other file.");
+    expect(p).toContain("version: 1\nepics:\n");
+    expect(p).toContain("depends_on: [2, 3]");
+  });
+});
+
+describe("planning prompt: shape", () => {
+  const sections = [{ name: "10-intro.md", text: "Intro {{planning_unit}} stays." }];
+  for (const unit of [STATUS_UNIT, GRAPH_UNIT]) {
+    test(`${unit.kind}: task, rules, sections, then the planning result step with its JSON Schema, last`, () => {
+      const p = planning({ unit, sections });
+      const at = ["# Task", "# Rules", "# Repository instructions", "# Result"].map((h) => p.indexOf(h));
+      expect(at.every((i) => i >= 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
+      expect(p).toContain("Intro {{planning_unit}} stays.");
+      expect(p).not.toContain("# Human Live Steps");
+      const r = resultSection(p);
+      expect(p.endsWith(r)).toBe(true);
+      expect(r).toContain(`\`${RESULT}\``);
+      expect(r).toContain("for a `planning` result");
+      const m = /```json\n([\s\S]*?)\n```/.exec(r);
+      expect(JSON.parse(m?.[1] ?? "null")).toEqual(z.toJSONSchema(PlanningResultSchema));
+      for (const o of ["done", "nothing-due", "blocked"]) expect(r).toContain(`\`${o}\``);
+    });
+  }
+  test("no sections: no repository part", () => {
+    expect(planning()).not.toContain("# Repository instructions");
+  });
+});
+
+describe("planning prompt: banned words", () => {
+  const sections = [{ name: "style.md", text: "Prefer small functions." }];
+  for (const unit of [STATUS_UNIT, GRAPH_UNIT, { ...GRAPH_UNIT, path_key: { key: "area", values: ["core"] } }, { ...STATUS_UNIT, contexts: [] }]) {
+    for (const extra of [{}, { sections }]) {
+      test(`${unit.kind}${"sections" in extra ? " with sections" : ""}${unit.kind === "graph" && unit.path_key !== null ? " with a path key" : ""}${unit.kind === "status" && unit.contexts.length === 0 ? " with no context" : ""}`, () => {
+        const p = planning({ unit, ...extra });
+        expect(PLANNING_BANNED.filter((b) => b.pattern.test(p)).map((b) => b.what)).toEqual([]);
+      });
+    }
+  }
+  test("every planning part of the package template, and the rules", () => {
+    for (const part of [...PLANNING_PARTS, "rules", "repo_sections"]) {
+      const text = PACKAGE_TEMPLATE[part as keyof PromptTemplate];
+      expect({ part, hits: PLANNING_BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
+    }
+  });
+  test("the table catches each kind", () => {
+    const hits = (s: string) => PLANNING_BANNED.some((b) => b.pattern.test(s));
+    for (const s of ["Wait for CI.", "Merge it.", "Queue it.", "Open a PR.", "Push the branch.", "Get approval.", "Claim the unit.", "Then the next one.", "Write the ledger.", "Choose an Epic."]) {
+      expect({ s, hit: hits(s) }).toEqual({ s, hit: true });
+    }
+  });
+});
+
+describe("planning prompt: invalid input and template", () => {
+  const cases: { name: string; patch: Partial<BuildPlanningPromptInput>; field: RegExp }[] = [
+    { name: "a status id on a graph unit", patch: { unit: { ...GRAPH_UNIT, id: "planning:status.1" } }, field: /unit\.id: must be planning:graph/ },
+    { name: "a graph id on a status unit", patch: { unit: { ...STATUS_UNIT, id: "planning:graph.1" } }, field: /unit\.id: must be planning:status/ },
+    { name: "n of 0", patch: { unit: { ...STATUS_UNIT, id: "planning:status.0" } }, field: /unit\.id/ },
+    { name: "a graph unit with no heading", patch: { unit: { ...GRAPH_UNIT, headings: [] } }, field: /unit\.headings/ },
+    { name: "a bad heading id", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.x", epic: 3, line: 1 }] } }, field: /unit\.headings\.0\.id/ },
+    { name: "a duplicate heading", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.1", epic: 3, line: 1 }, { id: "3.1", epic: 3, line: 2 }] } }, field: /duplicate Story 3\.1/ },
+    { name: "a duplicate context Epic", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md" }, { epic: 2, output_path: "b.md" }] } }, field: /duplicate Epic 2/ },
+    { name: "a backtick in epics_path", patch: { unit: { ...STATUS_UNIT, epics_path: "a`b.md" } }, field: /unit\.epics_path/ },
+    { name: "a newline in an output path", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a\nb.md" }] } }, field: /unit\.contexts\.0\.output_path/ },
+    { name: "an empty manifests dir", patch: { unit: { ...GRAPH_UNIT, manifests_dir: "" } }, field: /unit\.manifests_dir/ },
+    { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
+    { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      const e = planningFailure(c.patch);
+      expect(e.kind).toBe("invalid-input");
+      expect(e.message).toMatch(c.field);
+    });
+  }
+  test("a graph placeholder in the status part has no value", () => {
+    const e = planningFailure({ template: { ...PACKAGE_TEMPLATE, planning_status: "x {{manifests_dir}}" } });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/\{\{manifests_dir\}\} has no value in a status planning prompt/);
+  });
+  test("a Story placeholder in a planning part has no value", () => {
+    const e = planningFailure({ unit: GRAPH_UNIT, template: { ...PACKAGE_TEMPLATE, planning_graph: "x {{story_id}}" } });
+    expect(e.message).toMatch(/\{\{story_id\}\} has no value in a graph planning prompt/);
+  });
+  test("a missing planning part", () => {
+    const e = planningFailure({ template: { ...PACKAGE_TEMPLATE, result_planning: undefined } as unknown as PromptTemplate });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/template: result_planning/);
   });
 });

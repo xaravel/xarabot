@@ -1,13 +1,25 @@
 import { z } from "zod";
 import { normalizeGlob } from "../manifests/globs.ts";
 import { STORY_ID_PATTERN } from "../story-id.ts";
-import { GitHubLogin, IsoDateTime, NonEmpty, SchemaVersion } from "./common.ts";
+import { GitHubLogin, IsoDateTime, NonEmpty } from "./common.ts";
 import { RETRO_ITEM_ID_PATTERN } from "./retro-gates.ts";
 
 /**
  * The `xarabot/claims` ledger records (AR5, AR6, AR35): unit ids and their
  * file names, unit records and `coordinator.json`.
  */
+
+/**
+ * The ledger's own `schema_version` (Story 2.7): every record written carries
+ * it; the reader accepts each of `LEDGER_SCHEMA_VERSIONS`. The other versioned
+ * files keep `SCHEMA_VERSION` (1).
+ */
+export const LEDGER_SCHEMA_VERSION = 2;
+
+/** The ledger `schema_version`s this runner reads. */
+export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, LEDGER_SCHEMA_VERSION];
+
+export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(LEDGER_SCHEMA_VERSION)]);
 
 const POSITIVE = /^[1-9][0-9]*$/;
 const PLANNING_BODY = /^[a-z0-9]+(?:-[a-z0-9]+)*\.([1-9][0-9]*)$/;
@@ -35,6 +47,31 @@ export function unitKind(id: string): UnitKind | undefined {
 
 export function isUnitId(id: string): boolean {
   return unitKind(id) !== undefined;
+}
+
+/** The pseudo-glob a graph planning unit holds, so graph changes go one at a time (AD-11). */
+export const GRAPH_PSEUDO_GLOB = "xarabot:graph";
+
+/** The two planning kinds (Story 2.7): `planning:status.<n>` and `planning:graph.<n>`. */
+export type PlanningKind = "status" | "graph";
+
+/** The slug of a `planning:<slug>.<n>` id, or `null` when the id is not a planning unit. */
+export function planningSlug(unit: string): string | null {
+  if (unitKind(unit) !== "planning") return null;
+  const body = unit.slice(unit.indexOf(":") + 1);
+  return body.slice(0, body.lastIndexOf("."));
+}
+
+/**
+ * A planning record's kind, from its slug: `status` and `graph` name
+ * themselves; any other slug counts as graph when the record holds
+ * `xarabot:graph`, else as status. `null` for a record that is not planning.
+ */
+export function planningKindOf(record: { readonly unit: string; readonly globs: readonly string[] }): PlanningKind | null {
+  const slug = planningSlug(record.unit);
+  if (slug === null) return null;
+  if (slug === "status" || slug === "graph") return slug;
+  return record.globs.includes(GRAPH_PSEUDO_GLOB) ? "graph" : "status";
 }
 
 export const UnitId = z
@@ -97,6 +134,7 @@ export const RUNNER_CAUSES = [
   "attempts-cap",
   "unclaimable",
   "graph-invalid",
+  "readiness",
 ] as const;
 
 export const UnitState = z.enum(UNIT_STATES);
@@ -125,7 +163,7 @@ const Count = z.int().min(0);
 /** One unit's record, `units/<file>.json` (AR6). Keys are in serialization order. */
 export const UnitRecordSchema = z
   .strictObject({
-    schema_version: SchemaVersion,
+    schema_version: LedgerSchemaVersion,
     unit: UnitId,
     state: UnitState,
     owner: GitHubLogin,
@@ -155,7 +193,7 @@ export const UnitRecordSchema = z
 
 /** `coordinator.json`. */
 export const CoordinatorRecordSchema = z.strictObject({
-  schema_version: SchemaVersion,
+  schema_version: LedgerSchemaVersion,
   owner: GitHubLogin,
   host: z.uuid(),
   lane: z.literal("coordinator"),

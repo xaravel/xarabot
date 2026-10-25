@@ -14,6 +14,7 @@ import type { Agent } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck, ForgeReview } from "../../src/ports/forge.ts";
 import { runCoordinatorProcess, type CoordinatorStepInput } from "../../src/lane/coordinator-process.ts";
 import { readsPath, type PrStepOutput } from "../../src/lane/lane-process.ts";
+import { newTrack } from "../../src/lane/session.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { ReconcileCommit, ReconcileCommitRequest, ReconcileCommitter } from "../../src/lane/reconcile-commit.ts";
 import { createReconcileStep, reconcileBranch, reconcilePrText, reparkComment, type ReconcileStepDeps } from "../../src/lane/reconcile-step.ts";
@@ -71,7 +72,7 @@ const coord = (unit: string, over: Partial<UnitRecord> = {}): UnitRecord =>
 const OWN = coord(U, { state: "claimed" });
 
 function claimRec(): CoordinatorRecord {
-  return { schema_version: 1, ...COORD, lane: "coordinator", generation: 1, heartbeat_at: FORGE_NOW, digest_posted_at: null, rulings_cursor: null };
+  return { schema_version: 2, ...COORD, lane: "coordinator", generation: 1, heartbeat_at: FORGE_NOW, digest_posted_at: null, rulings_cursor: null };
 }
 
 /** The edit name in a ledger commit message, `ledger: <name> <unit> [skip ci]`. */
@@ -185,6 +186,7 @@ async function setup(o: FakeOpts = {}, seed: (fake: FakeForge) => Promise<readon
         files: s.value.main.files,
         signal: new AbortController().signal,
         log: (text) => logs.push(text),
+        track: newTrack({ unit: U, startedMs: T0, logName: "reconcile.log", state: "claimed" }),
       };
     },
     async run(deps = {}) {
@@ -401,7 +403,7 @@ describe("createReconcileStep: the matrix", () => {
     expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
     expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", attempts: 1, pr: r3.number, owner: COORD.owner });
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
-    expect(f.events.slice(0, 5)).toEqual(["ledgerSwap markMerged story:1.1", "queueState", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseReconcile reconcile:3"]);
+    expect(f.events.slice(0, 5)).toEqual(["ledgerSwap markMerged story:1.1", "queueState", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseDisposable reconcile:3"]);
     expect(f.commits).toHaveLength(1);
     expect(await prOnBranch(f, BRANCH)).toMatchObject({ state: "open", head_sha: f.head });
   });
@@ -460,7 +462,7 @@ describe("createReconcileStep: the matrix", () => {
     await f.run({ forge });
     expect(await stateOf(f, "reconcile:3")).toBe("merged");
     expect(f.messages()).toContain("ledger: markMerged reconcile:3 [skip ci]");
-    expect(f.messages()).not.toContain("ledger: releaseReconcile reconcile:3 [skip ci]");
+    expect(f.messages()).not.toContain("ledger: releaseDisposable reconcile:3 [skip ci]");
   });
 
   test("Earlier PR queued at another head: dequeued, closed and released", async () => {
@@ -471,7 +473,7 @@ describe("createReconcileStep: the matrix", () => {
       return [coord("reconcile:3", { state: "merging", pr: r3.number, head_sha: "d".repeat(40), passed_sha: "d".repeat(40) })];
     });
     await f.run();
-    expect(f.events.slice(0, 6)).toEqual(["queueState", "ledgerSwap heartbeat reconcile:5", "dequeue", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseReconcile reconcile:3"]);
+    expect(f.events.slice(0, 6)).toEqual(["queueState", "ledgerSwap heartbeat reconcile:5", "dequeue", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseDisposable reconcile:3"]);
     expect(f.fake.control.queue()).toEqual([]);
     expect(await stateOf(f, "reconcile:3")).toBe("released");
   });
@@ -490,7 +492,7 @@ describe("createReconcileStep: the matrix", () => {
     expect(out.state).toBe("merged");
     expect((await f.ledger()).has("reconcile:3")).toBe(false);
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
-    expect(swaps(f.events)).toContain("deleteReleasedReconcile reconcile:3");
+    expect(swaps(f.events)).toContain("deleteReleasedRecurring reconcile:3");
     expect(f.events.includes("closePr")).toBe(keepOpen);
   });
 
@@ -506,7 +508,7 @@ describe("createReconcileStep: the matrix", () => {
   });
 
   test.each([
-    ["a released record", "released", "deleteReleasedReconcile"],
+    ["a released record", "released", "deleteReleasedRecurring"],
     ["a dead run's record", "claimed", "releaseDeadReconcile"],
   ] as const)("Orphan PR: %s with no pr, a PR open on its branch: found by listing the branch, closed, then the record acted on", async (_name, state, edit) => {
     let orphan = 0;
@@ -562,7 +564,7 @@ describe("createReconcileStep: the matrix", () => {
     const out = await f.run();
     expect(out.reason).toContain("left for a later run");
     expect(await stateOf(f, "reconcile:3")).toBe("released");
-    expect(swaps(f.events)).not.toContain("deleteReleasedReconcile reconcile:3");
+    expect(swaps(f.events)).not.toContain("deleteReleasedRecurring reconcile:3");
   });
 
   test("Orphan PR: two open PRs for one target, the second close fails: the target is left and its open PR stops a new PR", async () => {
@@ -626,7 +628,7 @@ describe("createReconcileStep: the matrix", () => {
     expect([out.outcome, out.state]).toEqual(["progress", "released"]);
     expect((await f.ledger()).get(U)).toMatchObject({ state: "released", attempts: 0 });
     expect((await prOnBranch(f, BRANCH))?.state).toBe("closed");
-    expect(f.events.slice(-4)).toEqual(["enqueue", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseReconcile reconcile:5"]);
+    expect(f.events.slice(-4)).toEqual(["enqueue", "ledgerSwap heartbeat reconcile:5", "closePr", "ledgerSwap releaseDisposable reconcile:5"]);
   });
 
   test("Graph unit merged: the missing Story key is added as backlog after its Epic's last key", async () => {
@@ -1309,7 +1311,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", generation: 2, attempts: 0 });
     expect(out.reason).toContain(`reconcile:3: enqueue PR #${r3.number} conflict: head moved: closed, released`);
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
-    expect(swaps(f.events).slice(0, 4)).toEqual(["takeApproved reconcile:3", "heartbeat reconcile:3", "heartbeat reconcile:5", "releaseReconcile reconcile:3"]);
+    expect(swaps(f.events).slice(0, 4)).toEqual(["takeApproved reconcile:3", "heartbeat reconcile:3", "heartbeat reconcile:5", "releaseDisposable reconcile:3"]);
   });
 
   test("Reconcile PR approved, enqueue conflict, the release refused: no closed-and-released reason; the record left as the bump wrote it", async () => {
@@ -1321,7 +1323,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     });
     f.fake.control.injectError("enqueue", { kind: "conflict", message: "head moved" });
     let bumped: UnitRecord | null = null;
-    // Swaps: 1 takeApproved, 2 the taken record's fence, 3 the fence before closePr, 4 releaseReconcile.
+    // Swaps: 1 takeApproved, 2 the taken record's fence, 3 the fence before closePr, 4 releaseDisposable.
     f.fake.control.beforeSwap(async ({ n }) => {
       if (n !== 4) return;
       const current = (await f.ledger()).get("reconcile:3");
@@ -1332,7 +1334,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     const out = await f.run();
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
     expect(out.reason).not.toContain("closed, released");
-    expect(out.reason).toContain("releaseReconcile reconcile:3 skipped");
+    expect(out.reason).toContain("releaseDisposable reconcile:3 skipped");
     expect((await f.ledger()).get("reconcile:3")).toEqual(bumped ?? undefined);
   });
 
@@ -1376,6 +1378,82 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
 });
 
 // ------------------------------------------------------------------ acceptance
+
+describe("createReconcileStep: planning records (Story 2.7)", () => {
+  const STATUS_GLOBS = [STATUS, "_bmad-output/implementation-artifacts/retro-gates.yaml", "_bmad-output/implementation-artifacts/epic-*-context.md"];
+  const GRAPH_GLOBS = [EPICS, ".xarabot/epics.yaml", "stories/*.md", "xarabot:graph"];
+
+  test("the matrix: an ungated status PR out of the queue is closed and released, no attempt counted", async () => {
+    let pr = { number: 0, head: "" };
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      pr = await prOn(fake, "xarabot/planning-status.2");
+      return [coord("planning:status.2", { state: "merging", globs: STATUS_GLOBS, pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head, attempts: 1 })];
+    });
+    await f.run();
+    expect((await f.ledger()).get("planning:status.2")).toMatchObject({ state: "released", attempts: 1, pr: pr.number });
+    expect((await prOnBranch(f, "xarabot/planning-status.2"))?.state).toBe("closed");
+    expect(swaps(f.events)).toContain("releaseDisposable planning:status.2");
+  });
+
+  test("an ungated status PR still queued at its head is left merging", async () => {
+    let pr = { number: 0, head: "" };
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      pr = await prOn(fake, "xarabot/planning-status.2");
+      expect((await fake.forge.enqueue(pr.number, pr.head, opts())).ok).toBe(true);
+      return [coord("planning:status.2", { state: "merging", globs: STATUS_GLOBS, pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head })];
+    });
+    await f.run();
+    expect(await stateOf(f, "planning:status.2")).toBe("merging");
+    expect(f.fake.control.queue()).toEqual([pr.number]);
+  });
+
+  test("the matrix: a gated graph PR out of the queue is parked awaiting approval again (Story 2.6)", async () => {
+    let pr = { number: 0, head: "" };
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      pr = await prOn(fake, "xarabot/planning-graph.1");
+      return [coord("planning:graph.1", { state: "merging", generation: 2, globs: [EPICS, "stories/1.2.md"], pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head, approved_sha: pr.head })];
+    });
+    await f.run();
+    expect((await f.ledger()).get("planning:graph.1")).toMatchObject({ state: "parked", approved_sha: null, park: { kind: "awaiting-approval", globs_held: [EPICS, "stories/1.2.md"] } });
+    expect((await prOnBranch(f, "xarabot/planning-graph.1"))?.state).toBe("open");
+  });
+
+  test.each([
+    ["status, its PR closed", "planning:status.2", "xarabot/planning-status.2", STATUS_GLOBS, true],
+    ["graph, with no PR", "planning:graph.1", "xarabot/planning-graph.1", GRAPH_GLOBS, false],
+  ] as const)("the matrix: a released planning record, %s: the open PRs on its branch closed, then deleted", async (_name, unit, branch, globs, closedPr) => {
+    let orphan = 0;
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      const own = await prOn(fake, branch);
+      orphan = own.number;
+      if (closedPr) {
+        // Its own PR closed, and an orphan opened since on the same branch.
+        expect((await fake.forge.closePr(own.number, opts())).ok).toBe(true);
+        expect((await fake.forge.pushBranch({ branch, expected_sha: own.head, sha: fake.control.makeCommit() }, opts())).ok).toBe(true);
+        const opened = await fake.forge.openPr({ branch, base: "main", title: "t", body: "b" }, opts());
+        if (!opened.ok) throw new Error(opened.error.message);
+        orphan = opened.value.number;
+      }
+      return [coord(unit, { state: "released", globs, pr: closedPr ? own.number : null })];
+    });
+    await f.run();
+    expect((await f.ledger()).has(unit)).toBe(false);
+    expect(await prOnBranch(f, branch)).toMatchObject({ number: orphan, state: "closed" });
+    expect(swaps(f.events)).toContain(`deleteReleasedRecurring ${unit}`);
+  });
+
+  test("the matrix: a released planning record whose PR is open is left for the open-PR position", async () => {
+    let pr = { number: 0, head: "" };
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      pr = await prOn(fake, "xarabot/planning-status.2");
+      return [coord("planning:status.2", { state: "released", globs: STATUS_GLOBS, pr: pr.number, head_sha: pr.head })];
+    });
+    await f.run();
+    expect(await stateOf(f, "planning:status.2")).toBe("released");
+    expect((await prOnBranch(f, "xarabot/planning-status.2"))?.state).toBe("open");
+    expect(f.events).not.toContain("closePr");
+  });
+});
 
 describe("reconcile through the coordinator process", () => {
   const LANE: Lane = { repo: "xaravel/xarabot", role: "coordinator", owner: COORD.owner, agent: "claude", effort: "high" };

@@ -216,10 +216,22 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
     ]);
   });
 
-  test("a reconcile record's first protected-path park, written by the coordinator lane, gets parked_at = heartbeat_at", () => {
+  test("a reconcile record's first protected-path park (coordinator lane, no passed_sha) is a first park: parked_at null", () => {
     const r3 = coord("reconcile:3", { state: "parked", pr: 3, pr_owner: COORD.owner, head_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [STATUS] } });
     const p = plan({ records: [r3], prs: { "reconcile:3": open(3) } });
-    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: PARKED_AT, globs: [STATUS] }]);
+    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, globs: [STATUS] }]);
+  });
+
+  test("a planning step's first park (planning:graph.1, coordinator lane, no passed_sha): parked_at null", () => {
+    const g = coord("planning:graph.1", { state: "parked", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: null, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
+    const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
+    expect(p.takeApproved).toEqual([{ unit: "planning:graph.1", generation: 1, pr: 4, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, globs: [EPICS_MD] }]);
+  });
+
+  test("a coordinator re-park with passed_sha set: parked_at is its heartbeat_at", () => {
+    const g = coord("planning:graph.1", { state: "parked", generation: 2, globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
+    const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
+    expect(p.takeApproved.map((t) => t.parked_at)).toEqual([PARKED_AT]);
   });
 
   test("a coordinator-lane re-park is a take candidate whose park time is its heartbeat_at", () => {
@@ -301,5 +313,52 @@ describe("planReconcile: each kind's doneOnMain decides deleteMerged", () => {
     const p = plan({});
     expect(p.deleteMerged).toEqual([]);
     expect(p.supersededMerged).toEqual(["reconcile:4"]);
+  });
+});
+
+describe("planReconcile: planning records (Story 2.7)", () => {
+  const STATUS_GLOBS = [STATUS, "_bmad-output/implementation-artifacts/retro-gates.yaml", "_bmad-output/implementation-artifacts/epic-*-context.md"];
+  const graphGlobs = [EPICS_MD, GRAPH_PSEUDO_GLOB];
+  const status = (over: Partial<UnitRecord> = {}) => coord("planning:status.2", { globs: STATUS_GLOBS, pr: 6, pr_owner: COORD.owner, head_sha: HEAD, ...over });
+  const graph = (over: Partial<UnitRecord> = {}) => coord("planning:graph.1", { globs: graphGlobs, pr: 6, pr_owner: COORD.owner, head_sha: HEAD, ...over });
+
+  test("the matrix: an ungated status PR (merging, approved_sha null) is disposable: its queue is checked", () => {
+    const p = plan({ records: [status({ state: "merging", passed_sha: HEAD })], prs: { "planning:status.2": open(6) } });
+    expect(shape(p)).toEqual({ ...EMPTY, checkQueue: ["planning:status.2"] });
+    expect(p.checkQueue[0]).toEqual({ unit: "planning:status.2", generation: 1, pr: 6, pr_state: "open", head_sha: HEAD });
+  });
+
+  test("the matrix: a gated graph PR (merging, approved_sha set) is checked as gated, keeping 2.6's re-park", () => {
+    const p = plan({ records: [graph({ state: "merging", generation: 2, passed_sha: HEAD, approved_sha: HEAD })], prs: { "planning:graph.1": open(6) } });
+    expect(shape(p)).toEqual({ ...EMPTY, checkGated: ["planning:graph.1"] });
+  });
+
+  test("a status PR the coordinator took on approval (approved_sha set) is gated, not disposable", () => {
+    const p = plan({ records: [status({ state: "merging", generation: 2, passed_sha: HEAD, approved_sha: HEAD })], prs: { "planning:status.2": open(6) } });
+    expect(shape(p)).toEqual({ ...EMPTY, checkGated: ["planning:status.2"] });
+  });
+
+  test("a planning PR is never named among the open reconcile PRs", () => {
+    const p = plan({ records: [status({ state: "merging", passed_sha: HEAD })], prs: { "planning:status.2": open(6) } });
+    expect(p.openPrs).toEqual([]);
+  });
+
+  test.each([
+    ["status, its PR closed", status({ state: "released" }), { "planning:status.2": closed(6) }, ["planning:status.2"]],
+    ["status, no PR", status({ state: "released", pr: null, head_sha: null }), {}, ["planning:status.2"]],
+    ["graph, its PR closed", graph({ state: "released" }), { "planning:graph.1": closed(6) }, ["planning:graph.1"]],
+    ["status, its PR open (the open-PR position resumes it)", status({ state: "released" }), { "planning:status.2": open(6) }, []],
+    ["graph, its PR open", graph({ state: "released" }), { "planning:graph.1": open(6) }, []],
+  ] as const)("the matrix: a released planning record, %s", (_name, record, prs, want) => {
+    expect(plan({ records: [record], prs }).deleteReleased.map((t) => t.unit)).toEqual([...want]);
+  });
+
+  test.each([
+    ["parked blocked readiness", { state: "parked", park: { kind: "blocked", reason: "readiness", inbox_owner: "carol", globs_held: [] } }],
+    ["live claimed", { state: "claimed" }],
+    ["stale claimed (next takes it over)", { state: "claimed", heartbeat_at: minutesBefore(45) }],
+  ] as const)("a planning record %s is left alone", (_name, over) => {
+    const p = plan({ records: [status({ pr: null, head_sha: null, ...over } as Partial<UnitRecord>)] });
+    expect(shape(p)).toEqual(EMPTY);
   });
 });

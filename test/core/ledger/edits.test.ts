@@ -8,13 +8,14 @@ import {
   claimCoordinator,
   coordinatorClaimState,
   deleteMerged,
-  deleteReleasedReconcile,
+  deleteReleasedRecurring,
   ejected,
   failAttempt,
   fenced,
   finishRecurring,
   heartbeat,
   heldGlobs,
+  isDisposable,
   isStale,
   keepAlive,
   keepCoordinator,
@@ -24,7 +25,7 @@ import {
   parkNew,
   release,
   releaseDeadReconcile,
-  releaseReconcile,
+  releaseDisposable,
   releaseStale,
   startMerging,
   STALE_AFTER_MS,
@@ -431,11 +432,11 @@ describe("ledger edits", () => {
     expect(STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
-  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 1', '"schema_version": 2') };
-  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 1', '"schema_version": 0') };
+  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 2', '"schema_version": 3') };
+  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 2', '"schema_version": 0') };
   const everyEdit: readonly [string, LedgerEdit][] = CASES.map(([name, edit]) => [name, edit]);
   for (const [name, edit] of everyEdit) {
-    test(`${name}: a schema_version 2 or 0 record on the tip stops`, () => {
+    test(`${name}: a schema_version 3 or 0 record on the tip stops`, () => {
       for (const files of [v2, v0]) {
         const r = edit({ ...tip([rec()]), ...files });
         expect(r.ok).toBe(false);
@@ -466,7 +467,7 @@ describe("ledger edits", () => {
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 1,
+    schema_version: 2,
     owner: who.owner,
     host: who.host,
     lane: "coordinator",
@@ -522,8 +523,8 @@ describe("claimCoordinator", () => {
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 
-  test("a schema_version 2 coordinator.json stops", () => {
-    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 1', '"schema_version": 2');
+  test("a schema_version 3 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 2', '"schema_version": 3');
     const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
     expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
@@ -553,15 +554,15 @@ describe("reconcile record edits", () => {
 
   type Want = UnitRecord | "deleted" | "null" | "invalid" | "precondition";
   const cases: readonly (readonly [string, LedgerEdit, readonly UnitRecord[], Want, string])[] = [
-    // releaseReconcile: merging -> released, no attempt
-    ["releaseReconcile: merging, held by this coordinator", releaseReconcile(at(NOW, 2)), [rr({ state: "merging", generation: 2, passed_sha: SHA_A, attempts: 1 })], by(COORD, NOW, { unit: R, globs: [], state: "released", generation: 2, pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 1 }), "releaseReconcile"],
-    ["releaseReconcile: merging, held by another coordinator identity", releaseReconcile(at(NOW)), [rr({ state: "merging", passed_sha: SHA_A }, COORD_2)], by(COORD, NOW, { unit: R, globs: [], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A }), "releaseReconcile"],
-    ["releaseReconcile: a builder writer", releaseReconcile({ ...at(NOW), by: ALICE }), [rr({ state: "merging" })], "precondition", "releaseReconcile"],
-    ["releaseReconcile: a Story unit", releaseReconcile({ ...at(NOW), unit: U }), [rec({ state: "merging" })], "invalid", "releaseReconcile"],
-    ["releaseReconcile: the wrong generation", releaseReconcile(at(NOW, 2)), [rr({ state: "merging" })], "precondition", "releaseReconcile"],
-    ["releaseReconcile: claimed, not merging", releaseReconcile(at(NOW)), [rr()], "precondition", "releaseReconcile"],
-    ["releaseReconcile: a holder that is not a coordinator lane", releaseReconcile(at(NOW)), [rr({ state: "merging" }, ALICE)], "precondition", "releaseReconcile"],
-    ["releaseReconcile: no record", releaseReconcile(at(NOW)), [], "precondition", "releaseReconcile"],
+    // releaseDisposable: merging -> released, no attempt
+    ["releaseDisposable: merging, held by this coordinator", releaseDisposable(at(NOW, 2)), [rr({ state: "merging", generation: 2, passed_sha: SHA_A, attempts: 1 })], by(COORD, NOW, { unit: R, globs: [], state: "released", generation: 2, pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A, attempts: 1 }), "releaseDisposable"],
+    ["releaseDisposable: merging, held by another coordinator identity", releaseDisposable(at(NOW)), [rr({ state: "merging", passed_sha: SHA_A }, COORD_2)], by(COORD, NOW, { unit: R, globs: [], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, passed_sha: SHA_A }), "releaseDisposable"],
+    ["releaseDisposable: a builder writer", releaseDisposable({ ...at(NOW), by: ALICE }), [rr({ state: "merging" })], "precondition", "releaseDisposable"],
+    ["releaseDisposable: a Story unit", releaseDisposable({ ...at(NOW), unit: U }), [rec({ state: "merging" })], "invalid", "releaseDisposable"],
+    ["releaseDisposable: the wrong generation", releaseDisposable(at(NOW, 2)), [rr({ state: "merging" })], "precondition", "releaseDisposable"],
+    ["releaseDisposable: claimed, not merging", releaseDisposable(at(NOW)), [rr()], "precondition", "releaseDisposable"],
+    ["releaseDisposable: a holder that is not a coordinator lane", releaseDisposable(at(NOW)), [rr({ state: "merging" }, ALICE)], "precondition", "releaseDisposable"],
+    ["releaseDisposable: no record", releaseDisposable(at(NOW)), [], "precondition", "releaseDisposable"],
     // releaseDeadReconcile: stale claimed -> released, attempts + 1
     ["releaseDeadReconcile: stale claimed", releaseDeadReconcile(at(LATE)), [rr({ attempts: 1 }, COORD_2)], by(COORD, LATE, { unit: R, globs: [], state: "released", pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, attempts: 2 }), "releaseDeadReconcile"],
     ["releaseDeadReconcile: claimed but live", releaseDeadReconcile(at(NOW)), [rr()], "precondition", "releaseDeadReconcile"],
@@ -569,14 +570,14 @@ describe("reconcile record edits", () => {
     ["releaseDeadReconcile: the wrong generation", releaseDeadReconcile(at(LATE, 2)), [rr()], "precondition", "releaseDeadReconcile"],
     ["releaseDeadReconcile: a builder writer", releaseDeadReconcile({ ...at(LATE), by: ALICE }), [rr()], "precondition", "releaseDeadReconcile"],
     ["releaseDeadReconcile: a Story unit", releaseDeadReconcile({ ...at(LATE), unit: U }), [rec()], "invalid", "releaseDeadReconcile"],
-    // deleteReleasedReconcile: released -> none
-    ["deleteReleasedReconcile: released", deleteReleasedReconcile(at(NOW)), [rr({ state: "released" })], "deleted", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: already gone", deleteReleasedReconcile(at(NOW)), [], "null", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: merged", deleteReleasedReconcile(at(NOW)), [rr({ state: "merged" })], "precondition", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: parked", deleteReleasedReconcile(at(NOW)), [rr({ state: "parked", park: blocked("verification", "carol") })], "precondition", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: the wrong generation", deleteReleasedReconcile(at(NOW, 2)), [rr({ state: "released" })], "precondition", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: a builder writer", deleteReleasedReconcile({ ...at(NOW), by: ALICE }), [rr({ state: "released" })], "precondition", "deleteReleasedReconcile"],
-    ["deleteReleasedReconcile: a Story unit", deleteReleasedReconcile({ ...at(NOW), unit: U }), [rec({ state: "released" })], "invalid", "deleteReleasedReconcile"],
+    // deleteReleasedRecurring: released -> none
+    ["deleteReleasedRecurring: released", deleteReleasedRecurring(at(NOW)), [rr({ state: "released" })], "deleted", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: already gone", deleteReleasedRecurring(at(NOW)), [], "null", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: merged", deleteReleasedRecurring(at(NOW)), [rr({ state: "merged" })], "precondition", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: parked", deleteReleasedRecurring(at(NOW)), [rr({ state: "parked", park: blocked("verification", "carol") })], "precondition", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: the wrong generation", deleteReleasedRecurring(at(NOW, 2)), [rr({ state: "released" })], "precondition", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: a builder writer", deleteReleasedRecurring({ ...at(NOW), by: ALICE }), [rr({ state: "released" })], "precondition", "deleteReleasedRecurring"],
+    ["deleteReleasedRecurring: a Story unit", deleteReleasedRecurring({ ...at(NOW), unit: U }), [rec({ state: "released" })], "invalid", "deleteReleasedRecurring"],
   ];
   test.each(cases)("%s", (_name, edit, records, want, name) => {
     const r = edit(tip(records));
@@ -594,6 +595,71 @@ describe("reconcile record edits", () => {
       return;
     }
     expect(r.value).toEqual({ message: `ledger: ${name} ${R} [skip ci]`, writes: { [R_PATH]: serializeUnitRecord(want) }, deletes: [] });
+  });
+});
+
+describe("planning records: disposable and recurring (Story 2.7)", () => {
+  const STATUS_GLOBS = ["_bmad-output/implementation-artifacts/sprint-status.yaml"];
+  const GRAPH_GLOBS = ["_bmad-output/planning-artifacts/epics.md", "xarabot:graph"];
+  const pl = (unit: string, over: Partial<UnitRecord> = {}): UnitRecord =>
+    by(COORD, T0, { unit, globs: unit.includes("graph") ? GRAPH_GLOBS : STATUS_GLOBS, pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B, ...over });
+  const path = (unit: string) => `units/${unit.replace(":", "__")}.json`;
+
+  test.each([
+    ["a reconcile record", by(COORD, T0, { unit: "reconcile:3", globs: [] }), true],
+    ["a reconcile record taken on approval", by(COORD, T0, { unit: "reconcile:3", globs: [], approved_sha: SHA_A }), true],
+    ["an ungated status planning record", pl("planning:status.2"), true],
+    ["a status planning record taken on approval", pl("planning:status.2", { approved_sha: SHA_A }), false],
+    ["a graph planning record", pl("planning:graph.1"), false],
+    ["another slug holding xarabot:graph", pl("planning:sprint.1", { globs: GRAPH_GLOBS }), false],
+    ["another slug without it", pl("planning:sprint.1"), true],
+    ["a Story", rec(), false],
+  ] as const)("isDisposable: %s → %p", (_name, record, want) => {
+    expect(isDisposable(record)).toBe(want);
+  });
+
+  test("releaseDisposable: an ungated merging status planning record is released, no attempt, its PR kept", () => {
+    const u = "planning:status.2";
+    const r = releaseDisposable({ unit: u, by: COORD, now: NOW, generation: 1 })(tip([pl(u, { state: "merging", passed_sha: SHA_A })]));
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toEqual({
+      message: `ledger: releaseDisposable ${u} [skip ci]`,
+      writes: { [path(u)]: serializeUnitRecord(pl(u, { state: "released", passed_sha: SHA_A, heartbeat_at: NOW })) },
+      deletes: [],
+    });
+  });
+
+  test.each([
+    ["a graph planning record", "planning:graph.1", {}],
+    ["a status planning record taken on approval", "planning:status.2", { approved_sha: SHA_A }],
+  ] as const)("releaseDisposable refuses %s", (_name, u, over) => {
+    const r = releaseDisposable({ unit: u, by: COORD, now: NOW, generation: 1 })(tip([pl(u, { state: "merging", passed_sha: SHA_A, ...over })]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+  });
+
+  test.each(["planning:status.2", "planning:graph.1"])("deleteReleasedRecurring deletes a released %s", (u) => {
+    const r = deleteReleasedRecurring({ unit: u, by: COORD, now: NOW, generation: 1 })(tip([pl(u, { state: "released" })]));
+    expect(r.ok && r.value).toEqual({ message: `ledger: deleteReleasedRecurring ${u} [skip ci]`, writes: {}, deletes: [path(u)] });
+  });
+
+  test("every record an edit writes carries schema_version 2, whatever the tip held", () => {
+    const v1 = rec({ schema_version: 1, state: "claimed" });
+    const r = heartbeat({ unit: U, by: ALICE, now: NOW, generation: 1 })(tip([v1]));
+    if (!r.ok || r.value === null) throw new Error("expected a write");
+    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(2);
+    const c = claim({ unit: "story:7.1", by: ALICE, now: NOW, globs: ["src/7/**"], expectGeneration: null })(tip([v1]));
+    if (!c.ok || c.value === null) throw new Error("expected a write");
+    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(2);
+  });
+
+  test("coordinator.json writes carry schema_version 2: a claim over a v1 record, and the keeper's beat", () => {
+    const v1 = serializeCoordinator(coordRec(COORD, T0, { schema_version: 1 }));
+    const claimed = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v1 });
+    if (!claimed.ok || claimed.value === null) throw new Error("expected a write");
+    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(2);
+    const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
+    if (!kept.ok || kept.value === null) throw new Error("expected a write");
+    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(2);
   });
 });
 

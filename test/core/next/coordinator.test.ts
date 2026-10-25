@@ -9,15 +9,20 @@ import {
   missingStatusEntries,
   newestMergedReconcile,
   nextCoordinator,
+  nextPlanningNumber,
+  planningDue,
+  planningNumber,
+  planningSlug,
   reconcileDue,
+  unitBranch,
   type CoordinatorUnitSpec,
 } from "../../../src/core/next/coordinator.ts";
 import { next, type NextOutcome } from "../../../src/core/next/next.ts";
 import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
-import { UNIT_KINDS, unitKind, type CoordinatorRecord, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { planningKindOf, UNIT_KINDS, unitKind, type CoordinatorRecord, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { PrState } from "../../../src/core/schemas/snapshot.ts";
 import { ALICE, COORD, tip } from "../ledger/fixtures.ts";
-import { EPICS_MD, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "./fixtures.ts";
+import { AUTHORITY, CONFIG_PATH, EPICS_MD, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "./fixtures.ts";
 
 // NOW is 2026-10-22T10:10:00Z: past the default 08:00 digest slot.
 const TODAY_DIGEST = "2026-10-22T08:00:00Z";
@@ -27,7 +32,7 @@ const HEAD = "e".repeat(40);
 /** A live coordinator claim whose digest is posted for today, so the digest slot is no work. */
 function coordinator(over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 1,
+    schema_version: 2,
     owner: COORD.owner,
     host: COORD.host,
     lane: "coordinator",
@@ -54,9 +59,12 @@ const merged = (n: number): PrState => ({ number: n, state: "merged", head_sha: 
 
 const STATUS_GLOBS = [STATUS, RETRO, "_bmad-output/implementation-artifacts/epic-*-context.md"];
 
-/** Epic 1 bootstrapped, Epic 2 with Story 2.1 eligible; the coordinator's view. */
+/** Every status entry of the default world: no status planning due. */
+const PLANNED = { "epic-2": "backlog", "2.1": "backlog" } as const;
+
+/** Epic 1 bootstrapped, Epic 2 with Story 2.1 eligible and in sprint status; the coordinator's view. */
 function world(extra: Partial<World> = {}): World {
-  return { epics: { 1: [], 2: ["1"] }, bootstrapped: [1], role: "coordinator", coordinator: coordinator(), ...extra };
+  return { epics: { 1: [], 2: ["1"] }, bootstrapped: [1], role: "coordinator", coordinator: coordinator(), status: PLANNED, ...extra };
 }
 
 const pickC = (w: Partial<World>) => next(snapshotOf(world(w)), "coordinator");
@@ -425,5 +433,172 @@ describe("nextCoordinator", () => {
   test("is what next returns for the coordinator", () => {
     const s = snapshotOf(world({ records: [reconciled(4, 9)] }));
     expect(next(s, "coordinator")).toEqual(nextCoordinator(s));
+  });
+});
+
+describe("next(coordinator): planning (Story 2.7)", () => {
+  const GRAPH_GLOBS = coordinatorGlobs({ kind: "planning", planning: "graph" }, { ...CONFIG_DEFAULTS, manifests: { dir: "stories" } });
+  const planningRec = (unit: string, over: Partial<UnitRecord> = {}) =>
+    coord(unit, { globs: unit.startsWith("planning:graph") ? GRAPH_GLOBS : STATUS_GLOBS, ...over });
+  const parkedAs = (reason: "readiness" | "write-check" | "verification" | "ci-timeout" | "attempts-cap"): Partial<UnitRecord> => ({
+    state: "parked",
+    park: { kind: "blocked", reason, inbox_owner: "carol", globs_held: [] },
+  });
+  /** Epic 3 has a heading (3.1) with no manifest, and no status key. */
+  const GRAPH_DUE: Partial<World> = { epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }] };
+  /** Every key present, Epic 2's context missing and Story 2.1 in backlog. */
+  const CONTEXT_DUE: Partial<World> = { contexts: { 2: null } };
+  /** Graph due, every key present: status not due. */
+  const GRAPH_ONLY: Partial<World> = { ...GRAPH_DUE, status: { ...PLANNED, "epic-3": "backlog" } };
+  const pick = (w: Partial<World>) => pickC({ records: [RECENT, ...(w.records ?? [])], ...w, ...(w.records === undefined ? {} : { records: [RECENT, ...w.records] }) });
+  const reasonsOf = (o: NextOutcome) => (o.kind === "coordinator" || o.kind === "idle" ? o.reasons : []);
+
+  test.each([
+    ["the matrix: graph first (unmanifested 3.1, Epic 3 missing from status)", GRAPH_DUE, "unit planning:graph.1"],
+    ["the matrix: context only (Epic 2 context missing, Story 2.1 backlog, every key present)", CONTEXT_DUE, "unit planning:status.1"],
+    ["the matrix: bootstrapped (heading and missing context only in Epic 1)", { epics: { 1: ["1"], 2: ["1"] }, manifests: [{ id: "2.1" }], contexts: { 1: null } }, "idle"],
+    ["the matrix: readiness park holds status", { ...CONTEXT_DUE, records: [planningRec("planning:status.2", parkedAs("readiness"))] }, "idle"],
+    ["the matrix: readiness park, graph still due", { ...GRAPH_DUE, contexts: { 2: null }, records: [planningRec("planning:status.2", parkedAs("readiness"))] }, "unit planning:graph.1"],
+    ["the matrix: release (status.2 released, status due)", { ...CONTEXT_DUE, records: [planningRec("planning:status.2", { state: "released" })] }, "unit planning:status.3"],
+    ["nothing due: every key present, every context valid", {}, "idle"],
+    ["status due: an Epic key missing", { status: { "2.1": "backlog" } }, "unit planning:status.1"],
+    ["status due: a Story key missing", { status: { "epic-2": "backlog" } }, "unit planning:status.1"],
+    ["a missing key of a bootstrapped Epic only is not due", { epics: { 1: ["1"], 2: ["1"] }, status: PLANNED }, "idle"],
+    [
+      "missing keys a merged graph planning record will add are reconcile's, not due",
+      { status: { "epic-2": "backlog" }, records: [planningRec("planning:graph.1", { state: "merged" })] },
+      "idle",
+    ],
+    ["a context not valid, with every Story done: not due", { contexts: { 2: null }, status: { "epic-2": "in-progress", "2.1": "done" } }, "idle"],
+    ["a context with the wrong heading is due", { contexts: { 2: "# Wrong\n" } }, "unit planning:status.1"],
+    ["an empty context is due", { contexts: { 2: "" } }, "unit planning:status.1"],
+    [
+      "a context of an Epic a dependency holds: not due",
+      { epics: { 1: [], 2: ["1"], 3: ["1"] }, epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [2]\n", contexts: { 3: null }, status: { ...PLANNED, "epic-3": "backlog", "3.1": "backlog" } },
+      "idle",
+    ],
+    [
+      "a context of an Epic a rejected retro holds: not due",
+      { epics: { 1: [], 2: ["1"], 3: ["1"] }, contexts: { 3: null }, retro: { 2: "rejected" }, status: { "epic-2": "done", "2.1": "done", "epic-3": "backlog", "3.1": "backlog" } },
+      "idle",
+    ],
+    ["graph before status when both are due", { ...GRAPH_DUE, contexts: { 2: null } }, "unit planning:graph.1"],
+    ["a graph park holds graph only: status is still due", { ...GRAPH_DUE, contexts: { 2: null }, records: [planningRec("planning:graph.1", { state: "parked", park: { kind: "awaiting-approval", reason: null, inbox_owner: "carol", globs_held: [EPICS_MD] } })] }, "unit planning:status.1"],
+    ["a merging status record holds status", { ...CONTEXT_DUE, records: [planningRec("planning:status.1", { state: "merging", passed_sha: HEAD })] }, "idle"],
+    ["a live claimed status record holds status", { ...CONTEXT_DUE, records: [planningRec("planning:status.1")] }, "idle"],
+    ["a merged status record is reconcile's to delete first", { ...CONTEXT_DUE, records: [planningRec("planning:status.4", { state: "merged" })] }, "unit reconcile:5"],
+    ["a merged graph record not done on main does not hold; n counts it", { ...GRAPH_DUE, records: [planningRec("planning:graph.4", { state: "merged" })] }, "unit planning:graph.5"],
+    ["a released graph record does not hold; n counts it", { ...GRAPH_DUE, records: [planningRec("planning:graph.7", { state: "released" })] }, "unit planning:graph.8"],
+    ["n counts only its own slug", { ...GRAPH_DUE, records: [planningRec("planning:status.9", { state: "released" })] }, "unit planning:graph.1"],
+    ["n is by number, not by name: status.10 after status.9", { ...CONTEXT_DUE, records: [planningRec("planning:status.9", { state: "released" }), planningRec("planning:status.10", { state: "released" })] }, "unit planning:status.11"],
+    ["another slug holding xarabot:graph counts as graph and holds it", { ...GRAPH_ONLY, records: [coord("planning:sprint.1", { globs: GRAPH_GLOBS, ...parkedAs("verification") })] }, "idle"],
+    ["a held graph kind leaves a due status kind due", { ...GRAPH_DUE, records: [planningRec("planning:graph.1", parkedAs("verification"))] }, "unit planning:status.1"],
+    ["graph only", GRAPH_ONLY, "unit planning:graph.1"],
+    ["another slug without xarabot:graph counts as status and holds it", { ...CONTEXT_DUE, records: [coord("planning:sprint.1", { globs: STATUS_GLOBS, ...parkedAs("write-check") })] }, "idle"],
+  ] as const)("%s → %s", (_name, w, want) => {
+    expect(picked(pick(w as Partial<World>))).toBe(want);
+  });
+
+  test.each(["readiness", "write-check", "verification", "ci-timeout", "attempts-cap"] as const)("a blocked %s park holds its kind, naming it with planning-held", (reason) => {
+    const o = pick({ ...CONTEXT_DUE, records: [planningRec("planning:status.2", parkedAs(reason))] });
+    expect(o.kind).toBe("idle");
+    const held = reasonsOf(o).find((r) => r.code === "planning-held");
+    expect(held?.subject).toBe("planning:status.2");
+    expect(held?.message).toContain(`planning:status.2 is parked blocked ${reason}`);
+    expect(reasonOf(o)).toContain("status planning is due");
+  });
+
+  test("the matrix: a stale claim with no PR is taken over, same id", () => {
+    const stale = planningRec("planning:graph.1", { generation: 2, heartbeat_at: minutesBefore(30) });
+    const o = pick({ ...GRAPH_DUE, records: [stale] });
+    expect(o.kind === "coordinator" ? o.unit : null).toEqual({
+      unit: "planning:graph.1",
+      kind: "planning",
+      globs: GRAPH_GLOBS,
+      expect_generation: 2,
+      take_over: "claimed",
+      pr: null,
+      why: `planning:graph.1 is claimed and stale (heartbeat ${minutesBefore(30)}) with no open PR`,
+    });
+  });
+
+  test("a stale claim is taken over even when its kind is no longer due (the step finds nothing due)", () => {
+    const o = pick({ records: [planningRec("planning:status.3", { heartbeat_at: minutesBefore(45) })] });
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.take_over] : null).toEqual(["planning:status.3", "claimed"]);
+  });
+
+  test("a status unit holds the status files and every Epic context, says why, and has no generation or PR", () => {
+    const o = pick(CONTEXT_DUE);
+    expect(o.kind === "coordinator" ? o.unit : null).toEqual({
+      unit: "planning:status.1",
+      kind: "planning",
+      globs: STATUS_GLOBS,
+      expect_generation: null,
+      take_over: null,
+      pr: null,
+      why: "status planning is due: Epic 2 context _bmad-output/implementation-artifacts/epic-2-context.md is missing",
+    });
+  });
+
+  test("a graph unit holds the graph inputs and xarabot:graph and names the headings", () => {
+    const o = pick(GRAPH_DUE);
+    expect(o.kind === "coordinator" ? o.unit.globs : null).toEqual(GRAPH_GLOBS);
+    expect(o.kind === "coordinator" ? o.unit.why : "").toMatch(new RegExp(`^graph planning is due: Story 3\\.1 has a heading \\(${EPICS_MD.replaceAll(".", "\\.")}:[0-9]+\\) but no manifest$`));
+  });
+
+  test("overlap: a builder record holding a manifest glob passes graph over with an overlap reason; status is still due", () => {
+    const builder = storyRec("2.1", { globs: ["stories/**"] });
+    const o = pick({ ...GRAPH_DUE, contexts: { 2: null }, records: [builder] });
+    expect(picked(o)).toBe("unit planning:status.1");
+    const overlap = reasonsOf(o).find((r) => r.code === "overlap");
+    expect(overlap?.subject).toBe("planning:graph.1");
+    expect(overlap?.message).toContain('overlaps "stories/**" held by story:2.1');
+  });
+
+  test("overlap: no planning unit at all, idle naming the overlap", () => {
+    const o = pick({ ...CONTEXT_DUE, records: [storyRec("2.1", { globs: ["_bmad-output/**"] })] });
+    expect(o.kind).toBe("idle");
+    expect(reasonsOf(o).map((r) => r.code)).toContain("overlap");
+  });
+
+  test("reconcile comes first, and an open coordinator PR before planning", () => {
+    expect(picked(pickC({ ...GRAPH_DUE }))).toBe("unit reconcile:1");
+    const released = planningRec("planning:status.1", { state: "released", pr: 9 });
+    expect(picked(pick({ ...GRAPH_DUE, records: [released], prs: { "planning:status.1": open(9) } }))).toBe("unit planning:status.1");
+    const live = planningRec("planning:status.1", { state: "merging", pr: 9, passed_sha: HEAD });
+    expect(reasonOf(pick({ ...GRAPH_DUE, records: [live], prs: { "planning:status.1": open(9) } }))).toContain("waiting on an open coordinator PR");
+  });
+
+  test("planningDue reports both kinds for the prompt", () => {
+    const d = planningDue(snapshotOf(world({ ...GRAPH_DUE, contexts: { 2: null } })));
+    expect(d.graph.due).toBe(true);
+    expect(d.graph.headings.map((h) => [h.id, h.epic])).toEqual([["3.1", 3]]);
+    expect(d.status.due).toBe(true);
+    expect(d.status.entries.map((e) => e.key)).toEqual(["epic-3"]);
+    expect(d.status.contexts).toEqual([2]);
+    const none = planningDue(snapshotOf(world()));
+    expect([none.graph.due, none.status.due]).toEqual([false, false]);
+  });
+
+  test("with no manifests config, graph planning is never due (there is no manifest directory to write to)", () => {
+    const noManifests = ["schema_version: 1", 'runner_version: "0.1.0"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "bootstrapped_epics: [1]", ""].join("\n");
+    const d = planningDue(snapshotOf(world({ ...GRAPH_DUE, files: { [CONFIG_PATH]: noManifests } })));
+    expect(d.graph).toEqual({ due: false, why: "no manifests directory is configured", headings: [] });
+  });
+
+  test("planning ids, slugs and branches", () => {
+    expect(planningSlug("planning:status.12")).toBe("status");
+    expect(planningSlug("planning:sprint-x.1")).toBe("sprint-x");
+    expect(planningSlug("reconcile:1")).toBeNull();
+    expect(planningNumber("planning:graph.10")).toBe(10);
+    expect(planningKindOf({ unit: "planning:graph.1", globs: [] })).toBe("graph");
+    expect(planningKindOf({ unit: "planning:status.1", globs: [GRAPH_PSEUDO_GLOB] })).toBe("status");
+    expect(planningKindOf({ unit: "planning:x.1", globs: [GRAPH_PSEUDO_GLOB] })).toBe("graph");
+    expect(planningKindOf({ unit: "planning:x.1", globs: [] })).toBe("status");
+    expect(planningKindOf({ unit: "story:1.1", globs: [] })).toBeNull();
+    expect(unitBranch("xarabot/", "planning:status.2")).toBe("xarabot/planning-status.2");
+    expect(unitBranch("bot-", "reconcile:7")).toBe("bot-reconcile-7");
+    const s = snapshotOf(world({ records: [RECENT, planningRec("planning:graph.3", { state: "merged" }), planningRec("planning:status.1", { state: "released" })] }));
+    expect([nextPlanningNumber(s, "graph"), nextPlanningNumber(s, "status")]).toEqual([4, 2]);
   });
 });

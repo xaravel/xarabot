@@ -39,7 +39,7 @@ export type World = {
   readonly epicsYaml?: string;
   /** Epic → retro verdict; default none. */
   readonly retro?: Record<number, Verdict>;
-  /** Story id → status (sprint key `k-<id>`). */
+  /** Story id → status (sprint key `k-<id>`); an `epic-<N>` key is written as it is. */
   readonly status?: Record<string, string>;
   /** Epic → context text, `null` to leave it out. Default a valid file for every Epic. */
   readonly contexts?: Record<number, string | null>;
@@ -111,7 +111,7 @@ function retroGates(retro: Record<number, Verdict>): string {
 
 function sprintStatus(status: Record<string, string>): string {
   const lines = ["# comment", "project: x", "development_status:", "  epic-1: backlog"];
-  for (const [id, s] of Object.entries(status)) lines.push(`  k-${id}: ${s}`);
+  for (const [id, s] of Object.entries(status)) lines.push(id.startsWith("epic-") ? `  ${id}: ${s}` : `  k-${id}: ${s}`);
   lines.push("action_items: []");
   return `${lines.join("\n")}\n`;
 }
