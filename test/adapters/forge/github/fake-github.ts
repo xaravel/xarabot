@@ -382,7 +382,27 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
 
   const gqlError = (type: string, message: string) => json(200, { data: null, errors: [{ type, message }] });
 
-  /** `POST /graphql`: the queue-state query and the enqueue and dequeue mutations. */
+  /**
+   * PR `n`'s `latestOpinionatedReviews` nodes: each login's latest
+   * `APPROVED`, `CHANGES_REQUESTED` or `DISMISSED` review, oldest first.
+   */
+  function latestOpinionated(n: number): Record<string, unknown>[] {
+    const latest = new Map<string | null, FakeReview>();
+    for (const r of reviews.get(n) ?? []) {
+      if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) continue;
+      const key = r.login?.toLowerCase() ?? null;
+      latest.delete(key);
+      latest.set(key, r);
+    }
+    return [...latest.values()].map((r) => ({
+      author: r.login === null ? null : { login: r.login },
+      state: r.state,
+      commit: r.commit_id === null ? null : { oid: r.commit_id },
+      submittedAt: r.submitted_at,
+    }));
+  }
+
+  /** `POST /graphql`: the blob read, the snapshot's PR read, the queue-state query and the enqueue and dequeue mutations. */
   function handleGraphql(body: unknown): Reply {
     const b = obj(body);
     const query = b?.["query"];
@@ -423,6 +443,21 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       if (i === -1) return gqlError("UNPROCESSABLE", "Pull request is not in the queue");
       queue.splice(i, 1);
       return json(200, { data: { dequeuePullRequest: { mergeQueueEntry: { id: `MQE_${n}` } } } });
+    }
+    if (/\bpullRequest\s*\(/.test(query) && /\blatestOpinionatedReviews\b/.test(query)) {
+      if (vars["owner"] !== owner || vars["name"] !== name) {
+        return json(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: `Could not resolve to a Repository with the name '${String(vars["owner"])}/${String(vars["name"])}'.` }] });
+      }
+      const n = vars["number"];
+      const p = typeof n === "number" ? pulls.get(n) : undefined;
+      if (typeof n !== "number" || p === undefined) {
+        return json(200, {
+          data: { repository: { pullRequest: null } },
+          errors: [{ type: "NOT_FOUND", path: ["repository", "pullRequest"], message: `Could not resolve to a PullRequest with the number of ${String(n)}.` }],
+        });
+      }
+      const state = p.merged ? "MERGED" : p.state === "open" ? "OPEN" : "CLOSED";
+      return json(200, { data: { repository: { pullRequest: { state, headRefOid: headOf(p), latestOpinionatedReviews: { nodes: latestOpinionated(n) } } } } });
     }
     if (/\bpullRequest\s*\(/.test(query) && /\bmergeQueueEntry\b/.test(query)) {
       if (vars["owner"] !== owner || vars["name"] !== name) {

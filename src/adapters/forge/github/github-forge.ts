@@ -2,7 +2,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseLedger } from "../../../core/ledger/codec.ts";
 import type { LedgerCommit } from "../../../core/ledger/edits.ts";
-import type { PrState } from "../../../core/schemas/snapshot.ts";
+import { IsoDateTime } from "../../../core/schemas/common.ts";
+import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
   forgeErr,
@@ -45,9 +46,11 @@ import { createTokenSource } from "./tokens.ts";
 /**
  * The GitHub `Forge` adapter (FR6, FR9, FR13, FR24, AR7, AR16, AR19, AR24,
  * AR27, AR38, AR39). `snapshot` and `ledgerSwap` work over the REST git data
- * API; `pushBranch` runs `git push --force-with-lease` from the lane's private
- * `runner.git`; the PR operations, `comment`, `checks` (check runs plus the
- * combined commit status) and the CI-log prefetch use REST; `enqueue` and
+ * API (`snapshot` reads blobs and each unit's PR, with its reviewers' latest
+ * decisive reviews, over GraphQL); `pushBranch` runs `git push
+ * --force-with-lease` from the lane's private `runner.git`; the PR
+ * operations, `comment`, `checks` (check runs plus the combined commit
+ * status) and the CI-log prefetch use REST; `enqueue` and
  * `dequeue` read the PR's merge-queue state over GraphQL (as the read-only
  * `queueState` does) and then call `enqueuePullRequest` or
  * `dequeuePullRequest` (the merge queue is the only merge path; the adapter
@@ -104,6 +107,12 @@ export function alertBody(maintainer: string, condition: string, mainSha: GitSha
 /** The merge-queue state of one PR, by number. */
 const PULL_QUEUE_STATE_QUERY =
   "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id state headRefOid mergeQueueEntry { id } } } }";
+/**
+ * A unit's PR for the snapshot, by number: its state, head and each
+ * reviewer's latest decisive review, in one call (retro item 13).
+ */
+const PULL_SNAPSHOT_QUERY =
+  "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { state headRefOid latestOpinionatedReviews(first: 100) { nodes { author { login } state commit { oid } submittedAt } } } } }";
 const ENQUEUE_MUTATION =
   "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid }) { mergeQueueEntry { id } } }";
 const DEQUEUE_MUTATION = "mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }";
@@ -411,28 +420,58 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     return forgeOk({ sha: sha.value, tree: blobs.map((e) => e.path), files: files.value, blob_shas: blobShas });
   }
 
+  /**
+   * The PR state of every ledger record with a `pr`, one GraphQL read per PR
+   * (`PULL_SNAPSHOT_QUERY`, under `pullQueueState`, the adapter's GraphQL PR
+   * read): state, head and each reviewer's latest decisive review. A PR that
+   * no longer exists has no state, as in the fake forge.
+   */
   async function readPrs(ctx: Ctx, ledgerFiles: Readonly<Record<string, string>>): Promise<ForgeResult<ForgeSnapshot["prs"]>> {
     const parsed = parseLedger(ledgerFiles);
     if (!parsed.ok) return forgeOk({});
     const wanted = [...parsed.value.units].flatMap(([unit, record]) => (record.pr === null ? [] : [{ unit, pr: record.pr }]));
-    const op = GITHUB_OPERATIONS.getPull;
-    const results = await Promise.all(wanted.map((w) => api(ctx, op, `/pulls/${w.pr}`)));
+    const op = GITHUB_OPERATIONS.pullQueueState;
+    const results = await Promise.all(wanted.map((w) => graphql(ctx, op, PULL_SNAPSHOT_QUERY, { owner, name, number: w.pr })));
     const states: Record<string, PrState> = {};
     for (const [i, r] of results.entries()) {
       const { unit, pr } = wanted[i] as { unit: string; pr: number };
-      if (!r.ok) {
-        // A PR that no longer exists has no state, as in the fake forge.
-        if (r.error.kind === "not-found") continue;
-        return r;
+      if (!r.ok) return r;
+      const pull = asObj(r.value.data?.["repository"])?.["pullRequest"];
+      if (r.value.errors.length > 0) {
+        if ((pull === null || pull === undefined) && r.value.errors.every((e) => e.type === "NOT_FOUND")) continue;
+        return redacted(mapGraphqlErrors(op, r.value.errors, "transient"));
       }
-      const body = asObj(r.value.body);
-      const state = body?.["state"];
-      const head = str(body?.["head"], "sha");
-      if ((state !== "open" && state !== "closed") || head === undefined) return malformed(op, `PR #${pr}`);
-      const merged = body?.["merged"] === true || typeof body?.["merged_at"] === "string";
-      states[unit] = { number: pr, state: merged ? "merged" : state, head_sha: head };
+      const state = str(pull, "state");
+      const head = str(pull, "headRefOid");
+      const reviews = toSnapshotReviews(asObj(asObj(pull)?.["latestOpinionatedReviews"])?.["nodes"]);
+      if ((state !== "OPEN" && state !== "CLOSED" && state !== "MERGED") || head === undefined || reviews === undefined) return malformed(op, `PR #${pr}`);
+      states[unit] = { number: pr, state: state === "OPEN" ? "open" : state === "CLOSED" ? "closed" : "merged", head_sha: head, reviews };
     }
     return forgeOk(states);
+  }
+
+  /** `latestOpinionatedReviews` nodes as the snapshot's reviews, decisive ones only; `undefined` when malformed. */
+  function toSnapshotReviews(nodes: unknown): PrReview[] | undefined {
+    if (!Array.isArray(nodes)) return undefined;
+    const list: PrReview[] = [];
+    for (const raw of nodes) {
+      const n = asObj(raw);
+      if (n === undefined) return undefined;
+      const state = typeof n["state"] === "string" ? n["state"].toLowerCase() : undefined;
+      if (state === undefined || !(REVIEW_STATES as readonly string[]).includes(state)) return undefined;
+      const author = n["author"];
+      const commit = n["commit"];
+      if ((author !== null && asObj(author) === undefined) || (commit !== null && asObj(commit) === undefined)) return undefined;
+      const login = author === null ? null : str(author, "login");
+      const sha = commit === null ? null : str(commit, "oid");
+      const submitted = n["submittedAt"];
+      if (login === undefined || sha === undefined || (sha !== null && !SHA_PATTERN.test(sha)) || (submitted !== null && typeof submitted !== "string")) return undefined;
+      // A pending or commented review, or one never submitted, decides nothing.
+      if (!(PR_REVIEW_DECISIONS as readonly string[]).includes(state) || submitted === null) continue;
+      if (!IsoDateTime.safeParse(submitted).success) return undefined;
+      list.push({ author: login, state: state as PrReview["state"], commit_sha: sha, submitted_at: submitted });
+    }
+    return list;
   }
 
   /** Runs `body` unless the signal is already aborted; turns a throw into `transient`. */

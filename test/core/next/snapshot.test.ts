@@ -108,6 +108,17 @@ describe("assembleSnapshot: fields", () => {
   });
 });
 
+const PR = { number: 7, state: "open", head_sha: MAIN_SHA } as const;
+const APPROVAL = { author: "edanisko", state: "approved", commit_sha: MAIN_SHA, submitted_at: "2026-10-22T10:00:00Z" } as const;
+
+describe("assembleSnapshot: PR reviews (retro item 13)", () => {
+  test("each PR's reviews are carried as the forge read them; absent stays absent", () => {
+    const reviews = [APPROVAL, { author: null, state: "dismissed", commit_sha: null, submitted_at: "2026-10-22T10:05:00.000Z" }] as const;
+    const r = assembleSnapshot({ ...input(BASE), prs: { "story:2.1": { ...PR, reviews: [...reviews] }, "story:2.2": { ...PR, number: 8 } } });
+    expect(r.ok && r.value.prs).toEqual({ "story:2.1": { ...PR, reviews: [...reviews] }, "story:2.2": { ...PR, number: 8 } });
+  });
+});
+
 describe("assembleSnapshot: errors", () => {
   const cases: { name: string; world: World; kind: string; tweak?: (i: ReturnType<typeof input>) => ReturnType<typeof input> }[] = [
     { name: "bad config", world: { ...BASE, files: { [CONFIG_PATH]: "schema_version: 1\n" } }, kind: "invalid" },
@@ -145,6 +156,19 @@ describe("assembleSnapshot: errors", () => {
     },
     { name: "bad main SHA", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, main_sha: "abc" }) },
     { name: "bad PR entry", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, prs: { "story:2.1": { number: 0, state: "open", head_sha: MAIN_SHA } } }) },
+    {
+      name: "a PR review that decides nothing (commented)",
+      world: BASE,
+      kind: "invalid-snapshot",
+      tweak: (i) => ({ ...i, prs: { "story:2.1": { ...PR, reviews: [{ ...APPROVAL, state: "commented" as "approved" }] } } }),
+    },
+    {
+      name: "a PR review with no submitted time",
+      world: BASE,
+      kind: "invalid-snapshot",
+      tweak: (i) => ({ ...i, prs: { "story:2.1": { ...PR, reviews: [{ ...APPROVAL, submitted_at: null as unknown as string }] } } }),
+    },
+    { name: "a PR review on a commit that is not a SHA", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, prs: { "story:2.1": { ...PR, reviews: [{ ...APPROVAL, commit_sha: "HEAD" }] } } }) },
     { name: "bad escalation id", world: { ...BASE, escalations: ["two"] }, kind: "invalid-snapshot" },
     { name: "bad role", world: BASE, kind: "invalid-snapshot", tweak: (i) => ({ ...i, role: "reviewer" as "builder" }) },
   ];

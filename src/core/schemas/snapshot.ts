@@ -60,11 +60,30 @@ export const GraphResultSchema = z.discriminatedUnion("ok", [
 export const EPIC_CONTEXT_STATES = ["valid", "missing", "empty", "wrong-heading"] as const;
 export const EpicContextState = z.enum(EPIC_CONTEXT_STATES);
 
-/** A unit's PR as the forge reports it. */
+/** The review states that decide a PR: GitHub's `latestOpinionatedReviews` ones. */
+export const PR_REVIEW_DECISIONS = ["approved", "changes_requested", "dismissed"] as const;
+
+/**
+ * One reviewer's latest decisive review of a PR, from the snapshot's own PR
+ * read (Story 2.4, retro item 13). `author` is `null` for a deleted account.
+ */
+export const PrReviewSchema = z.strictObject({
+  author: NonEmpty.nullable(),
+  state: z.enum(PR_REVIEW_DECISIONS),
+  commit_sha: GitSha.nullable(),
+  submitted_at: IsoDateTime,
+});
+
+/**
+ * A unit's PR as the forge reports it. `reviews`: each reviewer's latest
+ * decisive review, in the forge's order; absent when the forge did not read
+ * them.
+ */
 export const PrStateSchema = z.strictObject({
   number: z.int().min(1),
   state: z.enum(["open", "closed", "merged"]),
   head_sha: GitSha,
+  reviews: z.array(PrReviewSchema).optional(),
 });
 
 /** Everything `next` reads, from one `main` SHA and one ledger tip (AR28). */
@@ -100,6 +119,7 @@ export type SnapshotManifest = z.infer<typeof SnapshotManifestSchema>;
 export type ResolvedGraphData = z.infer<typeof ResolvedGraphSchema>;
 export type GraphResult = z.infer<typeof GraphResultSchema>;
 export type EpicContextState = z.infer<typeof EpicContextState>;
+export type PrReview = z.infer<typeof PrReviewSchema>;
 export type PrState = z.infer<typeof PrStateSchema>;
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type SnapshotInput = z.input<typeof SnapshotSchema>;

@@ -6,6 +6,7 @@ import {
   doneOnMain,
   GRAPH_PSEUDO_GLOB,
   isCoordinatorKind,
+  maintainerApproved,
   missingStatusEntries,
   newestMergedReconcile,
   nextCoordinator,
@@ -156,6 +157,81 @@ describe("next(coordinator): reconcile", () => {
   test("no merged run: due, saying so", () => {
     const o = pickC({ records: [coord("reconcile:2", { state: "merging", passed_sha: HEAD })] });
     expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.why] : null).toEqual(["reconcile:3", "no merged reconcile run on the ledger"]);
+  });
+});
+
+describe("next(coordinator): reconcile on the Maintainer's approval (retro item 13)", () => {
+  const MAINTAINER = "edanisko";
+  const OTHER_HEAD = "f".repeat(40);
+  const PARKED_AT = minutesBefore(30);
+  /** Story 2.1 parked awaiting approval at `HEAD` with PR #7, by its builder. */
+  const awaiting = (over: Partial<UnitRecord> = {}): UnitRecord =>
+    storyRec("2.1", {
+      state: "parked",
+      pr: 7,
+      pr_owner: "alice",
+      head_sha: HEAD,
+      heartbeat_at: PARKED_AT,
+      park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["docs/x.md"] },
+      ...over,
+    });
+  const review = (author: string | null, commit: string | null, minutesAgo: number, state: "approved" | "changes_requested" | "dismissed" = "approved") => ({
+    author,
+    state,
+    commit_sha: commit,
+    submitted_at: minutesBefore(minutesAgo),
+  });
+  const openWith = (reviews: PrState["reviews"], head = HEAD): PrState => ({ number: 7, state: "open", head_sha: head, ...(reviews === undefined ? {} : { reviews }) });
+  const dueFor = (record: UnitRecord, pr: PrState) => reconcileDue(snapshotOf(world({ records: [RECENT, record], prs: { "story:2.1": pr } })));
+
+  test("the Maintainer's approval at the parked head: due in this round, saying why", () => {
+    const w = world({ records: [RECENT, awaiting()], prs: { "story:2.1": openWith([review(MAINTAINER, HEAD, 5)]) } });
+    const o = next(snapshotOf(w), "coordinator");
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.why] : null).toEqual([
+      "reconcile:5",
+      `story:2.1 is parked awaiting approval and the Maintainer approved PR #7 at ${HEAD}`,
+    ]);
+  });
+
+  test.each([
+    ["the Maintainer's approval at another head", openWith([review(MAINTAINER, OTHER_HEAD, 5)])],
+    ["an approval at the parked head by another login (the PR owner)", openWith([review("alice", HEAD, 5)])],
+    ["no review", openWith([])],
+    ["no reviews read", openWith(undefined)],
+    ["the Maintainer requested changes at the parked head", openWith([review(MAINTAINER, HEAD, 5, "changes_requested")])],
+    ["the Maintainer's approval was dismissed", openWith([review(MAINTAINER, HEAD, 5, "dismissed")])],
+    ["the PR moved past the parked head, approved at its new head", openWith([review(MAINTAINER, OTHER_HEAD, 5)], OTHER_HEAD)],
+    ["the PR is closed", { ...openWith([review(MAINTAINER, HEAD, 5)]), state: "closed" as const }],
+  ] as const)("%s: not due", (_name, pr) => {
+    const r = dueFor(awaiting(), pr);
+    expect([r.due, r.why]).toEqual([false, `reconcile:4 ran at ${RECENT.heartbeat_at}, under 10 min ago, and the snapshot shows no reconcile work`]);
+  });
+
+  test("the Maintainer's login is compared case-insensitively", () => {
+    expect(dueFor(awaiting(), openWith([review("Edanisko", HEAD, 5)])).due).toBe(true);
+  });
+
+  test("only a record parked awaiting approval, with an owner, counts", () => {
+    const approved = openWith([review(MAINTAINER, HEAD, 5)]);
+    expect(dueFor(awaiting({ park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } }), approved).due).toBe(false);
+    expect(dueFor(awaiting({ state: "claimed", park: null }), approved).due).toBe(false);
+    expect(dueFor(awaiting({ pr_owner: null }), approved).due).toBe(false);
+  });
+
+  test("a coordinator re-park counts only an approval submitted after it", () => {
+    const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD });
+    expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(false);
+    expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 30)])).due).toBe(false);
+    expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 20)])).due).toBe(true);
+    // A taken record returned to its park (no `passed_sha`) counts any standing approval, as reconcile does.
+    expect(dueFor(awaiting({ lane: COORD.lane, passed_sha: null }), openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
+  });
+
+  test("maintainerApproved reads the record and its PR", () => {
+    const s = snapshotOf(world({ records: [RECENT, awaiting()], prs: { "story:2.1": openWith([review(MAINTAINER, HEAD, 5)]) } }));
+    const parked = s.ledger.units.find((u) => u.unit === "story:2.1") as UnitRecord;
+    expect(maintainerApproved(parked, s)).toBe(true);
+    expect(maintainerApproved(RECENT, s)).toBe(false);
   });
 });
 

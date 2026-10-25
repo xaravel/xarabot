@@ -44,6 +44,43 @@ function apiCalls(gh: FakeGitHub): string[] {
     .map((l) => `${l.method} ${l.path.replace("/repos/acme/widgets", "")}`);
 }
 
+/** The PR numbers of the snapshot's GraphQL PR reads, in request order. */
+function prReads(gh: FakeGitHub): number[] {
+  return gh.control
+    .log()
+    .filter((l) => l.auth === "token" && l.method === "POST" && l.path.endsWith("/graphql"))
+    .map((l) => l.body as { query?: unknown; variables?: { number?: unknown } })
+    .filter((b) => typeof b.query === "string" && b.query.includes("latestOpinionatedReviews"))
+    .map((b) => b.variables?.number as number);
+}
+
+/**
+ * A forge over a fake GitHub holding `story:1.8` with open PR #1, whose
+ * snapshot PR read has its `pullRequest` replaced by `rewrite`'s result and,
+ * with `errors`, those GraphQL errors added.
+ */
+function prSetup(rewrite: (pull: Record<string, unknown>) => Record<string, unknown> | null, errors?: readonly Record<string, unknown>[]): { gh: FakeGitHub; forge: Forge } {
+  const { privateKey, publicKey } = testKeys();
+  const gh = createFakeGitHub({ publicKey });
+  const forge = createGitHubForge({
+    repo: { owner: "acme", name: "widgets" },
+    credentials: { app: { id: 4242, slug: "alice-xarabot" }, key: privateKey },
+    fetch: async (url, init) => {
+      const r = await gh.fetch(url, init);
+      if (!String(url).endsWith("/graphql") || !String(init?.body).includes("latestOpinionatedReviews")) return r;
+      const body = (await r.json()) as { data: { repository: { pullRequest: Record<string, unknown> } } };
+      const replaced = { data: { repository: { pullRequest: rewrite(body.data.repository.pullRequest) } }, ...(errors === undefined ? {} : { errors }) };
+      return new Response(JSON.stringify(replaced), { status: r.status, headers: r.headers });
+    },
+    apiUrl: gh.control.apiUrl,
+    now: gh.control.clock,
+  });
+  const record = rec({ unit: "story:1.8", globs: ["src/a/**"], pr: 1, pr_owner: "alice", head_sha: "a".repeat(40) });
+  gh.control.writeForeignLedger({ message: "m", writes: { [unitPath("story:1.8")]: serializeUnitRecord(record) }, deletes: [] });
+  gh.control.setPull(1, { state: "open", merged: false, head_sha: "1".repeat(40) });
+  return { gh, forge };
+}
+
 describe("snapshot", () => {
   test("uninstalled: installation lookup 404 is uninstalled and no API call is made", async () => {
     const { gh, forge } = setup();
@@ -78,7 +115,7 @@ describe("snapshot", () => {
     expect(gh.control.commit(foreign() as string)?.message).toBe("other lane [skip ci]");
   });
 
-  test("snapshot order: ledger reads, then main reads, then pulls/{n}", async () => {
+  test("snapshot order: ledger reads, then main reads, then each PR's GraphQL read", async () => {
     const parts: SnapshotPart[] = [];
     const { gh, forge } = setup({ onRead: (p) => parts.push(p) });
     const record = serializeUnitRecord(rec({ pr: 7, pr_owner: "alice", head_sha: "a".repeat(40) }));
@@ -86,10 +123,11 @@ describe("snapshot", () => {
     gh.control.setMain({ "README.md": "hi\n" });
     gh.control.setPull(7, { state: "open", merged: false, head_sha: "b".repeat(40) });
     const s = value(await forge.snapshot({ ...live(), read: () => true }));
-    expect(s.prs).toEqual({ "story:1.5": { number: 7, state: "open", head_sha: "b".repeat(40) } });
+    expect(s.prs).toEqual({ "story:1.5": { number: 7, state: "open", head_sha: "b".repeat(40), reviews: [] } });
     expect(parts).toEqual(["ledger", "main", "prs"]);
 
     const calls = apiCalls(gh);
+    const prRead = prReads(gh);
     const ledgerTree = gh.control.commit(gh.control.ref("xarabot/claims") as string)?.tree as string;
     const mainTree = gh.control.commit(gh.control.ref("main") as string)?.tree as string;
     const at = (call: string) => calls.findIndex((c) => c.startsWith(call));
@@ -99,12 +137,14 @@ describe("snapshot", () => {
       calls.indexOf("POST /graphql"),
       at("GET /git/ref/heads/main"),
       at(`GET /git/trees/${mainTree}`),
+      calls.lastIndexOf("POST /graphql") - 1,
       calls.lastIndexOf("POST /graphql"),
-      at("GET /pulls/7"),
     ];
     expect(order.every((i) => i >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect(at("GET /pulls/7")).toBe(calls.length - 1);
+    expect(calls.at(-1)).toBe("POST /graphql");
+    expect(prRead).toEqual([7]);
+    expect(calls.some((c) => c.includes("/pulls/"))).toBe(false);
   });
 
   test("ledger files are every blob of the tip, decoded as UTF-8", async () => {
@@ -192,13 +232,84 @@ describe("snapshot", () => {
     gh.control.setPull(1, { state: "closed", merged: true, head_sha: "1".repeat(40) });
     gh.control.setPull(2, { state: "closed", merged: false, head_sha: "2".repeat(40) });
     expect(value(await forge.snapshot(live())).prs).toEqual({
-      "story:1.8": { number: 1, state: "merged", head_sha: "1".repeat(40) },
-      "story:1.9": { number: 2, state: "closed", head_sha: "2".repeat(40) },
+      "story:1.8": { number: 1, state: "merged", head_sha: "1".repeat(40), reviews: [] },
+      "story:1.9": { number: 2, state: "closed", head_sha: "2".repeat(40), reviews: [] },
     });
     gh.control.writeForeignLedger({ message: "m", writes: { "units/story__9.9.json": "{not json" }, deletes: [] });
     gh.control.clearLog();
     expect(value(await forge.snapshot(live())).prs).toEqual({});
-    expect(apiCalls(gh).some((c) => c.includes("/pulls/"))).toBe(false);
+    expect(prReads(gh)).toEqual([]);
+  });
+
+  test("each PR carries its reviewers' latest decisive reviews, from its one read", async () => {
+    const { gh, forge } = setup();
+    const a = rec({ unit: "story:1.8", globs: ["src/a/**"], pr: 1, pr_owner: "alice", head_sha: "a".repeat(40) });
+    const b = rec({ unit: "story:1.9", globs: ["src/b/**"], pr: 2, pr_owner: "alice", head_sha: "b".repeat(40) });
+    gh.control.writeForeignLedger({
+      message: "m",
+      writes: { [unitPath("story:1.8")]: serializeUnitRecord(a), [unitPath("story:1.9")]: serializeUnitRecord(b) },
+      deletes: [],
+    });
+    gh.control.setPull(1, { state: "open", merged: false, head_sha: "1".repeat(40) });
+    gh.control.setPull(2, { state: "open", merged: false, head_sha: "2".repeat(40) });
+    const head = "1".repeat(40);
+    gh.control.addReview(1, { login: "Edanisko", state: "CHANGES_REQUESTED", commit_id: "9".repeat(40), submitted_at: "2026-10-25T09:00:00Z" });
+    gh.control.addReview(1, { login: "bob", state: "APPROVED", commit_id: head, submitted_at: "2026-10-25T09:30:00Z" });
+    gh.control.addReview(1, { login: "edanisko", state: "COMMENTED", commit_id: head, submitted_at: "2026-10-25T09:45:00Z" });
+    gh.control.addReview(1, { login: "edanisko", state: "APPROVED", commit_id: head, submitted_at: "2026-10-25T10:00:00Z" });
+    gh.control.addReview(1, { login: null, state: "DISMISSED", commit_id: null, submitted_at: "2026-10-25T10:05:00Z" });
+    gh.control.addReview(1, { login: "carol", state: "PENDING", commit_id: head, submitted_at: null });
+    gh.control.clearLog();
+    expect(value(await forge.snapshot(live())).prs).toEqual({
+      "story:1.8": {
+        number: 1,
+        state: "open",
+        head_sha: head,
+        reviews: [
+          { author: "bob", state: "approved", commit_sha: head, submitted_at: "2026-10-25T09:30:00Z" },
+          { author: "edanisko", state: "approved", commit_sha: head, submitted_at: "2026-10-25T10:00:00Z" },
+          { author: null, state: "dismissed", commit_sha: null, submitted_at: "2026-10-25T10:05:00Z" },
+        ],
+      },
+      "story:1.9": { number: 2, state: "open", head_sha: "2".repeat(40), reviews: [] },
+    });
+    // No extra call per PR: one GraphQL read each, and no review list.
+    expect(prReads(gh).sort()).toEqual([1, 2]);
+    expect(apiCalls(gh).some((c) => c.includes("/pulls/") || c.includes("/reviews"))).toBe(false);
+  });
+
+  test("a commented, pending or unsubmitted review node in the PR read decides nothing", async () => {
+    const head = "1".repeat(40);
+    const nodes = [
+      { author: { login: "edanisko" }, state: "COMMENTED", commit: { oid: head }, submittedAt: "2026-10-25T10:00:00Z" },
+      { author: { login: "bob" }, state: "PENDING", commit: { oid: head }, submittedAt: null },
+      { author: { login: "carol" }, state: "APPROVED", commit: { oid: head }, submittedAt: null },
+      { author: { login: "dave" }, state: "APPROVED", commit: { oid: head }, submittedAt: "2026-10-25T10:05:00Z" },
+    ];
+    const { forge } = prSetup((pull) => ({ ...pull, latestOpinionatedReviews: { nodes } }));
+    expect(value(await forge.snapshot(live())).prs["story:1.8"]?.reviews).toEqual([
+      { author: "dave", state: "approved", commit_sha: head, submitted_at: "2026-10-25T10:05:00Z" },
+    ]);
+  });
+
+  test.each([
+    ["no review list", (pull: Record<string, unknown>) => ({ ...pull, latestOpinionatedReviews: null })],
+    ["an unknown review state", (pull: Record<string, unknown>) => ({ ...pull, latestOpinionatedReviews: { nodes: [{ author: null, state: "LGTM", commit: null, submittedAt: "2026-10-25T10:00:00Z" }] } })],
+    ["a review commit that is not a SHA", (pull: Record<string, unknown>) => ({ ...pull, latestOpinionatedReviews: { nodes: [{ author: null, state: "APPROVED", commit: { oid: "HEAD" }, submittedAt: "2026-10-25T10:00:00Z" }] } })],
+    ["a submitted time that is not ISO 8601", (pull: Record<string, unknown>) => ({ ...pull, latestOpinionatedReviews: { nodes: [{ author: null, state: "APPROVED", commit: null, submittedAt: "yesterday" }] } })],
+    ["an unknown PR state", (pull: Record<string, unknown>) => ({ ...pull, state: "DRAFT" })],
+  ])("a PR read with %s is transient", async (_, rewrite) => {
+    const { forge } = prSetup(rewrite);
+    expect(kind(await forge.snapshot(live()))).toBe("transient");
+  });
+
+  test("GraphQL errors on a PR read fail the snapshot; NOT_FOUND alone skips the PR", async () => {
+    const internal = prSetup(() => null, [{ type: "INTERNAL", message: "Something went wrong" }]);
+    expect(kind(await internal.forge.snapshot(live()))).toBe("transient");
+    const forbidden = prSetup(() => null, [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }]);
+    expect(kind(await forbidden.forge.snapshot(live()))).toBe("forbidden");
+    const missing = prSetup(() => null, [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest with the number of 1." }]);
+    expect(value(await missing.forge.snapshot(live())).prs).toEqual({});
   });
 
   test("now is the latest Date header seen during the snapshot", async () => {

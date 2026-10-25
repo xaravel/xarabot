@@ -1,6 +1,7 @@
 import { EPICS_YAML_PATH } from "../config/load-repo-config.ts";
 import { heldGlobs, isStale } from "../ledger/edits.ts";
 import { globsOverlap } from "../manifests/globs.ts";
+import { standingApproval } from "../reconcile/approval.ts";
 import type { Config } from "../schemas/config.ts";
 import { GRAPH_PSEUDO_GLOB, planningKindOf, planningSlug, unitKind, type PlanningKind, type UnitKind, type UnitRecord } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../schemas/retro-gates.ts";
@@ -251,12 +252,31 @@ export type ReconcileDue = {
 };
 
 /**
- * When `reconcile` is due (the Maintainer's 2026-10-24 decision): the
- * snapshot shows work (a record not `merged` whose PR merged, or a `merged`
- * record whose unit is done on `main`), there is no `merged`
- * `reconcile:<n>` record, or `now` is 10 min or more past the newest
- * `merged` one's `heartbeat_at`. A passed digest slot is not work until
- * Story 4.2 adds it back.
+ * Whether `record` is parked `awaiting-approval` with its PR open at the
+ * parked head and the Maintainer's approval of that head standing in the
+ * PR's snapshot `reviews` (Maintainer decision 2026-10-25, retro item 13).
+ * The record must be one `reconcile` would try to take (`pr`, `pr_owner`
+ * and `head_sha` set), and, as there, a coordinator re-park (`lane`
+ * `coordinator` with a `passed_sha`) counts only an approval submitted after
+ * its `heartbeat_at`.
+ */
+export function maintainerApproved(record: UnitRecord, snapshot: Snapshot): boolean {
+  if (record.state !== "parked" || record.park?.kind !== "awaiting-approval") return false;
+  if (record.pr === null || record.pr_owner === null || record.head_sha === null) return false;
+  const pr = snapshot.prs[record.unit];
+  if (pr?.state !== "open" || pr.head_sha !== record.head_sha) return false;
+  const parkedAt = record.lane === "coordinator" && record.passed_sha !== null ? record.heartbeat_at : null;
+  return standingApproval(pr.reviews ?? [], { owner: snapshot.config.maintainer, head: record.head_sha, parkedAt }) !== null;
+}
+
+/**
+ * When `reconcile` is due (the Maintainer's 2026-10-24 decision, amended
+ * 2026-10-25): the snapshot shows work (a record not `merged` whose PR
+ * merged, a record parked awaiting an approval the Maintainer has given
+ * (`maintainerApproved`), or a `merged` record whose unit is done on
+ * `main`), there is no `merged` `reconcile:<n>` record, or `now` is 10 min
+ * or more past the newest `merged` one's `heartbeat_at`. A passed digest
+ * slot is not work until Story 4.2 adds it back.
  */
 export function reconcileDue(snapshot: Snapshot): ReconcileDue {
   const last = newestMergedReconcile(snapshot);
@@ -264,6 +284,11 @@ export function reconcileDue(snapshot: Snapshot): ReconcileDue {
     const pr = snapshot.prs[r.unit];
     if (r.state !== "merged" && pr?.state === "merged") {
       return { due: true, why: `${r.unit} is ${r.state} but its PR #${pr.number} merged`, last };
+    }
+  }
+  for (const r of snapshot.ledger.units) {
+    if (maintainerApproved(r, snapshot)) {
+      return { due: true, why: `${r.unit} is parked awaiting approval and the Maintainer approved PR #${r.pr} at ${r.head_sha}`, last };
     }
   }
   for (const r of snapshot.ledger.units) {
