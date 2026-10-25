@@ -11,7 +11,9 @@ import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
  * committer fetches `ontoSha` only when `runner.git` lacks it, measures the
  * session's change from `merge-base(start, ontoSha)` and makes the one
  * bot-authored commit through `commitSession`, whose write check sees only
- * that change, so `main`'s own changes never trip it.
+ * that change, so `main`'s own changes never trip it. A conflict carries the
+ * session's start: committing onto it measures from the start itself, so it
+ * cannot conflict.
  */
 
 export type CommitRequest = {

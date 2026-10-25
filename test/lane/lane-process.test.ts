@@ -405,6 +405,30 @@ describe("runLaneProcess", () => {
     expect(h.runs).toHaveLength(0);
   });
 
+  test("a host STOP written during a builder session: the unit finishes through its PR step, and the next start claims nothing", async () => {
+    const h = harness({
+      behaviors: [
+        (ctx) => {
+          mkdirSync(dirname(h.hostStop), { recursive: true });
+          writeFileSync(h.hostStop, "stop\n");
+          return finishes("done")(ctx);
+        },
+      ],
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe("progress");
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(1);
+    expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "progress", state: "claimed", sessions: 1 });
+    const commits = h.fake.control.ledgerLog().length;
+    const again = await h.run();
+    expect(again.outcome).toBe("stop");
+    expect(again.laneStop).toBeUndefined();
+    expect(h.fake.control.ledgerLog()).toHaveLength(commits);
+    expect(h.runs).toHaveLength(1);
+    expect(h.prSteps).toHaveLength(1);
+  });
+
   test("a STOP marker that appears after next and before the claim stops with no claim", async () => {
     const h = harness();
     const store = createFsLaneStore({ laneDir: h.laneDir, hostStop: h.hostStop });

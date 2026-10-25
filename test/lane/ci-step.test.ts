@@ -22,7 +22,8 @@ import {
   type CiUnit,
   type RegenerateRequest,
 } from "../../src/lane/ci-step.ts";
-import type { Committer } from "../../src/lane/committer.ts";
+import type { CommitOutcome } from "../../src/lane/commit.ts";
+import type { CommitRequest, Committer } from "../../src/lane/committer.ts";
 import { CI_FIX_LOG, runLaneProcess, type PrStepInput, type PrStepOutput, type SessionLimits } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { MergeOutcome, MergeRequest, Merger } from "../../src/lane/merger.ts";
@@ -163,9 +164,14 @@ function stubMerger(outcomes: (MergeOutcome | "error")[]): Merger & { requests: 
   };
 }
 
-/** A committer giving a fresh head on `ontoSha`. */
-function committer(fake: FakeForge): Committer {
-  return { commit: async (r) => ok({ kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() }) };
+/** A committer giving a fresh head on `ontoSha`, after the scripted `first` outcomes in call order. */
+function committer(fake: FakeForge, first: CommitOutcome[] = [], requests: CommitRequest[] = []): Committer {
+  return {
+    commit: async (r) => {
+      requests.push(r);
+      return ok(first.shift() ?? { kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() });
+    },
+  };
 }
 
 type SessionReply = Result<CiSessionDone> | "throw";
@@ -696,6 +702,8 @@ type EndToEndOpts = {
   readonly limits?: SessionLimits;
   /** The CI step's poll sleep; default the virtual clock's. */
   readonly ciSleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The committer's first outcomes, in call order; then fresh commits. */
+  readonly commits?: CommitOutcome[];
 };
 
 async function endToEnd(script: Script, o: EndToEndOpts = {}) {
@@ -752,7 +760,8 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
     },
   };
   const spied = scripted(fake, [...script]);
-  const prStep = createPrStep({ forge: spied.forge, committer: committer(fake), identity: ALICE, repo: LANE.repo, sleep: async () => {}, random: () => 0 });
+  const commits: CommitRequest[] = [];
+  const prStep = createPrStep({ forge: spied.forge, committer: committer(fake, [...(o.commits ?? [])], commits), identity: ALICE, repo: LANE.repo, sleep: async () => {}, random: () => 0 });
   const c = clock();
   const merger = stubMerger([...(o.merges ?? [{ kind: "up-to-date" }])]);
   const ciStep = createCiStep({ forge: spied.forge, merger, identity: ALICE, repo: LANE.repo, now: c.now, sleep: o.ciSleep ?? c.sleep, random: () => 0 });
@@ -786,10 +795,29 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
   if (!snap.ok) throw new Error(snap.error.message);
   const l = parseLedger(snap.value.ledger.files);
   if (!l.ok) throw new Error(l.error.message);
-  return { fake, runs, outcome: r.outcome, journal: units[0] as UnitJournalRecord, record: l.value.units.get(UNIT), asked: spied.asked, merger, prepares };
+  return { fake, runs, outcome: r.outcome, journal: units[0] as UnitJournalRecord, record: l.value.units.get(UNIT), asked: spied.asked, merger, prepares, commits };
 }
 
 describe("runLaneProcess with createCiStep", () => {
+  test("a commit conflict onto fresh main: the PR step commits onto the session's start and opens the PR with no attempt; the CI step's merge of main runs a conflict session counted 1 in ci_fixes (Story 2.11)", async () => {
+    const start = "5".repeat(40);
+    const candidate = "c".repeat(40);
+    const e = await endToEnd([[success("test")]], {
+      commits: [{ kind: "conflict", paths: ["src/s0/a.ts"], start }],
+      merges: [{ kind: "needs-session", candidate_sha: candidate, paths: ["src/s0/a.ts"], lockfiles: [] }, { kind: "up-to-date" }],
+    });
+    expect(e.outcome).toBe("progress");
+    const main = e.commits[0]?.ontoSha as string;
+    // The build's commit onto main, its fallback onto the start, then the conflict session's fix onto main.
+    expect(e.commits.map((r) => r.ontoSha)).toEqual([main, start, main]);
+    expect(e.runs).toHaveLength(2);
+    expect(e.prepares[1]?.start).toBe(candidate);
+    expect(e.runs[1]?.ciLog).toContain("hold conflict markers:\n\n- src/s0/a.ts\n");
+    expect(e.record).toMatchObject({ state: "claimed", pr: 1, attempts: 0, ci_fixes: 1 });
+    expect(e.journal).toMatchObject({ outcome: "progress", state: "claimed", attempts: 0, ci_fixes: 1, sessions: 2 });
+    expect(readFileSync(e.journal.log, "utf8")).toContain(`commit conflict onto ${main}: src/s0/a.ts; committing onto the session's start ${start}`);
+  });
+
   test("CI passes after the PR step: progress, the record claimed with its PR, and no CI or poll instruction to the agent", async () => {
     const e = await endToEnd([[success("test")]]);
     expect(e.outcome).toBe("progress");

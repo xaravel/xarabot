@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createClaudeAgent } from "../adapters/agent/claude/claude-agent.ts";
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
+import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
 import type { Result } from "../core/result.ts";
@@ -16,6 +17,7 @@ import { createGitCommitter } from "../lane/committer.ts";
 import { createGitDiffPaths } from "../lane/diff-paths.ts";
 import { createGitGraphTrees } from "../lane/graph-trees.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type LaneProcessResult } from "../lane/lane-process.ts";
+import { acquireLaneLock } from "../lane/lane-lock.ts";
 import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
 import { createGitMerger } from "../lane/merger.ts";
@@ -24,6 +26,7 @@ import { createRetroItemStep } from "../lane/retro-item-step.ts";
 import { createRetroStep } from "../lane/retro-step.ts";
 import { createGitTreeFiles } from "../lane/tree-files.ts";
 import { createPrStep } from "../lane/pr-step.ts";
+import { createPsProcessTable, type ProcessTable } from "../lane/processes.ts";
 import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
 import { createReconcileStep } from "../lane/reconcile-step.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
@@ -39,14 +42,20 @@ import { githubConnect, type Connect } from "./lane-connection.ts";
 
 /**
  * `xarabot lane run <owner>/<name> <lane>` (FR1, NFR15, AR22, AR26, AR34):
- * what the launcher runs, from the pinned runner. It checks STOP, then that
- * `main` still pins the running version (installing the new one and exiting
- * when not), then the refusal table; only then does it compose the real
- * adapters and run one `runLaneProcess`. A coordinator lane skips the
- * builder limit, and its last start check claims `coordinator.json`
- * (AD-8); it then runs one `runCoordinatorProcess`. Every refusal or failure
- * after the STOP check, apart from a version switch and the role and
- * lane-name check (a static `host.yaml` error), is a failed start, and so is
+ * what the launcher runs, from the pinned runner. It checks STOP and the
+ * lane's role and name, then takes the lane's exclusive `lane.lock` (AR3)
+ * for the rest of the run, released on every exit: a lock a live process
+ * holds means the lane is already running, so this process exits 0 with no
+ * connect, no claim and no failed start, and a stale one (its process gone,
+ * its PID reused or running another command, or its text unreadable) is
+ * taken over. Then it checks that `main` still pins the running version
+ * (installing the new one and exiting when not), then the refusal table;
+ * only then does it compose the real adapters and run one `runLaneProcess`.
+ * A coordinator lane skips the builder limit, and its last start check
+ * claims `coordinator.json` (AD-8); it then runs one `runCoordinatorProcess`.
+ * Every refusal or failure after the STOP check, apart from a version
+ * switch, a held lock and the role and lane-name check (a static `host.yaml`
+ * error), is a failed start (an I/O error on the lock included), and so is
  * a run that ends in a lane stop (outcome `stop` for any reason but a STOP
  * marker, exit 1): three in a row write the lane's `STOP` and post an alert.
  * The count is reset only after a run that ends without a lane stop, so a
@@ -81,6 +90,13 @@ export type LaneRunDeps = {
   readonly installTimeoutMs?: number;
   readonly out?: (line: string) => void;
   readonly errOut?: (line: string) => void;
+  /** The lane lock's owner and process table; default this process, its runtime's basename and start, and `ps`. */
+  readonly lock?: {
+    readonly pid?: number;
+    readonly command?: string;
+    readonly startedMs?: number;
+    readonly table?: ProcessTable;
+  };
 };
 
 /** The adapter for an agent name; only `claude` has one before Epic 6. */
@@ -208,177 +224,206 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     return 1;
   }
 
-  // 3. Credentials, the snapshot and config.yaml.
-  const connected = await (deps.connect ?? githubConnect(deps.env))(lane);
-  if (!connected.ok) return failedStart(connected.message);
-  const connection = connected.connection;
-  const snapped = await connection.forge({}).snapshot({ ...deadline(), read: readsPath });
-  if (!snapped.ok) {
-    if (snapped.error.kind === "uninstalled") return failedStart(`the App installation does not cover ${lane.repo}`);
-    return failedStart(`snapshot: ${snapped.error.kind}: ${snapped.error.message}`);
-  }
-  const snap: ForgeSnapshot = snapped.value;
-  mainSha = snap.main.sha;
-  const config = pinnedConfig(snap);
-  if (!config.ok) return failedStart(config.error.message);
-  const maintainer = config.value.maintainer;
-  alertForge = connection.forge({ maintainer });
-  const pinned = config.value.runner_version;
-
-  // 4. The runner version.
-  const runnerPath = join(laneDir, RUNNER_FILE);
-  const runnerText = readText(runnerPath);
-  const running = runnerText === null ? null : parseRunnerFile(runnerText);
-  if (running === null || !running.ok || running.value !== pinned) {
-    const was = running === null ? "none" : running.ok ? running.value : "unreadable";
-    const installed = await ensureRunner({
-      paths,
-      version: pinned,
-      connection,
-      install: deps.installRunner ?? defaultInstallRunner,
-      timeoutMs: deps.installTimeoutMs ?? INSTALL_TIMEOUT_MS,
-      callTimeoutMs,
-    });
-    if (!installed.ok) return failedStart(installed.error.message);
-    const w = writeFileAtomic(runnerPath, runnerFileText(pinned), 0o600);
-    if (!w.ok) return failedStart(w.error.message);
-    out(`main pins runner ${pinned} (was ${was}): ${installed.value.installed ? "installed it" : "already installed"}, wrote ${runnerPath}; exiting without a claim`);
+  // The lane's process lock (AR3): a second process of the same lane exits 0 with no claim, and nothing is counted.
+  const lockDeps = deps.lock ?? {};
+  const locked = acquireLaneLock({
+    laneDir,
+    pid: lockDeps.pid ?? process.pid,
+    command: lockDeps.command ?? basename(process.execPath),
+    startedMs: lockDeps.startedMs ?? performance.timeOrigin,
+    table: lockDeps.table ?? createPsProcessTable(),
+  });
+  if (!locked.ok) return failedStart(`the lane lock: ${locked.error.message}`);
+  if (locked.value.kind === "held") {
+    out(`lane ${name} is already running (pid ${locked.value.pid ?? "unknown"}, ${LANE_LOCK_FILE}); exiting without a claim`);
     return 0;
   }
-
-  // 5. The repo config and the refusals.
-  const repoConfig = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-  if (!repoConfig.ok) return failedStart(`repo config ${repoConfig.error.kind}: ${repoConfig.error.message}`);
-  const unattended = unattendedRefusal(repoConfig.value.repo.policy, lane.agent);
-  if (!unattended.ok) return failedStart(unattended.error.message);
-  const agent = adapterFor(lane.agent);
-  if (agent === null) return failedStart(`no adapter for agent ${lane.agent} (only claude has one)`);
-  const settings = { ...(lane.model !== undefined ? { model: lane.model } : {}), effort: lane.effort };
-  const spec = agent.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, settings, layout.resultPath);
-  if (!spec.ok) return failedStart(spec.error.message);
-  const command = spec.value.argv[0] ?? "";
-  const version = await (deps.cliVersion ?? defaultCliVersion)(command, deps.env);
-  if (!version.ok) return failedStart(version.error.message);
-  const checked = agent.startCheck(settings, version.value);
-  if (!checked.ok) return failedStart(checked.error.message);
-  const credPath = credentialPath(deps.env, spec.value.vendor, spec.value.credential.file);
-  if (!credPath.ok) return failedStart(credPath.error.message);
-  const credential = readCredential(credPath.value);
-  if (!credential.ok) return failedStart(credential.error.message);
-  const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);
-  if (!limit.ok) return failedStart(limit.error.message);
-  const coordinator = lane.role === "coordinator";
-  if (!coordinator) {
-    const builders = builderRefusal(host, name, limit.value);
-    if (!builders.ok) return failedStart(builders.error.message);
+  const lock = locked.value;
+  if (lock.tookOver !== null) {
+    out(`took over a stale ${LANE_LOCK_FILE} (pid ${lock.tookOver.pid ?? "unknown"}): ${describeStale(lock.tookOver.reason)}`);
   }
 
-  // 6. Every check passed: compose the real dependencies and run one unit.
-  const gitDir = await openRunnerGit(laneDir, deadline());
-  if (!gitDir.ok) return failedStart(`runner.git: ${gitDir.error.message}`);
-  const botId = await connection.botUserId(AbortSignal.timeout(callTimeoutMs));
-  if (!botId.ok) return failedStart(`bot user id: ${botId.error.kind}: ${botId.error.message}`);
-  const bot = botIdentity(lane.owner, botId.value);
-  if (!bot.ok) return failedStart(bot.error.message);
+  /** Steps 3 to 6, run while the lock is held. */
+  const run = async (): Promise<number> => {
+    // 3. Credentials, the snapshot and config.yaml.
+    const connected = await (deps.connect ?? githubConnect(deps.env))(lane);
+    if (!connected.ok) return failedStart(connected.message);
+    const connection = connected.connection;
+    const snapped = await connection.forge({}).snapshot({ ...deadline(), read: readsPath });
+    if (!snapped.ok) {
+      if (snapped.error.kind === "uninstalled") return failedStart(`the App installation does not cover ${lane.repo}`);
+      return failedStart(`snapshot: ${snapped.error.kind}: ${snapped.error.message}`);
+    }
+    const snap: ForgeSnapshot = snapped.value;
+    mainSha = snap.main.sha;
+    const config = pinnedConfig(snap);
+    if (!config.ok) return failedStart(config.error.message);
+    const maintainer = config.value.maintainer;
+    alertForge = connection.forge({ maintainer });
+    const pinned = config.value.runner_version;
 
-  const runnerGit = gitDir.value;
-  const forge = connection.forge({ runnerGit, maintainer });
-  const identity = { owner: lane.owner, host: hostId, lane: name };
+    // 4. The runner version.
+    const runnerPath = join(laneDir, RUNNER_FILE);
+    const runnerText = readText(runnerPath);
+    const running = runnerText === null ? null : parseRunnerFile(runnerText);
+    if (running === null || !running.ok || running.value !== pinned) {
+      const was = running === null ? "none" : running.ok ? running.value : "unreadable";
+      const installed = await ensureRunner({
+        paths,
+        version: pinned,
+        connection,
+        install: deps.installRunner ?? defaultInstallRunner,
+        timeoutMs: deps.installTimeoutMs ?? INSTALL_TIMEOUT_MS,
+        callTimeoutMs,
+      });
+      if (!installed.ok) return failedStart(installed.error.message);
+      const w = writeFileAtomic(runnerPath, runnerFileText(pinned), 0o600);
+      if (!w.ok) return failedStart(w.error.message);
+      out(`main pins runner ${pinned} (was ${was}): ${installed.value.installed ? "installed it" : "already installed"}, wrote ${runnerPath}; exiting without a claim`);
+      return 0;
+    }
 
-  // A coordinator's last start check: the claim on coordinator.json (AD-8).
-  let claimed: CoordinatorRecord | null = null;
-  if (coordinator) {
-    const c = await claimCoordinatorRecord({ forge, identity, now: snap.now, callTimeoutMs });
-    if (!c.ok) return failedStart(c.error.message);
-    claimed = c.value;
-  }
+    // 5. The repo config and the refusals.
+    const repoConfig = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+    if (!repoConfig.ok) return failedStart(`repo config ${repoConfig.error.kind}: ${repoConfig.error.message}`);
+    const unattended = unattendedRefusal(repoConfig.value.repo.policy, lane.agent);
+    if (!unattended.ok) return failedStart(unattended.error.message);
+    const agent = adapterFor(lane.agent);
+    if (agent === null) return failedStart(`no adapter for agent ${lane.agent} (only claude has one)`);
+    const settings = { ...(lane.model !== undefined ? { model: lane.model } : {}), effort: lane.effort };
+    const spec = agent.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, settings, layout.resultPath);
+    if (!spec.ok) return failedStart(spec.error.message);
+    const command = spec.value.argv[0] ?? "";
+    const version = await (deps.cliVersion ?? defaultCliVersion)(command, deps.env);
+    if (!version.ok) return failedStart(version.error.message);
+    const checked = agent.startCheck(settings, version.value);
+    if (!checked.ok) return failedStart(checked.error.message);
+    const credPath = credentialPath(deps.env, spec.value.vendor, spec.value.credential.file);
+    if (!credPath.ok) return failedStart(credPath.error.message);
+    const credential = readCredential(credPath.value);
+    if (!credential.ok) return failedStart(credential.error.message);
+    const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);
+    if (!limit.ok) return failedStart(limit.error.message);
+    const coordinator = lane.role === "coordinator";
+    if (!coordinator) {
+      const builders = builderRefusal(host, name, limit.value);
+      if (!builders.ok) return failedStart(builders.error.message);
+    }
 
-  const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
-  const fetch = connection.fetchShas(runnerGit);
-  const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
-  if (claimed !== null) {
-    // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
-    const waiter = createSleepWaiter({ store });
-    const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
-    const planning = createPlanningStep({
+    // 6. Every check passed: compose the real dependencies and run one unit.
+    const gitDir = await openRunnerGit(laneDir, deadline());
+    if (!gitDir.ok) return failedStart(`runner.git: ${gitDir.error.message}`);
+    const botId = await connection.botUserId(AbortSignal.timeout(callTimeoutMs));
+    if (!botId.ok) return failedStart(`bot user id: ${botId.error.kind}: ${botId.error.message}`);
+    const bot = botIdentity(lane.owner, botId.value);
+    if (!bot.ok) return failedStart(bot.error.message);
+
+    const runnerGit = gitDir.value;
+    const forge = connection.forge({ runnerGit, maintainer });
+    const identity = { owner: lane.owner, host: hostId, lane: name };
+
+    // A coordinator's last start check: the claim on coordinator.json (AD-8).
+    let claimed: CoordinatorRecord | null = null;
+    if (coordinator) {
+      const c = await claimCoordinatorRecord({ forge, identity, now: snap.now, callTimeoutMs });
+      if (!c.ok) return failedStart(c.error.message);
+      claimed = c.value;
+    }
+
+    const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
+    const fetch = connection.fetchShas(runnerGit);
+    const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
+    if (claimed !== null) {
+      // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
+      const waiter = createSleepWaiter({ store });
+      const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
+      const planning = createPlanningStep({
+        forge,
+        agent,
+        sandbox: createMacSandbox({ launchingEnv: deps.env }),
+        store,
+        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
+        waiter,
+        laneDir,
+        lane,
+        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+        graphTrees,
+        identity,
+        secrets: [credential.value],
+      });
+      const retro = createRetroStep({
+        forge,
+        agent,
+        sandbox: createMacSandbox({ launchingEnv: deps.env }),
+        store,
+        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
+        waiter,
+        laneDir,
+        lane,
+        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+        treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }),
+        identity,
+        secrets: [credential.value],
+      });
+      const retroItem = createRetroItemStep({
+        forge,
+        agent,
+        sandbox: createMacSandbox({ launchingEnv: deps.env }),
+        store,
+        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
+        waiter,
+        laneDir,
+        lane,
+        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+        merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }),
+        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
+        graphTrees,
+        identity,
+        secrets: [credential.value],
+      });
+      const coordinatorDeps: CoordinatorDeps = {
+        forge,
+        agent,
+        store,
+        laneDir,
+        identity,
+        lane,
+        claim: claimed,
+        steps: { reconcile, planning, retro, "retro-item": retroItem },
+        waiter,
+      };
+      return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
+    }
+
+    const laneDeps: LaneDeps = {
       forge,
       agent,
       sandbox: createMacSandbox({ launchingEnv: deps.env }),
       store,
       workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-      waiter,
-      laneDir,
-      lane,
-      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-      diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-      graphTrees,
-      identity,
-      secrets: [credential.value],
-    });
-    const retro = createRetroStep({
-      forge,
-      agent,
-      sandbox: createMacSandbox({ launchingEnv: deps.env }),
-      store,
-      workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-      waiter,
-      laneDir,
-      lane,
-      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-      diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-      treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }),
-      identity,
-      secrets: [credential.value],
-    });
-    const retroItem = createRetroItemStep({
-      forge,
-      agent,
-      sandbox: createMacSandbox({ launchingEnv: deps.env }),
-      store,
-      workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-      waiter,
-      laneDir,
-      lane,
-      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-      merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }),
-      diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-      graphTrees,
-      identity,
-      secrets: [credential.value],
-    });
-    const coordinatorDeps: CoordinatorDeps = {
-      forge,
-      agent,
-      store,
+      prStep: createPrStep({
+        forge,
+        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
+        identity,
+        repo: lane.repo,
+        secrets: [credential.value],
+      }),
+      ciStep: createCiStep({ forge, merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo }),
+      mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), graphTrees, identity, repo: lane.repo }),
       laneDir,
       identity,
       lane,
-      claim: claimed,
-      steps: { reconcile, planning, retro, "retro-item": retroItem },
-      waiter,
+      waiter: createSleepWaiter({ store }),
     };
-    return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
-  }
-
-  const laneDeps: LaneDeps = {
-    forge,
-    agent,
-    sandbox: createMacSandbox({ launchingEnv: deps.env }),
-    store,
-    workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-    prStep: createPrStep({
-      forge,
-      committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-      identity,
-      repo: lane.repo,
-      secrets: [credential.value],
-    }),
-    ciStep: createCiStep({ forge, merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo }),
-    mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), graphTrees, identity, repo: lane.repo }),
-    laneDir,
-    identity,
-    lane,
-    waiter: createSleepWaiter({ store }),
+    return afterRun(await (deps.start ?? runLaneProcess)(laneDeps));
   };
-  return afterRun(await (deps.start ?? runLaneProcess)(laneDeps));
+
+  try {
+    return await run();
+  } finally {
+    const released = lock.release();
+    if (!released.ok) say(`${LANE_LOCK_FILE}: ${released.error.message}`);
+  }
 }

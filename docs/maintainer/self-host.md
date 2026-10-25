@@ -381,8 +381,9 @@ install:
 ### 13. `xarabot lane install`
 
 On the host, as `edanisko-xarabot`, from a checkout of the tag. Lane names
-must be `builder-<n>` or `coordinator`, the names ledger records accept. Any
-other name passes `lane install` but stops the lane at its first snapshot.
+must be `builder-<n>` (n >= 1) or `coordinator`, the names ledger records
+accept: `lane install` refuses any other name for a builder, and refuses a
+name `host.yaml` already holds for another repo.
 
 ```sh
 git clone --branch <tag> --depth 1 https://github.com/xaravel/xarabot.git ~/xarabot-<tag>
@@ -391,9 +392,9 @@ PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=1 bun src/cli/
 ```
 
 The `PATH` prefix matters: `lane install` writes its `PATH` into the plist,
-and the lane needs `claude`, `bun`, `git` and `uv` on it. Until Story 2.11
-makes `lane install` check them, check by hand that each resolves on that
-`PATH`.
+and the lane needs `claude`, `bun`, `git` and `uv` on it. `lane install`
+refuses, and writes nothing, when any of them does not resolve on that
+`PATH`; it names each missing tool and the `PATH`.
 
 It installs `~/.xarabot/runner/<tag>/` and writes `host.yaml`, the lane folder
 and its `runner` file, the launcher `~/.xarabot/bin/xarabot-lane` and the plist.
@@ -525,6 +526,25 @@ decision, 2026-10-24).
 
   At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until `runner_version` has Story 2.6, keep adding approved PRs to the merge queue by hand; a runner with 2.6 does it for you (above). A moved coordinator leaves nothing stuck: when the new coordinator lane finds a PR the old one queued ejected, dequeued or closed, it parks that unit again itself, holding only the paths of the PR's diff.
 - **A crashed lane.** A crashed lane's unit is taken over 30 min after its last heartbeat; `stop --now <lane>` releases it at once.
+- **Several builder lanes.** Once `runner_version` has Story 2.11, one host can run several builder lanes. Keep the limit at 1 until Epic 3 merges: Story 2.12's live race proof comes first, and a coordinator and 2 builders running 24 hours with no double build is the check for lifting it. Then:
+  1. Reinstall every existing builder lane on the host (here `builder-1`) with `XARABOT_MAX_BUILDERS=2` first, so its plist carries the new limit; a reinstall keeps the lane's folder and `host.yaml` entry. A builder whose plist still says 1 refuses every start once two builders are in `host.yaml` (a failed start; the third writes its `STOP` and alerts). The coordinator ignores the limit, so it needs no reinstall. The limit counts the builder lanes in `host.yaml` across all repos.
+
+     ```sh
+     PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=2 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install builder-1 --repo xaravel/xarabot --role builder --owner edanisko --agent claude
+     ```
+
+  2. Reload each reinstalled lane without cutting a unit short. `sudo launchctl bootout` on a running lane sends it SIGTERM mid-session or mid-PR-step, so drain it first:
+     1. `bun ~/.xarabot/runner/<tag>/src/cli/main.ts stop <lane>` writes the lane's `STOP`.
+     2. Wait until the lane's `outcome` is written and no unit is running (`cat ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/outcome`; no `lane.lock` in its folder).
+     3. As your admin account, `sudo launchctl bootout system/<label>`, then run the two `sudo` commands the reinstall printed to bootstrap the new plist.
+     4. Remove the lane's `STOP` (`rm ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/STOP`).
+  3. Then install the new lane with `XARABOT_MAX_BUILDERS=2`, and run the two `sudo` commands it prints:
+
+     ```sh
+     PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=2 bun ~/.xarabot/runner/<tag>/src/cli/main.ts lane install builder-2 --repo xaravel/xarabot --role builder --owner edanisko --agent claude
+     ```
+
+  Each lane has its own folder under `~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/`, with its own `runner.git`, clone, vendor home, journal and launchd job (`com.xarabot.lane.xaravel__xarabot.<lane>`). Each lane run holds `lane.lock` in its folder (its PID, runtime and start time) until it exits. A second start of the same lane while one runs prints `lane <lane> is already running (pid <pid>, lane.lock); exiting without a claim`, exits 0 and is not a failed start. A lock whose process is gone (or whose PID now belongs to a later or other process) is taken over, and the run says which PID was stale and why. A lane stopped by SIGTERM (`launchctl bootout`, `stop --now`) leaves its `lane.lock` behind, so the next start takes it over as stale and prints that message; that is expected then. `touch ~/.xarabot/STOP` stops every lane on the host after its current unit: a unit in progress finishes through its PR step, and the next start of each lane claims nothing. When a builder's change conflicts with a fresh `main` at commit time (common with several builders), the PR still opens, from the session's start; the CI step then merges `main` into it, and a conflict no rule resolves runs a conflict session, counted in `ci_fixes` (2 at most, shared with CI fixes), never as an attempt.
 - **Releasing a parked unit.** Once `runner_version` has Story 2.5b, release a `parked` unit with one host command instead of a hand-written ledger commit. Run it on the host as `edanisko-xarabot`:
 
   ```sh

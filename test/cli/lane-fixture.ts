@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
@@ -54,20 +54,37 @@ export type World = {
   readonly xarabot: string;
   readonly runnerRoot: string;
   readonly laneDir: string;
+  /** First on `env.PATH`: stubs for the tools `lane install` checks, and `git` linked to the real one. */
+  readonly bin: string;
 };
+
+/** The tools `lane install` needs on the plist's `PATH`, written as stubs in `bin` (`git` as a link to the real one). */
+export function writeToolBin(bin: string): void {
+  mkdirSync(bin, { recursive: true });
+  for (const tool of ["claude", "bun", "uv"]) {
+    writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, tool), 0o755);
+  }
+  const git = Bun.which("git");
+  if (git === null) throw new Error("git is not on this test's PATH");
+  symlinkSync(git, join(bin, "git"));
+}
 
 export function world(dirs: string[], extraEnv: Record<string, string> = {}): World {
   const root = mkdtempSync(join(tmpdir(), "xarabot-lane-cli-"));
   dirs.push(root);
   const home = join(root, "home");
   const xdg = join(root, "config");
+  const bin = join(root, "tools");
   mkdirSync(home, { recursive: true });
+  writeToolBin(bin);
   const xarabot = join(home, ".xarabot");
   return {
     root,
     home,
     xdg,
-    env: { HOME: home, XDG_CONFIG_HOME: xdg, PATH: "/usr/bin:/bin", ...extraEnv },
+    bin,
+    env: { HOME: home, XDG_CONFIG_HOME: xdg, PATH: `${bin}:/usr/bin:/bin`, ...extraEnv },
     hostYaml: join(xdg, "xarabot", "host.yaml"),
     xarabot,
     runnerRoot: join(xarabot, "runner"),

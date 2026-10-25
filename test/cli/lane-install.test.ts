@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { loadHostConfig } from "../../src/core/config/load-host-config.ts";
 import { renderLauncher, renderPlist } from "../../src/core/lane/launchd.ts";
-import { laneInstall, parseInstallArgs, type LaneInstallDeps } from "../../src/cli/lane-install.ts";
+import { laneInstall, missingTools, parseInstallArgs, type LaneInstallDeps } from "../../src/cli/lane-install.ts";
+import { laneLayout } from "../../src/lane/lane-store.ts";
 import { RUNNER_REPO_URL } from "../../src/cli/lane-connection.ts";
 import { cleanup, FAKE_TOKEN, HOST_ID, mainFiles, stubInstaller, world, fakeConnect, type World } from "./lane-fixture.ts";
 
@@ -190,6 +191,10 @@ describe("xarabot lane install", () => {
     [["coord", "--repo", "xaravel/xarabot", "--role", "coordinator", "--owner", "alice", "--agent", "claude"], "a coordinator lane must be named coordinator"],
     [["builder-1", "--repo", "xaravel/xarabot", "--role", "coordinator", "--owner", "alice", "--agent", "claude"], "a coordinator lane must be named coordinator"],
     [["coordinator", ...ARGS.slice(1)], "the lane name coordinator is only for role coordinator"],
+    [["worker", ...ARGS.slice(1)], 'a builder lane must be named builder-<n> (n >= 1), not "worker"'],
+    [["builder-0", ...ARGS.slice(1)], 'a builder lane must be named builder-<n> (n >= 1), not "builder-0"'],
+    [["builder-01", ...ARGS.slice(1)], 'a builder lane must be named builder-<n> (n >= 1), not "builder-01"'],
+    [["Builder-1", ...ARGS.slice(1)], 'a builder lane must be named builder-<n> (n >= 1), not "Builder-1"'],
   ])("%j is refused before anything is read or written", async (args, why) => {
     const w = world(dirs);
     const r = await install(w, args);
@@ -197,6 +202,80 @@ describe("xarabot lane install", () => {
     expect(r.err.join("\n")).toContain(why);
     expect(r.record.connects).toBe(0);
     nothingWritten(w);
+  });
+
+  test("a name host.yaml holds for another repo: refused naming that repo, host.yaml unchanged, no connect", async () => {
+    const w = world(dirs);
+    mkdirSync(join(w.xdg, "xarabot"), { recursive: true });
+    const before = `schema_version: 1\nhost_id: ${HOST_ID}\nlanes:\n  builder-1:\n    repo: xaravel/xaravel\n    role: builder\n    owner: alice\n    agent: claude\n`;
+    writeFileSync(w.hostYaml, before);
+    const r = await install(w, ARGS);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("lane builder-1 is already installed on this host for xaravel/xaravel");
+    expect(r.record.connects).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(readFileSync(w.hostYaml, "utf8")).toBe(before);
+    expect(existsSync(w.laneDir)).toBe(false);
+  });
+
+  test.each([
+    ["uv missing", ["uv"], "uv does not resolve on the PATH the lane's plist gets: "],
+    ["claude and git missing", ["claude", "git"], "claude and git do not resolve on the PATH the lane's plist gets: "],
+  ] as const)("%s from the PATH: refused naming each and the PATH, nothing written, no connect", async (_name, missing, why) => {
+    const w = world(dirs);
+    for (const tool of missing) rmSync(join(w.bin, tool));
+    // A PATH holding none of the tools.
+    const env = { ...w.env, PATH: `${w.bin}:${join(w.root, "empty")}` };
+    const r = await install({ ...w, env }, ARGS);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(`${why}${env.PATH}`);
+    expect(r.record.connects).toBe(0);
+    nothingWritten(w);
+  });
+
+  test("an unset PATH: refused naming all four tools, nothing written", async () => {
+    const w = world(dirs);
+    const { PATH: _path, ...env } = w.env;
+    const r = await install({ ...w, env }, ARGS);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("PATH is not set, so the lane's plist gets none: claude, bun, git and uv must each resolve on it");
+    expect(r.record.connects).toBe(0);
+    nothingWritten(w);
+  });
+
+  test("builder-1 and builder-2 under XARABOT_MAX_BUILDERS=2: distinct lane folders, runner.gits, plists and labels, and distinct clone and vendor paths", async () => {
+    const w = world(dirs, { XARABOT_MAX_BUILDERS: "2" });
+    expect((await install(w, ARGS)).code).toBe(0);
+    expect((await install(w, ["builder-2", ...ARGS.slice(1)])).code).toBe(0);
+    const host = loadHostConfig(readFileSync(w.hostYaml, "utf8"));
+    expect(host.ok && Object.keys(host.value.lanes).sort()).toEqual(["builder-1", "builder-2"]);
+    const dirsOf = ["builder-1", "builder-2"].map((n) => join(w.xarabot, "repos", "xaravel__xarabot", "lanes", n));
+    const labels = ["builder-1", "builder-2"].map((n) => `com.xarabot.lane.xaravel__xarabot.${n}`);
+    expect(new Set(labels).size).toBe(2);
+    for (const [i, dir] of dirsOf.entries()) {
+      expect(existsSync(join(dir, "runner.git", "HEAD"))).toBe(true);
+      const plist = readFileSync(join(dir, `${labels[i]}.plist`), "utf8");
+      expect(plist).toContain(`<string>${labels[i]}</string>`);
+      expect(plist).toContain("<key>XARABOT_MAX_BUILDERS</key>\n    <string>2</string>");
+    }
+    const [one, two] = dirsOf.map((d) => laneLayout(d));
+    expect(one?.clone).not.toBe(two?.clone);
+    expect(one?.vendorHome).not.toBe(two?.vendorHome);
+    expect(one?.runnerGit).not.toBe(two?.runnerGit);
+    expect(one?.lock).not.toBe(two?.lock);
+    // A third builder is over the limit.
+    const third = await install(w, ["builder-3", ...ARGS.slice(1)]);
+    expect(third.code).toBe(1);
+    expect(third.err.join("\n")).toContain("more than XARABOT_MAX_BUILDERS=2");
+  });
+
+  test("missingTools: each missing tool named in order, with the PATH", () => {
+    const has = (present: readonly string[]) => (tool: string) => (present.includes(tool) ? `/bin/${tool}` : null);
+    expect(missingTools("/p", has(["claude", "bun", "git", "uv"]))).toBeNull();
+    expect(missingTools("/p", has(["claude", "bun", "git"]))).toBe("uv does not resolve on the PATH the lane's plist gets: /p");
+    expect(missingTools("/p", has(["git"]))).toBe("claude, bun and uv do not resolve on the PATH the lane's plist gets: /p");
+    expect(missingTools(undefined, has([]))).toContain("claude, bun, git and uv");
+    expect(missingTools("", has([]))).toContain("PATH is not set");
   });
 
   test("a coordinator lane named coordinator installs in lanes/coordinator", async () => {

@@ -603,7 +603,7 @@ describe("createPlanningStep: done", () => {
   });
 
   test.each([
-    ["a commit conflict", () => ok({ kind: "conflict", paths: [STATUS] } as CommitOutcome), /commit conflict onto/],
+    ["a commit conflict", () => ok({ kind: "conflict", paths: [STATUS], start: "e".repeat(40) } as CommitOutcome), /commit conflict onto/],
     ["a failed commit", () => err("transient", "disk full"), /commit transient: disk full/],
   ] as const)("%s is a failed attempt; nothing pushed", async (_name, committer, why) => {
     const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))], committer });

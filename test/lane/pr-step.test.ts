@@ -99,13 +99,24 @@ const REFUSED: CommitOutcome = {
 
 type StubCommitter = Committer & { readonly requests: CommitRequest[] };
 
-/** A committer returning `outcome`; `committed` gets a fresh head on `ontoSha`. */
-function stubCommitter(fake: FakeForge, outcome: "committed" | CommitOutcome | "error" = "committed"): StubCommitter {
+type StubOutcome = "committed" | CommitOutcome | "error";
+
+/** The session's start a stub conflict names. */
+const START = "5".repeat(40);
+const CONFLICT: CommitOutcome = { kind: "conflict", paths: ["src/s0/a.ts"], start: START };
+
+/**
+ * A committer returning `outcome`, or the n-th of a list on the n-th commit (the last repeating);
+ * `committed` gets a fresh head on `ontoSha`.
+ */
+function stubCommitter(fake: FakeForge, outcomes: StubOutcome | readonly StubOutcome[] = "committed"): StubCommitter {
   const requests: CommitRequest[] = [];
   return {
     requests,
     async commit(r) {
       requests.push(r);
+      const list: readonly StubOutcome[] = Array.isArray(outcomes) ? outcomes : [outcomes as StubOutcome];
+      const outcome = list[Math.min(requests.length, list.length) - 1] ?? "committed";
       if (outcome === "error") return err("git", "boom");
       if (outcome === "committed") return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() });
       return ok(outcome);
@@ -125,7 +136,7 @@ type World = {
 };
 
 async function world(
-  o: { readonly authority?: "ok" | "missing" | "expired"; readonly record?: Partial<UnitRecord>; readonly commit?: "committed" | CommitOutcome | "error" } = {},
+  o: { readonly authority?: "ok" | "missing" | "expired"; readonly record?: Partial<UnitRecord>; readonly commit?: StubOutcome | readonly StubOutcome[] } = {},
 ): Promise<World> {
   const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o) });
   const s = await fake.forge.snapshot(opts());
@@ -406,12 +417,39 @@ describe("createPrStep", () => {
     expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
   });
 
-  test("commit conflict: no push, released", async () => {
-    const w = await world({ commit: { kind: "conflict", paths: ["a"] } });
+  test("commit conflict onto main: committed again onto the session's start, pushed, the PR opened, progress, no attempt; the log names the paths", async () => {
+    const w = await world({ commit: [CONFLICT, "committed"] });
     const out = await w.run();
-    expect(out).toMatchObject({ outcome: "failed", state: "released" });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.committer.requests.map((r) => r.ontoSha)).toEqual([w.main, START]);
+    const list = await prs(w.fake);
+    expect(list).toHaveLength(1);
+    expect(await w.ledger()).toMatchObject({ state: "claimed", attempts: 0, ci_fixes: 0, pr: list[0]?.number, head_sha: list[0]?.head_sha, base_sha: START });
+    expect(w.logs.some((l) => l.includes(`commit conflict onto ${w.main}: src/s0/a.ts; committing onto the session's start ${START}`))).toBe(true);
+  });
+
+  test("commit conflict for a fix: committed onto the session's start and pushed to the adopted PR, no attempt", async () => {
+    const w = await world({ commit: [CONFLICT, "committed"] });
+    const first = await w.run();
+    expect(first.outcome).toBe("progress");
+    const record = first.record as UnitRecord;
+    const out = await w.run({ record, kind: "fix" });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.committer.requests.map((r) => r.ontoSha)).toEqual([w.main, START, w.main]);
+    expect(await w.ledger()).toMatchObject({ attempts: 0, pr: record.pr });
+  });
+
+  test.each([
+    ["a second conflict: a failed attempt, no push", [CONFLICT, CONFLICT], { outcome: "failed", state: "released" }, { state: "released", attempts: 1 }],
+    ["a refusal onto the start: parked write-check, no push", [CONFLICT, REFUSED], { outcome: "progress", state: "parked" }, { state: "parked", park: { kind: "blocked", reason: "write-check" }, attempts: 0 }],
+    ["an empty commit onto the start: parked no-op, no push", [CONFLICT, { kind: "empty" }], { outcome: "progress", state: "parked" }, { state: "parked", park: { kind: "blocked", reason: "no-op" }, attempts: 0 }],
+    ["a committer error onto the start: a failed attempt", [CONFLICT, "error"], { outcome: "failed", state: "released" }, { state: "released", attempts: 1 }],
+  ] as const)("commit conflict, then %s", async (_name, commit, out, ledger) => {
+    const w = await world({ commit: commit as readonly StubOutcome[] });
+    expect(await w.run()).toMatchObject(out);
+    expect(w.committer.requests.map((r) => r.ontoSha)).toEqual([w.main, START]);
     expect(w.calls).not.toContain("pushBranch");
-    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+    expect(await w.ledger()).toMatchObject(ledger);
   });
 
   test("a committer error is a failed attempt", async () => {
@@ -816,7 +854,7 @@ describe("createPrStep", () => {
   });
 
   test("the attempts cap parks the unit on a failed attempt", async () => {
-    const w = await world({ record: { attempts: 2 }, commit: { kind: "conflict", paths: ["a"] } });
+    const w = await world({ record: { attempts: 2 }, commit: "error" });
     const out = await w.run();
     expect(out).toMatchObject({ outcome: "failed", state: "parked" });
     expect(await w.ledger()).toMatchObject({ state: "parked", attempts: 3, park: { reason: "attempts-cap" } });
