@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-13-act-on-approvals-in-the-next-round",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -18,7 +18,7 @@
     "test/core/next/**",
     "test/core/schemas/**"
   ],
-  "heartbeat_at": "2026-10-25T19:47:34.745Z",
+  "heartbeat_at": "2026-10-25T19:49:23.188Z",
   "pr": 116,
   "pr_owner": "edanisko",
   "base_sha": "f214a46a6244009f76812e6fd326f9ccfee1bc02",
@@ -29,7 +29,23 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/adapters/forge/fake/fake-forge.ts",
+      "src/adapters/forge/github/github-forge.ts",
+      "src/core/next/coordinator.ts",
+      "src/core/schemas/snapshot.ts",
+      "src/ports/forge.ts",
+      "test/adapters/forge/github/fake-github.ts",
+      "test/adapters/forge/github/github-forge.test.ts",
+      "test/contracts/forge.contract.ts",
+      "test/core/next/coordinator.test.ts",
+      "test/core/next/snapshot.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
