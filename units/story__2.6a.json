@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "unit": "story:2.6a",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-2-6a-one-session-runner.md",
@@ -22,7 +22,7 @@
     "test/lane/session.test.ts",
     "test/support/boundaries.ts"
   ],
-  "heartbeat_at": "2026-10-25T02:57:39.527Z",
+  "heartbeat_at": "2026-10-25T02:59:53Z",
   "pr": 80,
   "pr_owner": "edanisko",
   "base_sha": "716e7ff21509abe7797d453a49b0f4e6659825b6",
