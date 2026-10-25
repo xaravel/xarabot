@@ -15,12 +15,15 @@ import {
   type ForgePr,
   type ForgePrState,
   type ForgeResult,
+  type ForgeReview,
   type ForgeSnapshot,
   type GitSha,
   type PrefetchRequest,
   type PushLease,
   type QueueState,
   rateLimited,
+  REVIEW_STATES,
+  type ReviewState,
 } from "../../../ports/forge.ts";
 import type { AppCredentials } from "./credentials.ts";
 import {
@@ -660,6 +663,36 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     });
   }
 
+  /** A review item as a `ForgeReview`: GitHub's uppercase state lowercased; `undefined` when malformed. */
+  function toReview(raw: unknown): ForgeReview | undefined {
+    const r = asObj(raw);
+    if (r === undefined) return undefined;
+    const state = typeof r["state"] === "string" ? r["state"].toLowerCase() : undefined;
+    if (state === undefined || !(REVIEW_STATES as readonly string[]).includes(state)) return undefined;
+    const user = r["user"];
+    if (user !== null && user !== undefined && asObj(user) === undefined) return undefined;
+    const author = str(user, "login") ?? null;
+    const commit = r["commit_id"] ?? null;
+    const submitted = r["submitted_at"] ?? null;
+    if ((commit !== null && typeof commit !== "string") || (submitted !== null && typeof submitted !== "string")) return undefined;
+    return { author, state: state as ReviewState, commit_sha: commit, submitted_at: submitted };
+  }
+
+  async function reviews(pr: number, opts: CallOpts): Promise<ForgeResult<readonly ForgeReview[]>> {
+    return guarded("reviews", opts, async (ctx) => {
+      const op = GITHUB_OPERATIONS.listReviews;
+      const r = await paged(ctx, op, (page) => `/pulls/${pr}/reviews?per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
+      if (!r.ok) return r;
+      const list: ForgeReview[] = [];
+      for (const raw of r.value) {
+        const review = toReview(raw);
+        if (review === undefined) return malformed(op, "not a review");
+        list.push(review);
+      }
+      return forgeOk(list);
+    });
+  }
+
   async function comment(pr: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>> {
     return guarded("comment", opts, async (ctx) => {
       const found = await getPr(ctx, pr);
@@ -976,6 +1009,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     updatePr,
     closePr,
     listPrsByBranch,
+    reviews,
     comment,
     checks,
     enqueue,

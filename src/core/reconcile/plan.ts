@@ -23,6 +23,36 @@ export type PlanTarget = {
   readonly head_sha: string | null;
 };
 
+/** A parked PR the run may take on its owner's standing approval. */
+export type ApprovalTarget = {
+  readonly unit: string;
+  readonly generation: number;
+  readonly pr: number;
+  readonly pr_owner: string;
+  /** The record's head, which the snapshot shows the PR still at. */
+  readonly head_sha: string;
+  /**
+   * For a coordinator-written re-park (the record's `lane` is `coordinator`),
+   * its `heartbeat_at`: an approval must be submitted after it. `null` for a
+   * builder's first park: any standing owner approval of the head counts.
+   */
+  readonly parked_at: string | null;
+  /** The paths the PR's diff changes (the park's `globs_held`). */
+  readonly globs: readonly string[];
+};
+
+/** A coordinator-held `merging` record taken on approval, whose queue is checked. */
+export type GatedTarget = {
+  readonly unit: string;
+  readonly generation: number;
+  readonly pr: number;
+  readonly pr_owner: string | null;
+  readonly head_sha: string | null;
+  readonly approved_sha: string | null;
+  /** The paths the PR's diff changes, kept since the first park. */
+  readonly globs: readonly string[];
+};
+
 export type StatusPlan =
   /** Nothing to change on `main`. */
   | { readonly kind: "none" }
@@ -38,11 +68,15 @@ export type ReconcilePlan = {
   readonly markMerged: readonly string[];
   /** 2. Coordinator-held `merging` `reconcile` records whose PR has not merged: their queue is checked. */
   readonly checkQueue: readonly PlanTarget[];
-  /** 3. Stale `claimed` `reconcile` records: the open PRs on their branch closed, then released with an attempt. */
+  /** 3. Coordinator-held `merging` records of other kinds whose PR has not merged: their queue is checked, and a PR out of it parks again. */
+  readonly checkGated: readonly GatedTarget[];
+  /** 4. `parked` `awaiting-approval` records whose PR is open at the record's head: taken on a standing owner approval (after the park only for a coordinator-written re-park). */
+  readonly takeApproved: readonly ApprovalTarget[];
+  /** 5. Stale `claimed` `reconcile` records: the open PRs on their branch closed, then released with an attempt. */
   readonly releaseDead: readonly PlanTarget[];
-  /** 4. `released` `reconcile` records: the open PRs on their branch closed, then deleted. */
+  /** 6. `released` `reconcile` records: the open PRs on their branch closed, then deleted. */
   readonly deleteReleased: readonly PlanTarget[];
-  /** 5. `merged` records (as of this run) whose unit is done on `main`. */
+  /** 7. `merged` records (as of this run) whose unit is done on `main`. */
   readonly deleteMerged: readonly string[];
   /** `sprint_status_path`. */
   readonly path: string;
@@ -52,7 +86,7 @@ export type ReconcilePlan = {
    * the ledger work leaves open stop a new PR this run.
    */
   readonly openPrs: readonly { readonly unit: string; readonly pr: number }[];
-  /** The other `merged` `reconcile` records left after step 5, deleted once this run finishes `merged`. */
+  /** The other `merged` `reconcile` records left after step 7, deleted once this run finishes `merged`. */
   readonly supersededMerged: readonly string[];
 };
 
@@ -132,12 +166,38 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
   const marked = new Set(markMerged);
   const pending = others.filter((r) => isReconcile(r) && !marked.has(r.unit) && prOf(r)?.state !== "merged");
 
-  // 2-4. Earlier reconcile runs.
+  // 2, 5, 6. Earlier reconcile runs.
   const checkQueue = pending.filter((r) => r.state === "merging" && r.lane === "coordinator").map((r) => target(r, snapshot));
   const releaseDead = pending.filter((r) => r.state === "claimed" && isStale(r, snapshot.now)).map((r) => target(r, snapshot));
   const deleteReleased = pending.filter((r) => r.state === "released").map((r) => target(r, snapshot));
 
-  // 5. Records merged as of this run whose unit is done on main.
+  // 3. Approval-gated PRs the coordinator queued.
+  const checkGated: GatedTarget[] = [];
+  for (const r of others) {
+    if (marked.has(r.unit) || isReconcile(r) || r.state !== "merging" || r.lane !== "coordinator") continue;
+    if (r.pr === null || prOf(r)?.state === "merged") continue;
+    checkGated.push({ unit: r.unit, generation: r.generation, pr: r.pr, pr_owner: r.pr_owner, head_sha: r.head_sha, approved_sha: r.approved_sha, globs: r.globs });
+  }
+
+  // 4. Parked PRs awaiting approval, still open at the head the lane parked.
+  const takeApproved: ApprovalTarget[] = [];
+  for (const r of others) {
+    if (marked.has(r.unit) || r.state !== "parked" || r.park?.kind !== "awaiting-approval") continue;
+    if (r.pr === null || r.pr_owner === null || r.head_sha === null) continue;
+    const p = prOf(r);
+    if (p?.state !== "open" || p.head_sha !== r.head_sha) continue;
+    takeApproved.push({
+      unit: r.unit,
+      generation: r.generation,
+      pr: r.pr,
+      pr_owner: r.pr_owner,
+      head_sha: r.head_sha,
+      parked_at: r.lane === "coordinator" ? r.heartbeat_at : null,
+      globs: r.park.globs_held,
+    });
+  }
+
+  // 7. Records merged as of this run whose unit is done on main.
   const effective = asMerged(snapshot, marked);
   const mergedNow = effective.ledger.units.filter((r) => r.unit !== unit && r.state === "merged");
   const deleteMerged = mergedNow.filter((r) => doneOnMain(r, effective)).map((r) => r.unit);
@@ -156,5 +216,5 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
     status = edited.ok ? { kind: "edit", changes, text: edited.value, summary } : { kind: "invalid", changes, message: edited.error.message };
   }
 
-  return { markMerged, checkQueue, releaseDead, deleteReleased, deleteMerged, path, status, openPrs, supersededMerged };
+  return { markMerged, checkQueue, checkGated, takeApproved, releaseDead, deleteReleased, deleteMerged, path, status, openPrs, supersededMerged };
 }

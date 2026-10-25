@@ -151,6 +151,17 @@ export type QueueState = {
   readonly queued: boolean;
 };
 
+export const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed", "pending"] as const;
+export type ReviewState = (typeof REVIEW_STATES)[number];
+
+/** One review on a PR. `author` is `null` for a deleted account; `submitted_at` is `null` while pending. */
+export type ForgeReview = {
+  readonly author: string | null;
+  readonly state: ReviewState;
+  readonly commit_sha: GitSha | null;
+  readonly submitted_at: string | null;
+};
+
 export type Forge = {
   snapshot(opts: SnapshotOpts): Promise<ForgeResult<ForgeSnapshot>>;
   /** Fast-forward only: the tip must still be `oldSha`, else `conflict`. One new commit. */
@@ -165,6 +176,8 @@ export type Forge = {
   closePr(pr: number, opts: CallOpts): Promise<ForgeResult<ForgePr>>;
   /** Every PR on `branch` in any state, ascending by number. */
   listPrsByBranch(branch: string, opts: CallOpts): Promise<ForgeResult<readonly ForgePr[]>>;
+  /** Every review on PR `pr`, in the forge's order (oldest first). A missing PR is `not-found`. */
+  reviews(pr: number, opts: CallOpts): Promise<ForgeResult<readonly ForgeReview[]>>;
   /** Posts `body` verbatim as one comment on PR `pr`. */
   comment(pr: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>>;
   /** The checks on `sha`; an empty list means pending. */
@@ -192,6 +205,7 @@ export const FORGE_OPERATIONS = [
   "updatePr",
   "closePr",
   "listPrsByBranch",
+  "reviews",
   "comment",
   "checks",
   "enqueue",

@@ -9,7 +9,7 @@ operation table in `src/adapters/forge/github/http.ts` by
 | Permission | Operations that use it |
 |---|---|
 | `contents: write` | `getRef`, `getCommit`, `getTree`, `getBlob`, `createBlob`, `createTree`, `createCommit`, `createRef`, `updateRef`, `git push` of unit branches, `enqueuePullRequest`, `dequeuePullRequest` |
-| `pull_requests: write` | `getPull`, `listPulls`, `createPull`, `updatePull`, `createComment`, `pullQueueState` |
+| `pull_requests: write` | `getPull`, `listPulls`, `listReviews`, `createPull`, `updatePull`, `createComment`, `pullQueueState` |
 | `issues: write` | `listIssues`, `createIssue`, `listIssueComments`, `createIssueComment` (the Maintainer's `xarabot-inbox` alerts) |
 | `checks: read` | `listCheckRuns` |
 | `statuses: read` | `getCombinedStatus` |

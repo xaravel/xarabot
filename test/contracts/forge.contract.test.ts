@@ -12,6 +12,7 @@ const CONTROLS = {
   injectError: true,
   refusePushes: true,
   mergeQueueHead: true,
+  addReview: true,
   comments: true,
   queue: true,
   trace: true,

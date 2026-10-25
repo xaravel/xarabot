@@ -445,8 +445,12 @@ cat ~/.xarabot/repos/xaravel__xarabot/lanes/builder-1/outcome
 
 To stop it, use `bun ~/.xarabot/runner/<tag>/src/cli/main.ts stop builder-1`,
 or `touch ~/.xarabot/STOP` for the whole host. Every PR it opens parks
-awaiting your approval. Approve it, then add it to the merge queue by hand.
-The lane records it `merged` at its next start.
+awaiting your approval. With a `runner_version` that has Story 2.6 and the
+coordinator lane running, approve the PR's current head (before or after the
+lane parks it) and the coordinator adds it to the merge queue within about
+10 min; you queue nothing by hand (see "The coordinator lane" below). On an
+older runner, approve it, then add it to the merge queue by hand. Either way,
+the lane records it `merged` at its next start.
 
 Xarabot requests no review and sends no notice for a parked PR. Until Story
 4.2's daily digest, watch the repo with "All Activity" (the repo page →
@@ -479,6 +483,12 @@ decision, 2026-10-24).
 
   With Story 2.5, the lane runs a `reconcile:<n>` unit whenever the ledger shows a record whose PR merged, or a `merged` record whose unit is done on `main`, and at least every 10 min otherwise; after an idle round it waits 10 min. `reconcile` starts no agent session. It records merged PRs as `merged`, deletes `merged` records once their unit is done on `main` (a Story is done once its `sprint-status.yaml` key is `done`), and cleans up earlier `reconcile` runs. When `sprint-status.yaml` needs a change (a merged Story's key to `done`, a merged graph unit's new keys as `backlog`), it opens one runner-written PR from `xarabot/reconcile-<n>` that changes only that file. Once the PR's checks pass, the runner queues it itself: the Standing Authority exempts `reconcile` PRs from owner approval, so you do not approve or queue them. A Protected Path still gates one, and a failing or timed-out check parks it for you (`verification`, `ci-timeout`). An ejected or conflicting `reconcile` PR is closed, and a later run opens a fresh one; no new one opens while another is open.
 
+  With Story 2.6, a runner needs no hand queueing. Each `reconcile` run (at least every 10 min) reads the reviews of every PR parked awaiting approval whose head is still the one the lane parked. Only your latest approving, changes-requested or dismissed review counts, and it must be an approval of the PR's current head. When you dismiss a review, GitHub turns that review's own state to `DISMISSED`, so a dismissed approval no longer counts. Comments and pending reviews never count. When a builder parked the PR, any such approval counts, including one you gave while its checks still ran. Once it stands, the run re-checks the Standing Authority on fresh `main`, takes the unit (`merging`, held by the coordinator) and adds the PR to the merge queue at that head. Expect it within about 10 min of your approval; no agent session runs.
+
+  If the queue later ejects or dequeues the PR, or it is closed, the next run parks it awaiting approval again, held by the coordinator, and posts a 🤖 comment saying why. If its enqueue conflicts, the same run parks it again. After such a re-park, only an approval you submit after the re-park counts, so a failing PR never loops and a dequeue you made by hand sticks. Approve its current head again once it can merge. A closed PR must be reopened first. A `reconcile` PR gated by a Protected Path is parked by the coordinator itself, so only an approval you submit after its gate comment counts. It is then taken the same way, but on an ejection, dequeue or conflict it is closed and its record released, never parked again; a later run opens a fresh one.
+
+  A push to the PR's branch after the park stops the auto-queue: the lane's checks never ran on the new head, so the coordinator never takes it, whatever you approve. A push while the PR is queued also takes it out of the queue; the next run parks it again, with a 🤖 comment saying its head moved. Either way, add it to the merge queue by hand (the PR is still recorded `merged` once it merges), or run `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule rebuild <unit-id>`, which closes the PR and lets a builder start the unit fresh.
+
   **`reconcile` PRs and `Protect main`.** While `Protect main` requires an approving review on every PR, GitHub refuses the runner's enqueue of a `reconcile` PR. The Maintainer decided (2026-10-24) to use code-owner review instead of a blanket approval, with no bypass actor. Do this before you install the coordinator lane:
   1. In a Maintainer PR, add `.github/CODEOWNERS`:
 
@@ -505,7 +515,7 @@ decision, 2026-10-24).
 
   **Hand edits.** Once the coordinator lane runs, stop marking Stories `done` in `sprint-status.yaml` by hand. A hand edit while a `reconcile` PR is open can get that PR ejected, and a later run closes it and opens a fresh one.
 
-  At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until Story 2.6 merges, keep adding approved PRs to the merge queue by hand.
+  At each start the lane claims `coordinator.json` as `edanisko/<host_id>/coordinator`. While another identity's claim is live (heartbeat under 30 min old), the start is refused and counted, and the third refusal in a row writes the lane's `STOP` and posts `lane-start-failed`. While the claim is missing or expired, builders keep building and post a `coordinator-missing` or `coordinator-expired` alert, once per `main` SHA. Expect `coordinator-missing` on every new `main` SHA from the first builder start on a runner with Story 2.4 until you install the coordinator lane. To move the coordinator to another host, or to recover it there, stop the old lane, then wait until its claim is 30 min stale: until then, each start of the new lane is refused and counted. Until `runner_version` has Story 2.6, keep adding approved PRs to the merge queue by hand; a runner with 2.6 does it for you (above). A moved coordinator leaves nothing stuck: when the new coordinator lane finds a PR the old one queued ejected, dequeued or closed, it parks that unit again itself, holding only the paths of the PR's diff.
 - **A crashed lane.** A crashed lane's unit is taken over 30 min after its last heartbeat; `stop --now <lane>` releases it at once.
 - **Releasing a parked unit.** Once `runner_version` has Story 2.5b, release a `parked` unit with one host command instead of a hand-written ledger commit. Run it on the host as `edanisko-xarabot`:
 

@@ -57,6 +57,7 @@ export const GITHUB_OPERATIONS = {
   updateRef: { name: "updateRef", method: "PATCH", permission: "contents: write", conflictOn: SWAP_CONFLICT_STATUS },
   getPull: { name: "getPull", method: "GET", permission: "pull_requests: write" },
   listPulls: { name: "listPulls", method: "GET", permission: "pull_requests: write" },
+  listReviews: { name: "listReviews", method: "GET", permission: "pull_requests: write" },
   createPull: { name: "createPull", method: "POST", permission: "pull_requests: write" },
   updatePull: { name: "updatePull", method: "PATCH", permission: "pull_requests: write" },
   createComment: { name: "createComment", method: "POST", permission: "pull_requests: write" },

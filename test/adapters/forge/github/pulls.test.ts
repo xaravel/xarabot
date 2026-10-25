@@ -188,6 +188,66 @@ describe("listPrsByBranch", () => {
   });
 });
 
+describe("reviews", () => {
+  test("maps author, lowercased state, commit SHA and submitted time, paging 100 at a time in order", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    const states = ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"];
+    for (let i = 0; i < 120; i += 1) {
+      gh.control.addReview(7, { login: `u${i}`, state: states[i % 4] as string, commit_id: H1, submitted_at: `2026-10-24T10:${String(i % 60).padStart(2, "0")}:00Z` });
+    }
+    const listed = value(await forge.reviews(7, live()));
+    expect(listed).toHaveLength(120);
+    expect(listed.slice(0, 4)).toEqual([
+      { author: "u0", state: "approved", commit_sha: H1, submitted_at: "2026-10-24T10:00:00Z" },
+      { author: "u1", state: "changes_requested", commit_sha: H1, submitted_at: "2026-10-24T10:01:00Z" },
+      { author: "u2", state: "commented", commit_sha: H1, submitted_at: "2026-10-24T10:02:00Z" },
+      { author: "u3", state: "dismissed", commit_sha: H1, submitted_at: "2026-10-24T10:03:00Z" },
+    ]);
+    expect(listed.map((r) => r.author)).toEqual(Array.from({ length: 120 }, (_, i) => `u${i}`));
+    expect(calls(gh)).toEqual(["GET /pulls/7/reviews?per_page=100&page=1", "GET /pulls/7/reviews?per_page=100&page=2"]);
+  });
+
+  test("a null user is a null author; a pending review has a null submitted time", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    gh.control.addReview(7, { login: null, state: "APPROVED", commit_id: H1, submitted_at: "2026-10-24T10:00:00Z" });
+    gh.control.addReview(7, { login: "alice", state: "PENDING", commit_id: H2, submitted_at: null });
+    expect(value(await forge.reviews(7, live()))).toEqual([
+      { author: null, state: "approved", commit_sha: H1, submitted_at: "2026-10-24T10:00:00Z" },
+      { author: "alice", state: "pending", commit_sha: H2, submitted_at: null },
+    ]);
+  });
+
+  test("a missing PR is not-found", async () => {
+    const { forge } = setup();
+    expect(kind(await forge.reviews(99, live()))).toBe("not-found");
+  });
+
+  test("a review with no submitted_at key is valid, with a null submitted time", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    gh.control.inject("GET", /\/pulls\/7\/reviews\?/, { status: 200, body: [{ id: 1, user: { login: "alice" }, state: "PENDING", commit_id: H1 }] });
+    expect(value(await forge.reviews(7, live()))).toEqual([{ author: "alice", state: "pending", commit_sha: H1, submitted_at: null }]);
+  });
+
+  test.each([
+    ["an unknown state", [{ id: 1, user: { login: "alice" }, state: "SHRUGGED", commit_id: H1, submitted_at: "2026-10-24T10:00:00Z" }]],
+    ["a non-object item", ["approved"]],
+    ["a non-string commit", [{ id: 1, user: { login: "alice" }, state: "APPROVED", commit_id: 7, submitted_at: "2026-10-24T10:00:00Z" }]],
+    ["a non-object user", [{ id: 1, user: "alice", state: "APPROVED", commit_id: H1, submitted_at: "2026-10-24T10:00:00Z" }]],
+    ["a non-string submitted time", [{ id: 1, user: { login: "alice" }, state: "APPROVED", commit_id: H1, submitted_at: 1729764000 }]],
+    ["a non-list page", { reviews: [] }],
+  ])("%s is a malformed reply (transient)", async (_what, body) => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    gh.control.inject("GET", /\/pulls\/7\/reviews\?/, { status: 200, body });
+    const r = await forge.reviews(7, live());
+    expect(r.ok ? "ok" : r.error.kind).toBe("transient");
+    expect(r.ok ? "" : r.error.message).toMatch(/^listReviews: malformed reply/);
+  });
+});
+
 describe("comment", () => {
   test("GETs the PR, POSTs the body verbatim to the issue and returns the id as a string", async () => {
     const { gh, forge } = setup();

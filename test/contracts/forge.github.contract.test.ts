@@ -42,7 +42,7 @@ forgeContract({
   name: "github (emulator)",
   enabled: !isSandboxed,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes"],
+  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes", "addReview"],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -89,6 +89,8 @@ forgeContract({
           writeForeignLedger: (commit) => gh.control.writeForeignLedger(commit),
           queue: () => gh.control.queue(),
           mergeQueueHead: () => gh.control.mergeQueueHead(),
+          addReview: (pr, r) =>
+            gh.control.addReview(pr, { login: r.author, state: r.state.toUpperCase(), commit_id: r.commit_sha, submitted_at: r.submitted_at }),
           trace: () => [...trace],
           // A pre-receive hook in the git server's bare repo refuses the listed refs.
           refusePushes: (branch) => remote.refuse(branch),

@@ -522,8 +522,9 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
   /**
    * Before `next`: every parked or merging record whose PR the forge reports
-   * merged (the Maintainer approved and queued it by hand, or the queue merged
-   * it after its lane ended) is marked `merged`, with one journal record each.
+   * merged (the Maintainer queued it by hand, the coordinator queued it on its
+   * owner's approval, or the queue merged it after its lane ended) is marked
+   * `merged`, with one journal record each.
    * Returns the records it wrote, for `next` to see in place of the snapshot's.
    */
   const sweepMerged = async (units: readonly UnitRecord[], prs: ForgeSnapshot["prs"], now: string): Promise<UnitRecord[]> => {
