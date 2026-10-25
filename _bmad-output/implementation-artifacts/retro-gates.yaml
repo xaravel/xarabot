@@ -104,7 +104,7 @@ epics:
         text: "Make reconcile's runner code set an Epic's epic-<N> key to done in sprint-status.yaml once every Story of the Epic is done there (E6; Maintainer decision 2026-10-25), in the same status edit that marks the last Story done; never for an Epic in bootstrapped_epics whose key is absent, and never back from done; tests for the last Story done, a Story not yet done, an Epic already done, and a bootstrapped Epic"
         route: lane
         blocking: false
-        globs: ["src/core/reconcile/plan.ts", "src/core/reconcile/status-edit.ts", "test/core/reconcile/**"]
+        globs: ["src/core/reconcile/plan.ts", "src/core/reconcile/status-edit.ts", "test/core/reconcile/**", "test/lane/reconcile-step.test.ts"]
         status: open
       - id: "epic-2-retro-item-17-void-a-stale-graph-approval-after-a-retake"
         text: "Story 2.8 follow-up review F1 (medium): approved_graph is written at the take but never read again, so after a runner failure that follows the take (refused fence, failed re-check snapshot or gate, non-conflict enqueue error), a later main graph change lets reconcile re-take and enqueue the PR on the Maintainer's approval of the older delta, and the new delta is never posted. Carry approved_graph through GatedTarget and untake's target; in the take, when it differs from the gate's current hash, void the approval and re-park for the Maintainer with the delta comment. Fix the test at test/lane/reconcile-step.test.ts (re-taken at a different hash and queued with no comment) to assert the void"
