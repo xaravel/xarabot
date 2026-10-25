@@ -10,12 +10,21 @@ export const GoSchema = z.strictObject({
   ruling: NonEmpty,
 });
 
+/** A retro's verdicts, as the stock retro document's frontmatter spells them. */
+export const RETRO_VERDICTS = ["accepted", "accepted-with-open-items", "rejected"] as const;
+export const RetroVerdict = z.enum(RETRO_VERDICTS);
+
 export const RETRO_UNIT_PATTERN = /^retro:([1-9][0-9]*)$/;
-export const RETRO_ITEM_ID_PATTERN = /^epic-([1-9][0-9]*)-retro-item-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
+/**
+ * A retro item id: `epic-<N>-retro-item-<seq>-<slug>`. The slug is what the
+ * stock `bmad-retrospective` `_slugify` emits: runs of Unicode letters, marks,
+ * digits and `_`, joined by single `-` (or its 8-hex hash fallback).
+ */
+export const RETRO_ITEM_ID_PATTERN = /^epic-([1-9][0-9]*)-retro-item-([1-9][0-9]*)-([\p{L}\p{M}\p{N}_]+(?:-[\p{L}\p{M}\p{N}_]+)*)$/u;
 
 export const RetroSchema = z
   .strictObject({
-    verdict: z.enum(["accepted", "accepted-with-open-items", "rejected"]),
+    verdict: RetroVerdict,
     unit: z.string().regex(RETRO_UNIT_PATTERN, 'must be "retro:<N>"'),
     recorded_at: IsoDateTime,
     go: GoSchema.optional(),
@@ -42,6 +51,28 @@ export const RetroItemSchema = z.strictObject({
   blocking: z.boolean(),
   globs: z.array(Glob),
   status: z.enum(["open", "in-progress", "waiting", "deferred", "done"]),
+});
+
+/** A string with at least one non-whitespace character; a pattern, so `z.toJSONSchema` states it. */
+const ResultText = z.string().regex(/\S/, "must not be blank");
+
+/**
+ * One action item of a `retro` session result (AR15). Its own module's, not
+ * `session-result.ts`'s, so the ledger's `retro_result` (Story 2.9) shares it
+ * with no import cycle.
+ */
+export const RetroResultItemSchema = z.strictObject({
+  id: z.string().regex(RETRO_ITEM_ID_PATTERN, "must be epic-<N>-retro-item-<seq>-<slug>"),
+  text: ResultText,
+  route: z.enum(["lane", "maintainer"]),
+  blocking: z.boolean(),
+  globs: z.array(z.string()),
+});
+
+/** A retro result as a ledger record carries it to the merge (Story 2.9): its verdict and items. */
+export const RetroRecordResultSchema = z.strictObject({
+  verdict: RetroVerdict,
+  items: z.array(RetroResultItemSchema),
 });
 
 export const CheckpointGoSchema = z.strictObject({ go: GoSchema });
@@ -78,6 +109,9 @@ export const RetroGatesSchema = z
     }
   });
 
+export type RetroResultItem = z.infer<typeof RetroResultItemSchema>;
+export type RetroRecordResult = z.infer<typeof RetroRecordResultSchema>;
+export type RetroVerdict = z.infer<typeof RetroVerdict>;
 export type Go = z.infer<typeof GoSchema>;
 export type Retro = z.infer<typeof RetroSchema>;
 export type RetroItem = z.infer<typeof RetroItemSchema>;

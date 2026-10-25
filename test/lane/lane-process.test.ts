@@ -858,7 +858,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown ledger schema_version alerts ledger-schema-version and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 4 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 5 });
     h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.2.json": v2 }, deletes: [] });
     const main = await mainSha(h.fake);
     expect((await h.run()).outcome).toBe("stop");
@@ -869,7 +869,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown schema_version found by the claim's swap alerts and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 4 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 5 });
     h.fake.control.beforeSwap(({ n }) => {
       if (n === 1) h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.3.json": v2 }, deletes: [] });
     });

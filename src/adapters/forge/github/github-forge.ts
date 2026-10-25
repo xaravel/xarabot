@@ -578,7 +578,9 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     }
     if (typeof title !== "string" || typeof text !== "string") return undefined;
     const merged = b?.["merged"] === true || typeof b?.["merged_at"] === "string";
-    return { number, branch, base, state: merged ? "merged" : state, head_sha: head, title, body: text };
+    const mergeSha = b?.["merge_commit_sha"];
+    const merge_sha = merged && typeof mergeSha === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(mergeSha) ? mergeSha : null;
+    return { number, branch, base, state: merged ? "merged" : state, head_sha: head, title, body: text, merge_sha };
   }
 
   function prResult(op: Operation, body: unknown): ForgeResult<ForgePr> {

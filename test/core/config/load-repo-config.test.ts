@@ -69,6 +69,7 @@ describe("loadRepoConfig: valid snapshots", () => {
       retro_gates_path: "_bmad-output/implementation-artifacts/retro-gates.yaml",
       retro_doc_glob: "_bmad-output/implementation-artifacts/epic-<N>-retro-*.md",
       epic_context_path: "_bmad-output/implementation-artifacts/epic-<N>-context.md",
+      live_evidence_glob: "docs/maintainer/evidence/epic-<N>.md",
       bootstrapped_epics: [],
       digest_time: "08:00",
       story_spec_path: "_bmad-output/implementation-artifacts/spec-<epic>-<story>-*.md",

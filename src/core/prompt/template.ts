@@ -4,13 +4,16 @@
  * in one pass. The Story parts carry no selection, CI, merge or status
  * instruction (the CI-fix part may say "CI log" only); the planning parts
  * (Story 2.7) carry no CI, merge, queue, PR, push, approval, claim, `next`,
- * ledger or selection word. The runner does all of that.
+ * ledger or selection word; the retro parts (Story 2.9) carry no CI, push,
+ * queue, approval, claim, `next`, ledger, sprint-status or selection word.
+ * The runner does all of that.
  *
  * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopback only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
  * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`
  * and `planning_contexts` (status), `planning_headings`, `manifests_dir`
- * and `manifest_paths` (graph).
+ * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
+ * `prs_path`.
  */
 export type PromptTemplate = {
   /** A `story` first build: names the Story and runs `bmad-build-auto`. */
@@ -35,6 +38,10 @@ export type PromptTemplate = {
   readonly planning_graph: string;
   /** The result step of a planning unit: always the prompt's last part. */
   readonly result_planning: string;
+  /** A retro unit: runs `bmad-retrospective -H <N>` on the prefetched PR history. */
+  readonly retro: string;
+  /** The result step of a retro unit: always the prompt's last part. */
+  readonly result_retro: string;
 };
 
 export const PLACEHOLDERS = [
@@ -53,6 +60,9 @@ export const PLACEHOLDERS = [
   "planning_headings",
   "manifests_dir",
   "manifest_paths",
+  "retro_unit",
+  "retro_epic",
+  "prs_path",
 ] as const;
 export type Placeholder = (typeof PLACEHOLDERS)[number];
 
@@ -183,6 +193,29 @@ Set \`outcome\`:
 The other fields:
 
 - \`summary\`: for \`done\`, one line saying what the change does (it becomes the commit title); for \`blocked\`, the findings; for \`nothing-due\`, one line saying why.
+- \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
+
+Write this file last, and do nothing after it.`,
+
+  retro: `# Task
+
+Run the retrospective of Epic {{retro_epic}} (\`{{retro_unit}}\`).
+
+Run the stock \`bmad-retrospective\` skill headless, as \`bmad-retrospective -H {{retro_epic}}\`, asking no questions, and follow it until it halts. It writes the Epic's retrospective document and appends the Epic's action items.
+
+The Epic's pull requests are prefetched in \`{{prs_path}}\`, in your temp folder: read them from there, never from GitHub. It holds one JSON object whose \`prs\` lists each pull request on one of the Epic's Story branches, with its Story, number, title, body, state, head commit and merge commit, and its reviews (author, state, time and reviewed commit). The Epic's git history is in this clone.`,
+
+  result_retro: `${resultHead("retro")}
+
+Set the fields:
+
+- \`verdict\`: the \`verdict\` in the frontmatter of the retrospective document the skill wrote, exactly as written there.
+- \`items\`: one entry for each action item the skill appended in this run, in its order, and no other:
+  - \`id\`: the item's id as appended, of the form \`epic-{{retro_epic}}-retro-item-<seq>-<slug>\`.
+  - \`text\`: the item's action text, on one line.
+  - \`blocking\`: \`true\` when the item must be done before work on the Epics that depend on this one starts; else \`false\`.
+  - \`route\`: \`lane\` when a build session can do the item by changing files in this repository; \`maintainer\` when it needs a person.
+  - \`globs\`: quoted repo-relative globs covering every file the item's work changes; \`[]\` when it changes no file. Never list the planning artifacts, the tracking files, \`.xarabot/\`, \`.github/\`, agent configuration, the Standing Authority file, the repository's Protected Paths or the Maintainer's evidence files.
 - \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
 
 Write this file last, and do nothing after it.`,

@@ -488,11 +488,11 @@ describe("ledger edits", () => {
     expect(STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
-  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 3', '"schema_version": 4') };
-  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 3', '"schema_version": 0') };
+  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 4', '"schema_version": 5') };
+  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 4', '"schema_version": 0') };
   const everyEdit: readonly [string, LedgerEdit][] = CASES.map(([name, edit]) => [name, edit]);
   for (const [name, edit] of everyEdit) {
-    test(`${name}: a schema_version 4 or 0 record on the tip stops`, () => {
+    test(`${name}: a schema_version 5 or 0 record on the tip stops`, () => {
       for (const files of [v2, v0]) {
         const r = edit({ ...tip([rec()]), ...files });
         expect(r.ok).toBe(false);
@@ -523,7 +523,7 @@ describe("ledger edits", () => {
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 3,
+    schema_version: 4,
     owner: who.owner,
     host: who.host,
     lane: "coordinator",
@@ -579,8 +579,8 @@ describe("claimCoordinator", () => {
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 
-  test("a schema_version 4 coordinator.json stops", () => {
-    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 3', '"schema_version": 4');
+  test("a schema_version 5 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 4', '"schema_version": 5');
     const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
     expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
@@ -698,24 +698,24 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     expect(r.ok && r.value).toEqual({ message: `ledger: deleteReleasedRecurring ${u} [skip ci]`, writes: {}, deletes: [path(u)] });
   });
 
-  test("every record an edit writes carries schema_version 3, whatever the tip held", () => {
+  test("every record an edit writes carries schema_version 4, whatever the tip held", () => {
     const v1 = rec({ schema_version: 1, state: "claimed" });
     const r = heartbeat({ unit: U, by: ALICE, now: NOW, generation: 1 })(tip([v1]));
     if (!r.ok || r.value === null) throw new Error("expected a write");
-    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(3);
+    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(4);
     const c = claim({ unit: "story:7.1", by: ALICE, now: NOW, globs: ["src/7/**"], expectGeneration: null })(tip([v1]));
     if (!c.ok || c.value === null) throw new Error("expected a write");
-    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(3);
+    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(4);
   });
 
-  test("coordinator.json writes carry schema_version 3: a claim over a v1 record, and the keeper's beat", () => {
+  test("coordinator.json writes carry schema_version 4: a claim over a v1 record, and the keeper's beat", () => {
     const v1 = serializeCoordinator(coordRec(COORD, T0, { schema_version: 1 }));
     const claimed = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v1 });
     if (!claimed.ok || claimed.value === null) throw new Error("expected a write");
-    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(3);
+    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(4);
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
-    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(3);
+    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(4);
   });
 });
 
@@ -762,5 +762,61 @@ describe("coordinatorClaimState", () => {
     ["exactly 30 min old", coordRec(COORD, "2026-10-22T09:40:00Z"), "expired"],
   ] as const)("%s → %s", (_name, record, want) => {
     expect(coordinatorClaimState(record, NOW)).toBe(want);
+  });
+});
+
+describe("retro_result (Story 2.9)", () => {
+  const R = "retro:2";
+  const RP = "units/retro__2.json";
+  const RESULT = { verdict: "accepted-with-open-items" as const, items: [{ id: "epic-2-retro-item-1-fix", text: "Fix it", route: "lane" as const, blocking: true, globs: ["src/x/**"] }] };
+  const adopt = { pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B };
+  const retro = (over: Partial<UnitRecord> = {}) => by(COORD, T0, { unit: R, globs: ["src/r/**"], retro_result: RESULT, pr: 9, pr_owner: "carol", head_sha: SHA_A, ...over });
+  const written = (r: ReturnType<LedgerEdit>): UnitRecord => {
+    if (!r.ok || r.value === null) throw new Error(r.ok ? "no write" : r.error.message);
+    return JSON.parse(r.value.writes[RP] as string) as UnitRecord;
+  };
+
+  test("a heartbeat records retro_result with the PR fields", () => {
+    const r = heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { pr: 9, retro_result: RESULT } })(tip([retro({ retro_result: null, pr: null })]));
+    expect(written(r)).toMatchObject({ pr: 9, retro_result: RESULT, schema_version: 4 });
+  });
+
+  test("a heartbeat with an invalid retro_result is invalid", () => {
+    const bad = { ...RESULT, items: [{ ...RESULT.items[0], id: "nope" }] };
+    const r = heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { retro_result: bad as never } })(tip([retro()]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+
+  test.each([
+    ["claim from released adopting the PR keeps it", () => claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: 1, adoptPr: adopt }), retro({ state: "released" }), RESULT],
+    ["claim from released with no PR clears it", () => claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: 1, baseSha: SHA_B }), retro({ state: "released" }), null],
+    ["a claimed takeover adopting the PR keeps it", () => takeOverStale({ unit: R, by: COORD_2, now: LATE, generation: 1, adoptPr: adopt }), retro(), RESULT],
+    ["a claimed takeover with no PR clears it", () => takeOverStale({ unit: R, by: COORD_2, now: LATE, generation: 1, baseSha: SHA_B }), retro(), null],
+    [
+      "applyRuling release keeps it (the next claim adopts the PR)",
+      () => applyRuling({ unit: R, by: COORD, now: NOW, generation: 1, ruling: "release" }),
+      retro({ state: "parked", park: blocked("verification", "carol") }),
+      RESULT,
+    ],
+    [
+      "applyRuling rebuild clears it",
+      () => applyRuling({ unit: R, by: COORD, now: NOW, generation: 1, ruling: "rebuild" }),
+      retro({ state: "parked", park: blocked("verification", "carol") }),
+      null,
+    ],
+    ["markMerged keeps it for reconcile", () => markMerged({ unit: R, by: COORD, now: NOW }), retro({ state: "merging", passed_sha: SHA_A }), RESULT],
+    ["park keeps it", () => park({ unit: R, by: COORD, now: NOW, generation: 1, kind: "awaiting-approval", diffPaths: ["a.md"] }), retro({ state: "merging", passed_sha: SHA_A }), RESULT],
+  ] as const)("%s", (_name, edit, record, want) => {
+    expect(written(edit()(tip([record]))).retro_result).toEqual(want);
+  });
+
+  test("a new claim starts with none", () => {
+    expect(written(claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: null })({})).retro_result).toBeNull();
+  });
+
+  test("a retro record is never disposable", () => {
+    expect(isDisposable(retro())).toBe(false);
+    const r = releaseDisposable({ unit: R, by: COORD, now: NOW, generation: 1 })(tip([retro({ state: "merging", passed_sha: SHA_A })]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 });

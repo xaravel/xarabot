@@ -49,7 +49,7 @@ describe("assembleSnapshot: fields", () => {
     expect(Object.keys(s).sort()).toEqual(
       [
         "now", "main_sha", "ledger", "config", "policy", "standing_authority", "manifests", "graph",
-        "sprint_status", "retro_gates", "escalations", "epic_context", "prs", "lane", "role",
+        "sprint_status", "retro_gates", "escalations", "epic_context", "live_evidence", "prs", "lane", "role",
       ].sort(),
     );
     expect(s.main_sha).toBe(MAIN_SHA);
@@ -67,8 +67,18 @@ describe("assembleSnapshot: fields", () => {
     expect(s.retro_gates.epics["2"]?.retro?.verdict).toBe("accepted");
     expect(s.escalations).toEqual({ open: ["2.2"] });
     expect(s.epic_context).toEqual({ 1: "valid", 2: "valid" });
+    expect(s.live_evidence).toEqual({ 1: false, 2: false });
     expect(s.role).toBe("builder");
     expect(SnapshotSchema.safeParse(s).success).toBe(true);
+  });
+
+  test.each([
+    ["no evidence file", {}, { 1: false, 2: false, 3: false }],
+    ["Epic 2's default evidence file", { evidence: [2] }, { 1: false, 2: true, 3: false }],
+    ["another Epic's file is not Epic 2's", { files: { "docs/maintainer/evidence/epic-22.md": "x\n" } }, { 1: false, 2: false, 3: false }],
+    ["a configured glob with a wildcard", { liveEvidenceGlob: "ev/epic-<N>-run-*.md", files: { "ev/epic-3-run-1.md": "x\n" } }, { 1: false, 2: false, 3: true }],
+  ] as const)("live_evidence: %s", (_name, over, want) => {
+    expect(snapshotOf({ epics: { 1: [], 2: [], 3: [] }, ...over }).live_evidence).toEqual(want);
   });
 
   test("absent sprint-status.yaml reads as empty", () => {
@@ -104,8 +114,8 @@ describe("assembleSnapshot: errors", () => {
     { name: "missing config", world: { ...BASE, files: { [CONFIG_PATH]: null } }, kind: "missing" },
     { name: "config schema_version 2", world: { ...BASE, files: { [CONFIG_PATH]: "schema_version: 2\n" } }, kind: "unsupported-version" },
     {
-      name: "ledger schema_version 4",
-      world: { ...BASE, ledgerFiles: { "units/story__2.1.json": '{"schema_version": 4}' } },
+      name: "ledger schema_version 5",
+      world: { ...BASE, ledgerFiles: { "units/story__2.1.json": '{"schema_version": 5}' } },
       kind: "stop",
     },
     {

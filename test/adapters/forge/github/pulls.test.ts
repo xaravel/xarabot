@@ -54,7 +54,7 @@ describe("openPr", () => {
     const { gh, forge } = setup();
     gh.control.setBranch("story/1.9", H1);
     const pr = value(await forge.openPr({ branch: "story/1.9", base: "main", title: "T", body: "B" }, live()));
-    expect(pr).toEqual({ number: pr.number, branch: "story/1.9", base: "main", state: "open", head_sha: H1, title: "T", body: "B" });
+    expect(pr).toEqual({ number: pr.number, branch: "story/1.9", base: "main", state: "open", head_sha: H1, title: "T", body: "B", merge_sha: null });
     expect(calls(gh)).toEqual(["POST /pulls"]);
     expect(bodies(gh, "POST")).toContainEqual({ title: "T", body: "B", head: "story/1.9", base: "main" });
   });
@@ -178,6 +178,31 @@ describe("listPrsByBranch", () => {
       [3, "merged"],
       [4, "closed"],
     ]);
+  });
+
+  test("merge_sha is merge_commit_sha for a merged PR, and null for an open or closed one (GitHub sends a test merge for open PRs)", async () => {
+    const { gh, forge } = setup();
+    gh.control.inject("GET", /\/pulls\?/, {
+      status: 200,
+      body: [
+        { number: 3, state: "closed", merged_at: "2026-10-22T00:00:00Z", merge_commit_sha: SHA, title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+        { number: 4, state: "open", merged_at: null, merge_commit_sha: H2, title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+        { number: 5, state: "closed", merged_at: null, merge_commit_sha: H2, title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+        { number: 6, state: "closed", merged_at: "2026-10-22T00:00:00Z", merge_commit_sha: "not-a-sha", title: "t", body: "b", head: { ref: "story/1.9", sha: H1 }, base: { ref: "main" } },
+      ],
+    });
+    expect(value(await forge.listPrsByBranch("story/1.9", live())).map((p) => [p.number, p.state, p.merge_sha])).toEqual([
+      [3, "merged", SHA],
+      [4, "open", null],
+      [5, "closed", null],
+      [6, "merged", null],
+    ]);
+  });
+
+  test("the emulator's merged PR carries the merge commit it made on main", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "closed", merged: true, head_sha: H1, branch: "story/1.9", merge_commit_sha: SHA });
+    expect(value(await forge.listPrsByBranch("story/1.9", live())).map((p) => p.merge_sha)).toEqual([SHA]);
   });
 
   test(`more than ${MAX_PAGES} full pages is transient`, async () => {

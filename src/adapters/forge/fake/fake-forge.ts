@@ -132,6 +132,8 @@ type PrRecord = {
   head_sha: GitSha;
   title: string;
   body: string;
+  /** The `main` SHA `mergeQueueHead` made; `null` until then. */
+  merge_sha: GitSha | null;
 };
 
 export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
@@ -294,7 +296,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
             return forgeErr("conflict", `openPr: ${request.branch} already has open PR #${p.number}`);
           }
         }
-        const p: PrRecord = { number: nextPr++, ...request, state: "open", head_sha: head };
+        const p: PrRecord = { number: nextPr++, ...request, state: "open", head_sha: head, merge_sha: null };
         prs.set(p.number, p);
         return forgeOk(view(p));
       }),
@@ -445,6 +447,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       const p = prs.get(number) as PrRecord;
       p.state = "merged";
       mainSha = newSha("main");
+      p.merge_sha = mainSha;
       return view(p);
     },
     eject(pr) {

@@ -1,4 +1,5 @@
 import { AGENT_CONFIG_PATHS } from "../config/protected-paths.ts";
+import { parseRetroGates } from "../graph/retro-gates.ts";
 import { parseYaml } from "../schemas/common.ts";
 import type { Config } from "../schemas/config.ts";
 import type { Policy } from "../schemas/policy.ts";
@@ -14,7 +15,7 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
  */
 
 /** The refused path classes, in reporting order: a path in several is reported as the first. */
-export const WRITE_CLASSES = ["coordinator-file", "xarabot", "manifest", "standing-authority", "github", "agent-config", "protected-path"] as const;
+export const WRITE_CLASSES = ["coordinator-file", "live-evidence", "xarabot", "manifest", "standing-authority", "github", "agent-config", "protected-path"] as const;
 export type WriteClass = (typeof WRITE_CLASSES)[number];
 
 /** The classes an approved Infrastructure Story may write. */
@@ -31,6 +32,8 @@ export type WriteRules = {
   readonly protectedPaths: readonly string[];
   /** `epic_context_path`, with `<N>`. */
   readonly epicContextPath: string;
+  /** `live_evidence_glob` with `<N>` as `*` (Story 2.9): the Maintainer's live evidence files. */
+  readonly liveEvidenceGlob: string;
   /** The unit's spec file: excepted, exact path. */
   readonly specPath: string;
   /**
@@ -46,7 +49,10 @@ export type WriteRules = {
 };
 
 export type WriteRulesInput = {
-  readonly config: Pick<Config, "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests" | "standing_authority_path" | "epic_context_path">;
+  readonly config: Pick<
+    Config,
+    "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests" | "standing_authority_path" | "epic_context_path" | "live_evidence_glob"
+  >;
   readonly policy: Pick<Policy, "protected_paths">;
   readonly specPath: string;
   /** Default none. */
@@ -64,6 +70,7 @@ export function writeRules(input: WriteRulesInput): WriteRules {
     standingAuthorityPath: config.standing_authority_path,
     protectedPaths: [...policy.protected_paths],
     epicContextPath: config.epic_context_path,
+    liveEvidenceGlob: config.live_evidence_glob.replaceAll("<N>", "*"),
     specPath: input.specPath,
     superseded: [...(input.superseded ?? [])],
     storyFile: input.storyFile,
@@ -81,6 +88,12 @@ export type WriteChange = {
    */
   readonly mode?: string;
   readonly storyFile?: { readonly before: string; readonly after: string };
+  /**
+   * Under coordinator rules, for a change to `retro_gates_path`: its text
+   * before and after (`null` when absent on that side). Missing for such a
+   * change is `retro-gates-invalid`.
+   */
+  readonly retroGates?: { readonly before: string | null; readonly after: string | null };
 };
 
 export type WriteRefusal = { readonly path: string; readonly class: WriteClass | CoordinatorWriteClass };
@@ -91,9 +104,26 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * unit that is not graph planning; a path none of the unit's globs match;
  * when the diff touches both a graph input and a status file, every graph
  * input and status file the classes before left; and a status file or graph
- * input left whose new mode is not `100644` (a deleted one has none).
+ * input left whose new mode is not `100644` (a deleted one has none). A
+ * change to `retro_gates_path` the classes before left is then compared by
+ * Epic (Story 2.9): a change to a `retro` other than its `go` is
+ * `retro-verdict`, to `items` `retro-item`, to `retro.go` `retro-go`, to
+ * `checkpoint` `checkpoint-go` (one refusal per class hit), and a side that
+ * does not parse, or texts not given, is `retro-gates-invalid`. Only
+ * `reconcile`'s runner code writes those records.
  */
-export const COORDINATOR_WRITE_CLASSES = ["xarabot", "graph-input", "outside-unit", "graph-and-status", "mode"] as const;
+export const COORDINATOR_WRITE_CLASSES = [
+  "xarabot",
+  "graph-input",
+  "outside-unit",
+  "graph-and-status",
+  "mode",
+  "retro-verdict",
+  "retro-item",
+  "retro-go",
+  "checkpoint-go",
+  "retro-gates-invalid",
+] as const;
 export type CoordinatorWriteClass = (typeof COORDINATOR_WRITE_CLASSES)[number];
 
 export type CoordinatorWriteRules = {
@@ -106,6 +136,8 @@ export type CoordinatorWriteRules = {
   readonly graphInputs: readonly string[];
   /** `sprint_status_path` and `retro_gates_path`. */
   readonly statusFiles: readonly string[];
+  /** `retro_gates_path`: its retro records are never an agent's to change (Story 2.9). */
+  readonly retroGatesPath: string;
 };
 
 export type CoordinatorWriteRulesInput = {
@@ -121,6 +153,7 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
     graphUnit: input.graphUnit,
     graphInputs: graphInputGlobs(input.config),
     statusFiles: statusFiles(input.config),
+    retroGatesPath: input.config.retro_gates_path,
   };
 }
 
@@ -198,6 +231,7 @@ function matchesAny(globs: readonly string[], folded: string): boolean {
 function classify(rules: WriteRules, path: string): WriteClass | null {
   const p = fold(path);
   if (rules.coordinatorFiles.some((f) => fold(f) === p)) return "coordinator-file";
+  if (new Bun.Glob(fold(rules.liveEvidenceGlob)).match(p)) return "live-evidence";
   if (p === ".xarabot" || p.startsWith(".xarabot/")) return "xarabot";
   if (rules.manifestsDir !== null) {
     const prefix = `${fold(rules.manifestsDir)}/`;
@@ -229,16 +263,43 @@ function classifyCoordinator(rules: CoordinatorWriteRules, p: string): Coordinat
 /** The only git mode a status file or graph input may have under coordinator rules. */
 const REGULAR_MODE = "100644";
 
+/** The retro record classes, in reporting order, a change to `retro-gates.yaml` hits; `[]` when it changes none. */
+type RetroRecordClass = "retro-verdict" | "retro-item" | "retro-go" | "checkpoint-go" | "retro-gates-invalid";
+
+/** Whether `retro_gates_path`'s change touches a retro record (Story 2.9): each class it hits, by comparing both parsed sides per Epic. */
+export function retroGatesClasses(path: string, texts: WriteChange["retroGates"]): RetroRecordClass[] {
+  if (texts === undefined) return ["retro-gates-invalid"];
+  const parse = (text: string | null) => (text === null ? { ok: true as const, value: { schema_version: 1 as const, epics: {} } } : parseRetroGates(path, text));
+  const before = parse(texts.before);
+  const after = parse(texts.after);
+  if (!before.ok || !after.ok) return ["retro-gates-invalid"];
+  const hit = new Set<RetroRecordClass>();
+  const same = (a: unknown, b: unknown) => Bun.deepEquals(a, b, true);
+  const epics = new Set([...Object.keys(before.value.epics), ...Object.keys(after.value.epics)]);
+  for (const n of epics) {
+    const b = before.value.epics[n];
+    const a = after.value.epics[n];
+    const withoutGo = (r: typeof b) => (r?.retro === undefined ? undefined : { ...r.retro, go: undefined });
+    if (!same(withoutGo(b), withoutGo(a))) hit.add("retro-verdict");
+    if (!same(b?.items, a?.items)) hit.add("retro-item");
+    if (!same(b?.retro?.go, a?.retro?.go)) hit.add("retro-go");
+    if (!same(b?.checkpoint, a?.checkpoint)) hit.add("checkpoint-go");
+  }
+  const order: readonly RetroRecordClass[] = ["retro-verdict", "retro-item", "retro-go", "checkpoint-go"];
+  return order.filter((c) => hit.has(c));
+}
+
 function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
-  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode }));
+  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode, retroGates: c.retroGates }));
   const isGraph = (p: string) => matchesAny(rules.graphInputs, p);
   const isStatus = (p: string) => rules.statusFiles.some((f) => fold(f) === p);
   const both = folded.some((c) => isGraph(c.p)) && folded.some((c) => isStatus(c.p));
-  for (const { path, p, mode } of folded) {
+  for (const { path, p, mode, retroGates } of folded) {
     const kept = isGraph(p) || isStatus(p);
     const cls = classifyCoordinator(rules, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
     if (cls !== null) out.push({ path, class: cls });
+    else if (fold(rules.retroGatesPath) === p) for (const c of retroGatesClasses(rules.retroGatesPath, retroGates)) out.push({ path, class: c });
   }
   return out.sort(byPath);
 }

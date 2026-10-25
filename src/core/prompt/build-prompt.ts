@@ -2,7 +2,7 @@ import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues } from "../schemas/common.ts";
 import { HumanLiveStepSchema, type HumanLiveStep } from "../schemas/human-live-steps.ts";
-import { BuildResultSchema, PlanningResultSchema } from "../schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema, RetroResultSchema } from "../schemas/session-result.ts";
 import { STORY_ID_PATTERN } from "../story-id.ts";
 import { PLACEHOLDERS, type Placeholder, type PromptTemplate } from "./template.ts";
 
@@ -39,6 +39,9 @@ export const BUILD_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(BuildResul
 
 /** The `planning` result's JSON Schema, embedded in a planning prompt's result step. */
 export const PLANNING_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(PlanningResultSchema), null, 2);
+
+/** The `retro` result's JSON Schema, embedded in a retro prompt's result step (Story 2.9). */
+export const RETRO_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(RetroResultSchema), null, 2);
 
 const PATH_MESSAGE = "must be an absolute path with no control character or backtick";
 
@@ -97,6 +100,8 @@ const TemplateSchema = z.strictObject({
   planning_status: z.string(),
   planning_graph: z.string(),
   result_planning: z.string(),
+  retro: z.string(),
+  result_retro: z.string(),
 });
 
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
@@ -333,4 +338,65 @@ export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<str
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_planning);
   return fill(parts, values, `a ${unit.kind} planning prompt`);
+}
+
+// ------------------------------------------------------------ retro prompts
+
+/** A retro unit (Story 2.9): its id, its Epic and the prefetched PR file's absolute path. */
+export type RetroPromptUnit = {
+  readonly kind: "retro";
+  readonly id: string;
+  readonly epic: number;
+  readonly prs_path: string;
+};
+
+export type BuildRetroPromptInput = {
+  readonly template: PromptTemplate;
+  readonly unit: RetroPromptUnit;
+  readonly sections: readonly PromptSection[];
+  readonly result_path: string;
+};
+
+const RetroInputSchema = z.strictObject({
+  unit: z
+    .strictObject({
+      kind: z.literal("retro"),
+      id: z.string().regex(/^retro:[1-9][0-9]*$/, "must be retro:<N>"),
+      epic: z.int().positive(),
+      prs_path: AbsolutePath,
+    })
+    .refine((u) => u.id === `retro:${u.epic}`, { message: "must be retro:<epic>", path: ["id"] }),
+  sections: SectionsSchema,
+  result_path: AbsolutePath,
+});
+
+/**
+ * Builds a retro prompt (Story 2.9): the `retro` task (`bmad-retrospective
+ * -H <N>` on the prefetched PR file), the rules, the repo sections, and the
+ * `retro` result step with its JSON Schema last. Pure; placeholders are
+ * filled in one pass.
+ */
+export function buildRetroPrompt(input: BuildRetroPromptInput): Result<string, BuildPromptError> {
+  const template = checkTemplate(input.template);
+  if (!template.ok) return template;
+  const t = template.value;
+
+  const parsed = RetroInputSchema.safeParse({ unit: input.unit, sections: input.sections, result_path: input.result_path });
+  if (!parsed.success) return err("invalid-input", describeIssues(parsed.error));
+  const { unit, sections, result_path } = parsed.data;
+  const dupSection = firstDuplicate(sections.map((s) => s.name));
+  if (dupSection !== undefined) return err("invalid-input", `sections: duplicate section "${dupSection}"`);
+
+  const values: Partial<Record<Placeholder, string>> = {
+    retro_unit: unit.id,
+    retro_epic: String(unit.epic),
+    prs_path: unit.prs_path,
+    result_path,
+    result_schema: RETRO_RESULT_JSON_SCHEMA,
+    sections: sectionsText(sections),
+  };
+  const parts: string[] = [t.retro, t.rules];
+  if (sections.length > 0) parts.push(t.repo_sections);
+  parts.push(t.result_retro);
+  return fill(parts, values, "a retro prompt");
 }

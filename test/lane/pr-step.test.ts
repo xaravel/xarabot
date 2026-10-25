@@ -527,6 +527,7 @@ describe("createPrStep", () => {
       standingAuthorityPath: AUTHORITY,
       protectedPaths: [],
       epicContextPath: `${SPEC_DIR}/epic-<N>-context.md`,
+      liveEvidenceGlob: "docs/maintainer/evidence/epic-*.md",
       specPath: `${SPEC_DIR}/spec-1-1-first.md`,
       superseded: [],
       storyFile: "stories/1.1.md",
@@ -797,7 +798,7 @@ describe("createPrStep", () => {
 
   test("an unknown schema_version found by the fence alerts ledger-schema-version and stops", async () => {
     const w = await world();
-    const v2 = JSON.stringify({ ...w.record, schema_version: 4 });
+    const v2 = JSON.stringify({ ...w.record, schema_version: 5 });
     w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.1.json": v2 }, deletes: [] });
     const out = await w.run();
     expect(out.outcome).toBe("stop");

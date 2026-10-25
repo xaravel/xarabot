@@ -22,7 +22,7 @@ export type Ledger = {
 
 export type LedgerParseErrorKind = "stop" | "invalid";
 
-/** `1, 2 and 3`. */
+/** `1, 2, 3 and 4`. */
 function readable(versions: readonly number[]): string {
   const head = versions.slice(0, -1);
   const last = versions[versions.length - 1];
@@ -127,6 +127,13 @@ export function serializeUnitRecord(r: UnitRecord): string {
     passed_sha: r.passed_sha,
     approved_sha: r.approved_sha,
     approved_graph: r.approved_graph,
+    retro_result:
+      r.retro_result === null
+        ? null
+        : {
+            verdict: r.retro_result.verdict,
+            items: r.retro_result.items.map((i) => ({ id: i.id, text: i.text, route: i.route, blocking: i.blocking, globs: [...i.globs] })),
+          },
     builder_providers: sortedSet(r.builder_providers),
     park: r.park === null ? null : orderedPark(r.park),
     attempts: r.attempts,

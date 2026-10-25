@@ -9,6 +9,7 @@ export const CONFIG_DEFAULTS = {
   retro_gates_path: "_bmad-output/implementation-artifacts/retro-gates.yaml",
   retro_doc_glob: "_bmad-output/implementation-artifacts/epic-<N>-retro-*.md",
   epic_context_path: "_bmad-output/implementation-artifacts/epic-<N>-context.md",
+  live_evidence_glob: "docs/maintainer/evidence/epic-<N>.md",
   bootstrapped_epics: [] as readonly number[],
   digest_time: "08:00",
   story_spec_path: "_bmad-output/implementation-artifacts/spec-<epic>-<story>-*.md",
@@ -62,6 +63,8 @@ export const ConfigSchema = z.strictObject({
   retro_gates_path: RepoPath.default(CONFIG_DEFAULTS.retro_gates_path),
   retro_doc_glob: patternWith("<N>").default(CONFIG_DEFAULTS.retro_doc_glob),
   epic_context_path: patternWith("<N>").default(CONFIG_DEFAULTS.epic_context_path),
+  /** The Maintainer's live evidence file per Epic (Story 2.9): a retro waits for it on `main`; builders never write one. */
+  live_evidence_glob: patternWith("<N>").default(CONFIG_DEFAULTS.live_evidence_glob),
   bootstrapped_epics: z.array(z.int().positive()).default([]),
   digest_time: z
     .string()

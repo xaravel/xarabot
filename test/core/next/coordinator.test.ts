@@ -14,7 +14,10 @@ import {
   planningNumber,
   planningSlug,
   reconcileDue,
+  retroCandidates,
+  retroDue,
   unitBranch,
+  WAITING_ON_MAINTAINER,
   type CoordinatorUnitSpec,
 } from "../../../src/core/next/coordinator.ts";
 import { next, type NextOutcome } from "../../../src/core/next/next.ts";
@@ -600,5 +603,114 @@ describe("next(coordinator): planning (Story 2.7)", () => {
     expect(unitBranch("bot-", "reconcile:7")).toBe("bot-reconcile-7");
     const s = snapshotOf(world({ records: [RECENT, planningRec("planning:graph.3", { state: "merged" }), planningRec("planning:status.1", { state: "released" })] }));
     expect([nextPlanningNumber(s, "graph"), nextPlanningNumber(s, "status")]).toEqual([4, 2]);
+  });
+});
+
+describe("next(coordinator): retro (Story 2.9)", () => {
+  const RETRO_GLOBS_2 = [STATUS, RETRO, "_bmad-output/implementation-artifacts/epic-2-context.md", "_bmad-output/implementation-artifacts/epic-2-retro-*.md"];
+  /** Story 2.1 done, every status key present. */
+  const DONE = { "epic-2": "backlog", "2.1": "done" } as const;
+  /** Epic 2's retro due: its Story done, no verdict, its live evidence on main. */
+  const DUE: Partial<World> = { status: DONE, evidence: [2] };
+  const retroRec = (over: Partial<UnitRecord> = {}) => coord("retro:2", { globs: RETRO_GLOBS_2, ...over });
+  const pick = (w: Partial<World>) => pickC({ ...w, records: [RECENT, ...(w.records ?? [])] });
+  const codes = (o: NextOutcome) => (o.kind === "coordinator" || o.kind === "idle" ? o.reasons.map((r) => `${r.subject} ${r.code}`) : []);
+
+  test.each([
+    ["due: Epic 2 all done, no verdict, evidence on main", DUE, "unit retro:2"],
+    ["a Story not done (2.1 backlog)", { ...DUE, status: PLANNED }, "idle"],
+    ["no evidence file", { status: DONE }, "idle"],
+    ["bootstrapped: Epic 1 all done with evidence, never retro:1", { epics: { 1: ["1"], 2: ["1"] }, status: { ...PLANNED, "1.1": "done" }, evidence: [1, 2] }, "idle"],
+    ["recorded: retro-gates has 2.retro", { ...DUE, retro: { 2: "accepted" } }, "idle"],
+    ["a rejected verdict is recorded too", { ...DUE, retro: { 2: "rejected" } }, "idle"],
+    ["an Epic with no Story", { epics: { 1: [], 2: [] }, status: { "epic-2": "backlog" }, evidence: [2] }, "idle"],
+    ["an unmanifested heading", { epics: { 1: [], 2: ["1", "2"] }, manifests: [{ id: "2.1" }], status: DONE, evidence: [2] }, "unit planning:graph.1"],
+    ["planning goes first: a status key missing", { status: { "2.1": "done" }, evidence: [2] }, "unit planning:status.1"],
+    ["Epics in ascending order", { epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" }, evidence: [2, 3] }, "unit retro:2"],
+    ["an Epic waiting on evidence passes to the next one", { epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" }, evidence: [3] }, "unit retro:3"],
+    ["released, no PR: re-claimed", { ...DUE, records: [retroRec({ state: "released", generation: 2 })] }, "unit retro:2"],
+    ["stale claimed, no PR: taken over", { ...DUE, records: [retroRec({ heartbeat_at: minutesBefore(30) })] }, "unit retro:2"],
+    ["live claimed: holds", { ...DUE, records: [retroRec()] }, "idle"],
+    ["merged, waiting for reconcile: holds", { ...DUE, records: [retroRec({ state: "merged" })] }, "idle"],
+    ["parked: holds", { ...DUE, records: [retroRec({ state: "parked", park: { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] } })] }, "idle"],
+    ["merging: holds", { ...DUE, records: [retroRec({ state: "merging", pr: 9, passed_sha: HEAD })] }, "idle"],
+  ] as const)("%s → %s", (_name, w, want) => {
+    expect(picked(pick(w as Partial<World>))).toBe(want);
+  });
+
+  test("the unit: its globs, a new claim, and why", () => {
+    const o = pick(DUE);
+    expect(o.kind === "coordinator" ? o.unit : null).toEqual({
+      unit: "retro:2",
+      kind: "retro",
+      globs: RETRO_GLOBS_2,
+      expect_generation: null,
+      take_over: null,
+      pr: null,
+      why: "retro:2 is due: Epic 2's Stories are all done, its retro is not recorded and docs/maintainer/evidence/epic-2.md is on main",
+    });
+    expect(RETRO_GLOBS_2).toEqual(coordinatorGlobs({ kind: "retro", epic: 2 }, CONFIG_DEFAULTS));
+  });
+
+  test("released: re-claimed at its generation; stale claimed: taken over at its generation", () => {
+    const released = pick({ ...DUE, records: [retroRec({ state: "released", generation: 2 })] });
+    expect(released.kind === "coordinator" ? [released.unit.expect_generation, released.unit.take_over] : null).toEqual([2, null]);
+    const stale = pick({ ...DUE, records: [retroRec({ heartbeat_at: minutesBefore(30), generation: 3 })] });
+    expect(stale.kind === "coordinator" ? [stale.unit.expect_generation, stale.unit.take_over] : null).toEqual([3, "claimed"]);
+  });
+
+  test("a released record with its PR open is the open-PR position's", () => {
+    const o = pick({ ...DUE, records: [retroRec({ state: "released", pr: 9 })], prs: { "retro:2": open(9) } });
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.pr, o.unit.why] : null).toEqual(["retro:2", 9, "retro:2 is released with PR #9 open"]);
+  });
+
+  test("a stale claimed record with its PR open is the open-PR position's", () => {
+    const o = pick({ ...DUE, records: [retroRec({ heartbeat_at: minutesBefore(30), pr: 9 })], prs: { "retro:2": open(9) } });
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.take_over, o.unit.pr] : null).toEqual(["retro:2", "claimed", 9]);
+  });
+
+  test("no evidence: idle waiting-on-maintainer, naming the file", () => {
+    const o = pick({ status: DONE });
+    expect(reasonOf(o).startsWith(`${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file docs/maintainer/evidence/epic-2.md on main`)).toBe(true);
+    expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence"]);
+  });
+
+  test("a configured live_evidence_glob is named with <N> set", () => {
+    const o = pick({ status: DONE, liveEvidenceGlob: "evidence/e<N>-*.md" });
+    expect(reasonOf(o)).toContain("waits for the live evidence file evidence/e2-*.md on main");
+    expect(picked(pick({ status: DONE, liveEvidenceGlob: "evidence/e<N>-*.md", files: { "evidence/e2-run.md": "x\n" } }))).toBe("unit retro:2");
+  });
+
+  test("an idle outcome without a live-evidence reason has no waiting-on-maintainer prefix", () => {
+    expect(reasonOf(pick({ ...DUE, records: [retroRec()] })).startsWith("no coordinator unit due")).toBe(true);
+  });
+
+  test("a held record is a record-state reason", () => {
+    const o = pick({ ...DUE, records: [retroRec({ state: "merged" })] });
+    expect(codes(o)).toContain("retro:2 record-state");
+    expect(reasonOf(o)).toContain("retro:2 is due but its record is merged");
+  });
+
+  test("an overlap with any held glob passes the Epic over", () => {
+    const held = coord("planning:status.1", { globs: STATUS_GLOBS });
+    const o = pick({ ...DUE, records: [held] });
+    expect(picked(o)).toBe("idle");
+    expect(codes(o)).toContain("retro:2 overlap");
+    expect(reasonOf(o)).toContain(`glob "${STATUS}" overlaps "${STATUS}" held by planning:status.1`);
+  });
+
+  test("retroCandidates and retroDue", () => {
+    const s = snapshotOf(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" }, evidence: [3] }));
+    expect(retroCandidates(s)).toEqual([
+      { epic: 2, evidence: "docs/maintainer/evidence/epic-2.md", evidenceOnMain: false },
+      { epic: 3, evidence: "docs/maintainer/evidence/epic-3.md", evidenceOnMain: true },
+    ]);
+    expect([retroDue(s, 2), retroDue(s, 3), retroDue(s, 1)]).toEqual([false, true, false]);
+  });
+
+  test("retro:<N> is done on main once retro-gates records its verdict", () => {
+    const rec = retroRec({ state: "merged" });
+    expect(doneOnMain(rec, snapshotOf(world({ ...DUE, records: [rec] })))).toBe(false);
+    expect(doneOnMain(rec, snapshotOf(world({ ...DUE, records: [rec], retro: { 2: "rejected" } })))).toBe(true);
   });
 });

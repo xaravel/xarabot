@@ -20,6 +20,7 @@ import {
   type UnitRecord,
   type UnitState,
 } from "../schemas/ledger.ts";
+import { RetroRecordResultSchema } from "../schemas/retro-gates.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord, type Ledger } from "./codec.ts";
 import { checkTransition } from "./transitions.ts";
 
@@ -219,6 +220,7 @@ function fresh(ctx: Ctx, state: UnitState, globs: string[], park: Park | null): 
     passed_sha: null,
     approved_sha: null,
     approved_graph: null,
+    retro_result: null,
     builder_providers: [],
     park,
     attempts: 0,
@@ -312,6 +314,8 @@ export function claim(p: ClaimParams): LedgerEdit {
         passed_sha: null,
         approved_sha: null,
         approved_graph: null,
+        // A retro's result belongs to its PR: kept only when the claim adopts the PR (Story 2.9).
+        retro_result: adopted === null ? null : rec.retro_result,
       }),
     );
   });
@@ -354,6 +358,8 @@ export const HeartbeatSetSchema = z.strictObject({
   reviewed_sha: GitSha.nullable().optional(),
   passed_sha: GitSha.nullable().optional(),
   builder_providers: z.array(NonEmpty).optional(),
+  /** A retro unit's validated result, recorded with its PR (Story 2.9). */
+  retro_result: RetroRecordResultSchema.nullable().optional(),
 });
 export type HeartbeatSet = z.infer<typeof HeartbeatSetSchema>;
 
@@ -489,6 +495,7 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
       passed_sha: null,
       approved_sha: null,
       approved_graph: null,
+      retro_result: adopted === null ? null : r.retro_result,
     };
     const attempts = r.attempts + 1;
     if (attempts >= ATTEMPTS_CAP) {
@@ -718,7 +725,8 @@ export type ApplyRulingParams = EditBase & {
  * `parked → released` under a ruling, by any lane identity: the coordinator's
  * comment rulings (4.6) or the Maintainer's `xarabot rule`. The record must be
  * `parked` at `generation`; `release` and `rebuild` zero the counters, and
- * `rebuild` also clears the providers, the reviewed, passed and approved SHAs and `approved_graph`.
+ * `rebuild` also clears the providers, the reviewed, passed and approved SHAs,
+ * `approved_graph` and `retro_result`.
  */
 export function applyRuling(p: ApplyRulingParams): LedgerEdit {
   return makeEdit("applyRuling", p, (ctx) => {
@@ -753,6 +761,7 @@ export function applyRuling(p: ApplyRulingParams): LedgerEdit {
           passed_sha: null,
           approved_sha: null,
           approved_graph: null,
+          retro_result: null,
         }),
       );
     }

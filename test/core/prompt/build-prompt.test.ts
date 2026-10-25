@@ -4,6 +4,9 @@ import { z } from "zod";
 import {
   buildPlanningPrompt,
   buildPrompt,
+  buildRetroPrompt,
+  RETRO_RESULT_JSON_SCHEMA,
+  type BuildRetroPromptInput,
   type BuildPlanningPromptInput,
   type BuildPromptInput,
   type GraphPlanningPromptUnit,
@@ -11,7 +14,7 @@ import {
   type StatusPlanningPromptUnit,
 } from "../../../src/core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE, type PromptTemplate } from "../../../src/core/prompt/template.ts";
-import { BuildResultSchema, PlanningResultSchema } from "../../../src/core/schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema, RetroResultSchema } from "../../../src/core/schemas/session-result.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const KEY = "1-7-forge-port-fake-forge-and-contract-suite";
@@ -283,7 +286,7 @@ describe("banned instructions", () => {
   }
   test("every Story part of the package template", () => {
     for (const [part, text] of Object.entries(PACKAGE_TEMPLATE)) {
-      if (PLANNING_PARTS.includes(part)) continue;
+      if (PLANNING_PARTS.includes(part) || RETRO_PARTS.includes(part)) continue;
       expect({ part, hits: BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
     }
   });
@@ -508,5 +511,109 @@ describe("planning prompt: invalid input and template", () => {
     const e = planningFailure({ template: { ...PACKAGE_TEMPLATE, result_planning: undefined } as unknown as PromptTemplate });
     expect(e.kind).toBe("invalid-template");
     expect(e.message).toMatch(/template: result_planning/);
+  });
+});
+
+// ------------------------------------------------------------ retro prompts (Story 2.9)
+
+/** The template parts only retro prompts use. */
+const RETRO_PARTS: readonly string[] = ["retro", "result_retro"];
+
+/** No CI, push, queue, approval, claim, `next`, ledger, sprint-status or selection word in a retro prompt. */
+const RETRO_BANNED: readonly { readonly what: string; readonly pattern: RegExp }[] = [
+  { what: "CI", pattern: /\bCI\b/ },
+  { what: "CI: continuous integration", pattern: /continuous integration/i },
+  { what: "CI: GitHub Actions", pattern: /github actions|workflow run/i },
+  { what: "push", pattern: /\bpush/i },
+  { what: "queue", pattern: /\bqueue/i },
+  { what: "approval", pattern: /\bapprov/i },
+  { what: "claim", pattern: /\bclaim/i },
+  { what: "next", pattern: /\bnext\b/i },
+  { what: "ledger", pattern: /\bledger\b/i },
+  { what: "sprint-status", pattern: /sprint[-_ ]?status/i },
+  { what: "selection", pattern: /\b(?:select|pick|choose)/i },
+  { what: "gh", pattern: /\bgh\b/ },
+];
+
+const PRS = "/private/var/folders/xy/T/xarabot-lane/epic-2-prs.json";
+
+function retroInput(patch: Partial<BuildRetroPromptInput> = {}): BuildRetroPromptInput {
+  return { template: PACKAGE_TEMPLATE, unit: { kind: "retro", id: "retro:2", epic: 2, prs_path: PRS }, sections: [], result_path: RESULT, ...patch };
+}
+
+function retro(patch: Partial<BuildRetroPromptInput> = {}): string {
+  const r = buildRetroPrompt(retroInput(patch));
+  if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+  return r.value;
+}
+
+function retroFailure(patch: Partial<BuildRetroPromptInput>): { kind: string; message: string } {
+  const r = buildRetroPrompt(retroInput(patch));
+  if (r.ok) throw new Error("expected an error");
+  return r.error;
+}
+
+describe("retro prompt", () => {
+  test("names the unit, bmad-retrospective -H <N> and the prefetched file's absolute path", () => {
+    const p = retro();
+    expect(p).toContain("`retro:2`");
+    expect(p).toContain("`bmad-retrospective -H 2`");
+    expect(p).toContain(`\`${PRS}\``);
+    expect(p).toContain("never from GitHub");
+  });
+  test("asks for each appended item's id, text, blocking, route and globs, and the verdict", () => {
+    const p = retro();
+    for (const field of ["`verdict`", "`items`", "`id`", "`text`", "`blocking`", "`route`", "`globs`", "`denied_actions`"]) expect(p).toContain(field);
+    expect(p).toContain("`epic-2-retro-item-<seq>-<slug>`");
+    expect(p).toContain("the Standing Authority file, the repository's Protected Paths");
+  });
+  test("task, rules, sections, then the result step with RetroResultSchema's JSON Schema last", () => {
+    const p = retro({ sections: [{ name: "b.md", text: "B section." }, { name: "a.md", text: "A section." }] });
+    const order = ["# Task", "# Rules", "A section.", "B section.", "# Result"].map((x) => p.indexOf(x));
+    expect(order.every((x) => x >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(p).toContain(RETRO_RESULT_JSON_SCHEMA);
+    expect(JSON.parse(RETRO_RESULT_JSON_SCHEMA)).toEqual(z.toJSONSchema(RetroResultSchema));
+    expect(p).toContain(RESULT);
+    expect(p.trimEnd().endsWith("Write this file last, and do nothing after it.")).toBe(true);
+    expect(p).not.toMatch(/\{\{[^{}]*\}\}/);
+  });
+  test("every retro part of the package template, and the rules, carry no banned word", () => {
+    for (const part of [...RETRO_PARTS, "rules", "repo_sections"]) {
+      const text = PACKAGE_TEMPLATE[part as keyof PromptTemplate];
+      expect({ part, hits: RETRO_BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
+    }
+    expect(RETRO_BANNED.filter((b) => b.pattern.test(retro())).map((b) => b.what)).toEqual([]);
+  });
+  test("the table catches each kind", () => {
+    const hits = (s: string) => RETRO_BANNED.some((b) => b.pattern.test(s));
+    for (const s of ["Wait for CI.", "Push it.", "Queue it.", "Get approval.", "Claim it.", "Then the next one.", "The ledger.", "Edit sprint-status.yaml.", "Pick one."]) {
+      expect({ s, hit: hits(s) }).toEqual({ s, hit: true });
+    }
+  });
+  const cases: { name: string; patch: Partial<BuildRetroPromptInput>; field: RegExp }[] = [
+    { name: "an id of another Epic", patch: { unit: { kind: "retro", id: "retro:3", epic: 2, prs_path: PRS } }, field: /unit\.id: must be retro:<epic>/ },
+    { name: "a non-retro id", patch: { unit: { kind: "retro", id: "planning:status.1", epic: 2, prs_path: PRS } }, field: /unit\.id/ },
+    { name: "a relative prs path", patch: { unit: { kind: "retro", id: "retro:2", epic: 2, prs_path: "epic-2-prs.json" } }, field: /unit\.prs_path/ },
+    { name: "a backtick in the prs path", patch: { unit: { kind: "retro", id: "retro:2", epic: 2, prs_path: "/tmp/a`b.json" } }, field: /unit\.prs_path/ },
+    { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
+    { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },
+  ];
+  for (const c of cases) {
+    test(`invalid input: ${c.name}`, () => {
+      const e = retroFailure(c.patch);
+      expect(e.kind).toBe("invalid-input");
+      expect(e.message).toMatch(c.field);
+    });
+  }
+  test("a Story placeholder in a retro part has no value", () => {
+    const e = retroFailure({ template: { ...PACKAGE_TEMPLATE, retro: "x {{story_id}}" } });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/\{\{story_id\}\} has no value in a retro prompt/);
+  });
+  test("a missing retro part", () => {
+    const e = retroFailure({ template: { ...PACKAGE_TEMPLATE, result_retro: undefined } as unknown as PromptTemplate });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/template: result_retro/);
   });
 });

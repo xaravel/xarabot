@@ -8,7 +8,7 @@ import type { Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import { epicHolds } from "./epic-gates.ts";
 import type { CoordinatorOutcome, Reason } from "./next.ts";
-import { epicContextPath } from "./snapshot.ts";
+import { epicContextPath, liveEvidenceGlob } from "./snapshot.ts";
 
 export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
 
@@ -16,8 +16,8 @@ export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
  * The coordinator's side of `next` (FR4, AR14, AD-8, AD-9, AD-13): the globs
  * each coordinator unit kind holds, when `reconcile` is due, and the
  * coordinator's order: `reconcile`, an open coordinator PR, then planning
- * (Story 2.7, graph before status); retro and retro items join the order in
- * Stories 2.9 and 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is
+ * (Story 2.7, graph before status), then retro (Story 2.9); retro items join
+ * the order in Story 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is
  * only a `go` target (AR14). Pure.
  */
 
@@ -379,10 +379,15 @@ const NOTHING_DUE = "no coordinator unit due";
 /** The coordinator states an open coordinator PR's record may be in. */
 const OPEN_PR_STATES: readonly UnitRecord["state"][] = ["claimed", "merging", "released"];
 
+/** The prefix of an idle reason that waits on the Maintainer (a live evidence file missing on `main`). */
+export const WAITING_ON_MAINTAINER = "waiting-on-maintainer: ";
+
 /**
  * The coordinator's next unit from a validated snapshot whose graph resolved
  * (AD-13): `reconcile` when due, then an open coordinator PR, then planning
- * (`nextPlanning`), else `idle`.
+ * (`nextPlanning`), then retro (`nextRetro`), else `idle`. An idle outcome
+ * with a `live-evidence` reason starts `waiting-on-maintainer: ` and those
+ * reasons' messages.
  * Never a Story. The open-PR position never returns a `reconcile` record (a
  * released or dead run's PR is the next `reconcile` run's to close), but a
  * live one still makes later positions wait.
@@ -428,8 +433,109 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   const planning = nextPlanning(snapshot, reasons);
   if (planning !== null) return { kind: "coordinator", unit: planning, reasons };
 
-  // Retro and retro items arrive in Stories 2.9 and 2.10.
-  return { kind: "idle", reason: [NOTHING_DUE, ...reasons.map((x) => x.message)].join("; "), reasons };
+  // 4. Retro, Epics in ascending order.
+  const retro = nextRetro(snapshot, reasons);
+  if (retro !== null) return { kind: "coordinator", unit: retro, reasons };
+
+  // Retro items arrive in Story 2.10.
+  const waiting = reasons.filter((x) => x.code === "live-evidence").map((x) => x.message);
+  const head = waiting.length === 0 ? [] : [`${WAITING_ON_MAINTAINER}${waiting.join("; ")}`];
+  const rest = reasons.filter((x) => x.code !== "live-evidence").map((x) => x.message);
+  return { kind: "idle", reason: [...head, NOTHING_DUE, ...rest].join("; "), reasons };
+}
+
+/** Whether Epic `epic` has a Story, no unmanifested heading, and every Story `done` (the done-check idiom of `epicHolds`). */
+function allStoriesDone(snapshot: Snapshot, epic: number): boolean {
+  if (!snapshot.graph.ok) return false;
+  const graph = snapshot.graph.value;
+  if (graph.unmanifested.some((u) => u.epic === epic)) return false;
+  const stories = graph.epics.find((x) => x.number === epic)?.stories ?? [];
+  if (stories.length === 0) return false;
+  const status = snapshot.sprint_status.development_status;
+  return stories.every((id) => {
+    const m = snapshot.manifests.find((x) => storyKey(x.story_id) === storyKey(id));
+    return m !== undefined && Object.hasOwn(status, m.sprint_key) && status[m.sprint_key] === "done";
+  });
+}
+
+/** An Epic whose retro is due on `snapshot` (Story 2.9), with its live evidence state. */
+export type RetroCandidate = {
+  readonly epic: number;
+  /** `live_evidence_glob` with `<N>` set to the Epic. */
+  readonly evidence: string;
+  /** Whether a `main` path matches `evidence`. */
+  readonly evidenceOnMain: boolean;
+};
+
+/**
+ * The Epics whose retro is due on their Stories (Story 2.9), in ascending
+ * order: not in `bootstrapped_epics`, with no `retro` entry in
+ * `retro-gates.yaml`, with at least one Story, no unmanifested heading, and
+ * every Story `done`. Each carries whether its live evidence file is on
+ * `main`; a retro is due only once it is. Records are not looked at here.
+ */
+export function retroCandidates(snapshot: Snapshot): RetroCandidate[] {
+  if (!snapshot.graph.ok) return [];
+  const bootstrapped = new Set(snapshot.config.bootstrapped_epics);
+  const out: RetroCandidate[] = [];
+  for (const e of [...snapshot.graph.value.epics].sort((a, b) => a.number - b.number)) {
+    const n = e.number;
+    if (bootstrapped.has(n)) continue;
+    if (snapshot.retro_gates.epics[String(n)]?.retro !== undefined) continue;
+    if (!allStoriesDone(snapshot, n)) continue;
+    out.push({ epic: n, evidence: liveEvidenceGlob(snapshot.config.live_evidence_glob, n), evidenceOnMain: snapshot.live_evidence[String(n)] === true });
+  }
+  return out;
+}
+
+/** Whether Epic `epic`'s retro is due: a retro candidate whose live evidence file is on `main`. */
+export function retroDue(snapshot: Snapshot, epic: number): boolean {
+  return retroCandidates(snapshot).some((c) => c.epic === epic && c.evidenceOnMain);
+}
+
+/**
+ * The retro position (Story 2.9): for each retro candidate in Epic order, an
+ * absent live evidence file is a `live-evidence` reason and no unit; else
+ * `retro:<N>`'s record decides. None: a new claim. `released`: a re-claim at
+ * its generation. A stale `claimed` one with no open PR: a takeover. Any
+ * other holds (`record-state`). A unit whose globs overlap another record's
+ * held globs is passed over (`overlap`).
+ */
+function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | null {
+  for (const c of retroCandidates(snapshot)) {
+    const unit = `retro:${c.epic}`;
+    if (!c.evidenceOnMain) {
+      reasons.push({ subject: unit, code: "live-evidence", message: `${unit} waits for the live evidence file ${c.evidence} on main` });
+      continue;
+    }
+    const rec = snapshot.ledger.units.find((r) => r.unit === unit);
+    const stale = rec !== undefined && rec.state === "claimed" && isStale(rec, snapshot.now) && snapshot.prs[unit]?.state !== "open";
+    if (rec !== undefined && rec.state !== "released" && !stale) {
+      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}` });
+      continue;
+    }
+    const globs = coordinatorGlobs({ kind: "retro", epic: c.epic }, snapshot.config);
+    const hits: string[] = [];
+    for (const other of snapshot.ledger.units) {
+      if (other.unit === unit) continue;
+      for (const held of heldGlobs(other)) {
+        const hit = globs.find((g) => globsOverlap(g, held));
+        if (hit !== undefined) hits.push(`glob "${hit}" overlaps "${held}" held by ${other.unit}`);
+      }
+    }
+    if (hits.length > 0) {
+      reasons.push({ subject: unit, code: "overlap", message: `${unit} ${hits.join(", ")}` });
+      continue;
+    }
+    const due = `Epic ${c.epic}'s Stories are all done, its retro is not recorded and ${c.evidence} is on main`;
+    if (rec === undefined) return { unit, kind: "retro", globs, expect_generation: null, take_over: null, pr: null, why: `${unit} is due: ${due}` };
+    if (rec.state === "released") {
+      return { unit, kind: "retro", globs, expect_generation: rec.generation, take_over: null, pr: null, why: `${unit} is released and due: ${due}` };
+    }
+    const why = `${unit} is claimed and stale (heartbeat ${rec.heartbeat_at}) with no open PR`;
+    return { unit, kind: "retro", globs, expect_generation: rec.generation, take_over: "claimed", pr: null, why };
+  }
+  return null;
 }
 
 const PLANNING_ORDER: readonly PlanningKind[] = ["graph", "status"];

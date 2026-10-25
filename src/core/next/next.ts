@@ -20,7 +20,8 @@ export type ReasonCode =
   | "depends-on"
   | "escalation"
   | "overlap"
-  | "planning-held";
+  | "planning-held"
+  | "live-evidence";
 
 /** Why a Story or Epic was passed over. `subject` is `epic:<N>` or a unit id. */
 export type Reason = { readonly subject: string; readonly code: ReasonCode; readonly message: string };

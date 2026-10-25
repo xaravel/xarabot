@@ -80,9 +80,15 @@ import { message, readsPath, stepKit, type PrStepOutput } from "./session.ts";
  * parks `blocked` `graph-invalid`, a different hash voids the approval (parked
  * again for the Maintainer, with the new delta), and an equal hash enqueues.
  *
- * With no status change, no `sprint-status.yaml`, or another `reconcile` PR
+ * Story 2.9: each `retro:<N>` record `merged` as of the run, with a
+ * `retro_result` and no `retro` entry for `<N>` on `main`, has its verdict
+ * and items written to `retro-gates.yaml` (`planReconcile`'s `retroGates`),
+ * once; a merged retro record with no result is logged and skipped, and a
+ * file that cannot be written fails the run.
+ *
+ * With no status or retro-gates change, or another `reconcile` PR
  * open that the ledger work did not close or settle, the run finishes `merged` with no PR and the older `merged`
- * `reconcile` records are deleted. Otherwise it commits the edited file onto
+ * `reconcile` records are deleted. Otherwise it commits the changed files onto
  * the snapshot's `main`, pushes `<branches.xarabot>reconcile-<n>` as a new
  * branch, opens the PR, polls its checks, re-checks the Standing Authority on
  * fresh `main`, keeps the protected-path gate (the PR is exempt from
@@ -120,21 +126,35 @@ export function reconcileBranch(xarabotPrefix: string, unit: string): string {
   return unitBranch(xarabotPrefix, unit);
 }
 
-/** The commit message, PR title and PR body for the changes in `summary`. */
-export function reconcilePrText(unit: string, path: string, summary: readonly string[]): { readonly message: string; readonly title: string; readonly body: string } {
-  const lines = summary.map((s) => `- ${sanitizeAgentText(s).replace(/\s+/g, " ").trim()}`);
-  const title = capText(`${unit}: sprint status for merged units`, FORGE_TEXT_LIMITS.title);
+/** One file a `reconcile` PR changes: its path, its new text and one line per change. */
+export type ReconcileFileChange = { readonly path: string; readonly text: string; readonly summary: readonly string[] };
+
+/**
+ * The commit message, PR title and PR body for the changed files, in order:
+ * `sprint_status_path`, then `retro_gates_path` (Story 2.9), each with its
+ * changes. The title names what changed: the sprint status, the retro
+ * gates, or both.
+ */
+export function reconcilePrText(
+  unit: string,
+  files: readonly Pick<ReconcileFileChange, "path" | "summary">[],
+  kinds: { readonly status: boolean; readonly retroGates: boolean } = { status: true, retroGates: false },
+): { readonly message: string; readonly title: string; readonly body: string } {
+  const what = kinds.status && kinds.retroGates ? "sprint status and retro gates" : kinds.retroGates ? "retro gates" : "sprint status";
+  const title = capText(`${unit}: ${what} for merged units`, FORGE_TEXT_LIMITS.title);
+  const sections = files.map((f) => {
+    const lines = f.summary.map((s) => `- ${sanitizeAgentText(s).replace(/\s+/g, " ").trim()}`);
+    return { path: sanitizeAgentText(f.path), lines };
+  });
   const body = [
     `🤖 ${unit}: runner-written by reconcile, with no agent session.`,
     "",
-    `Changes to \`${sanitizeAgentText(path)}\`:`,
-    "",
-    ...lines,
-    "",
+    ...sections.flatMap((x) => [`Changes to \`${x.path}\`:`, "", ...x.lines, ""]),
     "The Standing Authority exempts reconcile PRs from owner approval: the runner queues this PR once its checks pass, unless a Protected Path gates it.",
     "",
   ].join("\n");
-  return { message: `${title}\n\n${lines.join("\n")}\n`, title, body: capText(body, FORGE_TEXT_LIMITS.body) };
+  const messageLines = sections.length === 1 ? (sections[0]?.lines ?? []) : sections.flatMap((x) => [`${x.path}:`, ...x.lines]);
+  return { message: `${title}\n\n${messageLines.join("\n")}\n`, title, body: capText(body, FORGE_TEXT_LIMITS.body) };
 }
 
 /** Why a gated PR parked again, which picks its 🤖 comment. */
@@ -734,9 +754,10 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     };
 
     /** The PR path: commit, push, open, CI, the re-check and the gate, then `merging` and the enqueue. */
-    const openAndQueue = async (path: string, text: string, summary: readonly string[]): Promise<never> => {
-      const prText = reconcilePrText(unit, path, summary);
+    const openAndQueue = async (changes: readonly ReconcileFileChange[], kinds: { readonly status: boolean; readonly retroGates: boolean }): Promise<never> => {
+      const prText = reconcilePrText(unit, changes, kinds);
       const branch = reconcileBranch(snapshot.config.branches.xarabot, unit);
+      const paths = changes.map((c) => c.path);
 
       // 1. The bot commit onto the snapshot's main.
       let committed: Awaited<ReturnType<ReconcileCommitter["commit"]>>;
@@ -745,7 +766,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           unit,
           ontoSha: snapshot.main_sha,
           message: prText.message,
-          files: { [path]: text },
+          files: Object.fromEntries(changes.map((c) => [c.path, c.text])),
           signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
         });
       } catch (e) {
@@ -802,10 +823,10 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
       if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
 
-      // The protected-path gate stays; owner_approval_paths does not apply to a reconcile PR.
-      const gated = approvalPaths([path], config.repo.policy.effective_protected_paths);
+      // The protected-path gate stays, over every file the PR changes; owner_approval_paths does not apply to a reconcile PR.
+      const gated = approvalPaths(paths, config.repo.policy.effective_protected_paths);
       if (gated.length > 0) {
-        await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: [path] }));
+        await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: paths }));
         reasons.push(`awaiting approval: ${gated.join(", ")}`);
         note(`parked awaiting-approval: ${gated.join(", ")}`);
         const commented = await call("comment", (o) => forge.comment(pr, gateComment(`Unit ${unit}`, gated), o));
@@ -850,29 +871,40 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       aborted();
       const path = snapshot.config.sprint_status_path;
       const statusText = Object.hasOwn(input.files, path) ? (input.files[path] as string) : null;
-      const plan = planReconcile(snapshot, unit, statusText);
+      const gatesPath = snapshot.config.retro_gates_path;
+      const gatesText = Object.hasOwn(input.files, gatesPath) ? (input.files[gatesPath] as string) : null;
+      const plan = planReconcile(snapshot, unit, statusText, gatesText);
       note(
         `plan: ${plan.markMerged.length} to mark merged, ${plan.checkQueue.length} merging, ${plan.checkGated.length} gated merging, ` +
           `${plan.takeApproved.length} awaiting approval, ${plan.releaseDead.length} dead, ` +
-          `${plan.deleteReleased.length} released, ${plan.deleteMerged.length} done on main; status ${plan.status.kind}`,
+          `${plan.deleteReleased.length} released, ${plan.deleteMerged.length} done on main; status ${plan.status.kind}; retro gates ${plan.retroGates.kind}`,
       );
+      for (const u of plan.retroWithoutResult) {
+        reasons.push(`${u} merged with no retro_result: skipped`);
+        note(`${u} merged with no retro_result: no verdict to record, skipped`);
+      }
       const settled = await ledgerWork(plan);
 
       // A PR the ledger work closed, or whose record it released or deleted, no longer stops a new one.
       const open = plan.openPrs.find((o) => !settled.has(o.unit));
       if (open !== undefined) return await finish(plan, `${open.unit}'s PR #${open.pr} is open: no new reconcile PR this run`);
       const status = plan.status;
-      switch (status.kind) {
-        case "none":
-          return await finish(plan, "no status change");
-        case "absent":
-          return await finish(plan, `${plan.path} is absent: no status change written`);
-        case "invalid":
-          return await failed(`${plan.path} cannot be edited: ${status.message}`);
-        case "edit":
-          for (const s of status.summary) note(`status: ${s}`);
-          return await openAndQueue(plan.path, status.text, status.summary);
+      const gates = plan.retroGates;
+      if (status.kind === "invalid") return await failed(`${plan.path} cannot be edited: ${status.message}`);
+      if (gates.kind === "invalid") return await failed(`${plan.retroGatesPath} cannot be written: ${gates.message}`);
+      const changes: ReconcileFileChange[] = [];
+      if (status.kind === "edit") {
+        for (const s of status.summary) note(`status: ${s}`);
+        changes.push({ path: plan.path, text: status.text, summary: status.summary });
       }
+      if (gates.kind === "edit") {
+        for (const s of gates.summary) note(`retro gates: ${s}`);
+        changes.push({ path: plan.retroGatesPath, text: gates.text, summary: gates.summary });
+      }
+      if (changes.length === 0) {
+        return await finish(plan, status.kind === "absent" ? `${plan.path} is absent: no status change written` : "no status change");
+      }
+      return await openAndQueue(changes, { status: status.kind === "edit", retroGates: gates.kind === "edit" });
     };
 
     return kit.run(steps);

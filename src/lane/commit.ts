@@ -98,11 +98,31 @@ async function revertPaths(gitDir: string, tree: string, changes: readonly RawCh
   }
 }
 
-/** The write check's input: each changed path and its new mode, with the own manifest's texts when it is a regular file on both sides. */
+/** Full case folding, as the write check folds. */
+const fold = (s: string): string => s.toUpperCase().toLowerCase();
+
+/** A side's blob text, or `null` when the path is absent on that side. */
+async function sideText(gitDir: string, mode: string, sha: string, signal: AbortSignal): Promise<CloneResult<string | null>> {
+  if (mode === ABSENT) return ok(null);
+  return await git(gitDir, ["cat-file", "blob", sha], { signal });
+}
+
+/**
+ * The write check's input: each changed path and its new mode, with the own
+ * manifest's texts when it is a regular file on both sides and, under
+ * coordinator rules, `retro_gates_path`'s texts (`null` on a side where it
+ * is absent; Story 2.9).
+ */
 async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
   const out: WriteChange[] = [];
   for (const c of changes) {
-    if (rules.role === "builder" && c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
+    if (rules.role === "coordinator" && fold(c.path) === fold(rules.retroGatesPath)) {
+      const before = await sideText(gitDir, c.oldMode, c.oldSha, signal);
+      if (!before.ok) return before;
+      const after = await sideText(gitDir, c.newMode, c.newSha, signal);
+      if (!after.ok) return after;
+      out.push({ path: c.path, mode: c.newMode, retroGates: { before: before.value, after: after.value } });
+    } else if (rules.role === "builder" && c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
       const before = await git(gitDir, ["cat-file", "blob", c.oldSha], { signal });
       if (!before.ok) return before;
       const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });

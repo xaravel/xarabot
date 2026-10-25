@@ -21,6 +21,7 @@ import { createReconcileStep, reconcileBranch, reconcilePrText, reparkComment, t
 import type { WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
+import { parseRetroGates } from "../../src/core/graph/retro-gates.ts";
 import { graphFiles, GRAPH_STATUS, stubGraphTrees, treeOf, unchangedGraph, type StubAnswer } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
@@ -241,7 +242,7 @@ describe("reconcile texts", () => {
   });
 
   test("the PR text names the unit and each change, sanitized, and says no agent wrote it", () => {
-    const t = reconcilePrText(U, STATUS, ["1-1-first: backlog -> done", "@someone fixes #3: added as done"]);
+    const t = reconcilePrText(U, [{ path: STATUS, summary: ["1-1-first: backlog -> done", "@someone fixes #3: added as done"] }]);
     expect(t.title).toBe("reconcile:5: sprint status for merged units");
     expect(t.body.startsWith("🤖 reconcile:5:")).toBe(true);
     expect(t.body).toContain("no agent session");
@@ -275,7 +276,7 @@ describe("reconcile texts", () => {
   });
 
   test("the PR body and title are capped at the forge's limits", () => {
-    const t = reconcilePrText(`reconcile:${"9".repeat(300)}`, STATUS, Array.from({ length: 3000 }, (_, i) => `k-${i}-${"x".repeat(20)}: backlog -> done`));
+    const t = reconcilePrText(`reconcile:${"9".repeat(300)}`, [{ path: STATUS, summary: Array.from({ length: 3000 }, (_, i) => `k-${i}-${"x".repeat(20)}: backlog -> done`) }]);
     expect(t.title.length).toBe(256);
     expect(t.body.length).toBe(65_536);
     expect(t.body.endsWith("\n\n[truncated by xarabot]")).toBe(true);
@@ -1881,4 +1882,118 @@ describe("reconcile through the coordinator process", () => {
     if (!s.ok) throw new Error(s.error.message);
     return { ledger: s.value.ledger.files };
   }
+});
+
+// ------------------------------------------------------------------ retro-gates.yaml (Story 2.9)
+
+describe("createReconcileStep: retro-gates.yaml (Story 2.9)", () => {
+  const RETRO = "_bmad-output/implementation-artifacts/retro-gates.yaml";
+  const RESULT = {
+    verdict: "accepted-with-open-items" as const,
+    items: [
+      { id: "epic-1-retro-item-1-wire-it", text: "Wire it", route: "lane" as const, blocking: true, globs: ["src/x/**"] },
+      { id: "epic-1-retro-item-2-ask", text: "Ask", route: "maintainer" as const, blocking: false, globs: [] },
+    ],
+  };
+  /** retro:1's PR merged through the queue; its record merging, with its result. */
+  const retroMerged =
+    (over: Partial<UnitRecord> = {}) =>
+    async (fake: FakeForge) => {
+      const pr = await prOn(fake, "xarabot/retro-1", true);
+      return [coord("retro:1", { state: "merging", pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head, retro_result: RESULT, ...over })];
+    };
+
+  test("AC: retro:1 merged with a result, the file absent: the run's PR creates retro-gates.yaml at schema_version 1 with the verdict and the items open", async () => {
+    const f = await setup({ status: STATUS_DONE }, retroMerged());
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(await stateOf(f, "retro:1")).toBe("merged");
+    expect(f.commits).toHaveLength(1);
+    const c = f.commits[0] as ReconcileCommitRequest;
+    expect(Object.keys(c.files)).toEqual([RETRO]);
+    const parsed = parseRetroGates(RETRO, c.files[RETRO] as string);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value).toEqual({
+      schema_version: 1,
+      epics: {
+        "1": {
+          retro: { verdict: "accepted-with-open-items", unit: "retro:1", recorded_at: FORGE_NOW },
+          items: RESULT.items.map((i) => ({ ...i, status: "open" })),
+        },
+      },
+    });
+    const pr = await prOnBranch(f, BRANCH);
+    expect(pr?.title).toBe("reconcile:5: retro gates for merged units");
+    expect(pr?.body).toContain(`Changes to \`${RETRO}\`:`);
+    expect(pr?.body).toContain("- epics.1.retro: accepted-with-open-items (retro:1)");
+    expect(pr?.body).toContain("- epics.1.items: epic-1-retro-item-1-wire-it added as open");
+    expect(f.fake.control.queue()).toEqual([pr?.number ?? -1]);
+  });
+
+  test("AC: once that PR merges, retro:1 is done on main and the next run deletes its record, writing nothing", async () => {
+    const f = await setup({ status: STATUS_DONE }, retroMerged());
+    await f.run();
+    const text = (f.commits[0] as ReconcileCommitRequest).files[RETRO] as string;
+    // The reconcile PR merges: main now holds the new file; the next run starts.
+    f.fake.control.setMain({ ...mainFiles({ status: STATUS_DONE }), [RETRO]: text });
+    const merged = (await f.ledger()).get(U) as UnitRecord;
+    f.fake.control.writeForeignLedger({
+      message: "next run [skip ci]",
+      writes: tip([coord("reconcile:5", { ...merged, state: "merged" }), coord("reconcile:6", { state: "claimed" })]),
+      deletes: [],
+    });
+    const next = await f.input();
+    const record = next.snapshot.ledger.units.find((r) => r.unit === "reconcile:6") as UnitRecord;
+    f.events.length = 0;
+    const out = await createReconcileStep({ forge: spied(f.fake, f.events), committer: { commit: async () => err("invalid", "no commit expected") }, graphTrees: unchangedGraph(), identity: COORD, repo: "xaravel/xarabot", now: () => T0, sleep: async () => {}, random: () => 0 })({
+      ...next,
+      unit: { ...next.unit, unit: "reconcile:6" },
+      record,
+    });
+    expect(out.state).toBe("merged");
+    expect((await f.ledger()).has("retro:1")).toBe(false);
+    expect(swaps(f.events)).toContain("deleteMerged retro:1");
+  });
+
+  test("a Story and a retro merged in one run: one PR carries both files", async () => {
+    const f = await setup({}, async (fake) => [
+      rec({ unit: "story:1.1", globs: [], state: "merged", pr: (await prOn(fake, "story/1.1", true)).number }),
+      ...(await retroMerged({ state: "merged" })(fake)),
+    ]);
+    await f.run();
+    expect(Object.keys((f.commits[0] as ReconcileCommitRequest).files).sort()).toEqual([RETRO, STATUS].sort());
+    const pr = await prOnBranch(f, BRANCH);
+    expect(pr?.title).toBe("reconcile:5: sprint status and retro gates for merged units");
+    expect(pr?.body).toContain(`Changes to \`${STATUS}\`:`);
+    expect(pr?.body).toContain(`Changes to \`${RETRO}\`:`);
+  });
+
+  test("the protected-path gate covers retro-gates.yaml", async () => {
+    const f = await setup({ status: STATUS_DONE, policy: [`protected_paths: ["${RETRO}"]`] }, retroMerged());
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect((await f.ledger()).get(U)?.park).toMatchObject({ kind: "awaiting-approval", globs_held: [RETRO] });
+    expect(f.fake.control.queue()).toEqual([]);
+  });
+
+  test("an invalid retro-gates.yaml on main fails the run; nothing committed", async () => {
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      fake.control.setMain({ ...mainFiles({ status: STATUS_DONE }), [RETRO]: "schema_version: 1\nepics: [\n" });
+      return retroMerged()(fake);
+    });
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain(`${RETRO} cannot be written`);
+    expect(f.commits).toEqual([]);
+  });
+
+  test("a merged retro record with no retro_result is logged and skipped: no PR", async () => {
+    const f = await setup({ status: STATUS_DONE }, retroMerged({ state: "merged", retro_result: null }));
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.commits).toEqual([]);
+    expect(out.reason).toContain("retro:1 merged with no retro_result: skipped");
+    expect(f.logs.join("\n")).toContain("retro:1 merged with no retro_result: no verdict to record, skipped");
+    expect(await stateOf(f, "retro:1")).toBe("merged");
+  });
 });
