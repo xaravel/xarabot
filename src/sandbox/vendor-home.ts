@@ -104,14 +104,34 @@ export type SeedParams = {
   readonly keep?: boolean;
 };
 
-/** The env-mode credential variable, when there is one. */
-export type Seeded = { readonly env?: { readonly name: string; readonly value: string } };
+/**
+ * What was seeded: the env-mode credential variable, or the `homeFile`-mode
+ * file's path and the exact text written there (so the sandbox can tell,
+ * after the run, whether the session rewrote it).
+ */
+export type Seeded = {
+  readonly env?: { readonly name: string; readonly value: string };
+  readonly homeFile?: { readonly path: string; readonly text: string };
+};
+
+/**
+ * `true` when the seeded home file is no longer exactly what was written:
+ * changed, removed, or replaced by something that is not a regular file.
+ */
+export function homeFileChanged(seeded: { readonly path: string; readonly text: string }): boolean {
+  try {
+    if (!lstatSync(seeded.path).isFile()) return true;
+    return readFileSync(seeded.path, "utf8") !== seeded.text;
+  } catch {
+    return true;
+  }
+}
 
 /**
  * Reads and checks the credential, then empties the vendor home. In
  * `homeFile` mode it writes the credential to `<vendorHome>/<homeFile>` with
- * mode 600; in `env` mode the home stays empty and the trimmed credential is
- * returned for the variable. With `keep`, the home is not emptied (a resume
+ * mode 600 and returns its path and text; in `env` mode the home stays empty
+ * and the trimmed credential is returned for the variable. With `keep`, the home is not emptied (a resume
  * needs the session's transcript); a `homeFile` is still rewritten.
  *
  * With no credential (a repo command the runner starts, AR19) it only
@@ -147,7 +167,7 @@ export function seedVendorHome(params: SeedParams): Result<Seeded, "refused"> {
       closeSync(openSync(target, "wx", CREDENTIAL_MODE));
       chmodSync(target, CREDENTIAL_MODE);
       writeFileSync(target, text);
-      return ok({});
+      return ok({ homeFile: { path: target, text } });
     }
     return ok({ env: { name: credential.env, value: text.trim() } });
   } catch (e) {

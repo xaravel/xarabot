@@ -4,15 +4,16 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { isReservedEnvName, buildSessionEnv, deniedPaths, SESSION_DIR_NAMES, sessionDirs, type DeniedPaths, type LaunchingEnv } from "./environment.ts";
 import { buildAllowlist } from "../core/network/hosts.ts";
 import { renderProfile } from "./profile.ts";
-import { startProxy, type Proxy, type ProxyOpts } from "./proxy.ts";
+import { startProxy, type ConnectDecision, type Proxy, type ProxyOpts } from "./proxy.ts";
 import { resolveTools, type ResolvedTools } from "./tools.ts";
-import { isPlainFileName, removeTree, seedVendorHome } from "./vendor-home.ts";
+import { homeFileChanged, isPlainFileName, removeTree, seedVendorHome } from "./vendor-home.ts";
 import {
   ENV_NAME,
   isVendor,
   refused,
   sandboxOk,
   type LaunchSpec,
+  type ProxyRequest,
   type Sandbox,
   type SandboxHooks,
   type SandboxProfile,
@@ -27,7 +28,9 @@ import {
  * only network is a per-session CONNECT proxy on `127.0.0.1`, which allows
  * the vendor's API hosts, the package hosts and the repo's `proxy_hosts`, and
  * never a GitHub host. Every check fails closed and refuses the session;
- * nothing runs unsandboxed and the profile never touches the disk.
+ * nothing runs unsandboxed and the profile never touches the disk. The run
+ * reports every request the proxy decided on and, for a `homeFile`
+ * credential, whether the session rewrote the seeded file.
  */
 
 export const DEFAULT_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -196,6 +199,26 @@ function text(chunks: readonly Uint8Array[]): string {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** The most proxy requests one run records; a session past it gets one marker entry. */
+export const MAX_PROXY_REQUESTS = 10_000;
+const MAX_TARGET = 200;
+
+/** One proxy decision as the run reports it. */
+export function proxyRequest(line: string, decision: ConnectDecision): ProxyRequest {
+  const parts = line.split(" ");
+  const target = parts[0] === "CONNECT" && parts.length === 3 ? (parts[1] as string) : line;
+  return { target: target.slice(0, MAX_TARGET), allowed: decision.allow, reason: decision.allow ? null : decision.reason };
+}
+
+/** The entry that ends a run's record once it holds `MAX_PROXY_REQUESTS`. */
+export const PROXY_REQUESTS_MARKER: ProxyRequest = { target: "(more requests not recorded)", allowed: false, reason: `over ${MAX_PROXY_REQUESTS} requests` };
+
+/** Adds one decision to `requests`: up to `MAX_PROXY_REQUESTS`, then the marker once, then nothing. */
+export function recordProxyRequest(requests: ProxyRequest[], line: string, decision: ConnectDecision): void {
+  if (requests.length < MAX_PROXY_REQUESTS) requests.push(proxyRequest(line, decision));
+  else if (requests.length === MAX_PROXY_REQUESTS) requests.push(PROXY_REQUESTS_MARKER);
+}
+
 export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
   const sandboxExec = opts.sandboxExec ?? DEFAULT_SANDBOX_EXEC;
   const platform = opts.platform ?? process.platform;
@@ -261,10 +284,12 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
 
     const allow = buildAllowlist(spec.apiHosts, profile.repoHosts ?? []);
     if (!allow.ok) return refused(`sandbox: ${allow.error.message}`);
-    const proxy = startProxy({ allow: allow.value, ...opts.proxy });
+    const requests: ProxyRequest[] = [];
+    const onRequest = (line: string, decision: ConnectDecision): void => recordProxyRequest(requests, line, decision);
+    const proxy = startProxy({ allow: allow.value, ...opts.proxy, onRequest });
     if (!proxy.ok) return refused(`sandbox: the proxy fails to start: ${proxy.error.message}`);
     try {
-      return await session(spec, profile, signal, hooks, { tools: tools.value, denied: denied.value, roots, forbidden, proxy: proxy.value, launching });
+      return await session(spec, profile, signal, hooks, { tools: tools.value, denied: denied.value, roots, forbidden, proxy: proxy.value, launching, requests });
     } finally {
       proxy.value.stop();
     }
@@ -282,9 +307,11 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
       readonly forbidden: () => { what: string; path: string }[];
       readonly proxy: Proxy;
       readonly launching: LaunchingEnv;
+      /** Filled by the proxy's hook while the session runs. */
+      readonly requests: readonly ProxyRequest[];
     },
   ): Promise<SandboxResult<SandboxRun>> {
-    const { tools, denied, roots, forbidden, proxy, launching } = ctx;
+    const { tools, denied, roots, forbidden, proxy, launching, requests } = ctx;
     const cmd = spec.argv[0] as string;
     const rendered = renderProfile({
       toolFiles: [tools.agent.path, ...tools.helpers.map((t) => t.path)],
@@ -397,6 +424,7 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     for (const reader of readers) reader.cancel().catch(() => {});
 
     const sig = child.signalCode;
+    const home = seeded.value.homeFile;
     return sandboxOk({
       pid,
       exitCode: sig === null ? child.exitCode : null,
@@ -406,6 +434,8 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
       durationMs: endedAt - startedAt,
       stdout: text(out),
       stderr: text(errOut),
+      proxyRequests: [...requests],
+      ...(home === undefined ? {} : { credentialRewritten: homeFileChanged(home) }),
     });
   }
 

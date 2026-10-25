@@ -24,6 +24,11 @@ export type ProxyOpts = {
   readonly ports?: readonly number[];
   /** The address to connect to for an allowed host; default the host itself. For tests. */
   readonly dial?: (host: string) => string | Promise<string>;
+  /**
+   * Called with every complete request head's first line and the decision on
+   * it, before the proxy answers. A hook that throws is ignored.
+   */
+  readonly onRequest?: (line: string, decision: ConnectDecision) => void;
 };
 
 export type Proxy = {
@@ -53,9 +58,7 @@ function isPort(n: number): boolean {
  * `CONNECT host:port HTTP/1.x` to an allowed hostname and port passes.
  */
 export function decideConnect(head: string, allow: readonly string[], ports: readonly number[]): ConnectDecision {
-  const nl = head.indexOf("\n");
-  const line = (nl === -1 ? head : head.slice(0, nl)).replace(/\r$/, "");
-  const parts = line.split(" ");
+  const parts = firstLine(head).split(" ");
   if (parts[0] !== "CONNECT") return deny(405, `method ${JSON.stringify(parts[0] ?? "")} is not CONNECT`);
   if (parts.length !== 3 || !/^HTTP\/1\.[01]$/.test(parts[2] as string)) return deny(400, "malformed request line");
   const authority = parts[1] as string;
@@ -71,6 +74,12 @@ export function decideConnect(head: string, allow: readonly string[], ports: rea
   if (!allow.includes(host)) return deny(403, `${JSON.stringify(host)} is not on the allowlist`);
   if (!ports.includes(port)) return deny(403, `port ${port} is not allowed`);
   return { allow: true, host, port };
+}
+
+/** A head's first line, without its line ending. */
+export function firstLine(head: string): string {
+  const nl = head.indexOf("\n");
+  return (nl === -1 ? head : head.slice(0, nl)).replace(/\r$/, "");
 }
 
 const REASONS: Readonly<Record<number, string>> = {
@@ -253,7 +262,15 @@ export function startProxy(opts: ProxyOpts): Result<Proxy> {
     }
     clearTimeout(client.timer);
     client.head = new Uint8Array(0);
-    const decision = decideConnect(new TextDecoder("latin1").decode(buf.subarray(0, end)), allow, ports);
+    const head = new TextDecoder("latin1").decode(buf.subarray(0, end));
+    const decision = decideConnect(head, allow, ports);
+    if (opts.onRequest !== undefined) {
+      try {
+        opts.onRequest(firstLine(head), decision);
+      } catch {
+        // A hook's failure must not change the decision.
+      }
+    }
     if (!decision.allow) {
       respond(client, decision.status);
       return;

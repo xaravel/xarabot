@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { ok } from "../../src/core/result.ts";
 import { redactSecrets } from "../../src/core/sanitize.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
-import { laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
+import { credentialSecrets, laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
 import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
@@ -19,7 +19,20 @@ import * as retroItemStep from "../../src/lane/retro-item-step.ts";
 import * as retroStep from "../../src/lane/retro-step.ts";
 import type { CoordinatorStep } from "../../src/lane/coordinator-process.ts";
 import { hostTest } from "../support/sandbox.ts";
-import { cleanup, fakeConnect, HOST_ID, mainFiles, stubInstaller, world, writeCredential, type MainOpts, type World } from "./lane-fixture.ts";
+import {
+  cleanup,
+  CODEX_AUTH,
+  CODEX_REFRESH,
+  fakeConnect,
+  HOST_ID,
+  mainFiles,
+  stubInstaller,
+  world,
+  writeCodexCredential,
+  writeCredential,
+  type MainOpts,
+  type World,
+} from "./lane-fixture.ts";
 
 const dirs: string[] = [];
 afterEach(() => cleanup(dirs));
@@ -93,6 +106,8 @@ type Setup = {
   readonly failedStarts?: number;
   readonly main?: MainOpts;
   readonly credential?: boolean;
+  /** The codex credential files to write, mode 600; default none. */
+  readonly codex?: readonly ("auth.json" | "api-key")[];
   readonly installed?: readonly string[];
   readonly env?: Record<string, string>;
   readonly version?: string;
@@ -145,6 +160,8 @@ async function laneRunWith(
   args: readonly string[] = [REPO, "builder-1"],
   start?: LaneRunDeps["start"],
   startCoordinator?: LaneRunDeps["startCoordinator"],
+  /** Runs once the world is written, before `laneRun`. */
+  before?: (w: World) => void,
 ): Promise<Ran> {
   const w = world(dirs, o.env ?? {});
   const laneDir = join(dirname(w.laneDir), args[1] ?? "builder-1");
@@ -156,8 +173,10 @@ async function laneRunWith(
   if (o.failedStarts !== undefined) writeFileSync(join(laneDir, "failed-starts"), `${o.failedStarts}\n`);
   for (const v of o.installed ?? ["v1"]) mkdirSync(join(w.runnerRoot, v), { recursive: true });
   if (o.credential !== false) writeCredential(w);
+  for (const file of o.codex ?? []) writeCodexCredential(w, file);
   if (o.lockText === "dir") mkdirSync(join(laneDir, "lane.lock"));
   else if (o.lockText !== undefined) writeFileSync(join(laneDir, "lane.lock"), o.lockText);
+  before?.(w);
   const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main), ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
   const conn = fakeConnect(fake, { ...(o.connectFail !== undefined ? { fail: o.connectFail } : {}), ...(o.botUserFails === true ? { botUserFails: true } : {}) });
   const installer = stubInstaller(o.installFails !== undefined ? { fail: o.installFails } : {});
@@ -429,7 +448,7 @@ describe("xarabot lane run: refusals", () => {
   const other = { name: "builder-2", repo: "xaravel/xaravel" };
   test.each([
     ["agent not allowed", { main: { unattended: [] } }, "is not in .xarabot/policy.yaml unattended_adapters"],
-    ["no adapter", { host: hostYaml({ lanes: [{ agent: "codex" }] }), main: { unattended: ["codex"] } }, "no adapter for agent codex"],
+    ["no adapter", { host: hostYaml({ lanes: [{ agent: "pi" }] }), main: { unattended: ["pi"] } }, "no adapter for agent pi (only claude and codex have one)"],
     ["effort refused", { host: hostYaml({ lanes: [{ model: "claude-opus-4-6", effort: "xhigh" }] }) }, "does not offer effort xhigh"],
     ["CLI too old", { version: "2.0.0 (Claude Code)" }, "is older than"],
     ["no credential", { credential: false }, "missing"],
@@ -548,6 +567,82 @@ describe("xarabot lane run: a passing start", () => {
     expect(journal[0]).toMatchObject({ schema_version: 1, type: "span", span: "idle" });
     expect(read(join(r.w.laneDir, "outcome"))).toBe("idle\n");
     expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+});
+
+describe("xarabot lane run: a codex lane", () => {
+  const CODEX_HOST = hostYaml({ lanes: [{ agent: "codex" }] });
+  const CODEX = { host: CODEX_HOST, main: { unattended: ["codex"] }, credential: false, version: "codex-cli 0.163.0" } as const;
+
+  test("auth.json and codex-cli 0.163.0: the codex adapter is composed and every start check passes", async () => {
+    const r = await laneRunWith({ ...CODEX, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.starts).toHaveLength(1);
+    const d = r.starts[0] as LaneDeps;
+    expect(d.agent.vendor).toBe("codex");
+    expect(d.agent.defaultModel).toBe("gpt-6.1-sol");
+    const spec = d.agent.launchSpec({ kind: "fresh", prompt: "p" }, { effort: "high" }, "/r/result.json");
+    expect(spec.ok && spec.value.credential).toEqual({ file: "auth.json", homeFile: "auth.json" });
+    expect(spec.ok && spec.value.apiHosts).toEqual(["chatgpt.com", "ab.chatgpt.com", "auth.openai.com"]);
+    expect(spec.ok && spec.value.argv[0]).toBe("codex");
+  });
+
+  test("only api-key: the API-key spec, with api.openai.com", async () => {
+    const r = await laneRunWith({ ...CODEX, codex: ["api-key"] });
+    expect(r.code).toBe(0);
+    const d = r.starts[0] as LaneDeps;
+    const spec = d.agent.launchSpec({ kind: "fresh", prompt: "p" }, { effort: "high" }, "/r/result.json");
+    expect(spec.ok && spec.value.credential).toEqual({ file: "api-key", env: "CODEX_API_KEY" });
+    expect(spec.ok && spec.value.apiHosts).toContain("api.openai.com");
+  });
+
+  test("a bare X.Y.Z version is read too", async () => {
+    const r = await laneRunWith({ ...CODEX, codex: ["auth.json"], version: "0.164.2\n" });
+    expect(r.code).toBe(0);
+  });
+
+  test.each([
+    ["both credential files", { codex: ["auth.json", "api-key"] }, "both auth.json and api-key exist"],
+    ["no credential file", { codex: [] }, "codex: credential missing: neither auth.json nor api-key"],
+    ["an older CLI", { codex: ["auth.json"], version: "codex-cli 0.162.9" }, "codex: CLI 0.162.9 is older than 0.163.0"],
+    ["an unreadable version", { codex: ["auth.json"], version: "garbage" }, "codex: cannot read the CLI version"],
+    ["an unknown model", { codex: ["auth.json"], host: hostYaml({ lanes: [{ agent: "codex", model: "gpt-9-nope" }] }) }, "does not offer effort high (offered: none)"],
+    ["a claude model on a codex lane", { codex: ["auth.json"], host: hostYaml({ lanes: [{ agent: "codex", model: "claude-opus-5-5" }] }) }, "codex: model claude-opus-5-5 does not offer effort high"],
+  ] as const)("%s: a failed start, reason named", async (_name, o, why) => {
+    const r = await laneRunWith({ ...CODEX, ...o } as Setup);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(why);
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.starts).toEqual([]);
+  });
+
+  test("a mode-644 auth.json: a failed start naming the file", async () => {
+    const r = await laneRunWith({ ...CODEX, codex: ["auth.json"] }, [REPO, "builder-1"], undefined, undefined, (w) =>
+      chmodSync(join(w.xdg, "xarabot", "vendors", "codex", "auth.json"), 0o644),
+    );
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("auth.json: mode 644, must be 600");
+  });
+
+  test("a coordinator's session steps get the auth.json text and each token in it as secrets", async () => {
+    for (const list of Object.values(built)) list.length = 0;
+    const r = await laneRunWith({ ...CODEX, host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator", agent: "codex" }] }), codex: ["auth.json"] }, [REPO, "coordinator"]);
+    expect(r.code).toBe(0);
+    const planning = built.planning[0] as (typeof built.planning)[number];
+    expect(planning.deps.secrets).toContain(CODEX_AUTH);
+    expect(planning.deps.secrets).toContain(CODEX_REFRESH);
+    expect(redactSecrets(`leaked ${CODEX_REFRESH}`, planning.deps.secrets)).toBe("leaked [REDACTED]");
+  });
+});
+
+describe("credentialSecrets", () => {
+  test("a plain token is its own text; a JSON file adds every string of 16+ characters", () => {
+    expect(credentialSecrets("sk-ant-oat-fake\n")).toEqual(["sk-ant-oat-fake\n"]);
+    expect(credentialSecrets('{"a":"short","b":{"c":["0123456789abcdef"]},"n":12345678901234567890}')).toEqual([
+      '{"a":"short","b":{"c":["0123456789abcdef"]},"n":12345678901234567890}',
+      "0123456789abcdef",
+    ]);
   });
 });
 

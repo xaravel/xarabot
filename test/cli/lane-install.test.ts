@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createFakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { loadHostConfig } from "../../src/core/config/load-host-config.ts";
 import { renderLauncher, renderPlist } from "../../src/core/lane/launchd.ts";
-import { laneInstall, missingTools, parseInstallArgs, type LaneInstallDeps } from "../../src/cli/lane-install.ts";
+import { laneInstall, laneTools, missingTools, parseInstallArgs, type LaneInstallDeps } from "../../src/cli/lane-install.ts";
 import { laneLayout } from "../../src/lane/lane-store.ts";
 import { RUNNER_REPO_URL } from "../../src/cli/lane-connection.ts";
 import { cleanup, FAKE_TOKEN, HOST_ID, mainFiles, stubInstaller, world, fakeConnect, type World } from "./lane-fixture.ts";
@@ -271,11 +271,40 @@ describe("xarabot lane install", () => {
 
   test("missingTools: each missing tool named in order, with the PATH", () => {
     const has = (present: readonly string[]) => (tool: string) => (present.includes(tool) ? `/bin/${tool}` : null);
-    expect(missingTools("/p", has(["claude", "bun", "git", "uv"]))).toBeNull();
-    expect(missingTools("/p", has(["claude", "bun", "git"]))).toBe("uv does not resolve on the PATH the lane's plist gets: /p");
-    expect(missingTools("/p", has(["git"]))).toBe("claude, bun and uv do not resolve on the PATH the lane's plist gets: /p");
-    expect(missingTools(undefined, has([]))).toContain("claude, bun, git and uv");
-    expect(missingTools("", has([]))).toContain("PATH is not set");
+    const claude = laneTools("claude");
+    expect(missingTools("/p", claude, has(["claude", "bun", "git", "uv"]))).toBeNull();
+    expect(missingTools("/p", claude, has(["claude", "bun", "git"]))).toBe("uv does not resolve on the PATH the lane's plist gets: /p");
+    expect(missingTools("/p", claude, has(["git"]))).toBe("claude, bun and uv do not resolve on the PATH the lane's plist gets: /p");
+    expect(missingTools(undefined, claude, has([]))).toContain("claude, bun, git and uv");
+    expect(missingTools("", claude, has([]))).toContain("PATH is not set");
+  });
+
+  test("laneTools: the lane's own agent CLI first, then bun, git and uv", () => {
+    expect(laneTools("claude")).toEqual(["claude", "bun", "git", "uv"]);
+    expect(laneTools("codex")).toEqual(["codex", "bun", "git", "uv"]);
+    const has = (present: readonly string[]) => (tool: string) => (present.includes(tool) ? `/bin/${tool}` : null);
+    // A codex lane needs codex, never claude.
+    expect(missingTools("/p", laneTools("codex"), has(["codex", "bun", "git", "uv"]))).toBeNull();
+    expect(missingTools("/p", laneTools("codex"), has(["claude", "bun", "git", "uv"]))).toBe("codex does not resolve on the PATH the lane's plist gets: /p");
+  });
+
+  test("a codex lane installs with codex on the PATH and no claude", async () => {
+    const w = world(dirs);
+    rmSync(join(w.bin, "claude"));
+    const r = await install(w, ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "codex"]);
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const host = loadHostConfig(readFileSync(w.hostYaml, "utf8"));
+    expect(host.ok && host.value.lanes["builder-1"]).toEqual({ repo: "xaravel/xarabot", role: "builder", owner: "alice", agent: "codex", effort: "high" });
+  });
+
+  test("a codex lane without codex on the PATH is refused before anything is written", async () => {
+    const w = world(dirs);
+    rmSync(join(w.bin, "codex"));
+    const r = await install(w, ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "codex"]);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("codex does not resolve on the PATH");
+    nothingWritten(w);
   });
 
   test("a coordinator lane named coordinator installs in lanes/coordinator", async () => {

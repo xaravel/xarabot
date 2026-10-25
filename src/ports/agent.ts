@@ -5,10 +5,12 @@ import type { LaunchCredential, LaunchSpec, Vendor } from "./sandbox.ts";
 /**
  * The `Agent` port (AR1, FR7, AR15, AR22, AR30): turns one unit and a lane's
  * settings into a `LaunchSpec` for the `Sandbox`, checks the CLI before a
- * session starts, reads the session's usage from its stdout and checks the
- * model it reported. An adapter
- * never spawns anything itself; `src/sandbox/` runs what it describes. Every
- * method is pure and never throws.
+ * session starts, reads the session's usage from its stdout (and, for a CLI
+ * that keeps it there, from the session files in the lane's vendor home) and
+ * checks the model it reported. An adapter never spawns anything itself;
+ * `src/sandbox/` runs what it describes. Every method but `parseUsage` is
+ * pure; `parseUsage` only reads files under the vendor home it is given. No
+ * method throws.
  */
 
 /** A lane's `effort` (`host.yaml`). */
@@ -16,7 +18,11 @@ export type Effort = Lane["effort"];
 
 /** What a session is asked to do. */
 export type AgentUnit =
-  /** A new session; `prompt` goes on stdin, never in argv. */
+  /**
+   * A new session. Where `prompt` goes is the adapter's: `claude` writes it on
+   * stdin and never in argv; `codex` puts it last in argv, after `--` (its
+   * stdin stays closed).
+   */
   | { readonly kind: "fresh"; readonly prompt: string }
   /** The one resume of a session that left no result: it asks only for the result. */
   | { readonly kind: "resume"; readonly sessionId: string };
@@ -45,6 +51,12 @@ export type AgentUsage = {
   readonly cost: { readonly usd: number; readonly estimate: boolean } | null;
   /** Set when the session hit a usage limit; `resetAt` is epoch ms, or `null` when the reset can't be read. */
   readonly usageLimit: { readonly resetAt: number | null } | null;
+  /**
+   * Set, to the CLI's own error message, when the session's turn failed for a
+   * reason other than a usage limit (codex's `turn.failed`). The runner fails
+   * the attempt on it, with no resume. Absent when nothing failed.
+   */
+  readonly failure?: string;
 };
 
 /**
@@ -63,8 +75,14 @@ export type Agent = {
   readonly minVersion: string;
   /** The session to run; `resultPath` is the absolute path the sandbox exposes as `XARABOT_RESULT`. */
   launchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<AgentLaunchSpec, "invalid">;
-  /** Reads usage from the session's stdout; lines it can't read are skipped. */
-  parseUsage(stdout: string): AgentUsage;
+  /**
+   * Reads usage from the session's stdout; lines it can't read are skipped.
+   * `vendorHome` is the lane's vendor home after the run, for a CLI that
+   * keeps its model, rate limits or subagent sessions there; `since` is the
+   * run's start (epoch ms), so files an earlier run left are not counted.
+   * An adapter that needs neither ignores them. Never throws.
+   */
+  parseUsage(stdout: string, vendorHome?: string, since?: number): AgentUsage;
   /** After a run: the model `usage` reports, refused when it reported none or not the `configured` one (Story 2.6b). */
   checkModel(usage: AgentUsage, configured: string): Result<string, "model-mismatch">;
   /** The efforts the CLI offers for an exact model id; none for a model it doesn't know (fails closed). */

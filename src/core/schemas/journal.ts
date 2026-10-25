@@ -6,7 +6,7 @@ import { AdapterName } from "./policy.ts";
 
 /**
  * The lane journal, `journal.jsonl` (AR25, AR28): one JSON line per unit a
- * lane process handled, plus idle and usage-limit spans. Timings come from the host clock;
+ * lane process handled, plus idle, usage-limit and credential-rewrite spans. Timings come from the host clock;
  * model and effort are the lane's configured values, never what the agent
  * reported; `reported_model` is the last model a run reported, when any run
  * reported one (Story 2.6b).
@@ -73,8 +73,9 @@ export const UnitJournalRecordSchema = z.strictObject({
 export const SpanJournalRecordSchema = z.strictObject({
   schema_version: SchemaVersion,
   type: z.literal("span"),
-  span: z.enum(["idle", "usage-limit"]),
-  /** `next`'s idle reason, or the usage limit and its reset. */
+  /** `credential-rewrite`: a session changed the credential file seeded in its vendor home (a refreshed login); the span is the run's. */
+  span: z.enum(["idle", "usage-limit", "credential-rewrite"]),
+  /** `next`'s idle reason, the usage limit and its reset, or the rewritten file and the run. */
   reason: NonEmpty,
   started_at: IsoDateTime,
   ended_at: IsoDateTime,

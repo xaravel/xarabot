@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { LaunchSpec, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
-import { createMacSandbox, type MacSandboxOpts } from "../../src/sandbox/macos.ts";
+import type { LaunchSpec, ProxyRequest, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
+import { CODEX_API_HOSTS, CODEX_API_KEY_HOST } from "../../src/adapters/agent/codex/codex-agent.ts";
+import { createMacSandbox, MAX_PROXY_REQUESTS, PROXY_REQUESTS_MARKER, proxyRequest, recordProxyRequest, type MacSandboxOpts } from "../../src/sandbox/macos.ts";
 import { uvPythonDir, which } from "../../src/sandbox/tools.ts";
 import { canSandbox, liveSandboxTest, sandboxTest } from "../support/sandbox.ts";
 
@@ -709,6 +710,7 @@ describe("host tools", () => {
 
   for (const [tool, args, pattern] of [
     ["claude", ["--version"], /Claude Code/],
+    ["codex", ["--version"], /^codex-cli \d+\.\d+\.\d+/],
     ["bun", ["--version"], /^\d+\.\d+\.\d+/],
     ["git", ["--version"], /^git version /],
   ] as const) {
@@ -819,5 +821,138 @@ describe("abort", () => {
     const r = await createMacSandbox({ launchingEnv: launching }).run(spec(["true"]), profile, ac.signal, { onSpawn: (p) => spawned.push(p) });
     expect(r.ok).toBe(false);
     expect(spawned).toEqual([]);
+  });
+});
+
+describe("proxyRequest (any host)", () => {
+  test("a CONNECT is reported by its authority; anything else by its line, cut to 200 characters", () => {
+    expect(proxyRequest("CONNECT chatgpt.com:443 HTTP/1.1", { allow: true, host: "chatgpt.com", port: 443 })).toEqual({ target: "chatgpt.com:443", allowed: true, reason: null });
+    expect(proxyRequest("CONNECT github.com:443 HTTP/1.1", { allow: false, status: 403, reason: '"github.com" is a GitHub host' })).toEqual({
+      target: "github.com:443",
+      allowed: false,
+      reason: '"github.com" is a GitHub host',
+    });
+    expect(proxyRequest(`GET /${"x".repeat(300)} HTTP/1.1`, { allow: false, status: 405, reason: "not CONNECT" }).target).toHaveLength(200);
+    expect(MAX_PROXY_REQUESTS).toBeGreaterThan(1000);
+  });
+
+  test("recordProxyRequest keeps MAX_PROXY_REQUESTS decisions, then one marker, then nothing more", () => {
+    const requests: ProxyRequest[] = [];
+    const allow = { allow: true, host: "chatgpt.com", port: 443 } as const;
+    for (let i = 0; i < MAX_PROXY_REQUESTS + 5; i += 1) recordProxyRequest(requests, "CONNECT chatgpt.com:443 HTTP/1.1", allow);
+    expect(requests).toHaveLength(MAX_PROXY_REQUESTS + 1);
+    expect(requests[0]).toEqual({ target: "chatgpt.com:443", allowed: true, reason: null });
+    expect(requests.at(-1)).toEqual(PROXY_REQUESTS_MARKER);
+    recordProxyRequest(requests, "CONNECT github.com:443 HTTP/1.1", { allow: false, status: 403, reason: "GitHub" });
+    expect(requests).toHaveLength(MAX_PROXY_REQUESTS + 1);
+    expect(requests.at(-1)).toEqual(PROXY_REQUESTS_MARKER);
+  });
+});
+
+/** The codex adapter's specs, run through the sandbox with sh in place of codex. */
+describe("a codex spec", () => {
+  const AUTH = '{"OPENAI_API_KEY":null,"tokens":{"refresh_token":"rt-sandbox-123"}}\n';
+  const KEY = "sk-codex-sandbox-123";
+  const codexDir = () => join(home, ".config", "xarabot", "vendors", "codex");
+  const AUTH_SPEC: Partial<LaunchSpec> = { vendor: "codex", vendorHomeEnv: "CODEX_HOME", credential: { file: "auth.json", homeFile: "auth.json" }, apiHosts: CODEX_API_HOSTS };
+  const KEY_SPEC: Partial<LaunchSpec> = { vendor: "codex", vendorHomeEnv: "CODEX_HOME", credential: { file: "api-key", env: "CODEX_API_KEY" }, apiHosts: [...CODEX_API_HOSTS, CODEX_API_KEY_HOST] };
+
+  function writeCodex(file: string, content: string | null, mode = 0o600): void {
+    const f = join(codexDir(), file);
+    mkdirSync(codexDir(), { recursive: true });
+    rmSync(f, { force: true });
+    if (content === null) return;
+    writeFileSync(f, content);
+    chmodSync(f, mode);
+  }
+
+  beforeAll(() => {
+    if (!canSandbox) return;
+    writeCodex("auth.json", AUTH);
+    writeCodex("api-key", `${KEY}\n`);
+  });
+
+  sandboxTest("auth.json mode: CODEX_HOME holds only auth.json, mode 600, no credential variable, and the run reports it untouched", async () => {
+    const { run: r } = await ran(["sh", "-c", 'ls -A "$CODEX_HOME"; stat -f %Lp "$CODEX_HOME/auth.json"; printf %s "${CODEX_API_KEY:-unset}"'], { spec: AUTH_SPEC });
+    expect(r.stdout).toBe("auth.json\n600\nunset");
+    expect(r.credentialRewritten).toBe(false);
+  });
+
+  sandboxTest("a session that rewrites auth.json is reported; the operator's file is left as it is", async () => {
+    const { run: r } = await ran(["sh", "-c", 'printf %s \'{"tokens":"refreshed"}\' > "$CODEX_HOME/auth.json"'], { spec: AUTH_SPEC });
+    expect(r.exitCode).toBe(0);
+    expect(r.credentialRewritten).toBe(true);
+    expect(readFileSync(join(codexDir(), "auth.json"), "utf8")).toBe(AUTH);
+    expect(readFileSync(join(lane, "vendor", "auth.json"), "utf8")).toBe('{"tokens":"refreshed"}');
+  });
+
+  sandboxTest("a session that removes auth.json is reported as a rewrite", async () => {
+    const { run: r } = await ran(["sh", "-c", 'rm "$CODEX_HOME/auth.json"'], { spec: AUTH_SPEC });
+    expect(r.credentialRewritten).toBe(true);
+  });
+
+  sandboxTest("a resume re-seeds auth.json from the operator's file and keeps the transcript", async () => {
+    await ran(["sh", "-c", 'mkdir -p "$CODEX_HOME/sessions" && echo t > "$CODEX_HOME/sessions/r.jsonl" && printf x > "$CODEX_HOME/auth.json"'], { spec: AUTH_SPEC });
+    const { run: r } = await ran(["sh", "-c", 'cat "$CODEX_HOME/sessions/r.jsonl"; cat "$CODEX_HOME/auth.json"'], { spec: { ...AUTH_SPEC, resume: true } });
+    expect(r.stdout).toBe(`t\n${AUTH}`);
+    expect(r.credentialRewritten).toBe(false);
+  });
+
+  sandboxTest("api-key mode: CODEX_API_KEY holds the key, CODEX_HOME is empty, and no rewrite is reported", async () => {
+    const { run: r } = await ran(["sh", "-c", 'printf %s "$CODEX_API_KEY"; ls -A "$CODEX_HOME"'], { spec: KEY_SPEC });
+    expect(r.stdout).toBe(KEY);
+    expect("credentialRewritten" in r).toBe(false);
+  });
+
+  sandboxTest("the prompt is the last argument, after --, and stdin is closed", async () => {
+    const prompt = "# Task\n\nline two\n";
+    const { run: r } = await ran(["sh", "-c", 'printf "<%s>" "$(cat)"; printf "[%s]" "$2"', "sh", "--", prompt], { spec: AUTH_SPEC });
+    expect(r.stdout).toBe(`<>[${prompt}]`);
+  });
+
+  sandboxTest("every proxy request is reported: the allowed vendor host and the refused GitHub host", async () => {
+    const FIXTURE = "chatgpt.com";
+    const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok\n") });
+    try {
+      const p = fixture.port as number;
+      const { run: r } = await ran(
+        [
+          "sh",
+          "-c",
+          `curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://${FIXTURE}:${p}/; curl -sS --max-time 10 --proxytunnel -x "$HTTPS_PROXY" http://github.com:${p}/ >/dev/null 2>&1; echo github=$?`,
+        ],
+        { spec: AUTH_SPEC, sandbox: { proxy: { ports: [p], dial: () => "127.0.0.1" } } },
+      );
+      expect(r.stdout).toBe("ok\ngithub=56\n");
+      expect(r.proxyRequests).toEqual([
+        { target: `${FIXTURE}:${p}`, allowed: true, reason: null },
+        { target: `github.com:${p}`, allowed: false, reason: '"github.com" is a GitHub host' },
+      ]);
+    } finally {
+      fixture.stop(true);
+    }
+  });
+
+  for (const [name, content, mode] of [
+    ["missing", null, 0o600],
+    ["mode 644", AUTH, 0o644],
+    ["empty", "", 0o600],
+  ] as const) {
+    sandboxTest(`a ${name} auth.json refuses, naming the file`, async () => {
+      writeCodex("auth.json", content, mode);
+      try {
+        await refusedWith(["true"], { spec: AUTH_SPEC }, join(codexDir(), "auth.json"));
+      } finally {
+        writeCodex("auth.json", AUTH);
+      }
+    });
+  }
+
+  sandboxTest("a credential variable named CODEX_HOME refuses: it names the vendor home", async () => {
+    await refusedWith(["true"], { spec: { ...KEY_SPEC, credential: { file: "api-key", env: "CODEX_HOME" } } }, "names both the vendor home and the credential");
+  });
+
+  sandboxTest("a codex spec allowing a GitHub host refuses, spawning nothing", async () => {
+    await refusedWith(["true"], { spec: { ...AUTH_SPEC, apiHosts: [...CODEX_API_HOSTS, "api.github.com"] } }, "proxy allowlist");
   });
 });

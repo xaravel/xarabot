@@ -66,6 +66,15 @@ export type SandboxProfile = {
   readonly repoHosts?: readonly string[];
 };
 
+/** One request the session's network proxy decided on. */
+export type ProxyRequest = {
+  /** The `CONNECT` authority (`host:port`), or the request line when it is not one (cut to 200 characters). */
+  readonly target: string;
+  readonly allowed: boolean;
+  /** Why it was denied; `null` when allowed. */
+  readonly reason: string | null;
+};
+
 /** A finished session. Times are epoch ms from the implementation's clock. */
 export type SandboxRun = {
   /** The agent's own PID. */
@@ -79,6 +88,15 @@ export type SandboxRun = {
   readonly durationMs: number;
   readonly stdout: string;
   readonly stderr: string;
+  /** Every request the session's proxy decided on, in order; absent when the implementation records none. */
+  readonly proxyRequests?: readonly ProxyRequest[];
+  /**
+   * `homeFile` credentials only: `true` when the file the sandbox seeded at
+   * `<vendorHome>/<homeFile>` was changed or removed by the session (a CLI
+   * that refreshed its login). Nothing is copied back to the operator's
+   * credential. Absent for an `env` credential or none.
+   */
+  readonly credentialRewritten?: boolean;
 };
 
 export type SandboxErrorKind = "refused";

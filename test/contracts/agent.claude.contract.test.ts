@@ -24,6 +24,7 @@ const STUB_STDOUT = [
 agentContract({
   name: "claude",
   make: createClaudeAgent,
+  prompt: "stdin",
   tempEnv: ["CLAUDE_CODE_TMPDIR"],
   stub: { stdout: STUB_STDOUT, sessionId: SID, model: "claude-opus-5-5" },
   live: { effort: "low" },

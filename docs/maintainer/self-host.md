@@ -730,3 +730,90 @@ Note the start time, then check both of these:
   ```
 
 If either check fails, keep the limit at 1 and investigate.
+
+## The `codex` adapter (Story 3.1)
+
+A lane with `agent: codex` runs `codex exec` inside Xarabot's sandbox, with
+codex's own sandbox and approvals off and a private `CODEX_HOME` (the lane's
+vendor home), re-seeded before every session. Its default model is
+`gpt-6.1-sol` at effort `high`; `gpt-6.1-sol` and `gpt-6-luna` offer `low`
+to `max`, and any other model refuses at start. The CLI must be at least
+`codex-cli 0.163.0`. Before the lane can run unattended, `codex` must be in
+`.xarabot/policy.yaml`'s `unattended_adapters`, and `xarabot lane install`
+checks that `codex` resolves on the plist's `PATH`.
+
+### The codex credential
+
+On the host, as `edanisko-xarabot`, keep **exactly one** of these two
+mode-600 files in `$XDG_CONFIG_HOME/xarabot/vendors/codex/` (that is
+`~/.config/xarabot/vendors/codex/` when `XDG_CONFIG_HOME` is unset). Both
+files, or neither, make every `lane run` a failed start.
+
+| File | What it is | How sessions get it | Hosts the session may reach |
+|---|---|---|---|
+| `auth.json` | a ChatGPT login, as `codex login` writes it | copied to `$CODEX_HOME/auth.json`, mode 600, before every session | `chatgpt.com`, `ab.chatgpt.com`, `auth.openai.com` |
+| `api-key` | an OpenAI API key, one line | the variable `CODEX_API_KEY` | the three above, plus `api.openai.com` |
+
+For a ChatGPT login, log in once with a throwaway `CODEX_HOME`, then move its
+`auth.json` into place (never copy `~/.codex/auth.json` while another codex
+uses it: two homes refreshing one refresh token may log one of them out):
+
+```sh
+umask 077
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/xarabot/vendors/codex"
+mkdir -p "$dir"
+login=$(mktemp -d)
+CODEX_HOME="$login" codex login          # follow the browser prompt
+mv "$login/auth.json" "$dir/auth.json" && rm -rf "$login"
+chmod 600 "$dir/auth.json"
+stat -f '%Lp %HT' "$dir/auth.json"       # expected: 600 Regular File
+codex --version                          # expected: codex-cli 0.163.0 or later
+```
+
+For an API key instead, write it the way the Claude token is written
+(`read -rs key; printf '%s\n' "$key" > "$dir/api-key"; unset key; chmod 600
+"$dir/api-key"`), and make sure `auth.json` is not also there.
+
+If codex refreshes its login during a session, it rewrites the copy in
+`CODEX_HOME`. The runner never copies it back: it journals a
+`credential-rewrite` span for that run instead (`jq 'select(.span ==
+"credential-rewrite")' journal.jsonl`). If those spans appear and sessions
+later fail to sign in, log in again as above.
+
+Every request a session's proxy decides on is written to the unit log, after
+the run's stdout and stderr, under `--- proxy ---`, as `allow <host>:<port>`
+or `deny <host>:<port> (<reason>)`. `files.openai.com` and the unresolved
+`2606:4700:440b::ac40:9034` the spike saw are not on the allowlist; a `deny`
+line naming them is what the live run below records.
+
+### The codex live evidence
+
+Run these on the Xarabot host as `edanisko-xarabot`, outside any sandbox
+(`XARABOT_SANDBOXED` must be unset), from a checkout of a `main` commit that
+has Story 3.1, with the codex credential above and `codex` on `PATH`. The
+live cases use a little of the subscription (each is one short session at
+effort `low`).
+
+```sh
+bun test test/sandbox/macos.test.ts test/sandbox/proxy.test.ts
+XARABOT_LIVE=1 bun test test/contracts/agent.codex.contract.test.ts
+XARABOT_LIVE=1 bun test test/adapters/agent/codex/codex-live.test.ts
+```
+
+**Expected results:** `0 fail` for each. Without `XARABOT_LIVE=1`, or inside
+a sandboxed session, the live and sandbox cases report skipped, never
+passed; that is not evidence.
+
+- **The sandbox suites:** the `a codex spec` block passes: `CODEX_HOME` holds only `auth.json` (mode 600) in ChatGPT mode and nothing in API-key mode, where `CODEX_API_KEY` is set; a session that rewrites or removes `auth.json` is reported as a rewrite while the operator's file stays byte-identical; the prompt arrives as the last argument with stdin closed; the proxy reports the allowed vendor host and the refused GitHub host; a missing, mode-644 or empty `auth.json` refuses, naming the file. `codex starts when present` passes too.
+- **The codex contract** (`Agent contract: codex`): `the real CLI passes the start check and starts in the sandbox without EPERM` (with a dummy API key) and `live: a smoke session writes a result and reports its usage` (with your credential) must pass, not skip.
+- **`codex-live.test.ts`**, five cases; record what each prints:
+  - `outcome mapping`: the shared build prompt, with `bmad-build-auto` taken as halted `ready-for-dev`, yields a `build` result `blocked`/`other` (never `no-op`), and the session file reports `gpt-6.1-sol`.
+  - `resume`: a run that wrote no result is resumed with `codex exec … resume <thread_id> -- <prompt>` (the options before `resume`), reports the same thread id, and writes the result.
+  - `subagent tokens`: prints `turnCompleted`, `parentRollout`, `children` and `parsed`. It asserts that `turn.completed` equals the parent's own session-file total (so children are not in it) and that the parsed total is larger. If it fails on the first assertion, codex counts children in `turn.completed` and the adapter double-counts them: report it to the Maintainer.
+  - `auth.json` (ChatGPT mode only; skipped in API-key mode): prints `credentialRewritten: true|false`, and asserts your `auth.json` is unchanged.
+  - `proxy hosts`: prints every `allow`/`deny` target the session's proxy saw. Record the list. Any `deny` line for a host codex needs (for example `files.openai.com`) is a decision for the Maintainer before that host is added; it is never added silently.
+
+Record the date, the host, the `main` commit, `bun --version`,
+`codex --version`, each command as run with its `pass`/`skip`/`fail` counts,
+and the printed lines above, in the Epic 3 live evidence file
+(`docs/maintainer/evidence/epic-3.md`), as for Epic 2.

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
+import { CLAUDE_COMMAND } from "../adapters/agent/claude/claude-agent.ts";
+import { CODEX_COMMAND } from "../adapters/agent/codex/codex-agent.ts";
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
@@ -11,6 +13,7 @@ import { err, ok, type Result } from "../core/result.ts";
 import { describeIssues, parseVersionedYaml } from "../core/schemas/common.ts";
 import { ConfigSchema, type Config } from "../core/schemas/config.ts";
 import { HostConfigSchema, LaneSchema, type HostConfig, type Lane } from "../core/schemas/host.ts";
+import type { AdapterName } from "../core/schemas/policy.ts";
 import type { ForgeSnapshot } from "../ports/forge.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
 import { hostPaths, laneDirFor, readHostConfig, RUNNER_FILE, type HostPaths } from "./host-paths.ts";
@@ -20,8 +23,8 @@ import { githubConnect, RUNNER_REPO_URL, type Connect, type LaneConnection } fro
  * `xarabot lane install <lane> --repo <o/n> --role <r> --owner <login>
  * --agent <a> [--model <m>] [--effort <e>]` (FR1, NFR15, AR26, AR34, AR35).
  * It checks the lane: a coordinator is named `coordinator`, a builder
- * `builder-<n>` (n >= 1), and `claude`, `bun`, `git` and `uv` each resolve on
- * the `PATH` the plist will carry. It refuses a name `host.yaml` already
+ * `builder-<n>` (n >= 1), and the lane's own agent CLI (`claude` or `codex`),
+ * `bun`, `git` and `uv` each resolve on the `PATH` the plist will carry. It refuses a name `host.yaml` already
  * holds for another repo (the same name and repo is replaced) and a lane that
  * would take the host over `XARABOT_MAX_BUILDERS`. It then reads
  * `runner_version` from `main` and installs that runner first; only then
@@ -43,17 +46,29 @@ export const COORDINATOR_LANE = "coordinator";
 /** A builder lane's name, as the ledger's lane-name rule takes it: `builder-<n>`, n >= 1. */
 export const BUILDER_LANE = /^builder-[1-9][0-9]*$/;
 
-/** The tools a lane runs, each of which must resolve on the `PATH` its plist carries. */
-export const LANE_TOOLS: readonly string[] = ["claude", "bun", "git", "uv"];
+/** The tools every lane runs besides its agent CLI. */
+export const LANE_HELPER_TOOLS: readonly string[] = ["bun", "git", "uv"];
+
+/** Each agent's CLI command. */
+export const AGENT_COMMANDS: Readonly<Record<AdapterName, string>> = { claude: CLAUDE_COMMAND, codex: CODEX_COMMAND, pi: "pi" };
+
+/** The tools a lane of `agent` runs, each of which must resolve on the `PATH` its plist carries: its own agent CLI first. */
+export function laneTools(agent: AdapterName): readonly string[] {
+  return [AGENT_COMMANDS[agent], ...LANE_HELPER_TOOLS];
+}
 
 /**
- * `null` when every `LANE_TOOLS` entry resolves on `path` (the plist's
- * `PATH`); else the refusal, naming each missing tool and the `PATH`.
+ * `null` when every one of `tools` (`laneTools`) resolves on `path` (the
+ * plist's `PATH`); else the refusal, naming each missing tool and the `PATH`.
  */
-export function missingTools(path: string | undefined, which: (tool: string, path: string) => string | null = (t, p) => Bun.which(t, { PATH: p })): string | null {
-  const list = (tools: readonly string[]) => (tools.length === 1 ? (tools[0] as string) : `${tools.slice(0, -1).join(", ")} and ${tools.at(-1) as string}`);
-  if (path === undefined || path === "") return `PATH is not set, so the lane's plist gets none: ${list(LANE_TOOLS)} must each resolve on it`;
-  const missing = LANE_TOOLS.filter((t) => which(t, path) === null);
+export function missingTools(
+  path: string | undefined,
+  tools: readonly string[],
+  which: (tool: string, path: string) => string | null = (t, p) => Bun.which(t, { PATH: p }),
+): string | null {
+  const list = (names: readonly string[]) => (names.length === 1 ? (names[0] as string) : `${names.slice(0, -1).join(", ")} and ${names.at(-1) as string}`);
+  if (path === undefined || path === "") return `PATH is not set, so the lane's plist gets none: ${list(tools)} must each resolve on it`;
+  const missing = tools.filter((t) => which(t, path) === null);
   if (missing.length === 0) return null;
   return `${list(missing)} ${missing.length === 1 ? "does" : "do"} not resolve on the PATH the lane's plist gets: ${path}`;
 }
@@ -207,7 +222,7 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   const paths = hostPaths(deps.env);
   if (paths === null) return fail("HOME is not set");
   // The lane runs on the PATH its plist carries, so the tools it needs must resolve there.
-  const tools = missingTools(plistEnv(deps.env)["PATH"]);
+  const tools = missingTools(plistEnv(deps.env)["PATH"], laneTools(lane.agent));
   if (tools !== null) return fail(tools);
 
   // 2. host.yaml.
