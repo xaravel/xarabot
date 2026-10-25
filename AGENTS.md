@@ -8,7 +8,7 @@ Runs BMAD projects unattended: lanes, `next` unit selection, claims, CI and merg
 ## Policy
 
 - Never push to `main`; open a PR. Branch as `story/<story-id>` for Story work and `planning/<topic>` for planning and docs work. The `Protect main` ruleset refuses direct pushes, force-pushes and deletion, requires the `check` status and the merge queue, and requires a Code Owner review: `.github/CODEOWNERS` makes the Maintainer the owner of every path except the two status files. Repository admins may bypass only that review, through the PR, so the Maintainer can merge their own PRs; the bot's PRs always need the Maintainer's approval, except runner-written `reconcile` PRs, which touch only the status files (Standing Authority).
-- Never add `Co-Authored-By` trailers, "Generated with" lines or similar markers to commits or PRs; the bot account is the only marker of lane-made work.
+- Never add `Co-Authored-By` trailers, "Generated with" lines or similar markers to commits or PRs; the bot account is the only marker of lane-made work. The `Co-authored-by: edanisko-xarabot[bot]` trailer that GitHub's squash merge adds itself is that marker, and is allowed.
 - Never create a `CLAUDE.md` anywhere in this repo — Claude Code stops reading `AGENTS.md` when one exists. Put instructions here.
 - Change these only when the Maintainer asks for that change: `AGENTS.md`; `_bmad-output/specs/` (through `bmad-spec`); `_bmad/`, `.claude/skills/` and `.agents/skills/` (re-run the installer, or `bmad-customize` into `_bmad/custom/`); `.github/`.
 - When a task conflicts with `SPEC.md`, or needs a decision it does not settle, stop that part and ask the Maintainer — never decide it locally.
