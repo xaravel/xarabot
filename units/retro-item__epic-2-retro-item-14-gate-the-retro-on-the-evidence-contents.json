@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-14-gate-the-retro-on-the-evidence-contents",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -19,7 +19,7 @@
     "test/core/next/**",
     "test/core/schemas/**"
   ],
-  "heartbeat_at": "2026-10-25T22:23:09.183Z",
+  "heartbeat_at": "2026-10-25T22:24:53.163Z",
   "pr": 131,
   "pr_owner": "edanisko",
   "base_sha": "53b824d1d2e6484672a4aa2856045e4d784a9474",
@@ -30,7 +30,22 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "src/core/next/coordinator.ts",
+      "src/core/next/snapshot.ts",
+      "src/core/schemas/config.ts",
+      "src/core/schemas/snapshot.ts",
+      "test/core/config/load-repo-config.test.ts",
+      "test/core/next/coordinator.test.ts",
+      "test/core/next/fixtures.ts",
+      "test/core/next/snapshot.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
