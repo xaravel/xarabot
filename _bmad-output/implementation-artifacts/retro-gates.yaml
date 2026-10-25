@@ -5,6 +5,10 @@ epics:
       verdict: rejected
       unit: "retro:2"
       recorded_at: "2026-10-25T18:01:08Z"
+      go:
+        by: edanisko
+        at: "2026-10-25T18:19:26Z"
+        ruling: maintainer-pr
     items:
       - id: "epic-2-retro-item-1-record-the-story-2-12-live-runs"
         text: "Record Story 2.12's three live runs in docs/maintainer/evidence/epic-2.md: the claims race suite with the 30-minute case, bun-install.test.ts and the agent-contract live smoke, each with counts and duration, plus date, host, commit and bun version (A1)"
