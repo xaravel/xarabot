@@ -11,7 +11,9 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
  * case-folded, because the clone lives on a case-insensitive filesystem;
  * the exceptions compare exact paths, so folding only ever widens a
  * refusal. A coordinator session's change has its own rules
- * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds. Pure.
+ * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds; a
+ * retro item's (Story 2.10) adds every builder refusal, with no exception.
+ * Pure.
  */
 
 /** The refused path classes, in reporting order: a path in several is reported as the first. */
@@ -21,8 +23,8 @@ export type WriteClass = (typeof WRITE_CLASSES)[number];
 /** The classes an approved Infrastructure Story may write. */
 const INFRASTRUCTURE_CLASSES: ReadonlySet<WriteClass> = new Set(["standing-authority", "github", "agent-config", "protected-path"]);
 
-export type WriteRules = {
-  readonly role: "builder";
+/** The paths behind the builder's refused classes (`WRITE_CLASSES`). */
+export type RefusedPaths = {
   /** `sprint_status_path`, `retro_gates_path` and `epics_path`. */
   readonly coordinatorFiles: readonly string[];
   /** `manifests.dir`, or `null` when `manifests` is unset (no manifests). */
@@ -30,10 +32,32 @@ export type WriteRules = {
   readonly standingAuthorityPath: string;
   /** The policy's own `protected_paths`. */
   readonly protectedPaths: readonly string[];
-  /** `epic_context_path`, with `<N>`. */
-  readonly epicContextPath: string;
   /** `live_evidence_glob` with `<N>` as `*` (Story 2.9): the Maintainer's live evidence files. */
   readonly liveEvidenceGlob: string;
+};
+
+/** What `refusedPaths` reads: the config's refused paths and the policy's own Protected Paths. */
+export type RefusedPathsInput = {
+  readonly config: Pick<Config, "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests" | "standing_authority_path" | "live_evidence_glob">;
+  readonly policy: Pick<Policy, "protected_paths">;
+};
+
+/** The paths behind the builder's refused classes, from the config and the policy. */
+export function refusedPaths(input: RefusedPathsInput): RefusedPaths {
+  const { config, policy } = input;
+  return {
+    coordinatorFiles: [config.sprint_status_path, config.retro_gates_path, config.epics_path],
+    manifestsDir: config.manifests?.dir ?? null,
+    standingAuthorityPath: config.standing_authority_path,
+    protectedPaths: [...policy.protected_paths],
+    liveEvidenceGlob: config.live_evidence_glob.replaceAll("<N>", "*"),
+  };
+}
+
+export type WriteRules = RefusedPaths & {
+  readonly role: "builder";
+  /** `epic_context_path`, with `<N>`. */
+  readonly epicContextPath: string;
   /** The unit's spec file: excepted, exact path. */
   readonly specPath: string;
   /**
@@ -65,12 +89,8 @@ export function writeRules(input: WriteRulesInput): WriteRules {
   const { config, policy } = input;
   return {
     role: "builder",
-    coordinatorFiles: [config.sprint_status_path, config.retro_gates_path, config.epics_path],
-    manifestsDir: config.manifests?.dir ?? null,
-    standingAuthorityPath: config.standing_authority_path,
-    protectedPaths: [...policy.protected_paths],
+    ...refusedPaths({ config, policy }),
     epicContextPath: config.epic_context_path,
-    liveEvidenceGlob: config.live_evidence_glob.replaceAll("<N>", "*"),
     specPath: input.specPath,
     superseded: [...(input.superseded ?? [])],
     storyFile: input.storyFile,
@@ -110,7 +130,9 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * `retro-verdict`, to `items` `retro-item`, to `retro.go` `retro-go`, to
  * `checkpoint` `checkpoint-go` (one refusal per class hit), and a side that
  * does not parse, or texts not given, is `retro-gates-invalid`. Only
- * `reconcile`'s runner code writes those records.
+ * `reconcile`'s runner code writes those records. With `refused` set (a
+ * retro item, Story 2.10), a path no coordinator class refuses is then
+ * classified as a builder's would be, with no exception (`WRITE_CLASSES`).
  */
 export const COORDINATOR_WRITE_CLASSES = [
   "xarabot",
@@ -138,12 +160,20 @@ export type CoordinatorWriteRules = {
   readonly statusFiles: readonly string[];
   /** `retro_gates_path`: its retro records are never an agent's to change (Story 2.9). */
   readonly retroGatesPath: string;
+  /**
+   * The builder's refused paths, with no exception, checked after the
+   * coordinator classes (a retro item, Story 2.10); `null` for every other
+   * coordinator unit.
+   */
+  readonly refused: RefusedPaths | null;
 };
 
 export type CoordinatorWriteRulesInput = {
   readonly config: Pick<Config, "sprint_status_path" | "retro_gates_path" | "epics_path" | "manifests">;
   readonly globs: readonly string[];
   readonly graphUnit: boolean;
+  /** Refuse every path a builder is refused too (a retro item); default none. */
+  readonly builderRefusals?: RefusedPathsInput;
 };
 
 export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): CoordinatorWriteRules {
@@ -154,6 +184,7 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
     graphInputs: graphInputGlobs(input.config),
     statusFiles: statusFiles(input.config),
     retroGatesPath: input.config.retro_gates_path,
+    refused: input.builderRefusals === undefined ? null : refusedPaths(input.builderRefusals),
   };
 }
 
@@ -228,7 +259,7 @@ function matchesAny(globs: readonly string[], folded: string): boolean {
 }
 
 /** The first refused class `path` is in, or `null`; case-folded. */
-function classify(rules: WriteRules, path: string): WriteClass | null {
+function classify(rules: RefusedPaths, path: string): WriteClass | null {
   const p = fold(path);
   if (rules.coordinatorFiles.some((f) => fold(f) === p)) return "coordinator-file";
   if (new Bun.Glob(fold(rules.liveEvidenceGlob)).match(p)) return "live-evidence";
@@ -298,8 +329,16 @@ function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly W
   for (const { path, p, mode, retroGates } of folded) {
     const kept = isGraph(p) || isStatus(p);
     const cls = classifyCoordinator(rules, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
-    if (cls !== null) out.push({ path, class: cls });
-    else if (fold(rules.retroGatesPath) === p) for (const c of retroGatesClasses(rules.retroGatesPath, retroGates)) out.push({ path, class: c });
+    if (cls !== null) {
+      out.push({ path, class: cls });
+      continue;
+    }
+    const records = fold(rules.retroGatesPath) === p ? retroGatesClasses(rules.retroGatesPath, retroGates) : [];
+    for (const c of records) out.push({ path, class: c });
+    if (records.length > 0 || rules.refused === null) continue;
+    // A retro item: then a builder's refusal, with no exception.
+    const builder = classify(rules.refused, path);
+    if (builder !== null) out.push({ path, class: builder });
   }
   return out.sort(byPath);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseRetroGates } from "../../../src/core/graph/retro-gates.ts";
-import { applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
+import { applyItemsDone, applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
 import type { RetroGates } from "../../../src/core/schemas/retro-gates.ts";
 
 const PATH = "_bmad-output/implementation-artifacts/retro-gates.yaml";
@@ -110,5 +110,57 @@ describe("editRetroGates", () => {
     const bad = { ...add(2, "accepted"), result: { verdict: "accepted" as const, items: [{ id: "epic-2-retro-item-1-a", text: "", route: "lane" as const, blocking: false, globs: [] }] } };
     const r = editRetroGates(PATH, null, [bad]);
     expect(r.ok ? "ok" : r.error.message).toContain("does not parse");
+  });
+});
+
+describe("applyItemsDone and editRetroGates: retro items done (Story 2.10)", () => {
+  const item = (id: string, status: "open" | "in-progress" | "waiting" | "deferred" | "done") => ({ id, text: `Do ${id}`, route: "lane" as const, blocking: false, globs: ["src/x/**"], status });
+  const START: RetroGates = {
+    schema_version: 1,
+    epics: {
+      "2": { retro: { verdict: "accepted-with-open-items", unit: "retro:2", recorded_at: AT }, items: [item("epic-2-retro-item-1-a", "open"), item("epic-2-retro-item-2-b", "deferred"), item("epic-2-retro-item-3-c", "done")] },
+      "3": { items: [item("epic-3-retro-item-1-z", "open")] },
+    },
+  };
+
+  test("sets each listed item not done to done, one summary line each with its old status, in Epic order", () => {
+    const { gates, summary } = applyItemsDone(START, [
+      { epic: 3, id: "epic-3-retro-item-1-z" },
+      { epic: 2, id: "epic-2-retro-item-2-b" },
+      { epic: 2, id: "epic-2-retro-item-1-a" },
+    ]);
+    expect(gates.epics["2"]?.items?.map((i) => i.status)).toEqual(["done", "done", "done"]);
+    expect(gates.epics["3"]?.items?.map((i) => i.status)).toEqual(["done"]);
+    expect(gates.epics["2"]?.retro).toEqual(START.epics["2"]?.retro);
+    expect(summary).toEqual([
+      "epics.2.items: epic-2-retro-item-2-b deferred -> done",
+      "epics.2.items: epic-2-retro-item-1-a open -> done",
+      "epics.3.items: epic-3-retro-item-1-z open -> done",
+    ]);
+  });
+
+  test("an item already done, an unknown item and an unknown Epic change nothing", () => {
+    const { gates, summary } = applyItemsDone(START, [
+      { epic: 2, id: "epic-2-retro-item-3-c" },
+      { epic: 2, id: "epic-2-retro-item-9-x" },
+      { epic: 4, id: "epic-4-retro-item-1-x" },
+    ]);
+    expect(gates).toEqual(START);
+    expect(summary).toEqual([]);
+  });
+
+  test("editRetroGates: the additions, then the items done, in one deterministic rewrite", () => {
+    const text = serializeRetroGates(START);
+    const r = editRetroGates(PATH, text, [add(4, "accepted", ["epic-4-retro-item-1-n"])], [{ epic: 2, id: "epic-2-retro-item-1-a" }]);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.summary).toEqual(["epics.4.retro: accepted (retro:4)", "epics.4.items: epic-4-retro-item-1-n added as open", "epics.2.items: epic-2-retro-item-1-a open -> done"]);
+    const back = parseRetroGates(PATH, r.value.text);
+    if (!back.ok) throw new Error(back.error.message);
+    expect(back.value.epics["2"]?.items?.[0]?.status).toBe("done");
+    expect(back.value.epics["4"]?.items?.[0]?.status).toBe("open");
+    expect(serializeRetroGates(back.value)).toBe(r.value.text);
+    // Deterministic: the same input writes the same text.
+    const again = editRetroGates(PATH, text, [add(4, "accepted", ["epic-4-retro-item-1-n"])], [{ epic: 2, id: "epic-2-retro-item-1-a" }]);
+    expect(again.ok && again.value.text).toBe(r.value.text);
   });
 });

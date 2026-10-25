@@ -1997,3 +1997,57 @@ describe("createReconcileStep: retro-gates.yaml (Story 2.9)", () => {
     expect(await stateOf(f, "retro:1")).toBe("merged");
   });
 });
+
+// ------------------------------------------------------------------ retro items done (Story 2.10)
+
+describe("createReconcileStep: retro items done (Story 2.10)", () => {
+  const RETRO = "_bmad-output/implementation-artifacts/retro-gates.yaml";
+  const X = "epic-1-retro-item-1-wire-it";
+  const UNIT_X = `retro-item:${X}`;
+  const GATES = [
+    "schema_version: 1",
+    "epics:",
+    '  "1":',
+    "    retro:",
+    "      verdict: accepted-with-open-items",
+    '      unit: "retro:1"',
+    "      recorded_at: 2026-10-20T00:00:00Z",
+    "    items:",
+    `      - id: ${X}`,
+    "        text: Wire it",
+    "        route: lane",
+    "        blocking: false",
+    '        globs: ["src/x/**"]',
+    "        status: open",
+    "",
+  ].join("\n");
+  /** The item's PR merged through the queue; its record merging, held by the coordinator. */
+  const itemMerged = (gates: string | null) => async (fake: FakeForge) => {
+    if (gates !== null) fake.control.setMain({ ...mainFiles({ status: STATUS_DONE }), [RETRO]: gates });
+    const pr = await prOn(fake, `xarabot/retro-item-${X}`, true);
+    return [coord(UNIT_X, { state: "merging", globs: ["src/x/**"], pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head })];
+  };
+
+  test("AC: the merged item's unit is marked merged and the run's PR sets the item done", async () => {
+    const f = await setup({ status: STATUS_DONE }, itemMerged(GATES));
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(await stateOf(f, UNIT_X)).toBe("merged");
+    expect(f.commits).toHaveLength(1);
+    const c = f.commits[0] as ReconcileCommitRequest;
+    expect(Object.keys(c.files)).toEqual([RETRO]);
+    const parsed = parseRetroGates(RETRO, c.files[RETRO] as string);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.epics["1"]?.items?.map((i) => [i.id, i.status])).toEqual([[X, "done"]]);
+    expect(f.logs.join("\n")).toContain(`retro gates: epics.1.items: ${X} open -> done`);
+  });
+
+  test("the item absent from retro-gates.yaml: logged and skipped, no PR", async () => {
+    const f = await setup({ status: STATUS_DONE }, itemMerged(null));
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.commits).toEqual([]);
+    expect(out.reason).toContain(`${UNIT_X} merged but its item is not listed: skipped`);
+    expect(await stateOf(f, UNIT_X)).toBe("merged");
+  });
+});

@@ -3,24 +3,25 @@ import { basename, join } from "node:path";
 import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ciFix, park } from "../core/ledger/edits.ts";
-import type { NextStory } from "../core/next/next.ts";
 import type { Result } from "../core/result.ts";
+import type { Config } from "../core/schemas/config.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, ParkReason, UnitRecord } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import type { MergeOutcome, Merger } from "./merger.ts";
-import { message, readsPath, stepKit, type PrStep, type PrStepOutput } from "./session.ts";
+import { message, readsPath, stepKit, type PrStepOutput, type StepUnit } from "./session.ts";
 
 /**
  * The CI step after the PR is open (FR6, AR8, AR20, AR21, AR44, AD-19). Each
  * round takes one fresh snapshot, re-checks the config and Standing Authority
  * on it, merges `main` into a conflicting PR, then polls the head's checks by
  * hand with back-off. An unexpected failure, or a conflict no rule resolves,
- * runs a builder session, and the PR step pushes its fix; the next round runs
- * on the new head. It parks at the CI-fix cap and at the max wait, and never
- * throws.
+ * runs a session in `ci-fix` mode, and `pushFix` pushes its fix; the next
+ * round runs on the new head. It parks at the CI-fix cap and at the max wait,
+ * and never throws. The unit is named, not a Story (Story 2.10): a Story's
+ * PR step pushes a Story's fix, a retro item's step its own.
  */
 
 /** CI-fix and conflict sessions a unit gets before it parks `ci-fix-cap`. */
@@ -35,7 +36,7 @@ export type CiSessionRequest = {
 
 export type CiSessionDone = {
   readonly result: BuildResult;
-  /** The spec file's repo-relative path in the clone; `null` for a `blocked` or `no-op` result, which needs none. */
+  /** The spec file's repo-relative path in the clone; `null` for a `blocked` or `no-op` result, or a unit that needs none. */
   readonly specPath: string | null;
   /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
   readonly superseded: readonly string[];
@@ -55,8 +56,29 @@ export type RegenerateRequest = {
 /** Runs the lockfile command in the sandbox at `start`; the lockfile texts by path. Never throws. */
 export type Regenerate = (request: RegenerateRequest) => Promise<Result<Readonly<Record<string, string>>>>;
 
+/** The unit whose PR the CI step takes through CI. */
+export type CiUnit = StepUnit & {
+  /** The PR's branch, from fresh `main`'s config. */
+  readonly branch: (config: Pick<Config, "branches">) => string;
+  /** Whether a `done` fix needs a spec file: a Story's does, a retro item's does not. */
+  readonly needsSpec: boolean;
+};
+
+/** A `done` CI-fix or conflict session's fix, to push to the open PR. */
+export type CiFix = {
+  /** The claimed record as the CI step last saw it, with its `pr` and `head_sha`. */
+  readonly record: UnitRecord;
+  readonly result: BuildResult;
+  /** The spec file's path; `null` for a unit that needs none. */
+  readonly specPath: string | null;
+  readonly superseded: readonly string[];
+};
+
+/** Commits and pushes a fix to the open PR, keeping its title and body. Never throws. */
+export type PushFix = (fix: CiFix) => Promise<PrStepOutput>;
+
 export type CiStepInput = {
-  readonly unit: NextStory;
+  readonly unit: CiUnit;
   /** The claimed record, with its `pr` and `head_sha` set. */
   readonly record: UnitRecord;
   readonly clone: string;
@@ -66,7 +88,7 @@ export type CiStepInput = {
   readonly log: (text: string) => void;
   /** A runner-only folder for prefetched logs. */
   readonly scratchDir: string;
-  readonly prStep: PrStep;
+  readonly pushFix: PushFix;
   readonly session: CiSession;
   readonly regenerate: Regenerate;
 };
@@ -112,16 +134,20 @@ export function ciLogText(p: { readonly sha: string; readonly failing: readonly 
 /**
  * The conflict session's log text: the clone is `main` merged into the PR,
  * with markers in `paths`; each of `lockfiles` holds `main`'s version with no
- * markers, the PR's changes to it dropped.
+ * markers, the PR's changes to it dropped. The PR is "this Story's" unless
+ * `subject` names another unit (`Unit <unit>`: "this unit's").
  */
 export function conflictLogText(p: {
   readonly mainSha: string;
   readonly headSha: string;
   readonly paths: readonly string[];
   readonly lockfiles?: readonly string[];
+  /** The unit's subject (`Story <id>`, `Unit <unit>`); default a Story. */
+  readonly subject?: string;
 }): string {
   const lockfiles = p.lockfiles ?? [];
-  const lines = [`# Conflicts merging main ${p.mainSha} into the PR`, "", `The clone is main (${p.mainSha}) merged into this Story's PR (${p.headSha}).`];
+  const noun = p.subject === undefined || p.subject.startsWith("Story ") ? "Story" : "unit";
+  const lines = [`# Conflicts merging main ${p.mainSha} into the PR`, "", `The clone is main (${p.mainSha}) merged into this ${noun}'s PR (${p.headSha}).`];
   if (p.paths.length > 0) {
     lines.push("", "No rule resolved these paths, so they hold conflict markers:", "", ...p.paths.map((path) => `- ${path}`));
   }
@@ -139,11 +165,11 @@ export function conflictLogText(p: {
   return `${lines.join("\n")}\n`;
 }
 
-/** The 🤖 comment after `main` was merged into the PR, capped at the comment limit. */
-export function mergeComment(p: { readonly storyId: string; readonly mainSha: string; readonly headSha: string; readonly resolved: readonly string[] }): string {
+/** The 🤖 comment after `main` was merged into the PR, for `subject` (`Story <id>`, `Unit <unit>`), capped at the comment limit. */
+export function mergeComment(p: { readonly subject: string; readonly mainSha: string; readonly headSha: string; readonly resolved: readonly string[] }): string {
   const resolved = p.resolved.length === 0 ? "" : ` Resolved: ${p.resolved.map((r) => sanitizeAgentText(r)).join(", ")}.`;
   return capText(
-    `🤖 Story ${sanitizeAgentText(p.storyId)}: merged main ${p.mainSha.slice(0, 7)} into the PR as ${p.headSha.slice(0, 7)}.${resolved}\n`,
+    `🤖 ${sanitizeAgentText(p.subject)}: merged main ${p.mainSha.slice(0, 7)} into the PR as ${p.headSha.slice(0, 7)}.${resolved}\n`,
     FORGE_TEXT_LIMITS.comment,
   );
 }
@@ -157,8 +183,8 @@ export function createCiStep(deps: CiStepDeps): CiStep {
   const sleep = deps.sleep ?? defaultSleep;
 
   return async (input: CiStepInput): Promise<PrStepOutput> => {
-    const story = input.unit;
-    const unit = story.unit;
+    const ciUnit = input.unit;
+    const unit = ciUnit.unit;
     const kit = stepKit({
       name: "CI step",
       forge,
@@ -194,7 +220,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
           unit,
           headSha: head,
           mainSha: main,
-          message: `Merge main ${main} into the PR for Story ${story.story_id}`,
+          message: `Merge main ${main} into the PR for ${ciUnit.subject}`,
           statusPaths,
           ...(lockfiles !== undefined ? { lockfiles } : {}),
           signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
@@ -215,7 +241,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       if (!pushed.ok) return await failed(`pushBranch ${pushed.error.kind}: ${pushed.error.message}`);
       note(`pushed merge ${m.head_sha} to ${branch}`);
       await beat("record", { head_sha: m.head_sha, base_sha: main });
-      const body = mergeComment({ storyId: story.story_id, mainSha: main, headSha: m.head_sha, resolved: m.resolved });
+      const body = mergeComment({ subject: ciUnit.subject, mainSha: main, headSha: m.head_sha, resolved: m.resolved });
       const commented = await call("comment", (o) => forge.comment(pr, body, o));
       if (!commented.ok) {
         reasons.push(`merge comment on PR #${pr} failed: ${commented.error.kind}: ${commented.error.message}`);
@@ -271,10 +297,10 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       note(`${what} result: ${result.outcome}`);
       if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`);
       if (result.outcome === "no-op") return await parkBlocked("no-op", `${what}: no-op`);
-      if (specPath === null) return await failed(`${what} session: a done result with no spec file`);
+      if (ciUnit.needsSpec && specPath === null) return await failed(`${what} session: a done result with no spec file`);
       let out: PrStepOutput;
       try {
-        out = await input.prStep({ unit: story, record: kit.record, result, specPath, superseded, clone: input.clone, signal: input.signal, log: input.log, kind: "fix" });
+        out = await input.pushFix({ record: kit.record, result, specPath, superseded });
       } catch (e) {
         return await failed(`PR step threw: ${message(e)}`);
       }
@@ -331,7 +357,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
         }
         const config = loaded.value.repo.config;
         const expected = loaded.value.repo.policy.expected_checks;
-        const branch = `${config.branches.story}${story.story_id}`;
+        const branch = ciUnit.branch(config);
         const statusPaths = [config.sprint_status_path, config.retro_gates_path];
         note(`round on head ${head}, fresh main ${main}`);
 
@@ -373,7 +399,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
 
         if (next.kind === "conflict") {
           // 4. A conflict session.
-          await session(next.start, "conflict session", async () => conflictLogText({ mainSha: main, headSha: head, paths: next.paths, lockfiles: next.lockfiles }));
+          await session(next.start, "conflict session", async () => conflictLogText({ mainSha: main, headSha: head, paths: next.paths, lockfiles: next.lockfiles, subject: ciUnit.subject }));
           continue;
         }
 

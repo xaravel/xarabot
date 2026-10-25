@@ -31,13 +31,14 @@ import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Agent, AgentSettings } from "../ports/agent.ts";
 import type { CallOpts, Forge, ForgePr, ForgeSnapshot, QueueState } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
-import type { LaunchSpec, Sandbox, SandboxProfile } from "../ports/sandbox.ts";
-import type { CiSession, CiStep, Regenerate } from "./ci-step.ts";
+import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
+import type { CiSession, CiStep, CiUnit, PushFix, Regenerate } from "./ci-step.ts";
 import { wipRef } from "./clone.ts";
 import { startHeartbeat, type Heartbeat } from "./heartbeat.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
 import type { MergeStep } from "./merge-step.ts";
+import { createRegenerate } from "./regenerate.ts";
 import {
   Abandon,
   addReason,
@@ -55,6 +56,7 @@ import {
   newTrack,
   readRegular,
   readsPath,
+  storySubject,
   trackOps,
   type JournalEntry,
   type LaneProcessResult,
@@ -112,8 +114,9 @@ export { CI_FIX_LOG, readsPath, type LaneProcessResult, type PrStep, type PrStep
  * usage-limit sleep, the result-linger kill and the result parse), the forge
  * and ledger helpers and the unit track live in `session.ts` (Story 2.6a),
  * shared with the coordinator process and the steps. This module keeps the
- * claim loop, the takeovers, the builder prompt, the spec pick, the lockfile
- * regeneration and the PR, CI and merge sequence.
+ * claim loop, the takeovers, the builder prompt, the spec pick and the PR,
+ * CI and merge sequence; the lockfile regeneration is `regenerate.ts`'s,
+ * shared with the retro-item step (Story 2.10).
  */
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -458,41 +461,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return ok({ result: ran.result, specPath: ran.specPath, superseded: ran.superseded });
     };
 
-    /**
-     * The lockfile command under the agent's own launch spec, `argv` replaced,
-     * no stdin and no credential: a repo command the runner starts gets no
-     * vendor credential (AR19, A14).
-     */
-    const regenerate: Regenerate = async ({ start: at, paths, command }) => {
-      const setUpFailed = await runner.prepare(ctx, at);
-      if (setUpFailed !== null) return err("prepare", setUpFailed);
-      const spec = agent.launchSpec({ kind: "fresh", prompt: "Regenerate the lockfiles." }, settings, layout.resultPath);
-      if (!spec.ok) return err("launch-spec", spec.error.message);
-      const s = spec.value;
-      const launch: LaunchSpec = { argv: [...command], vendor: s.vendor, vendorHomeEnv: s.vendorHomeEnv, apiHosts: s.apiHosts };
-      note(`lockfile command starts: ${command.join(" ")}`);
-      const { run, timedOut } = await runner.sandboxed(ctx, launch);
-      if (!run.ok) return err("sandbox", `sandbox refused: ${run.error.message}`);
-      runner.logRun("lockfile command", run.value);
-      if (budget.aborted) return err("budget", overBudget());
-      if (timedOut) return err("session-limit", `the lockfile command ran past ${runner.limits.sessionMs / HOUR_MS} h`);
-      if (run.value.exitCode !== 0) return err("exit", `the lockfile command exited ${run.value.exitCode ?? `on ${run.value.signal ?? "a signal"}`}`);
-      const texts: Record<string, string> = {};
-      for (const path of paths) {
-        if (path === "" || path.startsWith("/") || path.split("/").some((p) => p === ".." || p === "." || p === "" || p === ".git")) {
-          return err("invalid", `lockfile path ${JSON.stringify(path)} is not a plain repo path`);
-        }
-        let text: string | null;
-        try {
-          text = readRegular(join(layout.clone, path));
-        } catch (e) {
-          return err("read", `cannot read ${path}: ${message(e)}`);
-        }
-        if (text === null) return err("read", `${path} is not a regular file after the lockfile command`);
-        texts[path] = text;
-      }
-      return ok(texts);
-    };
+    /** The lockfile command (`regenerate.ts`), at the merge candidate, under the unit's budget and keeper. */
+    const regenerate: Regenerate = createRegenerate({ runner, ctx, agent, settings, layout, note });
 
     /** Records a step's output; the budget rule's `failed` when it released the unit, else `null`. */
     const settle = async (out: PrStepOutput, what: string): Promise<LaneOutcome | null> => {
@@ -558,6 +528,15 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     const ciStep = deps.ciStep;
     const mergeStep = deps.mergeStep;
+    /** The Story as the CI and merge steps name it. */
+    const stepUnit = { unit: story.unit, subject: storySubject(story.story_id) };
+    const ciUnit: CiUnit = { ...stepUnit, branch: (c) => `${c.branches.story}${story.story_id}`, needsSpec: true };
+    /** A CI fix goes through the Story's PR step, its title and body kept. */
+    const pushFix: PushFix = async (fix) => {
+      // The CI step hands on a `done` fix only with its spec file (`needsSpec`).
+      if (fix.specPath === null) return { outcome: "failed", state: fix.record.state, record: fix.record, reason: "a done CI fix with no spec file" };
+      return deps.prStep({ unit: story, record: fix.record, result: fix.result, specPath: fix.specPath, superseded: fix.superseded, clone: layout.clone, signal: budget, log: note, kind: "fix" });
+    };
     /** The claimed record with a PR a step may take on, else `null`. */
     const claimedWithPr = (o: PrStepOutput): UnitRecord | null => {
       const r = t.record;
@@ -568,7 +547,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     const mergeRound = async (step: MergeStep, record: UnitRecord): Promise<{ readonly end: LaneOutcome } | { readonly next: PrStepOutput }> => {
       let merged: Awaited<ReturnType<MergeStep>>;
       try {
-        merged = await step({ unit: story, record, signal: budget, log: note });
+        merged = await step({ unit: stepUnit, record, signal: budget, log: note });
       } catch (e) {
         return { end: await failUnit(t, `merge step threw: ${message(e)}`) };
       }
@@ -601,13 +580,13 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       let ci: PrStepOutput;
       try {
         ci = await ciStep({
-          unit: story,
+          unit: ciUnit,
           record: withPr,
           clone: layout.clone,
           signal: budget,
           log: note,
           scratchDir: join(layout.laneDir, "scratch"),
-          prStep: deps.prStep,
+          pushFix,
           session: ciSession,
           regenerate,
         });

@@ -2,7 +2,6 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ATTEMPTS_CAP, ejected, heartbeat, markMerged, park, startMerging } from "../core/ledger/edits.ts";
-import type { NextStory } from "../core/next/next.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type Forge, type ForgeError, type ForgeSnapshot } from "../ports/forge.ts";
@@ -11,7 +10,7 @@ import type { DiffPaths } from "./diff-paths.ts";
 import { gateGraph } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
-import { message, readsPath, stepKit, type StepOutput } from "./session.ts";
+import { message, readsPath, stepKit, type StepOutput, type StepUnit } from "./session.ts";
 
 /**
  * The merge step after CI passes (FR6, FR13, FR22, AR7, AR8, AR20, AR21). It
@@ -30,11 +29,16 @@ import { message, readsPath, stepKit, type StepOutput } from "./session.ts";
  * of `merging` other than to `merged` fences and dequeues the PR first.
  * A record already `merging` (a stale takeover, Story 2.2) skips the gate,
  * the fence, `startMerging` and the enqueue, and is only watched.
+ * With `watch: false` (a coordinator unit, Story 2.10) the step ends
+ * `progress` once the PR is enqueued, `merging`, with no queue watch: a
+ * coordinator-held `merging` record has no heartbeat (AD-6), and later
+ * `reconcile` runs check its queue (Story 2.6).
  * There is no merge call: the merge queue does every merge. It never throws.
  */
 
 export type MergeStepInput = {
-  readonly unit: NextStory;
+  /** The unit, and the subject its comments name. */
+  readonly unit: StepUnit;
   /**
    * The claimed record whose PR's checks just passed, or the `merging` record
    * a stale takeover holds, with its `pr` and `head_sha` set.
@@ -44,6 +48,8 @@ export type MergeStepInput = {
   readonly signal: AbortSignal;
   /** Writes a note to the unit log. */
   readonly log: (text: string) => void;
+  /** Watch the queue until the PR merges or leaves it; default `true`. `false`: end once enqueued. */
+  readonly watch?: boolean;
 };
 
 /** `ejected`: the queue ejected the PR; the unit is `claimed` again for another CI round. */
@@ -75,11 +81,6 @@ export const ENQUEUE_TRIES = 3;
 /** Host time between heartbeats while the PR is queued. */
 export const QUEUE_HEARTBEAT_MS = 5 * 60_000;
 
-/** The 🤖 comment on a PR parked for its owner's approval. */
-export function approvalComment(p: { readonly storyId: string; readonly paths: readonly string[] }): string {
-  return gateComment(`Story ${p.storyId}`, p.paths);
-}
-
 /** The approval gate's 🤖 comment for `subject` (`Story <id>`, or a coordinator unit), capped at the comment limit. */
 export function gateComment(subject: string, gatedPaths: readonly string[]): string {
   const paths = gatedPaths.map((path) => sanitizeAgentText(path).replace(/\s+/g, " ")).join(", ");
@@ -101,8 +102,8 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
   const sleep = deps.sleep ?? defaultSleep;
 
   return async (input: MergeStepInput): Promise<MergeStepOutput> => {
-    const story = input.unit;
-    const unit = story.unit;
+    const subject = input.unit.subject;
+    const unit = input.unit.unit;
     const kit = stepKit({
       name: "merge step",
       forge,
@@ -186,7 +187,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
         );
         reasons.push(`awaiting the Maintainer's approval: the merge result changes the Epic graph to ${graph.delta.hash}${gated.length > 0 ? `; gated paths: ${gated.join(", ")}` : ""}`);
         note(`parked awaiting-approval for the Maintainer ${graph.maintainer}: the graph changes to ${graph.delta.hash}`);
-        const body = graphDeltaComment(`Story ${story.story_id}`, { delta: graph.delta, maintainer: graph.maintainer, gatedPaths: gated });
+        const body = graphDeltaComment(subject, { delta: graph.delta, maintainer: graph.maintainer, gatedPaths: gated });
         const commented = await call("comment", (o) => forge.comment(pr, body, o));
         if (!commented.ok) {
           reasons.push(`graph delta comment on PR #${pr} failed: ${describeError(commented.error)}`);
@@ -198,7 +199,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
         await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value }));
         reasons.push(`awaiting approval: ${gated.join(", ")}`);
         note(`parked awaiting-approval: ${gated.join(", ")}`);
-        const commented = await call("comment", (o) => forge.comment(pr, approvalComment({ storyId: story.story_id, paths: gated }), o));
+        const commented = await call("comment", (o) => forge.comment(pr, gateComment(subject, gated), o));
         if (!commented.ok) {
           reasons.push(`approval comment on PR #${pr} failed: ${describeError(commented.error)}`);
           note(`approval comment failed: ${describeError(commented.error)}`);
@@ -259,7 +260,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
           await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "graph-invalid" }));
           reasons.push(`graph-invalid: ${g.refusals.join("; ")}`);
           note(`parked blocked graph-invalid: ${g.refusals.join("; ")}`);
-          const commented = await call("comment", (o) => forge.comment(pr, graphRefusalComment(`Story ${story.story_id}`, g.refusals), o));
+          const commented = await call("comment", (o) => forge.comment(pr, graphRefusalComment(subject, g.refusals), o));
           if (!commented.ok) {
             reasons.push(`graph refusal comment on PR #${pr} failed: ${describeError(commented.error)}`);
             note(`graph refusal comment failed: ${describeError(commented.error)}`);
@@ -305,6 +306,12 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       } else {
         const graph = await graphGate(head, pr, main, snap);
         await gateAndEnqueue(head, pr, main, [...policy.owner_approval_paths, ...policy.effective_protected_paths], graph === null ? null : { delta: graph, maintainer: loaded.value.repo.config.maintainer });
+      }
+      if (input.watch === false) {
+        // No queue watch: later reconcile runs check it (Story 2.6).
+        reasons.push(kit.record.state === "merging" && input.record.state !== "merging" ? `PR #${pr} enqueued at ${head}` : `PR #${pr} is merging at ${head}`);
+        note("the queue is not watched");
+        throw end("progress", kit.record.state);
       }
 
       // 4. Watch the queue.

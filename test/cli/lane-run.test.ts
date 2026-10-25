@@ -361,7 +361,7 @@ describe("xarabot lane run: a coordinator lane", () => {
     return l.value.coordinator;
   };
 
-  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with the reconcile, planning and retro steps", async () => {
+  test("no coordinator.json: claimed at generation 1, failed-starts reset, the coordinator process starts with the reconcile, planning, retro and retro-item steps", async () => {
     const r = await laneRunWith({ host: COORD_HOST, failedStarts: 2 }, ARGS);
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
@@ -370,10 +370,11 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(r.coordinatorStarts).toHaveLength(1);
     const d = r.coordinatorStarts[0] as CoordinatorDeps;
     expect(d.identity).toEqual(IDENTITY);
-    expect(Object.keys(d.steps)).toEqual(["reconcile", "planning", "retro"]);
+    expect(Object.keys(d.steps)).toEqual(["reconcile", "planning", "retro", "retro-item"]);
     expect(typeof d.steps.reconcile).toBe("function");
     expect(typeof d.steps.planning).toBe("function");
     expect(typeof d.steps.retro).toBe("function");
+    expect(typeof d.steps["retro-item"]).toBe("function");
     expect(d.laneDir).toBe(r.laneDir);
     expect(d.claim).toMatchObject({ ...IDENTITY, generation: 1, heartbeat_at: "2026-10-23T10:00:00Z" });
     expect(await coordinatorOf(r)).toEqual(d.claim);

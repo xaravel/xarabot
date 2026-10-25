@@ -181,10 +181,10 @@ describe("prText and statusComment", () => {
 
   test("the comment names the Story, short head and lane, and lists denied actions or none", () => {
     const head = "0123456789abcdef0123456789abcdef01234567";
-    expect(statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: [] })).toBe(
+    expect(statusComment({ subject: "Story 1.1", headSha: head, lane: "builder-1", deniedActions: [] })).toBe(
       "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions: none.\n",
     );
-    expect(statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: ["git push", "@bob rm", "two\nlines"] })).toBe(
+    expect(statusComment({ subject: "Story 1.1", headSha: head, lane: "builder-1", deniedActions: ["git push", "@bob rm", "two\nlines"] })).toBe(
       "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions:\n- git push\n- bob rm\n- two lines\n",
     );
   });
@@ -199,12 +199,12 @@ describe("prText and statusComment", () => {
 
   test("the status comment redacts secrets and is capped at the comment limit", () => {
     const head = "0123456789abcdef0123456789abcdef01234567";
-    const c = statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: ["cat tok-12345", "z".repeat(70_000)], secrets: ["tok-12345"] });
+    const c = statusComment({ subject: "Story 1.1", headSha: head, lane: "builder-1", deniedActions: ["cat tok-12345", "z".repeat(70_000)], secrets: ["tok-12345"] });
     expect(c).toContain("- cat [REDACTED]");
     expect(c.length).toBeLessThanOrEqual(65_536);
     // A secret holding a newline or a double space is redacted before whitespace collapses.
     for (const secret of ["line-one\nline-two", "word  word-xyz"]) {
-      const d = statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions: [`echo ${secret} done`], secrets: [secret] });
+      const d = statusComment({ subject: "Story 1.1", headSha: head, lane: "builder-1", deniedActions: [`echo ${secret} done`], secrets: [secret] });
       expect(d).toContain("- echo [REDACTED] done");
       expect(d).not.toContain(secret.replace(/\s+/g, " "));
     }
@@ -213,7 +213,7 @@ describe("prText and statusComment", () => {
 
   test("line breaks collapse before sanitizing, and actions that sanitize to nothing are skipped", () => {
     const head = "0123456789abcdef0123456789abcdef01234567";
-    const comment = (deniedActions: string[]) => statusComment({ storyId: "1.1", headSha: head, lane: "builder-1", deniedActions });
+    const comment = (deniedActions: string[]) => statusComment({ subject: "Story 1.1", headSha: head, lane: "builder-1", deniedActions });
     expect(comment(["fixes\n#12", "closes\nowner/repo#3", "Co-Authored-By: X <x@y>"])).toBe(
       "🤖 Story 1.1: pushed 0123456 from lane builder-1.\n\nDenied actions: none.\n",
     );

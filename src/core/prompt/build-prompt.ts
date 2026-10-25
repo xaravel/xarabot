@@ -2,6 +2,7 @@ import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues } from "../schemas/common.ts";
 import { HumanLiveStepSchema, type HumanLiveStep } from "../schemas/human-live-steps.ts";
+import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
 import { BuildResultSchema, PlanningResultSchema, RetroResultSchema } from "../schemas/session-result.ts";
 import { STORY_ID_PATTERN } from "../story-id.ts";
 import { PLACEHOLDERS, type Placeholder, type PromptTemplate } from "./template.ts";
@@ -102,6 +103,9 @@ const TemplateSchema = z.strictObject({
   result_planning: z.string(),
   retro: z.string(),
   result_retro: z.string(),
+  retro_item: z.string(),
+  retro_item_ci_fix: z.string(),
+  result_retro_item: z.string(),
 });
 
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
@@ -399,4 +403,98 @@ export function buildRetroPrompt(input: BuildRetroPromptInput): Result<string, B
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_retro);
   return fill(parts, values, "a retro prompt");
+}
+
+// ------------------------------------------------------------ retro-item prompts
+
+/** A retro-item unit (Story 2.10): its id, and the item's id, Epic, action text and globs. */
+export type RetroItemPromptUnit = {
+  readonly kind: "retro-item";
+  /** `retro-item:<item id>`. */
+  readonly id: string;
+  readonly item: {
+    readonly id: string;
+    readonly epic: number;
+    readonly text: string;
+    readonly globs: readonly string[];
+  };
+};
+
+/** A retro-item session's mode: its first build, or a CI fix with the prefetched log's absolute path. */
+export type RetroItemPromptMode = { readonly mode: "build" } | { readonly mode: "ci-fix"; readonly log_path: string };
+
+export type BuildRetroItemPromptInput = {
+  readonly template: PromptTemplate;
+  readonly unit: RetroItemPromptUnit;
+  readonly mode: RetroItemPromptMode;
+  readonly sections: readonly PromptSection[];
+  readonly human_live_steps: readonly HumanLiveStep[];
+  readonly result_path: string;
+};
+
+const RetroItemInputSchema = z.strictObject({
+  unit: z
+    .strictObject({
+      kind: z.literal("retro-item"),
+      id: z.string(),
+      item: z.strictObject({
+        id: z.string().regex(RETRO_ITEM_ID_PATTERN, "must be epic-<N>-retro-item-<seq>-<slug>"),
+        epic: z.int().positive(),
+        text: z.string().regex(/\S/, "must not be blank"),
+        globs: z.array(SafeText).min(1, "a retro item unit needs at least one glob"),
+      }),
+    })
+    .refine((u) => u.id === `retro-item:${u.item.id}`, { message: "must be retro-item:<item id>", path: ["id"] })
+    .refine((u) => RETRO_ITEM_ID_PATTERN.exec(u.item.id)?.[1] === String(u.item.epic), { message: "must be an item of its Epic", path: ["item", "epic"] }),
+  mode: z.discriminatedUnion("mode", [z.strictObject({ mode: z.literal("build") }), z.strictObject({ mode: z.literal("ci-fix"), log_path: AbsolutePath })]),
+  sections: SectionsSchema,
+  human_live_steps: InputSchema.shape.human_live_steps,
+  result_path: AbsolutePath,
+});
+
+/**
+ * Builds a retro-item prompt (Story 2.10): the `retro_item` task (or
+ * `retro_item_ci_fix` with the CI log), which runs no skill and names the
+ * unit and the item (its id, Epic, action text on one line and globs), the
+ * rules, the Human Live Steps, the repo sections, and the `build` result
+ * step with its JSON Schema last. Pure; placeholders are filled in one pass,
+ * so an item text holding `{{x}}` is never re-expanded.
+ */
+export function buildRetroItemPrompt(input: BuildRetroItemPromptInput): Result<string, BuildPromptError> {
+  const template = checkTemplate(input.template);
+  if (!template.ok) return template;
+  const t = template.value;
+
+  const parsed = RetroItemInputSchema.safeParse({
+    unit: input.unit,
+    mode: input.mode,
+    sections: input.sections,
+    human_live_steps: input.human_live_steps,
+    result_path: input.result_path,
+  });
+  if (!parsed.success) return err("invalid-input", describeIssues(parsed.error));
+  const { unit, mode, sections, human_live_steps: steps, result_path } = parsed.data;
+  const dupSection = firstDuplicate(sections.map((s) => s.name));
+  if (dupSection !== undefined) return err("invalid-input", `sections: duplicate section "${dupSection}"`);
+  const dupStep = firstDuplicate(steps.map((s) => s.id));
+  if (dupStep !== undefined) return err("invalid-input", `human_live_steps: duplicate step id "${dupStep}"`);
+
+  const values: Partial<Record<Placeholder, string>> = {
+    retro_item_unit: unit.id,
+    retro_item_id: unit.item.id,
+    retro_item_epic: String(unit.item.epic),
+    retro_item_text: unit.item.text.replace(/\s+/g, " ").trim(),
+    retro_item_globs: unit.item.globs.map((g) => `\`${g}\``).join(", "),
+    result_path,
+    result_schema: BUILD_RESULT_JSON_SCHEMA,
+    steps: steps.map((s) => `- \`${s.id}\`: ${s.text.replace(/\s+/g, " ")}`).join("\n"),
+    sections: sectionsText(sections),
+  };
+  if (mode.mode === "ci-fix") values.log_path = mode.log_path;
+
+  const parts: string[] = [mode.mode === "build" ? t.retro_item : t.retro_item_ci_fix, t.rules];
+  if (steps.length > 0) parts.push(t.human_live_steps);
+  if (sections.length > 0) parts.push(t.repo_sections);
+  parts.push(t.result_retro_item);
+  return fill(parts, values, `a retro-item ${mode.mode} prompt`);
 }

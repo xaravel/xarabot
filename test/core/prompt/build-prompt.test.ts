@@ -4,8 +4,11 @@ import { z } from "zod";
 import {
   buildPlanningPrompt,
   buildPrompt,
+  buildRetroItemPrompt,
   buildRetroPrompt,
+  BUILD_RESULT_JSON_SCHEMA,
   RETRO_RESULT_JSON_SCHEMA,
+  type BuildRetroItemPromptInput,
   type BuildRetroPromptInput,
   type BuildPlanningPromptInput,
   type BuildPromptInput,
@@ -615,5 +618,120 @@ describe("retro prompt", () => {
     const e = retroFailure({ template: { ...PACKAGE_TEMPLATE, result_retro: undefined } as unknown as PromptTemplate });
     expect(e.kind).toBe("invalid-template");
     expect(e.message).toMatch(/template: result_retro/);
+  });
+});
+
+// ------------------------------------------------------------ retro-item prompts
+
+const ITEM_ID = "epic-2-retro-item-1-fix-x";
+const ITEM_UNIT = { kind: "retro-item", id: `retro-item:${ITEM_ID}`, item: { id: ITEM_ID, epic: 2, text: "Fix the  x\nhelper.", globs: ["src/x/**", "docs/x.md"] } } as const;
+
+function itemInput(patch: Partial<BuildRetroItemPromptInput> = {}): BuildRetroItemPromptInput {
+  return { template: PACKAGE_TEMPLATE, unit: ITEM_UNIT, mode: { mode: "build" }, sections: [], human_live_steps: [], result_path: RESULT, ...patch };
+}
+
+function item(patch: Partial<BuildRetroItemPromptInput> = {}): string {
+  const r = buildRetroItemPrompt(itemInput(patch));
+  if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+  return r.value;
+}
+
+function itemFailure(patch: Partial<BuildRetroItemPromptInput>): { kind: string; message: string } {
+  const r = buildRetroItemPrompt(itemInput(patch));
+  if (r.ok) throw new Error("expected an error");
+  return r.error;
+}
+
+const ITEM_PARTS: readonly string[] = ["retro_item", "retro_item_ci_fix", "result_retro_item"];
+
+describe("retro-item prompt (Story 2.10)", () => {
+  const steps = [{ id: "dns", text: "Point the DNS record at the host." }];
+  const sections = [{ name: "b.md", text: "B section." }, { name: "a.md", text: "A section." }];
+
+  test("runs no skill and names the unit and the item: id, Epic, action text on one line and globs", () => {
+    const p = item();
+    expect(p).toContain("Run no skill.");
+    expect(p).not.toMatch(/bmad-/);
+    expect(p).toContain(`\`${ITEM_ID}\``);
+    expect(p).toContain(`\`retro-item:${ITEM_ID}\``);
+    expect(p).toContain("Epic 2's retrospective");
+    expect(p).toContain("\n\nFix the x helper.\n\n");
+    expect(p).toContain("`src/x/**`, `docs/x.md`");
+  });
+  test("task, rules, Human Live Steps, sections, then the build result step with its JSON Schema last", () => {
+    const p = item({ human_live_steps: steps, sections });
+    const order = ["# Task", "# Rules", "# Human Live Steps", "`dns`: Point the DNS", "# Repository instructions", "A section.", "B section.", "# Result"].map((x) => p.indexOf(x));
+    expect(order.every((x) => x >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(p).toContain(BUILD_RESULT_JSON_SCHEMA);
+    expect(p).toContain("a `build` result");
+    expect(p).toContain(RESULT);
+    expect(p.trimEnd().endsWith("Write this file last, and do nothing after it.")).toBe(true);
+    expect(p).not.toMatch(/\{\{[^{}]*\}\}/);
+  });
+  test("no steps and no sections omit those parts", () => {
+    const p = item();
+    expect(p).not.toContain("# Human Live Steps");
+    expect(p).not.toContain("# Repository instructions");
+  });
+  test("the result step maps done, blocked (with a listed step id) and no-op", () => {
+    const p = resultSection(item({ human_live_steps: steps }));
+    for (const s of ["`outcome` `done`", "`outcome` `blocked`", "`outcome` `no-op`", "`intent-gap`", "`human-live-step`", "never one you make up"]) expect(p).toContain(s);
+  });
+  test("ci-fix mode: the CI log's absolute path, the item and its globs", () => {
+    const p = item({ mode: { mode: "ci-fix", log_path: LOG } });
+    expect(p).toContain("Repair the action item");
+    expect(p).toContain(`\`${LOG}\``);
+    expect(p).toContain("CI log");
+    expect(p).toContain("Fix the x helper.");
+    expect(p).toContain("`src/x/**`, `docs/x.md`");
+    expect(p).toContain(BUILD_RESULT_JSON_SCHEMA);
+  });
+  test("an item text holding a placeholder is not re-expanded", () => {
+    expect(item({ unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, text: "Keep {{log_path}} as it is." } } })).toContain("Keep {{log_path}} as it is.");
+  });
+  test("every retro-item part carries no banned instruction (CI log only)", () => {
+    for (const part of ITEM_PARTS) {
+      const text = PACKAGE_TEMPLATE[part as keyof PromptTemplate];
+      expect({ part, hits: BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
+    }
+    for (const mode of [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }] as const) {
+      for (const extra of [{}, { human_live_steps: steps, sections }]) {
+        expect(BANNED.filter((b) => b.pattern.test(item({ mode, ...extra }))).map((b) => b.what)).toEqual([]);
+      }
+    }
+  });
+  const cases: { name: string; patch: Partial<BuildRetroItemPromptInput>; field: RegExp }[] = [
+    { name: "a unit id not of the item", patch: { unit: { ...ITEM_UNIT, id: "retro-item:epic-2-retro-item-2-y" } }, field: /unit\.id: must be retro-item:<item id>/ },
+    { name: "an item id of the wrong shape", patch: { unit: { ...ITEM_UNIT, id: "retro-item:x", item: { ...ITEM_UNIT.item, id: "x" } } }, field: /unit\.item\.id/ },
+    { name: "an Epic not the item's", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, epic: 3 } } }, field: /unit\.item\.epic: must be an item of its Epic/ },
+    { name: "a blank text", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, text: " \n" } } }, field: /unit\.item\.text/ },
+    { name: "no globs", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, globs: [] } } }, field: /unit\.item\.globs/ },
+    { name: "a backtick in a glob", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, globs: ["src/`x`"] } } }, field: /unit\.item\.globs/ },
+    { name: "a relative log path", patch: { mode: { mode: "ci-fix", log_path: "ci.log" } }, field: /mode\.log_path/ },
+    { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
+    { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },
+    { name: "a duplicate step", patch: { human_live_steps: [...steps, ...steps] }, field: /duplicate step id/ },
+  ];
+  for (const c of cases) {
+    test(`invalid input: ${c.name}`, () => {
+      const e = itemFailure(c.patch);
+      expect(e.kind).toBe("invalid-input");
+      expect(e.message).toMatch(c.field);
+    });
+  }
+  test("a Story placeholder in a retro-item part has no value", () => {
+    const e = itemFailure({ template: { ...PACKAGE_TEMPLATE, retro_item: "x {{story_id}}" } });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/\{\{story_id\}\} has no value in a retro-item build prompt/);
+  });
+  test("log_path in build mode has no value", () => {
+    const e = itemFailure({ template: { ...PACKAGE_TEMPLATE, retro_item: "x {{log_path}}" } });
+    expect(e.message).toMatch(/\{\{log_path\}\} has no value in a retro-item build prompt/);
+  });
+  test("a missing retro-item part", () => {
+    const e = itemFailure({ template: { ...PACKAGE_TEMPLATE, result_retro_item: undefined } as unknown as PromptTemplate });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/template: result_retro_item/);
   });
 });

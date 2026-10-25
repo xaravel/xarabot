@@ -16,6 +16,8 @@ import {
   reconcileDue,
   retroCandidates,
   retroDue,
+  retroItemCandidates,
+  retroItemUnit,
   unitBranch,
   WAITING_ON_MAINTAINER,
   type CoordinatorUnitSpec,
@@ -712,5 +714,151 @@ describe("next(coordinator): retro (Story 2.9)", () => {
     const rec = retroRec({ state: "merged" });
     expect(doneOnMain(rec, snapshotOf(world({ ...DUE, records: [rec] })))).toBe(false);
     expect(doneOnMain(rec, snapshotOf(world({ ...DUE, records: [rec], retro: { 2: "rejected" } })))).toBe(true);
+  });
+});
+
+describe("next(coordinator): retro items (Story 2.10)", () => {
+  type ItemSpec = { readonly id: string; readonly route?: string; readonly status?: string; readonly globs?: readonly string[] };
+  /** `retro-gates.yaml` with Epic → items, each Epic's retro recorded. */
+  const gatesOf = (epics: Record<number, readonly ItemSpec[]>): string => {
+    const lines = ["schema_version: 1", "epics:"];
+    for (const [n, items] of Object.entries(epics)) {
+      lines.push(`  "${n}":`, "    retro:", "      verdict: accepted-with-open-items", `      unit: "retro:${n}"`, "      recorded_at: 2026-10-20T00:00:00Z", "    items:");
+      for (const i of items) {
+        lines.push(
+          `      - id: ${i.id}`,
+          `        text: Do ${i.id}`,
+          `        route: ${i.route ?? "lane"}`,
+          "        blocking: false",
+          `        globs: [${(i.globs ?? ["src/x/**"]).map((g) => JSON.stringify(g)).join(", ")}]`,
+          `        status: ${i.status ?? "open"}`,
+        );
+      }
+    }
+    return `${lines.join("\n")}\n`;
+  };
+  const X = "epic-2-retro-item-1-fix-x";
+  const Y = "epic-2-retro-item-2-fix-y";
+  const UNIT_X = `retro-item:${X}`;
+  const items = (epics: Record<number, readonly ItemSpec[]>): Partial<World> => ({ files: { [RETRO]: gatesOf(epics) } });
+  const DUE = items({ 2: [{ id: X }] });
+  const itemRec = (over: Partial<UnitRecord> = {}) => coord(UNIT_X, { globs: ["src/x/**"], ...over });
+  const pick = (w: Partial<World>) => pickC({ ...w, records: [RECENT, ...(w.records ?? [])] });
+  const codes = (o: NextOutcome) => (o.kind === "coordinator" || o.kind === "idle" ? o.reasons.map((r) => `${r.subject} ${r.code}`) : []);
+  const BLOCKED: NonNullable<UnitRecord["park"]> = { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] };
+
+  test.each([
+    ["due: an open lane item with globs", DUE, `unit ${UNIT_X}`],
+    ["no globs: never returned", items({ 2: [{ id: X, globs: [] }] }), "idle"],
+    ["a maintainer item: skipped", items({ 2: [{ id: X, route: "maintainer" }] }), "idle"],
+    ["a done item: skipped", items({ 2: [{ id: X, status: "done" }] }), "idle"],
+    ["an in-progress item: skipped", items({ 2: [{ id: X, status: "in-progress" }] }), "idle"],
+    ["a deferred item: skipped", items({ 2: [{ id: X, status: "deferred" }] }), "idle"],
+    ["a waiting item: skipped", items({ 2: [{ id: X, status: "waiting" }] }), "idle"],
+    ["items in file order", items({ 2: [{ id: Y }, { id: X }] }), `unit retro-item:${Y}`],
+    ["a skipped item passes to the next one", items({ 2: [{ id: X, status: "done" }, { id: Y }] }), `unit retro-item:${Y}`],
+    ["a no-glob item passes to the next one", items({ 2: [{ id: X, globs: [] }, { id: Y }] }), `unit retro-item:${Y}`],
+    ["Epics in ascending order", items({ 3: [{ id: "epic-3-retro-item-1-z" }], 2: [{ id: X }] }), `unit ${UNIT_X}`],
+    ["Epics in numeric order: 2 before 10", items({ 10: [{ id: "epic-10-retro-item-1-z" }], 2: [{ id: X }] }), `unit ${UNIT_X}`],
+    ["released, no PR: re-claimed", { ...DUE, records: [itemRec({ state: "released", generation: 2 })] }, `unit ${UNIT_X}`],
+    ["stale claimed, no PR: taken over", { ...DUE, records: [itemRec({ heartbeat_at: minutesBefore(30) })] }, `unit ${UNIT_X}`],
+    ["live claimed: holds", { ...DUE, records: [itemRec()] }, "idle"],
+    ["parked: holds", { ...DUE, records: [itemRec({ state: "parked", park: BLOCKED })] }, "idle"],
+    ["merged, waiting for reconcile: holds", { ...DUE, records: [itemRec({ state: "merged" })] }, "idle"],
+    ["merging: holds", { ...DUE, records: [itemRec({ state: "merging", pr: 9, passed_sha: HEAD })] }, "idle"],
+    ["a held item passes to the next one", { ...items({ 2: [{ id: X }, { id: Y, globs: ["src/y/**"] }] }), records: [itemRec()] }, `unit retro-item:${Y}`],
+  ] as const)("%s → %s", (_name, w, want) => {
+    expect(picked(pick(w as Partial<World>))).toBe(want);
+  });
+
+  test("the unit: its globs, its branch, a new claim, and why", () => {
+    const o = pick(DUE);
+    expect(o.kind === "coordinator" ? o.unit : null).toEqual({
+      unit: UNIT_X,
+      kind: "retro-item",
+      globs: ["src/x/**"],
+      expect_generation: null,
+      take_over: null,
+      pr: null,
+      why: `${UNIT_X} is due: Epic 2's retro item is open and routed to a lane`,
+    });
+    expect(coordinatorGlobs({ kind: "retro-item", globs: ["src/x/**"] }, CONFIG_DEFAULTS)).toEqual(["src/x/**"]);
+    expect(unitBranch(CONFIG_DEFAULTS.branches.xarabot, UNIT_X)).toBe(`xarabot/retro-item-${X}`);
+  });
+
+  test("released: re-claimed at its generation; stale claimed: taken over at its generation", () => {
+    const released = pick({ ...DUE, records: [itemRec({ state: "released", generation: 2 })] });
+    expect(released.kind === "coordinator" ? [released.unit.expect_generation, released.unit.take_over] : null).toEqual([2, null]);
+    const stale = pick({ ...DUE, records: [itemRec({ heartbeat_at: minutesBefore(30), generation: 3 })] });
+    expect(stale.kind === "coordinator" ? [stale.unit.expect_generation, stale.unit.take_over] : null).toEqual([3, "claimed"]);
+  });
+
+  test("a released record with its PR open is the open-PR position's (adopted)", () => {
+    const o = pick({ ...DUE, records: [itemRec({ state: "released", pr: 9 })], prs: { [UNIT_X]: open(9) } });
+    expect(o.kind === "coordinator" ? [o.unit.unit, o.unit.kind, o.unit.pr, o.unit.why] : null).toEqual([UNIT_X, "retro-item", 9, `${UNIT_X} is released with PR #9 open`]);
+  });
+
+  test("a released record with its PR open whose globs overlap a held glob: not adopted, an overlap reason, later positions wait", () => {
+    const held = storyRec("2.1", { globs: ["src/**"] });
+    const o = pick({ ...DUE, records: [held, itemRec({ state: "released", pr: 9 })], prs: { [UNIT_X]: open(9) } });
+    expect(picked(o)).toBe("idle");
+    expect(codes(o)).toContain(`${UNIT_X} overlap`);
+    expect(reasonOf(o)).toContain("waiting on an open coordinator PR");
+    expect(reasonOf(o)).toContain(`${UNIT_X} with PR #9 open glob "src/x/**" overlaps "src/**" held by story:2.1`);
+  });
+
+  test("a stale claimed record with its PR open whose globs overlap a held glob: not taken over", () => {
+    const held = storyRec("2.1", { globs: ["src/**"] });
+    const o = pick({ ...DUE, records: [held, itemRec({ heartbeat_at: minutesBefore(30), pr: 9 })], prs: { [UNIT_X]: open(9) } });
+    expect(picked(o)).toBe("idle");
+    expect(codes(o)).toContain(`${UNIT_X} overlap`);
+  });
+
+  test("no globs: an unclaimable reason naming the item", () => {
+    const o = pick(items({ 2: [{ id: X, globs: [] }] }));
+    expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", `${UNIT_X} unclaimable`]);
+    expect(reasonOf(o)).toContain(`${UNIT_X} is unclaimable: the item has no globs`);
+  });
+
+  test("a maintainer or done item gets no reason", () => {
+    expect(codes(pick(items({ 2: [{ id: X, route: "maintainer" }, { id: Y, status: "done" }] })))).toEqual(["reconcile:4 reconcile-not-due"]);
+  });
+
+  test("a held record is a record-state reason", () => {
+    const o = pick({ ...DUE, records: [itemRec({ state: "parked", park: BLOCKED })] });
+    expect(codes(o)).toContain(`${UNIT_X} record-state`);
+    expect(reasonOf(o)).toContain(`${UNIT_X} is due but its record is parked blocked verification`);
+  });
+
+  test("an overlap with any held glob passes the item over", () => {
+    const held = storyRec("2.1", { globs: ["src/**"] });
+    const o = pick({ ...DUE, records: [held] });
+    expect(picked(o)).toBe("idle");
+    expect(codes(o)).toContain(`${UNIT_X} overlap`);
+    expect(reasonOf(o)).toContain(`glob "src/x/**" overlaps "src/**" held by story:2.1`);
+  });
+
+  test("retro goes first: a due retro before a due item", () => {
+    const w = { ...items({ 2: [{ id: X }] }), epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { "epic-2": "backlog", "2.1": "done", "epic-3": "backlog", "3.1": "done" }, evidence: [3] };
+    expect(picked(pick(w))).toBe("unit retro:3");
+  });
+
+  test("planning goes first: a missing status key before a due item", () => {
+    expect(picked(pick({ ...DUE, status: { "2.1": "backlog" } }))).toBe("unit planning:status.1");
+  });
+
+  test("retroItemCandidates: open lane items, Epics ascending, file order, globs or not", () => {
+    const s = snapshotOf(world(items({ 3: [{ id: "epic-3-retro-item-1-z", globs: [] }], 2: [{ id: Y }, { id: X, route: "maintainer" }, { id: "epic-2-retro-item-3-w", status: "done" }] })));
+    expect(retroItemCandidates(s).map((c) => [c.epic, c.item.id])).toEqual([
+      [2, Y],
+      [3, "epic-3-retro-item-1-z"],
+    ]);
+    expect(retroItemUnit(X)).toBe(UNIT_X);
+  });
+
+  test("retro-item:<id> is done on main once its item is done", () => {
+    const rec = itemRec({ state: "merged" });
+    expect(doneOnMain(rec, snapshotOf(world({ ...DUE, records: [rec] })))).toBe(false);
+    expect(doneOnMain(rec, snapshotOf(world({ ...items({ 2: [{ id: X, status: "done" }] }), records: [rec] })))).toBe(true);
   });
 });
