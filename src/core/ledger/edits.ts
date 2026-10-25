@@ -193,6 +193,16 @@ function blocked(ctx: Ctx, reason: Park["reason"]): Park {
   return { kind: "blocked", reason, inbox_owner: ctx.by.owner, globs_held: [] };
 }
 
+/**
+ * A retro's result as `rec` keeps it at `pr` and `head` (Story 2.9): it is
+ * bound to the PR and the head it was validated at, so a move of either
+ * drops it, and the retro step re-checks the moved head against the result
+ * before recording it again.
+ */
+function boundRetroResult(rec: UnitRecord, pr: number | null, head: string | null): UnitRecord["retro_result"] {
+  return rec.pr === pr && rec.head_sha === head ? rec.retro_result : null;
+}
+
 /** The globs a record holds against other claims. */
 export function heldGlobs(rec: UnitRecord): readonly string[] {
   if (rec.state === "claimed" || rec.state === "merging") return rec.globs;
@@ -314,8 +324,8 @@ export function claim(p: ClaimParams): LedgerEdit {
         passed_sha: null,
         approved_sha: null,
         approved_graph: null,
-        // A retro's result belongs to its PR: kept only when the claim adopts the PR (Story 2.9).
-        retro_result: adopted === null ? null : rec.retro_result,
+        // A retro's result belongs to its PR: kept only when the claim adopts the PR at the head it was validated at (Story 2.9).
+        retro_result: adopted === null ? null : boundRetroResult(rec, adopted.value.pr, adopted.value.head_sha),
       }),
     );
   });
@@ -365,7 +375,11 @@ export type HeartbeatSet = z.infer<typeof HeartbeatSetSchema>;
 
 export type HeartbeatParams = HeldParams & { readonly set?: HeartbeatSet };
 
-/** `claimed → claimed` and `merging → merging`, optionally recording PR and SHA progress. */
+/**
+ * `claimed → claimed` and `merging → merging`, optionally recording PR and
+ * SHA progress. A set that moves `pr` or `head_sha` with no `retro_result`
+ * drops the record's (Story 2.9).
+ */
 export function heartbeat(p: HeartbeatParams): LedgerEdit {
   return makeEdit("heartbeat", p, (ctx) => {
     const set = check("heartbeat set", HeartbeatSetSchema, p.set ?? {});
@@ -375,6 +389,10 @@ export function heartbeat(p: HeartbeatParams): LedgerEdit {
     const changes: Partial<UnitRecord> = {};
     for (const [key, value] of Object.entries(set.value)) {
       if (value !== undefined) (changes as Record<string, unknown>)[key] = value;
+    }
+    // A retro's result is bound to its PR and head: a set that moves either without recording a result drops it.
+    if (set.value.retro_result === undefined) {
+      changes.retro_result = boundRetroResult(rec.value, changes.pr === undefined ? rec.value.pr : changes.pr, changes.head_sha === undefined ? rec.value.head_sha : changes.head_sha);
     }
     return to(rec.value.state, stamp(ctx, rec.value, changes));
   });
@@ -451,6 +469,7 @@ export type TakeOverStaleParams = EditBase & {
  * `merging → merging`. A `claimed` takeover is a claim of the record: its
  * globs re-checked for overlap, the claim's PR fields, the review SHAs
  * cleared. A `merging` takeover keeps the PR, SHAs and globs, `head_sha` aside.
+ * Either keeps a retro's result only at the PR and head it was validated at.
  */
 export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
   return makeEdit("takeOverStale", p, (ctx) => {
@@ -474,7 +493,7 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
       if (globs !== null || baseSha !== null) return pre(`${ctx.unit} is merging: a merging takeover keeps its globs and base_sha`);
       if (adopted === null) return to("merging", stamp(ctx, r, { generation }));
       if (adopted.value.pr !== r.pr) return pre(`${ctx.unit} is merging PR #${r.pr ?? "none"}, not #${adopted.value.pr}`);
-      return to("merging", stamp(ctx, r, { generation, head_sha: adopted.value.head_sha }));
+      return to("merging", stamp(ctx, r, { generation, head_sha: adopted.value.head_sha, retro_result: boundRetroResult(r, r.pr, adopted.value.head_sha) }));
     }
     const held = globs?.value ?? [...r.globs];
     for (const [id, other] of ctx.ledger.units) {
@@ -495,7 +514,7 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
       passed_sha: null,
       approved_sha: null,
       approved_graph: null,
-      retro_result: adopted === null ? null : r.retro_result,
+      retro_result: adopted === null ? null : boundRetroResult(r, adopted.value.pr, adopted.value.head_sha),
     };
     const attempts = r.attempts + 1;
     if (attempts >= ATTEMPTS_CAP) {

@@ -116,12 +116,14 @@ export type ReconcilePlan = {
   readonly retroGatesPath: string;
   /**
    * The verdicts and items of `retro:<N>` records `merged` as of this run,
-   * with a `retro_result`, whose Epic has no `retro` entry on `main`; then
+   * with a `retro_result` and their PR merged at the record's `head_sha`
+   * (the head the result was validated at), whose Epic has no `retro` entry
+   * on `main`; then
    * `status: done` for the item of each `retro-item:<id>` record `merged` as
    * of this run whose item is listed on `main` and not `done`.
    */
   readonly retroGates: RetroGatesPlan;
-  /** `merged` `retro:<N>` records with no `retro_result`: logged and skipped. */
+  /** `merged` `retro:<N>` records with no `retro_result`, or whose PR the snapshot does not show merged at the record's `head_sha`: logged and skipped. */
   readonly retroWithoutResult: readonly string[];
   /** `merged` `retro-item:<id>` records whose item `retro-gates.yaml` does not list: logged and skipped. */
   readonly retroItemsMissing: readonly string[];
@@ -188,7 +190,12 @@ function statusChanges(effective: Snapshot, unit: string): { readonly changes: S
   return { changes: { set: sets, add: additions }, summary };
 }
 
-/** The retro results to record: each `merged` `retro:<N>` record of `effective` with a result and no `retro` entry on `main`. */
+/**
+ * The retro results to record: each `merged` `retro:<N>` record of
+ * `effective` with no `retro` entry on `main` whose result is bound to the
+ * merged head: the snapshot shows its PR merged at the record's `head_sha`,
+ * the head the result was validated at. Any other is `without`.
+ */
 function retroAdditions(effective: Snapshot, unit: string): { readonly additions: RetroGatesAddition[]; readonly without: string[] } {
   const additions: RetroGatesAddition[] = [];
   const without: string[] = [];
@@ -198,7 +205,9 @@ function retroAdditions(effective: Snapshot, unit: string): { readonly additions
     if (m === null) continue;
     const epic = m[1] as string;
     if (effective.retro_gates.epics[epic]?.retro !== undefined) continue;
-    if (r.retro_result === null) {
+    const pr = effective.prs[r.unit];
+    const bound = pr?.state === "merged" && pr.number === r.pr && pr.head_sha === r.head_sha;
+    if (r.retro_result === null || !bound) {
       without.push(r.unit);
       continue;
     }

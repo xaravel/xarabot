@@ -770,6 +770,8 @@ describe("retro_result (Story 2.9)", () => {
   const RP = "units/retro__2.json";
   const RESULT = { verdict: "accepted-with-open-items" as const, items: [{ id: "epic-2-retro-item-1-fix", text: "Fix it", route: "lane" as const, blocking: true, globs: ["src/x/**"] }] };
   const adopt = { pr: 9, pr_owner: "carol", head_sha: SHA_A, base_sha: SHA_B };
+  /** The PR adopted at a head that moved past the one its result was validated at. */
+  const moved = { ...adopt, head_sha: SHA_D };
   const retro = (over: Partial<UnitRecord> = {}) => by(COORD, T0, { unit: R, globs: ["src/r/**"], retro_result: RESULT, pr: 9, pr_owner: "carol", head_sha: SHA_A, ...over });
   const written = (r: ReturnType<LedgerEdit>): UnitRecord => {
     if (!r.ok || r.value === null) throw new Error(r.ok ? "no write" : r.error.message);
@@ -792,6 +794,36 @@ describe("retro_result (Story 2.9)", () => {
     ["claim from released with no PR clears it", () => claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: 1, baseSha: SHA_B }), retro({ state: "released" }), null],
     ["a claimed takeover adopting the PR keeps it", () => takeOverStale({ unit: R, by: COORD_2, now: LATE, generation: 1, adoptPr: adopt }), retro(), RESULT],
     ["a claimed takeover with no PR clears it", () => takeOverStale({ unit: R, by: COORD_2, now: LATE, generation: 1, baseSha: SHA_B }), retro(), null],
+    ["claim from released adopting the PR at a moved head clears it (C1)", () => claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: 1, adoptPr: moved }), retro({ state: "released" }), null],
+    [
+      "claim from released adopting another PR at the same head clears it",
+      () => claim({ unit: R, by: COORD, now: NOW, globs: ["src/r/**"], expectGeneration: 1, adoptPr: { ...adopt, pr: 10 } }),
+      retro({ state: "released" }),
+      null,
+    ],
+    ["a claimed takeover adopting the PR at a moved head clears it (C1)", () => takeOverStale({ unit: R, by: COORD_2, now: LATE, generation: 1, adoptPr: moved }), retro(), null],
+    [
+      "a merging takeover at a moved queue head clears it",
+      () => takeOverStale({ unit: R, by: BOB, now: LATE, generation: 1, stillQueued: true, adoptPr: moved }),
+      retro({ ...BOB, state: "merging", passed_sha: SHA_A }),
+      null,
+    ],
+    [
+      "a merging takeover at the same queue head keeps it",
+      () => takeOverStale({ unit: R, by: BOB, now: LATE, generation: 1, stillQueued: true, adoptPr: adopt }),
+      retro({ ...BOB, state: "merging", passed_sha: SHA_A }),
+      RESULT,
+    ],
+    ["a heartbeat that keeps the PR and head keeps it", () => heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { passed_sha: SHA_A } }), retro(), RESULT],
+    ["a heartbeat re-recording the same head keeps it", () => heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { head_sha: SHA_A } }), retro(), RESULT],
+    ["a heartbeat moving the head with no result clears it", () => heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { head_sha: SHA_D } }), retro(), null],
+    ["a heartbeat moving the PR with no result clears it", () => heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { pr: 10 } }), retro(), null],
+    [
+      "a heartbeat moving the head with its re-checked result records it",
+      () => heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { head_sha: SHA_D, retro_result: RESULT } }),
+      retro(),
+      RESULT,
+    ],
     [
       "applyRuling release keeps it (the next claim adopts the PR)",
       () => applyRuling({ unit: R, by: COORD, now: NOW, generation: 1, ruling: "release" }),

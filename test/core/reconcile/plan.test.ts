@@ -373,8 +373,10 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     ],
   };
   const retroRec = (over: Partial<UnitRecord> = {}) => coord("retro:2", { state: "merging", pr: 9, head_sha: HEAD, passed_sha: HEAD, retro_result: RESULT, ...over });
+  /** The forge reports every record's PR: retro:2's merged at the record's head unless `w.prs` says otherwise (`undefined`: none). */
   const planWith = (w: Partial<World>) => {
-    const full = world(w);
+    const prs = Object.entries({ "retro:2": merged(9), ...w.prs }).filter(([, pr]) => pr !== undefined);
+    const full = world({ ...w, prs: Object.fromEntries(prs) });
     const files = input(full).files;
     const text = (p: string) => (Object.hasOwn(files, p) ? (files[p] as string) : null);
     return planReconcile(snapshotOf(full), U, text(STATUS), text(RETRO));
@@ -439,8 +441,21 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     expect(p.retroWithoutResult).toEqual(["retro:2"]);
   });
 
+  const MOVED = "f".repeat(40);
+  test.each([
+    ["its PR merged this run at a head that moved past the validated one", { state: "merging" }, { number: 9, state: "merged", head_sha: MOVED }],
+    ["merged on the ledger, its PR merged at a head that moved past the validated one", { state: "merged" }, { number: 9, state: "merged", head_sha: MOVED }],
+    ["merged on the ledger, the forge reporting no PR", { state: "merged" }, undefined],
+    ["merged on the ledger, the snapshot's PR another one", { state: "merged" }, { number: 10, state: "merged", head_sha: HEAD }],
+  ] as const)("the result is not bound to the merged head: %s; nothing written, listed and skipped (C1)", (_name, over, pr) => {
+    const p = planWith({ records: [retroRec(over)], prs: { "retro:2": pr as PrState } });
+    expect(p.retroGates).toEqual({ kind: "none" });
+    expect(p.retroWithoutResult).toEqual(["retro:2"]);
+    expect(p.deleteMerged).not.toContain("retro:2");
+  });
+
   test("an invalid retro-gates.yaml text: the plan is invalid", () => {
-    const full = world({ records: [retroRec({ state: "merged" })] });
+    const full = world({ records: [retroRec({ state: "merged" })], prs: { "retro:2": merged(9) } });
     const files = input(full).files;
     const p = planReconcile(snapshotOf(full), U, files[STATUS] as string, "schema_version: 1\nepics: [\n");
     expect(p.retroGates.kind).toBe("invalid");
@@ -543,8 +558,8 @@ describe("planReconcile: retro items done (Story 2.10)", () => {
   });
 
   test("in the same rewrite as a merged retro's additions", () => {
-    const retro3 = coord("retro:3", { state: "merged", retro_result: { verdict: "accepted", items: [{ id: "epic-3-retro-item-1-z", text: "Z", route: "lane", blocking: false, globs: ["src/z/**"] }] } });
-    const p = planWith({ epics: { 1: [], 2: ["1", "2"], 3: ["1"] }, files: { [RETRO]: gatesWith("open") }, records: [itemRec({ state: "merged" }), retro3] });
+    const retro3 = coord("retro:3", { state: "merged", pr: 10, head_sha: HEAD, retro_result: { verdict: "accepted", items: [{ id: "epic-3-retro-item-1-z", text: "Z", route: "lane", blocking: false, globs: ["src/z/**"] }] } });
+    const p = planWith({ epics: { 1: [], 2: ["1", "2"], 3: ["1"] }, files: { [RETRO]: gatesWith("open") }, records: [itemRec({ state: "merged" }), retro3], prs: { "retro:3": merged(10) } });
     if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
     expect(p.retroGates.summary).toEqual(["epics.3.retro: accepted (retro:3)", "epics.3.items: epic-3-retro-item-1-z added as open", `epics.2.items: ${X} open -> done`]);
     expect(statusOf(p)).toBe("done");
