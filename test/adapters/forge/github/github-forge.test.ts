@@ -339,6 +339,7 @@ describe("every operation", () => {
       updatePr: () => f.updatePr(1, { title: "t" }, o),
       closePr: () => f.closePr(1, o),
       listPrsByBranch: () => f.listPrsByBranch("story/9.9", o),
+      reviews: () => f.reviews(1, o),
       comment: () => f.comment(1, "b", o),
       checks: () => f.checks(sha, o),
       enqueue: () => f.enqueue(1, sha, o),

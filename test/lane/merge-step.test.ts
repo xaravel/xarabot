@@ -197,11 +197,11 @@ function dequeueBefore(events: readonly string[], edit: string): void {
 // -------------------------------------------------------------- texts
 
 describe("approvalComment", () => {
-  test("starts with 🤖, names the gated paths and the Maintainer's hand-queue", () => {
+  test("starts with 🤖, names the gated paths and says a coordinator lane running Story 2.6 queues it once the owner approves the current head", () => {
     const text = approvalComment({ storyId: "1.1", paths: ["src/a.ts", ".github/x.yml"] });
     expect(text.startsWith("🤖 Story 1.1:")).toBe(true);
     expect(text).toContain("src/a.ts, .github/x.yml");
-    expect(text).toContain("The Maintainer approves it and queues it by hand.");
+    expect(text).toContain("It is parked awaiting approval and was not queued. Once the owner approves the PR's current head, a coordinator lane running Story 2.6 adds it to the merge queue.");
   });
 
   test("sanitizes mentions and closing keywords out of path names", () => {

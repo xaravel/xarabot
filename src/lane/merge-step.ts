@@ -14,7 +14,8 @@ import { defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
  * The merge step after CI passes (FR6, FR13, FR22, AR7, AR8, AR20, AR21). It
  * re-checks the config and Standing Authority on fresh `main`, then reads the
  * PR's changed paths. A PR touching an owner-approval or protected path parks
- * `awaiting-approval` for the Maintainer, who approves and queues it by hand.
+ * `awaiting-approval` for its owner; once the owner approves its current head,
+ * the coordinator's `reconcile` queues it (Story 2.6).
  * Any other PR is fenced, written `merging`, enqueued at its head and watched
  * until it merges, is ejected (back to `claimed`, for the CI step to run
  * again) or fails. Every enqueue retry is fenced again, and every move out
@@ -76,7 +77,7 @@ export function gateComment(subject: string, gatedPaths: readonly string[]): str
   const paths = gatedPaths.map((path) => sanitizeAgentText(path).replace(/\s+/g, " ")).join(", ");
   return capText(
     `🤖 ${sanitizeAgentText(subject)}: this PR changes paths that need the owner's approval: ${paths}.\n\n` +
-      "It is parked awaiting approval and was not queued. The Maintainer approves it and queues it by hand.\n",
+      "It is parked awaiting approval and was not queued. Once the owner approves the PR's current head, a coordinator lane running Story 2.6 adds it to the merge queue.\n",
     FORGE_TEXT_LIMITS.comment,
   );
 }

@@ -516,7 +516,13 @@ export type ParkParams = HeldParams & {
   readonly inboxOwner?: string;
 };
 
-/** `claimed → parked` and, for an approval-gated ejection, `merging → parked`. */
+/**
+ * `claimed → parked` and, for an approval-gated ejection, `merging → parked`.
+ * The record must be held by the writer at `generation`, except a `merging`
+ * record held by a coordinator lane: any coordinator-lane writer may park it
+ * at its `generation` (as `releaseReconcile` releases one), so a coordinator
+ * that moved hosts leaves nothing stuck (AD-6).
+ */
 export function park(p: ParkParams): LedgerEdit {
   return makeEdit("park", p, (ctx) => {
     const reason = check("park reason", ParkReason.nullable(), p.reason ?? null);
@@ -538,7 +544,7 @@ export function park(p: ParkParams): LedgerEdit {
     });
     if (!parkValue.ok) return parkValue;
     if (reason.value === "unclaimable") return bad("park: unclaimable is not a reason for parking a claimed unit");
-    const rec = requireHeld(ctx, p.generation, ["claimed", "merging"]);
+    const rec = coordinatorMerging(ctx) ? requireCoordinatorMerging(ctx, p.generation) : requireHeld(ctx, p.generation, ["claimed", "merging"]);
     if (!rec.ok) return rec;
     if (rec.value.state === "merging") {
       if (p.kind !== "awaiting-approval") return pre(`${ctx.unit} is merging; only awaiting-approval parks it`);
@@ -546,6 +552,22 @@ export function park(p: ParkParams): LedgerEdit {
     }
     return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value }));
   });
+}
+
+/** The record is `merging` under a coordinator lane, and the writer is a coordinator lane. */
+function coordinatorMerging(ctx: Ctx): boolean {
+  return ctx.by.lane === "coordinator" && ctx.current?.state === "merging" && ctx.current.lane === "coordinator";
+}
+
+/** A coordinator-held `merging` record at `generation`, whatever coordinator holds it. */
+function requireCoordinatorMerging(ctx: Ctx, generation: number): Step<UnitRecord> {
+  const rec = requireRecord(ctx);
+  if (!rec.ok) return rec;
+  const s = requireState(rec.value, ["merging"]);
+  if (!s.ok) return s;
+  const g = requireGeneration(rec.value, generation);
+  if (!g.ok) return g;
+  return rec;
 }
 
 // ---------------------------------------------------------------- failAttempt / release

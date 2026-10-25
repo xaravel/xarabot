@@ -16,6 +16,7 @@ import {
   type ForgeOperation,
   type ForgePr,
   type ForgeResult,
+  type ForgeReview,
   type GitSha,
 } from "../../src/ports/forge.ts";
 import { rec } from "../core/ledger/fixtures.ts";
@@ -42,6 +43,8 @@ export type ForgeContractControls = {
   /** Later pushes to `branch` are refused, as a repository rule refuses them. */
   refusePushes(branch: string): MaybePromise<void>;
   mergeQueueHead(): MaybePromise<ForgePr | null>;
+  /** Appends a review to an existing PR, as its author submitting it would. */
+  addReview(pr: number, review: ForgeReview): MaybePromise<void>;
   comments(pr: number): MaybePromise<string[]>;
   queue(): MaybePromise<number[]>;
   trace(): MaybePromise<string[]>;
@@ -289,6 +292,7 @@ export function forgeContract(harness: ForgeHarness): void {
         updatePr: () => f.updatePr(1, { title: "t" }, aborted()),
         closePr: () => f.closePr(1, aborted()),
         listPrsByBranch: () => f.listPrsByBranch("story/9.9", aborted()),
+        reviews: () => f.reviews(1, aborted()),
         comment: () => f.comment(1, "b", aborted()),
         checks: () => f.checks(sha, aborted()),
         enqueue: () => f.enqueue(1, sha, aborted()),
@@ -454,6 +458,33 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(kind(await fx.forge.closePr(pr.number, live()))).toBe("conflict");
       const [listed] = value(await fx.forge.listPrsByBranch("story/3.6", live()));
       expect(listed?.state).toBe("merged");
+      },
+    );
+
+    // ------------------------------------------------------------ reviews
+
+    scenario("reviews of a PR with none is empty; a missing PR is not-found", [...OPEN_PR, "reviews"], ["makeCommit"], async (fx) => {
+      const pr = await openOn(fx, "story/3.7");
+      expect(value(await fx.forge.reviews(pr.number, live()))).toEqual([]);
+      expect(kind(await fx.forge.reviews(MISSING_PR, live()))).toBe("not-found");
+    });
+
+    scenario(
+      "reviews returns each review's author, state, commit SHA and submitted time, in order",
+      [...OPEN_PR, "reviews"],
+      ["makeCommit", "addReview"],
+      async (fx) => {
+        const pr = await openOn(fx, "story/3.8");
+        const old = await need(fx, "makeCommit")();
+        const list: ForgeReview[] = [
+          { author: "alice", state: "changes_requested", commit_sha: old, submitted_at: "2026-10-24T10:00:00Z" },
+          { author: "bob", state: "commented", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:05:00Z" },
+          { author: "alice", state: "approved", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:10:00Z" },
+          { author: "carol", state: "dismissed", commit_sha: pr.head_sha, submitted_at: "2026-10-24T10:15:00Z" },
+          { author: "dave", state: "pending", commit_sha: pr.head_sha, submitted_at: null },
+        ];
+        for (const r of list) await need(fx, "addReview")(pr.number, r);
+        expect(value(await fx.forge.reviews(pr.number, live()))).toEqual(list);
       },
     );
 

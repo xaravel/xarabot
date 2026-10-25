@@ -50,6 +50,9 @@ const needs: Park = { kind: "needs-approval", reason: null, inbox_owner: "alice"
 type Expect = UnitRecord | "null" | "deleted" | "stop" | "invalid" | "precondition" | "illegal-transition";
 type Case = readonly [name: string, edit: LedgerEdit, records: readonly UnitRecord[], expected: Expect, editName?: string];
 
+/** A second coordinator identity on another host. */
+const COORD_2: LaneIdentity = { owner: "dave", host: "44444444-4444-4444-8444-444444444444", lane: "coordinator" };
+
 const base = { unit: U, by: ALICE, now: NOW };
 const held = { ...base, generation: 1 };
 
@@ -230,6 +233,24 @@ const CASES: readonly Case[] = [
   ["park merging awaiting-approval", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [rec({ state: "merging", approved_sha: SHA_A })], by(ALICE, NOW, { state: "parked", park: awaiting(["src/a.ts"]) })],
   ["park merging blocked", park({ ...held, kind: "blocked", reason: "other" }), [rec({ state: "merging" })], "precondition"],
   ["park by another holder", park({ ...held, by: BOB, kind: "needs-approval" }), [rec()], "precondition"],
+  // park: any coordinator lane moves a coordinator-held merging record on at its generation (AD-6)
+  [
+    "park coordinator-held merging by another coordinator",
+    park({ ...held, by: COORD_2, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], inboxOwner: "alice" }),
+    [by(COORD, T0, { state: "merging", generation: 2, globs: ["src/a.ts"], pr: 7, approved_sha: SHA_A })],
+    by(COORD_2, NOW, { state: "parked", generation: 2, globs: ["src/a.ts"], pr: 7, park: awaiting(["src/a.ts"]) }),
+  ],
+  [
+    "park coordinator-held merging by another coordinator at the wrong generation",
+    park({ ...held, by: COORD_2, generation: 1, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }),
+    [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })],
+    "precondition",
+  ],
+  ["park coordinator-held merging blocked by another coordinator", park({ ...held, by: COORD_2, generation: 2, kind: "blocked", reason: "other" }), [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })], "precondition"],
+  ["park coordinator-held merging by a builder", park({ ...held, by: BOB, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })], "precondition"],
+  ["park builder-held merging by another identity", park({ ...held, by: BOB, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [rec({ state: "merging", pr: 7 })], "precondition"],
+  ["park builder-held merging by a coordinator", park({ ...held, by: COORD, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [rec({ state: "merging", pr: 7 })], "precondition"],
+  ["park coordinator-held claimed by another coordinator", park({ ...held, by: COORD_2, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [by(COORD, T0, { state: "claimed" })], "precondition"],
   // failAttempt
   ["failAttempt claimed, attempts 1", failAttempt(held), [rec({ attempts: 1 })], by(ALICE, NOW, { state: "released", attempts: 2 })],
   ["failAttempt claimed, attempts 2", failAttempt(held), [rec({ attempts: 2 })], by(ALICE, NOW, { state: "parked", attempts: 3, park: blocked("attempts-cap") })],
@@ -442,9 +463,6 @@ describe("ledger edits", () => {
 });
 
 // ---------------------------------------------------------------- coordinator.json
-
-/** A second coordinator identity on another host. */
-const COORD_2: LaneIdentity = { owner: "dave", host: "44444444-4444-4444-8444-444444444444", lane: "coordinator" };
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {

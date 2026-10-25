@@ -14,6 +14,7 @@ import {
   type ForgeOperation,
   type ForgePr,
   type ForgeResult,
+  type ForgeReview,
   type GitSha,
 } from "../../../ports/forge.ts";
 
@@ -70,6 +71,8 @@ export type FakeForgeControl = {
   mergeQueueHead(): ForgePr | null;
   /** Takes a queued PR out of the queue without merging it, as an ejection does; `false` when it was not queued. */
   eject(pr: number): boolean;
+  /** Appends a review to PR `pr` (which must exist), as its author submitting it would. */
+  addReview(pr: number, review: ForgeReview): void;
   /** Comment bodies on PR `pr`, oldest first. */
   comments(pr: number): string[];
   alerts(): FakeAlert[];
@@ -147,6 +150,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const prs = new Map<number, PrRecord>();
   let nextPr = options.firstPrNumber ?? 1;
   const comments = new Map<number, string[]>();
+  const reviews = new Map<number, ForgeReview[]>();
   let nextComment = 1;
   const checks = new Map<GitSha, ForgeCheck[]>();
   const ciLogs = new Map<GitSha, Map<string, string>>();
@@ -317,6 +321,13 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         ),
       ),
 
+    reviews: (pr, opts) =>
+      call("reviews", opts, () => {
+        const found = findPr(pr, "reviews");
+        if (!found.ok) return found;
+        return forgeOk((reviews.get(pr) ?? []).map((r) => ({ ...r })));
+      }),
+
     comment: (pr, body, opts) =>
       call("comment", opts, () => {
         const found = findPr(pr, "comment");
@@ -427,6 +438,12 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       if (!queue.includes(pr)) return false;
       dequeueNumber(pr);
       return true;
+    },
+    addReview(pr, review) {
+      if (!prs.has(pr)) throw new Error(`addReview: no PR #${pr}`);
+      const list = reviews.get(pr) ?? [];
+      list.push({ ...review });
+      reviews.set(pr, list);
     },
     comments: (pr) => [...(comments.get(pr) ?? [])],
     alerts: () => alerts.map((a) => ({ ...a })),

@@ -7,7 +7,7 @@ import type { ForgeCheck, ForgePr } from "../../../../src/ports/forge.ts";
  * An in-process GitHub emulator: a `fetch` for the endpoints the GitHub forge
  * adapter calls. It holds git objects, refs, PRs, a clock that sets `Date`,
  * App JWT and installation-token checks, pull requests, issues and their
- * comments, check runs, commit statuses, a merge queue behind a GraphQL
+ * comments, PR reviews, check runs, commit statuses, a merge queue behind a GraphQL
  * endpoint, Actions job logs (redirected to a log host it also serves), a
  * request log and one-shot hooks and response injections. Each request yields a macrotask and checks its signal
  * before any change, so an aborted request changes nothing.
@@ -89,6 +89,18 @@ export type FakeIssue = {
   readonly assignees: readonly string[];
 };
 
+/**
+ * A PR review as `addReview` takes it: `state` is GitHub's uppercase state
+ * (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`, `PENDING`), sent
+ * as given; a `null` login sends `user: null`, as for a deleted account.
+ */
+export type FakeReview = {
+  readonly login: string | null;
+  readonly state: string;
+  readonly commit_id: string | null;
+  readonly submitted_at: string | null;
+};
+
 /** A comment on an issue or PR. */
 export type FakeComment = { readonly id: number; readonly body: string; readonly login: string; readonly created_at: string };
 
@@ -125,6 +137,8 @@ export type FakeGitHubControl = {
   comments(number: number): string[];
   /** Every comment on issue or PR `number`, oldest first. */
   commentRecords(number: number): FakeComment[];
+  /** Appends a review to PR `number`, which must exist. */
+  addReview(number: number, review: FakeReview): void;
   /** Adds a comment by `login` on issue or PR `number`, at the clock's time. */
   addComment(number: number, body: string, login: string): void;
   /** Every issue (not PRs), ascending by number. */
@@ -215,6 +229,8 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   };
   const pulls = new Map<number, PullRecord>();
   const comments = new Map<number, FakeComment[]>();
+  const reviews = new Map<number, (FakeReview & { readonly id: number })[]>();
+  let reviewCounter = 9000;
   const issues = new Map<number, FakeIssue>();
   /** Merge-queue entries, head first, with the PR head at enqueue time. */
   const queue: { number: number; head: string }[] = [];
@@ -604,6 +620,20 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
         .map(([n, p]) => pullJson(n, p));
       return json(200, list.slice((page - 1) * perPage, page * perPage));
     }
+    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(route)) !== null) {
+      const n = Number(m[1]);
+      if (!pulls.has(n)) return notFound();
+      const perPage = Number(params.get("per_page") ?? "30");
+      const page = Number(params.get("page") ?? "1");
+      const list = (reviews.get(n) ?? []).map((r) => ({
+        id: r.id,
+        user: r.login === null ? null : { login: r.login },
+        state: r.state,
+        commit_id: r.commit_id,
+        submitted_at: r.submitted_at,
+      }));
+      return json(200, list.slice((page - 1) * perPage, page * perPage));
+    }
     if (method === "POST" && route === "/pulls") {
       const title = b?.["title"];
       const head = b?.["head"];
@@ -826,6 +856,10 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     tokenValid,
     comments: (number) => (comments.get(number) ?? []).map((c) => c.body),
     commentRecords: (number) => [...(comments.get(number) ?? [])],
+    addReview(number, review) {
+      if (!pulls.has(number)) throw new Error(`addReview: no PR #${number}`);
+      reviews.set(number, [...(reviews.get(number) ?? []), { ...review, id: reviewCounter++ }]);
+    },
     addComment(number, text, login) {
       addComment(number, text, login);
     },
