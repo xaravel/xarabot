@@ -9,7 +9,7 @@ import type { Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import { epicHolds } from "./epic-gates.ts";
 import type { Reason } from "./reasons.ts";
-import { epicContextPath, liveEvidenceGlob } from "./snapshot.ts";
+import { epicContextPath, liveEvidenceGaps, liveEvidenceGlob } from "./snapshot.ts";
 
 export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
 
@@ -410,7 +410,7 @@ const NOTHING_DUE = "no coordinator unit due";
 /** The coordinator states an open coordinator PR's record may be in. */
 const OPEN_PR_STATES: readonly UnitRecord["state"][] = ["claimed", "merging", "released"];
 
-/** The prefix of an idle reason that waits on the Maintainer (a live evidence file missing on `main`). */
+/** The prefix of an idle reason that waits on the Maintainer (a live evidence file missing on `main`, or lacking a required result). */
 export const WAITING_ON_MAINTAINER = "waiting-on-maintainer: ";
 
 /**
@@ -515,6 +515,13 @@ export type RetroCandidate = {
   readonly evidence: string;
   /** Whether a `main` path matches `evidence`. */
   readonly evidenceOnMain: boolean;
+  /**
+   * The Epic's `live_evidence_checks` commands the evidence file does not
+   * hold, and those it holds with no `0 fail` summary after them (retro item
+   * 14); both empty when none are listed or the file is not on `main`.
+   */
+  readonly missingChecks: readonly string[];
+  readonly failingChecks: readonly string[];
 };
 
 /**
@@ -522,7 +529,8 @@ export type RetroCandidate = {
  * order: not in `bootstrapped_epics`, with no `retro` entry in
  * `retro-gates.yaml`, with at least one Story, no unmanifested heading, and
  * every Story `done`. Each carries whether its live evidence file is on
- * `main`; a retro is due only once it is. Records are not looked at here.
+ * `main` and which required live results it lacks; a retro is due only once
+ * it is on `main` and lacks none. Records are not looked at here.
  */
 export function retroCandidates(snapshot: Snapshot): RetroCandidate[] {
   if (!snapshot.graph.ok) return [];
@@ -533,19 +541,46 @@ export function retroCandidates(snapshot: Snapshot): RetroCandidate[] {
     if (bootstrapped.has(n)) continue;
     if (snapshot.retro_gates.epics[String(n)]?.retro !== undefined) continue;
     if (!allStoriesDone(snapshot, n)) continue;
-    out.push({ epic: n, evidence: liveEvidenceGlob(snapshot.config.live_evidence_glob, n), evidenceOnMain: snapshot.live_evidence[String(n)] === true });
+    const evidenceOnMain = snapshot.live_evidence[String(n)] === true;
+    const checks = snapshot.config.live_evidence_checks?.[String(n)] ?? [];
+    const gaps = evidenceOnMain ? liveEvidenceGaps(snapshot.live_evidence_file[String(n)]?.text ?? "", checks) : { missing: [], failing: [] };
+    out.push({
+      epic: n,
+      evidence: liveEvidenceGlob(snapshot.config.live_evidence_glob, n),
+      evidenceOnMain,
+      missingChecks: gaps.missing,
+      failingChecks: gaps.failing,
+    });
   }
   return out;
 }
 
-/** Whether Epic `epic`'s retro is due: a retro candidate whose live evidence file is on `main`. */
+/** Whether a retro candidate's live evidence file is on `main` and holds each required result. */
+function evidenceReady(c: RetroCandidate): boolean {
+  return c.evidenceOnMain && c.missingChecks.length === 0 && c.failingChecks.length === 0;
+}
+
+/** Whether Epic `epic`'s retro is due: a retro candidate whose live evidence file is on `main` and holds each required result. */
 export function retroDue(snapshot: Snapshot, epic: number): boolean {
-  return retroCandidates(snapshot).some((c) => c.epic === epic && c.evidenceOnMain);
+  return retroCandidates(snapshot).some((c) => c.epic === epic && evidenceReady(c));
+}
+
+/** A `live-evidence` reason's text for a candidate whose file is on `main` but lacks a required result. */
+function describeGaps(snapshot: Snapshot, c: RetroCandidate): string {
+  const file = snapshot.live_evidence_file[String(c.epic)]?.path ?? c.evidence;
+  const list = (cs: readonly string[]) => cs.map((x) => `\`${x}\``).join(", ");
+  const parts = [
+    ...(c.missingChecks.length === 0 ? [] : [`missing ${list(c.missingChecks)}`]),
+    ...(c.failingChecks.length === 0 ? [] : [`no '0 fail' summary after ${list(c.failingChecks)}`]),
+  ];
+  return `retro:${c.epic} waits for the live evidence file ${file} on main to hold each required live result: ${parts.join("; ")}`;
 }
 
 /**
  * The retro position (Story 2.9): for each retro candidate in Epic order, an
- * absent live evidence file is a `live-evidence` reason and no unit; else
+ * absent live evidence file, or one lacking a command of the Epic's
+ * `live_evidence_checks` or its `0 fail` summary (retro item 14), is a
+ * `live-evidence` reason and no unit; else
  * `retro:<N>`'s record decides. None: a new claim. `released`: a re-claim at
  * its generation. A stale `claimed` one with no open PR: a takeover. Any
  * other holds (`record-state`). A unit whose globs overlap another record's
@@ -556,6 +591,10 @@ function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | nul
     const unit = `retro:${c.epic}`;
     if (!c.evidenceOnMain) {
       reasons.push({ subject: unit, code: "live-evidence", message: `${unit} waits for the live evidence file ${c.evidence} on main` });
+      continue;
+    }
+    if (!evidenceReady(c)) {
+      reasons.push({ subject: unit, code: "live-evidence", message: describeGaps(snapshot, c) });
       continue;
     }
     const rec = snapshot.ledger.units.find((r) => r.unit === unit);
@@ -577,7 +616,8 @@ function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | nul
       reasons.push({ subject: unit, code: "overlap", message: `${unit} ${hits.join(", ")}` });
       continue;
     }
-    const due = `Epic ${c.epic}'s Stories are all done, its retro is not recorded and ${c.evidence} is on main`;
+    const checked = (snapshot.config.live_evidence_checks?.[String(c.epic)] ?? []).length > 0 ? " with each required live result" : "";
+    const due = `Epic ${c.epic}'s Stories are all done, its retro is not recorded and ${c.evidence} is on main${checked}`;
     if (rec === undefined) return { unit, kind: "retro", globs, expect_generation: null, take_over: null, pr: null, why: `${unit} is due: ${due}` };
     if (rec.state === "released") {
       return { unit, kind: "retro", globs, expect_generation: rec.generation, take_over: null, pr: null, why: `${unit} is released and due: ${due}` };

@@ -52,6 +52,9 @@ const Hostname = z.string().superRefine((host, ctx) => {
   if (why !== null) ctx.addIssue({ code: "custom", message: why });
 });
 
+/** One command line: non-empty, with no line break and no leading or trailing whitespace. */
+const Command = NonEmpty.regex(/^\S(?:[^\r\n]*\S)?$/, "must be one line with no leading or trailing whitespace");
+
 /** `.xarabot/config.yaml` (AR21). */
 export const ConfigSchema = z.strictObject({
   schema_version: SchemaVersion,
@@ -78,6 +81,15 @@ export const ConfigSchema = z.strictObject({
   proxy_hosts: z.array(Hostname).default([]),
   lockfile_command: z.array(NonEmpty).min(1).optional(),
   epic_packages: z.record(z.string().regex(/^[1-9][0-9]*$/, "must be an Epic number"), z.array(NonEmpty).min(1)).optional(),
+  /**
+   * Epic number → the exact commands its verification Story's runbook
+   * requires (retro item 14): the Epic's retro waits until its live evidence
+   * file holds each one followed by a `bun test` summary with `0 fail`. An
+   * Epic with no entry needs only the file.
+   */
+  live_evidence_checks: z
+    .record(z.string().regex(/^[1-9][0-9]*$/, "must be an Epic number"), z.array(Command).min(1))
+    .optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

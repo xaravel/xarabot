@@ -42,10 +42,64 @@ export function liveEvidenceGlob(pattern: string, epic: number): string {
   return pattern.replaceAll("<N>", String(epic));
 }
 
-/** Whether some path of `tree` matches Epic `epic`'s live evidence glob. */
-export function hasLiveEvidence(pattern: string, epic: number, tree: readonly string[]): boolean {
+/** The first path of `tree`, in path order, that matches Epic `epic`'s live evidence glob, or `null`. */
+export function liveEvidencePath(pattern: string, epic: number, tree: readonly string[]): string | null {
   const glob = new Bun.Glob(liveEvidenceGlob(pattern, epic));
-  return tree.some((p) => glob.match(p));
+  return [...tree].sort().find((p) => glob.match(p)) ?? null;
+}
+
+/** The commands of `live_evidence_checks` an evidence file lacks (retro item 14). */
+export type LiveEvidenceGaps = {
+  /** Commands the file does not hold. */
+  readonly missing: readonly string[];
+  /** Commands the file holds, but never followed by a `bun test` summary with `0 fail`. */
+  readonly failing: readonly string[];
+};
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Where `command` stands whole in `text`, as `[start, end)` spans: at a line
+ * start, after a backtick or after a table bar (then an optional `$ `
+ * prompt), and before a backtick, a table bar or the line end. So it matches
+ * in an inline code span, a table cell or a transcript line, but never inside
+ * a longer command.
+ */
+function commandSpans(text: string, command: string): [number, number][] {
+  const re = new RegExp(`(?:^|[\`|])[ \\t]*(?:\\$[ \\t]+)?${escapeRegExp(command)}[ \\t]*(?=[\`|]|\\r?$)`, "gm");
+  return [...text.matchAll(re)].map((m) => [m.index, m.index + m[0].length]);
+}
+
+/** A `bun test` summary's fail count: `<n> fail`, `<n>` a whole number. */
+const FAIL_COUNT = /(?<![\w.])(\d+) fail\b/g;
+
+/**
+ * Which of `commands` evidence `text` lacks (retro item 14). A command counts
+ * once some place holds it whole (`commandSpans`) and the first fail count
+ * after it, before the next place any of `commands` stands, is `0 fail`.
+ * Pure.
+ */
+export function liveEvidenceGaps(text: string, commands: readonly string[]): LiveEvidenceGaps {
+  const spans = new Map(commands.map((c) => [c, commandSpans(text, c)]));
+  const starts = [...spans.values()].flat().map(([start]) => start);
+  const missing: string[] = [];
+  const failing: string[] = [];
+  for (const command of commands) {
+    const own = spans.get(command) ?? [];
+    if (own.length === 0) {
+      missing.push(command);
+      continue;
+    }
+    const passes = own.some(([, end]) => {
+      const limit = Math.min(text.length, ...starts.filter((s) => s >= end));
+      const fail = [...text.slice(end, limit).matchAll(FAIL_COUNT)][0];
+      return fail !== undefined && Number(fail[1]) === 0;
+    });
+    if (!passes) failing.push(command);
+  }
+  return { missing, failing };
 }
 
 /**
@@ -95,6 +149,7 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
   const manifests: unknown[] = [];
   const epicContext: Record<string, EpicContextState> = {};
   const liveEvidence: Record<string, boolean> = {};
+  const liveEvidenceFile: Record<string, { path: string; text: string }> = {};
   let retroGates = emptyRetroGates();
   if (!resolved.ok) {
     graph = { ok: false, error: { kind: resolved.error.kind, message: resolved.error.message } };
@@ -113,7 +168,14 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
       const text = readListed(repoSnap, path);
       if (!text.ok) return text;
       epicContext[String(e.number)] = epicContextState(e.number, text.value);
-      liveEvidence[String(e.number)] = hasLiveEvidence(config.live_evidence_glob, e.number, repoSnap.tree);
+      const evidencePath = liveEvidencePath(config.live_evidence_glob, e.number, repoSnap.tree);
+      liveEvidence[String(e.number)] = evidencePath !== null;
+      if (evidencePath !== null) {
+        const read = readListed(repoSnap, evidencePath);
+        // Only an Epic with live evidence checks needs the text; another reads it when the forge did.
+        if (!read.ok && config.live_evidence_checks?.[String(e.number)] !== undefined) return read;
+        if (read.ok && read.value !== null) liveEvidenceFile[String(e.number)] = { path: evidencePath, text: read.value };
+      }
     }
   }
 
@@ -135,6 +197,7 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
     escalations: input.escalations,
     epic_context: epicContext,
     live_evidence: liveEvidence,
+    live_evidence_file: liveEvidenceFile,
     prs: input.prs,
     lane: input.lane,
     role: input.role,

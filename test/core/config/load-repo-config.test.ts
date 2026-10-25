@@ -114,6 +114,8 @@ proxy_hosts: [pypi.org]
 lockfile_command: [bun, install]
 epic_packages:
   "3": ["@xaravel/web"]
+live_evidence_checks:
+  "2": ["XARABOT_LIVE=1 bun test test/contracts/", "bun test test/e2e/"]
 `;
     const policy = `schema_version: 1
 unattended_adapters: [claude, pi]
@@ -133,6 +135,7 @@ owner_approval_paths: ["**"]
     expect(c.proxy_hosts).toEqual(["pypi.org"]);
     expect(c.lockfile_command).toEqual(["bun", "install"]);
     expect(c.epic_packages).toEqual({ "3": ["@xaravel/web"] });
+    expect(c.live_evidence_checks).toEqual({ "2": ["XARABOT_LIVE=1 bun test test/contracts/", "bun test test/e2e/"] });
     expect(p.unattended_adapters).toEqual(["claude", "pi"]);
     expect(p.effective_protected_paths).toEqual([
       ".xarabot/**",
@@ -195,6 +198,10 @@ const STOP_CASES: readonly StopCase[] = [
   { name: "config empty path_map glob list", files: { [CONFIG_PATH]: `${CONFIG}manifests: {dir: m, path_key: a, path_map: {web: []}}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "path_map" },
   { name: "config unknown branches key", files: { [CONFIG_PATH]: `${CONFIG}branches: {story: s/, other: o/}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "other" },
   { name: "config empty lockfile_command", files: { [CONFIG_PATH]: `${CONFIG}lockfile_command: []\n` }, kind: "invalid", path: CONFIG_PATH, reason: "lockfile_command" },
+  { name: "config live_evidence_checks bad key", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"0": [bun test]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },
+  { name: "config live_evidence_checks empty list", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"2": []}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },
+  { name: "config live_evidence_checks multi-line command", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"2": ["bun test\\nbun test"]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },
+  { name: "config live_evidence_checks padded command", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"2": [" bun test"]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },
   { name: "config epic_packages bad key", files: { [CONFIG_PATH]: `${CONFIG}epic_packages: {"01": [a]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "epic_packages" },
   { name: "config absolute authority path", files: { [CONFIG_PATH]: CONFIG.replace(AUTHORITY_PATH, "/etc/authority.md") }, kind: "invalid", path: CONFIG_PATH, reason: "standing_authority_path" },
   ...["../outside.md", "docs/./a.md", "docs\\\\a.md", "docs//a.md"].map((p) => ({
