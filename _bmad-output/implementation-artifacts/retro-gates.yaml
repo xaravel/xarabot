@@ -27,7 +27,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/reconcile-step.ts", "src/lane/retro-step.ts", "src/lane/planning-step.ts", "src/lane/retro-item-step.ts", "src/core/reconcile/**", "src/core/ledger/**", "test/lane/reconcile-step.test.ts", "test/lane/retro-step.test.ts", "test/lane/planning-step.test.ts", "test/lane/retro-item-step.test.ts", "test/core/reconcile/**", "test/core/ledger/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-13-act-on-approvals-in-the-next-round"
         text: "Make reconcile due when the snapshot shows a record parked awaiting-approval whose open PR the Maintainer approved at the parked head (Maintainer decision 2026-10-25, epics.md Story 2.4): carry each parked PR's review decision in the snapshot from the snapshot's own forge query (GitHub reviewDecision), with no extra call per PR and no ledger schema change, and count it in reconcileDue; tests for an approval at the parked head, at another head, by another login, and none"
         route: lane
