@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-2-bind-the-retro-result-to-its-validated-head",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/core/reconcile/**",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T18:17:57.160Z",
+  "heartbeat_at": "2026-10-25T18:19:50.171Z",
   "pr": 107,
   "pr_owner": "edanisko",
   "base_sha": "881328ffd3a76314f30e96b3f237515084b2605a",
@@ -25,7 +25,19 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/ledger/edits.ts",
+      "src/core/reconcile/plan.ts",
+      "src/lane/retro-step.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/core/reconcile/plan.test.ts",
+      "test/lane/retro-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
