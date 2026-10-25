@@ -1,0 +1,31 @@
+{
+  "schema_version": 4,
+  "unit": "retro:2",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "coordinator",
+  "generation": 1,
+  "globs": [
+    "_bmad-output/implementation-artifacts/epic-2-context.md",
+    "_bmad-output/implementation-artifacts/epic-2-retro-*.md",
+    "_bmad-output/implementation-artifacts/retro-gates.yaml",
+    "_bmad-output/implementation-artifacts/sprint-status.yaml"
+  ],
+  "heartbeat_at": "2026-10-25T16:59:17Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "e9f95ec64df2849293e719a86f31f169a80009a3",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "approved_sha": null,
+  "approved_graph": null,
+  "retro_result": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
