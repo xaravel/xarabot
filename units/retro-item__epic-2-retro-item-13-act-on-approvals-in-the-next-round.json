@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-13-act-on-approvals-in-the-next-round",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "src/adapters/forge/fake/fake-forge.ts",
@@ -18,7 +18,7 @@
     "test/core/next/coordinator.test.ts",
     "test/core/next/snapshot.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T19:50:59.812Z",
+  "heartbeat_at": "2026-10-25T19:55:48Z",
   "pr": 116,
   "pr_owner": "edanisko",
   "base_sha": "f214a46a6244009f76812e6fd326f9ccfee1bc02",
