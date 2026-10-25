@@ -75,7 +75,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/**", "src/cli/lane-run.ts", "src/core/next/**", "src/adapters/agent/**", "src/ports/**", "test/lane/**", "test/cli/lane-run.test.ts", "test/core/next/**", "test/boundaries.test.ts", "test/support/boundaries.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-11-close-the-epic-2-verification-gaps"
         text: "Close Epic 2's verification gaps with tests: the retro step's lost-unit fence, the lane run coordinator-step wiring, 2.6's missing Standing Authority, only reconcile deletes ledger records, 2.5a fold rows for live-evidence and the coordinator retro classes, and 2.10's retro-item enqueue (C9)"
         route: lane
