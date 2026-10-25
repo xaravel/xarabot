@@ -12,7 +12,7 @@ import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
 import { createCiStep } from "../lane/ci-step.ts";
-import { claimCoordinatorRecord, runCoordinatorProcess, type CoordinatorDeps } from "../lane/coordinator-process.ts";
+import { claimCoordinatorRecord, runCoordinatorProcess, type CoordinatorDeps, type SessionStepDeps } from "../lane/coordinator-process.ts";
 import { createGitCommitter } from "../lane/committer.ts";
 import { createGitDiffPaths } from "../lane/diff-paths.ts";
 import { createGitGraphTrees } from "../lane/graph-trees.ts";
@@ -30,6 +30,7 @@ import { createPsProcessTable, type ProcessTable } from "../lane/processes.ts";
 import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
 import { createReconcileStep } from "../lane/reconcile-step.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
+import { message } from "../lane/session.ts";
 import { writeStop } from "../lane/stop.ts";
 import { createSleepWaiter } from "../lane/wait.ts";
 import { createGitWorkspace } from "../lane/workspace.ts";
@@ -102,10 +103,6 @@ export type LaneRunDeps = {
 /** The adapter for an agent name; only `claude` has one before Epic 6. */
 function adapterFor(agent: string): Agent | null {
   return agent === "claude" ? createClaudeAgent() : null;
-}
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 function readText(path: string): string | null {
@@ -330,59 +327,24 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       claimed = c.value;
     }
 
+    // The adapters both lane roles use, built once.
     const store = createFsLaneStore({ laneDir, hostStop: paths.hostStop });
     const fetch = connection.fetchShas(runnerGit);
+    const waiter = createSleepWaiter({ store });
+    const sandbox = createMacSandbox({ launchingEnv: deps.env });
+    const workspace = createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch });
+    const committer = createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch });
+    const merger = createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch });
+    const diffPaths = createGitDiffPaths({ gitDir: runnerGit, fetch });
     const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
+    const secrets = [credential.value];
     if (claimed !== null) {
       // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
-      const waiter = createSleepWaiter({ store });
+      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, secrets };
       const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
-      const planning = createPlanningStep({
-        forge,
-        agent,
-        sandbox: createMacSandbox({ launchingEnv: deps.env }),
-        store,
-        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-        waiter,
-        laneDir,
-        lane,
-        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-        graphTrees,
-        identity,
-        secrets: [credential.value],
-      });
-      const retro = createRetroStep({
-        forge,
-        agent,
-        sandbox: createMacSandbox({ launchingEnv: deps.env }),
-        store,
-        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-        waiter,
-        laneDir,
-        lane,
-        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-        treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }),
-        identity,
-        secrets: [credential.value],
-      });
-      const retroItem = createRetroItemStep({
-        forge,
-        agent,
-        sandbox: createMacSandbox({ launchingEnv: deps.env }),
-        store,
-        workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-        waiter,
-        laneDir,
-        lane,
-        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-        merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }),
-        diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }),
-        graphTrees,
-        identity,
-        secrets: [credential.value],
-      });
+      const planning = createPlanningStep({ ...session, graphTrees });
+      const retro = createRetroStep({ ...session, treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }) });
+      const retroItem = createRetroItemStep({ ...session, merger, graphTrees });
       const coordinatorDeps: CoordinatorDeps = {
         forge,
         agent,
@@ -400,22 +362,16 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const laneDeps: LaneDeps = {
       forge,
       agent,
-      sandbox: createMacSandbox({ launchingEnv: deps.env }),
+      sandbox,
       store,
-      workspace: createGitWorkspace({ gitDir: runnerGit, clone: layout.clone, fetch }),
-      prStep: createPrStep({
-        forge,
-        committer: createGitCommitter({ gitDir: runnerGit, clone: layout.clone, bot: bot.value, fetch }),
-        identity,
-        repo: lane.repo,
-        secrets: [credential.value],
-      }),
-      ciStep: createCiStep({ forge, merger: createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch }), identity, repo: lane.repo }),
-      mergeStep: createMergeStep({ forge, diffPaths: createGitDiffPaths({ gitDir: runnerGit, fetch }), graphTrees, identity, repo: lane.repo }),
+      workspace,
+      prStep: createPrStep({ forge, committer, identity, repo: lane.repo, secrets }),
+      ciStep: createCiStep({ forge, merger, identity, repo: lane.repo }),
+      mergeStep: createMergeStep({ forge, diffPaths, graphTrees, identity, repo: lane.repo }),
       laneDir,
       identity,
       lane,
-      waiter: createSleepWaiter({ store }),
+      waiter,
     };
     return afterRun(await (deps.start ?? runLaneProcess)(laneDeps));
   };

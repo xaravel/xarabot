@@ -3,6 +3,7 @@ import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
 import { graphReadPaths, type GraphTree } from "../core/graph/graph-gate.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { failed, git, gitRun, needCommit, type CloneResult } from "./clone.ts";
+import { message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -34,10 +35,6 @@ export type GitGraphTreesParams = {
   readonly gitDir: string;
   readonly fetch: FetchShas;
 };
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 /** A blob's text at `rev:path`, or `null` when `rev` has no such blob. */
 async function blobText(gitDir: string, rev: string, path: string, signal: AbortSignal): Promise<CloneResult<string | null>> {

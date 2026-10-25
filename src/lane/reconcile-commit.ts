@@ -3,6 +3,7 @@ import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { git, headRef, needCommit } from "./clone.ts";
 import { rewriteTree } from "./merger.ts";
+import { message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -35,10 +36,6 @@ export type GitReconcileCommitterParams = {
   readonly bot: BotIdentity;
   readonly fetch: FetchShas;
 };
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 export function createGitReconcileCommitter(params: GitReconcileCommitterParams): ReconcileCommitter {
   const gitDir = resolve(params.gitDir);

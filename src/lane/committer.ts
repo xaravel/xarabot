@@ -3,6 +3,7 @@ import type { CoordinatorWriteRules, WriteRules } from "../core/lane/write-check
 import { err, type Result } from "../core/result.ts";
 import { failed, gitRun, needCommit, readMarker } from "./clone.ts";
 import { commitSession, type CommitOutcome } from "./commit.ts";
+import { message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -40,10 +41,6 @@ export type GitCommitterParams = {
   readonly bot: BotIdentity;
   readonly fetch: FetchShas;
 };
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 export function createGitCommitter(params: GitCommitterParams): Committer {
   const { gitDir, clone, bot, fetch } = params;

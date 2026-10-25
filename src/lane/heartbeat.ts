@@ -69,6 +69,7 @@ export type Heartbeat = {
   stop(): Promise<void>;
 };
 
+/** A thrown value's text: this module's own copy of `session.ts`'s, since `session.ts` imports this module. */
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

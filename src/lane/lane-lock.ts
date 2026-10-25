@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { LANE_LOCK_FILE, laneLockText, lockVerdict, parseLaneLock, type StaleReason } from "../core/lane/lane-lock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { ProcessTable } from "./processes.ts";
+import { message } from "./session.ts";
 
 /**
  * The lane's exclusive process lock on the filesystem (AR3). The lock is
@@ -48,10 +49,6 @@ export type LaneLockHeld = {
 };
 
 export type LaneLockOutcome = LaneLockAcquired | LaneLockHeld;
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 function code(e: unknown): unknown {
   return e !== null && typeof e === "object" ? (e as { code?: unknown }).code : undefined;

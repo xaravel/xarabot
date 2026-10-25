@@ -4,13 +4,13 @@ import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ATTEMPTS_CAP, ejected, heartbeat, markMerged, park, startMerging } from "../core/ledger/edits.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
-import { isBackoffKind, type Forge, type ForgeError, type ForgeSnapshot } from "../ports/forge.ts";
+import { isBackoffKind, type Forge, type ForgeSnapshot } from "../ports/forge.ts";
 import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { DiffPaths } from "./diff-paths.ts";
 import { gateGraph } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
-import { message, readsPath, stepKit, type StepOutput, type StepUnit } from "./session.ts";
+import { describeError, message, readsPath, stepKit, type StepOutput, type StepUnit } from "./session.ts";
 
 /**
  * The merge step after CI passes (FR6, FR13, FR22, AR7, AR8, AR20, AR21). It
@@ -91,10 +91,6 @@ export function gateComment(subject: string, gatedPaths: readonly string[]): str
   );
 }
 
-function describeError(e: ForgeError): string {
-  return `${e.kind}: ${e.message}`;
-}
-
 export function createMergeStep(deps: MergeStepDeps): MergeStep {
   const { forge, identity } = deps;
   const clock = deps.now ?? Date.now;
@@ -155,8 +151,8 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       throw end("progress", kit.record.state);
     };
 
-    /** The unit budget passed: a failed attempt, after leaving `merging`. */
-    const aborted = async (): Promise<void> => {
+    /** The unit budget passed: a failed attempt, after leaving `merging` (not `StepOps.aborted`, which leaves the record as it is). */
+    const budgetPassed = async (): Promise<void> => {
       if (input.signal.aborted) await failed("unit budget passed during the merge step");
     };
 
@@ -177,7 +173,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       } catch (e) {
         changed = { ok: false, error: { kind: "transient", message: `diff paths threw: ${message(e)}` } };
       }
-      await aborted();
+      await budgetPassed();
       if (!changed.ok) return await failed(`diff paths ${changed.error.kind}: ${changed.error.message}`);
       const gated = approvalPaths(changed.value, gatedGlobs);
       if (graph !== null) {
@@ -214,7 +210,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
       note(`merging at ${head}`);
       for (let n = 0; ; n += 1) {
-        await aborted();
+        await budgetPassed();
         // The first enqueue follows the fence and startMerging; each retry is fenced again.
         if (n > 0) {
           await beat("fence");
@@ -244,7 +240,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
         signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
         listPrsByBranch: (branch) => call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o)),
       });
-      await aborted();
+      await budgetPassed();
       switch (g.kind) {
         case "pass":
           note(`graph gate: unchanged (${g.hash})`);
@@ -271,7 +267,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
     };
 
     const steps = async (): Promise<never> => {
-      await aborted();
+      await budgetPassed();
       const head = kit.record.head_sha;
       const pr = kit.record.pr;
       if (head === null || pr === null) return await failed("the record has no PR or head_sha to merge");
@@ -316,7 +312,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
 
       // 4. Watch the queue.
       for (let n = 0; ; n += 1) {
-        await aborted();
+        await budgetPassed();
         if (clock() - kit.lastBeat >= QUEUE_HEARTBEAT_MS) {
           await beat("heartbeat");
           kit.lastBeat = clock();

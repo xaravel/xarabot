@@ -13,6 +13,9 @@ import type { Snapshot } from "../core/schemas/snapshot.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
+import type { Sandbox } from "../ports/sandbox.ts";
+import type { Committer } from "./committer.ts";
+import type { DiffPaths } from "./diff-paths.ts";
 import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "./heartbeat.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName } from "./lane-store.ts";
@@ -32,10 +35,12 @@ import {
   trackOps,
   type LaneProcessResult,
   type PrStepOutput,
+  type SessionLimits,
   type StoreWrite,
   type UnitTrack,
 } from "./session.ts";
 import type { Waiter, WaitResult } from "./wait.ts";
+import type { Workspace } from "./workspace.ts";
 
 /**
  * The coordinator process (FR4, AR9, AR14, AD-8, AD-13): one round per run,
@@ -97,6 +102,39 @@ export type CoordinatorStepInput = {
 export type CoordinatorStep = (input: CoordinatorStepInput) => Promise<PrStepOutput>;
 
 export type CoordinatorSteps = Partial<Readonly<Record<CoordinatorKind, CoordinatorStep>>>;
+
+/**
+ * What every coordinator step that runs an agent session shares (planning,
+ * retro and retro-item; Epic 3's reviews next). `lane run` builds it once
+ * and adds each step's own dependencies.
+ */
+export type SessionStepDeps = {
+  readonly forge: Forge;
+  readonly agent: Agent;
+  readonly sandbox: Sandbox;
+  readonly store: LaneStore;
+  readonly workspace: Workspace;
+  /** Runs the usage-limit sleeps. */
+  readonly waiter: Waiter;
+  /** The lane folder (AR37). */
+  readonly laneDir: string;
+  /** The lane's `host.yaml` settings: repo, agent, model, effort. */
+  readonly lane: Lane;
+  readonly committer: Committer;
+  readonly diffPaths: DiffPaths;
+  /** Who writes the ledger records: the coordinator lane. */
+  readonly identity: LaneIdentity;
+  /** The lane's credentials, redacted from the commit message, the PR text and the comments; default none. */
+  readonly secrets?: readonly string[];
+  readonly limits?: SessionLimits;
+  /** Each forge call's (and the commit's) deadline; default 60 000 ms. */
+  readonly callTimeoutMs?: number;
+  /** The host clock in epoch ms; default `Date.now`. */
+  readonly now?: () => number;
+  /** The poll, enqueue retry and ledger back-off sleep. */
+  readonly sleep?: Sleep;
+  readonly random?: () => number;
+};
 
 /** The Story that wires each coordinator step. */
 export const STEP_STORY: Readonly<Record<CoordinatorKind, string>> = {

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { err, ok, type Result } from "../core/result.ts";
 import { failed, git, gitRun, needCommit } from "./clone.ts";
+import { message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -25,10 +26,6 @@ export type GitDiffPathsParams = {
   readonly gitDir: string;
   readonly fetch: FetchShas;
 };
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 export function createGitDiffPaths(params: GitDiffPathsParams): DiffPaths {
   const gitDir = resolve(params.gitDir);

@@ -1,48 +1,43 @@
 import { approvalPaths } from "../core/ci/approval.ts";
-import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
-import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
+import { pollDelayMs } from "../core/ci/checks.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { deleteMerged, finishRecurring, heartbeat, markMerged, park, release, releaseDisposable, startMerging, type HeartbeatSet } from "../core/ledger/edits.ts";
+import { deleteMerged, finishRecurring, markMerged, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
-import type { Lane } from "../core/schemas/host.ts";
-import { planningKindOf, type LaneIdentity, type ParkReason, type PlanningKind } from "../core/schemas/ledger.ts";
+import { planningKindOf, type PlanningKind } from "../core/schemas/ledger.ts";
 import type { PlanningResult } from "../core/schemas/session-result.ts";
 import type { Snapshot } from "../core/schemas/snapshot.ts";
-import type { Agent, AgentSettings } from "../ports/agent.ts";
-import { isBackoffKind, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
-import type { LaneStore } from "../ports/lane-store.ts";
-import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
+import type { AgentSettings } from "../ports/agent.ts";
+import { isBackoffKind, type ForgeError } from "../ports/forge.ts";
+import type { SandboxProfile } from "../ports/sandbox.ts";
 import type { Committer } from "./committer.ts";
-import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
+import type { CoordinatorStep, CoordinatorStepInput, SessionStepDeps } from "./coordinator-process.ts";
 import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { DiffPaths } from "./diff-paths.ts";
 import { gateGraph } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { laneLayout } from "./lane-store.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import { shown } from "./pr-step.ts";
 import {
   createSessionRunner,
+  describeError,
   End,
   Halt,
   LIMIT_STOP_REASON,
   MarkerStop,
   message,
-  readsPath,
   stepKit,
+  stepOps,
   type PromptOutcome,
   type PrStepOutput,
   type SessionContext,
-  type SessionLimits,
   type SessionOutcome,
 } from "./session.ts";
-import type { Waiter } from "./wait.ts";
-import type { Workspace } from "./workspace.ts";
 
 /**
  * The planning step (Story 2.7, FR2, NFR5, AR14, AR30): one sandboxed
@@ -87,43 +82,14 @@ import type { Workspace } from "./workspace.ts";
  * the unit. Anything else never throws.
  */
 
-export type PlanningStepDeps = {
-  readonly forge: Forge;
-  readonly agent: Agent;
-  readonly sandbox: Sandbox;
-  readonly store: LaneStore;
-  readonly workspace: Workspace;
-  /** Runs the usage-limit sleeps. */
-  readonly waiter: Waiter;
-  /** The lane folder (AR37). */
-  readonly laneDir: string;
-  /** The lane's `host.yaml` settings: repo, agent, model, effort. */
-  readonly lane: Lane;
-  readonly committer: Committer;
-  readonly diffPaths: DiffPaths;
+export type PlanningStepDeps = SessionStepDeps & {
   /** `main`'s tree and the PR's merge tree, for the graph-change gate. */
   readonly graphTrees: GraphTrees;
-  /** Who writes the ledger records: the coordinator lane. */
-  readonly identity: LaneIdentity;
-  /** The lane's credentials, redacted from the commit message, the PR text and the comment; default none. */
-  readonly secrets?: readonly string[];
-  readonly limits?: SessionLimits;
-  /** Each forge call's (and the commit's) deadline; default 60 000 ms. */
-  readonly callTimeoutMs?: number;
-  /** The host clock in epoch ms; default `Date.now`. */
-  readonly now?: () => number;
-  /** The poll, enqueue retry and ledger back-off sleep. */
-  readonly sleep?: Sleep;
-  readonly random?: () => number;
 };
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
-
-function describeError(e: ForgeError): string {
-  return `${e.kind}: ${e.message}`;
-}
 
 /** The planning prompt's unit for `kind` on `snapshot`, or why there is none. */
 export function planningPromptUnit(unit: string, kind: PlanningKind, snapshot: Snapshot): { readonly ok: true; readonly value: PlanningPromptUnit } | { readonly ok: false; readonly reason: string } {
@@ -195,21 +161,16 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       mainSha: snapshot.main_sha,
     });
     const { generation, reasons, note, end, forgeNow, call, swap, failed, held, beat } = kit;
-
-    /** The unit or the coordinator claim was lost: end `failed`, the record left for the process to judge. */
-    const aborted = (): void => {
-      if (!input.signal.aborted) return;
-      reasons.push("the unit or the coordinator claim was lost during the planning step");
-      note("aborted");
-      throw end("failed", kit.record.state);
-    };
-
-    const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
-      reasons.push(why);
-      note(`parking blocked ${reason}: ${why}`);
-      await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason }));
-      throw end("progress", kit.record.state);
-    };
+    const { aborted, parkBlocked, freshMain, poll, closeOrphans, recordPr } = stepOps({
+      kit,
+      forge,
+      identity,
+      repo: deps.lane.repo,
+      signal: input.signal,
+      abortReason: "the unit or the coordinator claim was lost during the planning step",
+      clock,
+      sleep,
+    });
 
     /** Nothing to commit: `merged` with no PR, then the record deleted at once. */
     const finish = async (why: string): Promise<never> => {
@@ -224,46 +185,6 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
         note(`deleteMerged ${unit} failed: ${r.message}`);
       }
       throw end("progress", kit.record.state);
-    };
-
-    /** Fresh `main`: one snapshot, then the config and Standing Authority loaded from it; an invalid one ends the step `stop`. */
-    const freshMain = async (): Promise<ForgeResult<{ readonly snap: ForgeSnapshot; readonly config: RepoConfig }>> => {
-      aborted();
-      const snapped = await call("snapshot", (o) => forge.snapshot({ ...o, read: readsPath }));
-      if (!snapped.ok) return snapped;
-      const snap: ForgeSnapshot = snapped.value;
-      kit.see(snap.now);
-      kit.mainSha = snap.main.sha;
-      const loaded = loadRepoConfig({ repo: deps.lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
-      if (!loaded.ok) {
-        reasons.push(`config ${loaded.error.kind}: ${loaded.error.message}`);
-        note(`stop: config ${loaded.error.kind}: ${loaded.error.message}`);
-        throw end("stop", kit.record.state);
-      }
-      return { ok: true, value: { snap, config: loaded.value } };
-    };
-
-    /** Polls `sha` until it passes or fails; parks `ci-timeout` past the max wait. */
-    const poll = async (sha: string, waitMs: number, expected: readonly string[]): Promise<readonly string[] | "passed"> => {
-      const startedAt = clock();
-      for (let n = 0; ; n += 1) {
-        aborted();
-        const r = await call("checks", (o) => forge.checks(sha, o));
-        let delay = pollDelayMs(n);
-        if (!r.ok) {
-          if (!isBackoffKind(r.error.kind)) return await failed(`checks ${describeError(r.error)}`);
-          if (r.error.kind === "rate-limited") delay = Math.max(delay, r.error.retry_after * 1000);
-          note(`checks ${describeError(r.error)}: counted as pending`);
-        } else {
-          const c = classifyChecks(r.value.checks, expected);
-          if (c.kind === "passed") return "passed";
-          if (c.kind === "failed") return c.failing;
-        }
-        if (clock() - startedAt >= waitMs) {
-          return await parkBlocked("ci-timeout", `CI on ${sha} still pending after ${Math.round(waitMs / MINUTE_MS)} min`);
-        }
-        await sleep(delay, input.signal);
-      }
     };
 
     /**
@@ -382,35 +303,6 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
     };
 
-    /**
-     * The `record` beat for the PR just opened. When it fails, no record
-     * carries the PR, so the next attempt would not adopt it and its own
-     * `openPr` would fail on it: the PR is closed, then the unit is lost or
-     * the attempt failed.
-     */
-    const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {
-      const recorded = await swap(heartbeat({ unit, by: identity, now: forgeNow(), generation, set }));
-      if (recorded.kind === "ok") return;
-      const closed = await call("closePr", (o) => forge.closePr(pr, o));
-      reasons.push(closed.ok ? `closed PR #${pr}, which no record carries` : `closePr PR #${pr} ${describeError(closed.error)}; it stays open with no record`);
-      if (recorded.kind === "lost") kit.lost("record", recorded.message);
-      await failed(`record: ${recorded.message}`);
-    };
-
-    /** Best effort after a failed `openPr`: each open PR on the branch closed, behind a fence. */
-    const closeOrphans = async (): Promise<void> => {
-      const listed = await call("listPrsByBranch", (o) => forge.listPrsByBranch(branch, o));
-      if (!listed.ok) {
-        reasons.push(`listPrsByBranch ${branch} ${describeError(listed.error)}`);
-        return;
-      }
-      for (const p of listed.value.filter((x) => x.state === "open")) {
-        await beat("fence");
-        const closed = await call("closePr", (o) => forge.closePr(p.number, o));
-        reasons.push(closed.ok ? `closed PR #${p.number}, which no record carries` : `closePr PR #${p.number} ${describeError(closed.error)}`);
-      }
-    };
-
     /** A `done` result: the commit onto fresh `main` behind the write check, the leased push, the PR, then CI and the gate. */
     const publish = async (result: PlanningResult): Promise<never> => {
       // 1. Fresh main: the write check's rules come from it.
@@ -467,7 +359,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       const opened = await call("openPr", (o) => forge.openPr({ branch, base: "main", title: text.title, body: text.body }, o));
       if (!opened.ok) {
         // The forge may have opened it anyway: no record carries it, so close any open PR on the branch.
-        await closeOrphans();
+        await closeOrphans(branch);
         return await failed(`openPr ${describeError(opened.error)}`);
       }
       const pr = opened.value.number;

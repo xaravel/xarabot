@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import { checkWrite, type WriteChange } from "../../src/core/lane/write-check.ts";
@@ -110,6 +111,7 @@ const AGENT: Agent = {
   parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
   effortValues: () => ["high"],
   startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
+  checkModel,
 };
 
 type Session = { readonly lane: string; readonly unit: string };

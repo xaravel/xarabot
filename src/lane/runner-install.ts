@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { runGit, type GitCredential } from "../adapters/forge/github/runner-git.ts";
 import { checkRunnerVersion } from "../core/lane/runner.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import { message } from "./session.ts";
 
 /**
  * Installs a pinned runner version (FR1, NFR15, AR26): the commit the tag
@@ -38,10 +39,6 @@ export type InstallRunnerResult = Result<{ readonly installed: boolean; readonly
 export type InstallRunner = (params: InstallRunnerParams) => Promise<InstallRunnerResult>;
 
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 /** The variables `bun install` gets: enough to find its cache, nothing else. */
 function depsEnv(): Record<string, string> {

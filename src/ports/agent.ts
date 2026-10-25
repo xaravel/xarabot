@@ -5,7 +5,8 @@ import type { LaunchCredential, LaunchSpec, Vendor } from "./sandbox.ts";
 /**
  * The `Agent` port (AR1, FR7, AR15, AR22, AR30): turns one unit and a lane's
  * settings into a `LaunchSpec` for the `Sandbox`, checks the CLI before a
- * session starts and reads the session's usage from its stdout. An adapter
+ * session starts, reads the session's usage from its stdout and checks the
+ * model it reported. An adapter
  * never spawns anything itself; `src/sandbox/` runs what it describes. Every
  * method is pure and never throws.
  */
@@ -64,6 +65,8 @@ export type Agent = {
   launchSpec(unit: AgentUnit, settings: AgentSettings, resultPath: string): Result<AgentLaunchSpec, "invalid">;
   /** Reads usage from the session's stdout; lines it can't read are skipped. */
   parseUsage(stdout: string): AgentUsage;
+  /** After a run: the model `usage` reports, refused when it reported none or not the `configured` one (Story 2.6b). */
+  checkModel(usage: AgentUsage, configured: string): Result<string, "model-mismatch">;
   /** The efforts the CLI offers for an exact model id; none for a model it doesn't know (fails closed). */
   effortValues(model: string): readonly Effort[];
   /** Before a session: refuses an effort the model doesn't offer and a CLI version that is unreadable or too old. */

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
 import type { NextStory } from "../../src/core/next/next.ts";
@@ -804,6 +805,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
+    checkModel,
   };
   const sandbox: Sandbox = {
     async run(_spec, profile) {
