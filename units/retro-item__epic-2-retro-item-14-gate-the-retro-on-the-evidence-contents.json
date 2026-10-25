@@ -19,7 +19,7 @@
     "test/core/next/**",
     "test/core/schemas/**"
   ],
-  "heartbeat_at": "2026-10-25T22:20:52.734Z",
+  "heartbeat_at": "2026-10-25T22:22:58.526Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "53b824d1d2e6484672a4aa2856045e4d784a9474",
