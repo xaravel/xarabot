@@ -1,0 +1,8 @@
+# Code owners for xaravel/xarabot. `Protect main` requires a Code Owner review instead of a
+# blanket approval (Maintainer decision D2, 2026-10-24; SPEC CAP-13: the bot has no bypass).
+# Every path needs @edanisko's review, except the two status files, which only the
+# coordinator's runner-written `reconcile` PRs change (Story 2.5; the write check refuses
+# them in any builder diff).
+*                                                          @edanisko
+_bmad-output/implementation-artifacts/sprint-status.yaml
+_bmad-output/implementation-artifacts/retro-gates.yaml
