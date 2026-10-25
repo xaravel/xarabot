@@ -147,6 +147,8 @@ type HarnessOpts = MainOpts & {
   readonly changed?: readonly string[];
   /** An empty commit. */
   readonly empty?: boolean;
+  /** Which commits, by index, conflict with the `main` they go onto; default none. */
+  readonly conflicts?: readonly number[];
   readonly diff?: readonly string[];
   /** Each committed head's checks, in order; default all pass. */
   readonly checks?: readonly (readonly ForgeCheck[])[];
@@ -252,6 +254,7 @@ function harness(o: HarnessOpts = {}): Harness {
       );
       if (refusals.length > 0) return ok({ kind: "refused", refusals, reverted: [] });
       if (o.empty === true) return ok({ kind: "empty" });
+      if (o.conflicts?.includes(commits.length - 1) === true) return ok({ kind: "conflict", paths: ["src/x/a.ts"], start: prepares.at(-1)?.start as string });
       return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: heads[commits.length - 1] as string });
     },
   };
@@ -353,6 +356,31 @@ function harness(o: HarnessOpts = {}): Harness {
         .split("\n")
         .filter((l) => l !== "")
         .map((l) => JSON.parse(l) as JournalRecord);
+    },
+  };
+}
+
+/**
+ * `base` with the first ledger swap after a successful `openPr` failing: the
+ * forge refuses it (`rejected`), or, with `lose`, another writer bumps
+ * `unit`'s generation first, so the unit is lost.
+ */
+function failRecordAfterOpen(h: { readonly fake: FakeForge; ledger(): Promise<Map<string, UnitRecord>> }, base: Forge, unit: string, lose: boolean): Forge {
+  let opened = false;
+  return {
+    ...base,
+    openPr: async (r, o) => {
+      const x = await base.openPr(r, o);
+      opened = x.ok;
+      return x;
+    },
+    ledgerSwap: async (oldSha, commit, o) => {
+      if (!opened) return base.ledgerSwap(oldSha, commit, o);
+      opened = false;
+      if (!lose) return { ok: false, error: { kind: "rejected", message: "422" } };
+      const current = (await h.ledger()).get(unit) as UnitRecord;
+      h.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: tip([{ ...current, generation: current.generation + 1 }]), deletes: [] });
+      return base.ledgerSwap(oldSha, commit, o);
     },
   };
 }
@@ -517,6 +545,50 @@ describe("createRetroItemStep: a done session", () => {
     });
     expect([out.outcome, out.state]).toEqual(["failed", "released"]);
     expect((await prOnBranch(h))?.state).toBe("closed");
+  });
+
+  test("the record beat fails after openPr: the new PR, which no record carries, is closed, then a failed attempt", async () => {
+    const h = harness({ behaviors: [writes(built())] });
+    const out = await h.run(undefined, { forge: failRecordAfterOpen(h, spied(h.fake, h.events), U, false) });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "released", attempts: 1, pr: null });
+    expect((await prOnBranch(h))?.state).toBe("closed");
+    // The refused record swap never reaches the spy; the close comes before the failed attempt.
+    expect(h.events.slice(h.events.indexOf("openPr"))).toEqual(["openPr", "closePr", "ledgerSwap failAttempt"]);
+    expect(out.reason).toContain("which no record carries");
+  });
+
+  test("the unit lost at the record beat after openPr: the new PR is closed, no further edit", async () => {
+    const h = harness({ behaviors: [writes(built())] });
+    const out = await h.run(undefined, { forge: failRecordAfterOpen(h, spied(h.fake, h.events), U, true) });
+    expect([out.outcome, out.state]).toEqual(["failed", null]);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "claimed", generation: 2, pr: null });
+    expect((await prOnBranch(h))?.state).toBe("closed");
+    expect(h.events).not.toContain("ledgerSwap failAttempt");
+  });
+
+  test("a commit conflicting with fresh main: committed onto the session's start instead, the PR opened, and the CI step's merge of main runs a conflict session, never an attempt", async () => {
+    const h = harness({
+      conflicts: [0],
+      merges: [{ kind: "needs-session", candidate_sha: "c".repeat(40), paths: ["src/x/a.ts"], lockfiles: [] }, { kind: "up-to-date" }],
+      behaviors: [writes(built()), writes(built({ summary: "Resolve the conflict" }))],
+    });
+    const out = await h.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    const start = h.prepares[0]?.start as string;
+    expect(h.commits.map((c) => c.ontoSha).slice(0, 2)).toEqual([(await snapshotOf(h)).main_sha, start]);
+    expect(h.logs.some((l) => l.includes(`committing onto the session's start ${start} for the CI step's merge of main`))).toBe(true);
+    expect(h.prompts).toHaveLength(2);
+    expect(h.ciLogs[1]).toContain("merged into this unit's PR");
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", attempts: 0, ci_fixes: 1 });
+  });
+
+  test("a commit conflicting again onto the session's start: a failed attempt, nothing pushed", async () => {
+    const h = harness({ conflicts: [0, 1], behaviors: [writes(built())] });
+    const out = await h.run();
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("and again onto the session's start");
+    expect(h.events).not.toContain("pushBranch");
   });
 
   test("a re-claim with a stale branch: the push leases from its head and the PR opens", async () => {

@@ -145,6 +145,31 @@ const OWN_STATUS = coord("planning:status.1", { globs: STATUS_GLOBS });
 const OWN_GRAPH = coord("planning:graph.1", { globs: GRAPH_GLOBS });
 
 /** The fake forge, recording each call in order; a ledger swap is `ledgerSwap <edit> <unit>`. */
+/**
+ * `base` with the first ledger swap after a successful `openPr` failing: the
+ * forge refuses it (`rejected`), or, with `lose`, another writer bumps
+ * `unit`'s generation first, so the unit is lost.
+ */
+function failRecordAfterOpen(h: { readonly fake: FakeForge; ledger(): Promise<Map<string, UnitRecord>> }, base: Forge, unit: string, lose: boolean): Forge {
+  let opened = false;
+  return {
+    ...base,
+    openPr: async (r, o) => {
+      const x = await base.openPr(r, o);
+      opened = x.ok;
+      return x;
+    },
+    ledgerSwap: async (oldSha, commit, o) => {
+      if (!opened) return base.ledgerSwap(oldSha, commit, o);
+      opened = false;
+      if (!lose) return { ok: false, error: { kind: "rejected", message: "422" } };
+      const current = (await h.ledger()).get(unit) as UnitRecord;
+      h.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: tip([{ ...current, generation: current.generation + 1 }]), deletes: [] });
+      return base.ledgerSwap(oldSha, commit, o);
+    },
+  };
+}
+
 function spied(fake: FakeForge, events: string[]): Forge {
   const out = {} as Record<string, unknown>;
   for (const [name, fn] of Object.entries(fake.forge)) {
@@ -673,6 +698,28 @@ describe("createPlanningStep: done", () => {
     expect(out.reason).toContain("closePr PR #");
     expect(out.reason).toContain("transient: 502");
     expect(swaps(h.events)).not.toContain("releaseDisposable planning:status.1");
+  });
+
+  test("the record beat fails after openPr: the new PR, which no record carries, is closed, then a failed attempt", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))] });
+    const events: string[] = [];
+    const out = await h.run("planning:status.1", {}, { forge: failRecordAfterOpen(h, spied(h.fake, events), "planning:status.1", false) });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "released", attempts: 1, pr: null });
+    expect((await prOnBranch(h, "xarabot/planning-status.1"))?.state).toBe("closed");
+    // The refused record swap never reaches the spy; the close comes before the failed attempt.
+    expect(events.slice(events.indexOf("openPr"))).toEqual(["openPr", "closePr", "ledgerSwap failAttempt planning:status.1"]);
+    expect(out.reason).toContain("which no record carries");
+  });
+
+  test("the unit lost at the record beat after openPr: the new PR is closed, no further edit", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))] });
+    const events: string[] = [];
+    const out = await h.run("planning:status.1", {}, { forge: failRecordAfterOpen(h, spied(h.fake, events), "planning:status.1", true) });
+    expect([out.outcome, out.state]).toEqual(["failed", null]);
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "claimed", pr: null });
+    expect((await prOnBranch(h, "xarabot/planning-status.1"))?.state).toBe("closed");
+    expect(events).not.toContain("ledgerSwap failAttempt planning:status.1");
   });
 
   test("openPr fails after the forge opened the PR: the orphan on the branch is closed, fenced, then a failed attempt", async () => {

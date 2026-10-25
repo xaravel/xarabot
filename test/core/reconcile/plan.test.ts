@@ -48,6 +48,7 @@ function shape(p: ReconcilePlan) {
     markMerged: p.markMerged,
     checkQueue: p.checkQueue.map((t) => t.unit),
     checkGated: p.checkGated.map((t) => t.unit),
+    checkUngated: p.checkUngated.map((t) => t.unit),
     takeApproved: p.takeApproved.map((t) => t.unit),
     releaseDead: p.releaseDead.map((t) => t.unit),
     deleteReleased: p.deleteReleased.map((t) => t.unit),
@@ -58,7 +59,7 @@ function shape(p: ReconcilePlan) {
   };
 }
 
-const EMPTY: ReturnType<typeof shape> = { markMerged: [], checkQueue: [], checkGated: [], takeApproved: [], releaseDead: [], deleteReleased: [], deleteMerged: [], status: "none", openPrs: [], supersededMerged: ["reconcile:4"] };
+const EMPTY: ReturnType<typeof shape> = { markMerged: [], checkQueue: [], checkGated: [], checkUngated: [], takeApproved: [], releaseDead: [], deleteReleased: [], deleteMerged: [], status: "none", openPrs: [], supersededMerged: ["reconcile:4"] };
 
 describe("planReconcile: the matrix", () => {
   test("Story merged: marked merged; the status set to done", () => {
@@ -277,7 +278,27 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
   test("a coordinator-held merging Story is checked as gated, with its approved head and diff paths", () => {
     const p = plan({ records: [gated()], prs: { "story:2.1": open(7) } });
     expect(shape(p)).toEqual({ ...EMPTY, checkGated: ["story:2.1"] });
-    expect(p.checkGated).toEqual([{ unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, approved_sha: HEAD, globs: ["src/2.1/a.ts"] }]);
+    expect(p.checkGated).toEqual([{ unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, approved_sha: HEAD, passed_sha: HEAD, globs: ["src/2.1/a.ts"] }]);
+  });
+
+  test("a taken record the runner never enqueued carries its null passed_sha to the gated check", () => {
+    const p = plan({ records: [gated({ passed_sha: null })], prs: { "story:2.1": open(7) } });
+    expect(p.checkGated.map((t) => [t.unit, t.passed_sha])).toEqual([["story:2.1", null]]);
+  });
+
+  test.each([
+    ["an ungated retro", coord("retro:2", { state: "merging", pr: 9, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD }), "retro:2"],
+    ["an ungated retro item", coord("retro-item:epic-2-retro-item-1-fix", { state: "merging", globs: ["src/x/**"], pr: 9, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD }), "retro-item:epic-2-retro-item-1-fix"],
+  ] as const)("%s merging under the coordinator is checked as ungated, never as gated", (_name, record, unit) => {
+    const p = plan({ records: [record], prs: { [unit]: open(9) } });
+    expect(shape(p)).toEqual({ ...EMPTY, checkUngated: [unit] });
+    expect(p.checkUngated).toEqual([{ unit, generation: 1, pr: 9, pr_state: "open", head_sha: HEAD }]);
+  });
+
+  test("a retro item taken on an approval (approved_sha set) is checked as gated", () => {
+    const unit = "retro-item:epic-2-retro-item-1-fix";
+    const p = plan({ records: [coord(unit, { state: "merging", generation: 2, globs: ["src/x/a.ts"], pr: 9, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, approved_sha: HEAD })], prs: { [unit]: open(9) } });
+    expect(shape(p)).toEqual({ ...EMPTY, checkGated: [unit] });
   });
 
   test.each([

@@ -945,7 +945,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: DIFF });
   }
 
-  test("Approved: merging at generation + 1, approved_sha = passed_sha = H, coordinator-held; queued at H; reviews → snapshot → take → fence → enqueue", async () => {
+  test("Approved: merging at generation + 1, approved_sha = passed_sha = H, coordinator-held; queued at H; reviews → snapshot → take → fence → enqueue → the enqueue recorded", async () => {
     const { f, pr } = await parkedWorld((h) => [review(h, 5)]);
     const out = await f.run({ forge: spied(f.fake, f.events, true) });
     expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
@@ -972,6 +972,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       "ledgerSwap takeApproved story:1.1",
       "ledgerSwap heartbeat story:1.1",
       "enqueue",
+      "ledgerSwap heartbeat story:1.1",
       "ledgerSwap finishRecurring reconcile:5",
     ]);
     expect(out.reason).toContain(`story:1.1: PR #${pr.number} approved by alice, enqueued at ${pr.head}`);
@@ -1142,13 +1143,99 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     expect(await stateOf(f, S)).toBe("merging");
   });
 
-  test("an enqueue failure that is neither a conflict nor a lane stop leaves the record merging for the next run's queue check", async () => {
-    const { f } = await parkedWorld((h) => [review(h, 5)]);
+  test("an enqueue failure that is neither a conflict nor a lane stop leaves the record merging for the next run's queue check, its enqueue unrecorded", async () => {
+    const { f, pr } = await parkedWorld((h) => [review(h, 5)]);
     f.fake.control.injectError("enqueue", { kind: "rejected", message: "422" });
     const out = await f.run();
     expect(out.state).toBe("merged");
-    expect((await f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2 });
+    expect((await f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, approved_sha: pr.head, passed_sha: null });
     expect(out.reason).toContain("left merging for the next run's queue check");
+  });
+
+  test("an enqueue whose record is refused is still queued; the run notes it", async () => {
+    const { f, pr } = await parkedWorld((h) => [review(h, 5)]);
+    let bumped: UnitRecord | null = null;
+    // Swap 1 is takeApproved, 2 the fence on the taken record, 3 the record of the enqueue.
+    f.fake.control.beforeSwap(async ({ n }) => {
+      if (n !== 3) return;
+      const current = (await f.ledger()).get(S);
+      if (current === undefined) throw new Error("no record");
+      bumped = { ...current, generation: 3 };
+      f.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: { [unitPath(S)]: serializeUnitRecord(bumped) }, deletes: [] });
+    });
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.fake.control.queue()).toEqual([pr.number]);
+    expect((await f.ledger()).get(S)).toEqual(bumped ?? undefined);
+    expect(f.logs.join("\n")).toContain(`story:1.1: the enqueue of PR #${pr.number} at ${pr.head} is not recorded on the taken record`);
+  });
+
+  describe("a taken record the runner never enqueued keeps its approval (no passed_sha)", () => {
+    /** story:1.1 taken at generation 2 and left merging, never enqueued; the PR open, out of the queue, with `reviews`. */
+    async function untakenWorld(reviews: (head: string) => readonly ForgeReview[], over: Partial<UnitRecord> = {}) {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        for (const r of reviews(pr.head)) fake.control.addReview(pr.number, r);
+        return [gatedRec(pr, { passed_sha: null, heartbeat_at: minutesBefore(15), ...over })];
+      });
+      return { f, pr };
+    }
+
+    test("its owner's approval standing, given before the take: parked on it, taken again and queued in the same run, with no comment", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30)]);
+      const out = await f.run();
+      expect(out.state).toBe("merged");
+      expect((await f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 3, approved_sha: pr.head, passed_sha: pr.head, globs: DIFF, lane: "coordinator" });
+      expect(f.fake.control.queue()).toEqual([pr.number]);
+      expect(f.fake.control.comments(pr.number)).toEqual([]);
+      expect(swaps(f.events)).toEqual(["park story:1.1", "takeApproved story:1.1", "heartbeat story:1.1", "heartbeat story:1.1", "finishRecurring reconcile:5"]);
+      expect(out.reason).toContain(`story:1.1: PR #${pr.number} was never enqueued after its take: parked on its standing approval, to be taken again`);
+      expect(out.reason).toContain(`story:1.1: PR #${pr.number} approved by alice, enqueued at ${pr.head}`);
+    });
+
+    test("its owner's approval since superseded: parked awaiting approval with passed_sha unset, not queued, no comment", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30), review(h, 3, { state: "changes_requested" })]);
+      await f.run();
+      const r = (await f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, passed_sha: null, park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: DIFF } });
+      expect(f.fake.control.queue()).toEqual([]);
+      expect(f.fake.control.comments(pr.number)).toEqual([]);
+    });
+
+    test("closed: re-parked with the closed comment and passed_sha set at its approved head, so a fresh approval is needed", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30)]);
+      expect((await f.fake.forge.closePr(pr.number, opts())).ok).toBe(true);
+      await f.run();
+      expect((await f.ledger()).get(S)).toMatchObject({ state: "parked", passed_sha: pr.head, approved_sha: null });
+      expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(S, "closed")]);
+    });
+
+    test("its head moved: re-parked with the head-moved comment and passed_sha set", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30)]);
+      const moved = f.fake.control.makeCommit();
+      expect((await f.fake.forge.pushBranch({ branch: "story/1.1", expected_sha: pr.head, sha: moved }, opts())).ok).toBe(true);
+      await f.run();
+      expect((await f.ledger()).get(S)).toMatchObject({ state: "parked", passed_sha: pr.head });
+      expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(S, "head-moved")]);
+    });
+
+    test("still queued at its approved head (the enqueue landed, its record did not): left as it is", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30)]);
+      expect((await f.fake.forge.enqueue(pr.number, pr.head, opts())).ok).toBe(true);
+      const before = (await f.ledger()).get(S);
+      await f.run();
+      expect((await f.ledger()).get(S)).toEqual(before);
+      expect(f.fake.control.queue()).toEqual([pr.number]);
+    });
+
+    test("an enqueue it recorded, then an ejection: parked for a fresh approval, as before", async () => {
+      const { f, pr } = await untakenWorld((h) => [review(h, 30)], { passed_sha: "f".repeat(40) });
+      await f.run();
+      expect((await f.ledger()).get(S)).toMatchObject({ state: "parked", passed_sha: "f".repeat(40) });
+      expect(f.fake.control.queue()).toEqual([]);
+      expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(S, "not-queued")]);
+    });
   });
 
   test("a forbidden enqueue stops the lane with an alert", async () => {
@@ -1581,11 +1668,11 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       return w;
     }
 
-    test("main moved at enqueue, the second gate run fails: left merging, not enqueued", async () => {
+    test("main moved at enqueue, the second gate run fails: left merging, not enqueued, its enqueue unrecorded", async () => {
       const w = await movedWorld({ error: "git broke" });
       const out = await w.run();
       expect(w.g.calls).toHaveLength(2);
-      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: w.pr.head });
+      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: null });
       expect(w.f.fake.control.queue()).toEqual([]);
       expect(out.reason).toContain("left merging for the next run's queue check");
     });
@@ -1612,7 +1699,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       };
       const out = await w.f.run({ forge, graphTrees: w.g.trees });
       expect(w.g.calls).toHaveLength(1);
-      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: w.pr.head });
+      expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", generation: 2, passed_sha: null });
       expect(w.f.fake.control.queue()).toEqual([]);
       expect(out.reason).toContain("before the enqueue");
     });
@@ -1645,6 +1732,24 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       expect(g.calls).toEqual([]);
       expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "merging", generation: 2, approved_sha: r3.head, approved_graph: null, globs: [STATUS] });
       expect(f.fake.control.queue()).toEqual([r3.number]);
+    });
+
+    test("a graph change the runner never enqueued: parked on the Maintainer's standing approval, the gate run again, taken and queued with the graph", async () => {
+      let pr = { number: 0, head: "" };
+      const f = await setup({}, async (fake) => {
+        pr = await prOn(fake, "story/1.1");
+        fake.control.addReview(pr.number, review(pr.head, 30, { author: "edanisko" }));
+        return [gatedRec(pr, { globs: [...DIFF, "xarabot:graph"].sort(), approved_graph: `sha256:${"b".repeat(64)}`, passed_sha: null })];
+      });
+      const g = stubGraphTrees(CHANGE);
+      const out = await f.run({ graphTrees: g.trees });
+      expect(out.state).toBe("merged");
+      expect(g.calls).toHaveLength(1);
+      const r = (await f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "merging", generation: 3, approved_sha: pr.head, passed_sha: pr.head });
+      expect(r?.globs).toEqual([...DIFF, "xarabot:graph"].sort());
+      expect(f.fake.control.queue()).toEqual([pr.number]);
+      expect(f.fake.control.comments(pr.number)).toEqual([]);
     });
 
     test("main unmoved at enqueue: no second gate run", async () => {
@@ -1877,6 +1982,61 @@ describe("reconcile through the coordinator process", () => {
     expect(fake.control.queue()).toEqual([pr.number]);
   });
 
+  test("AC (C2): the runner's own enqueue failure leaves story:1.1 merging; the next run enqueues it on the same approval, no fresh review; once ejected, only a fresh approval re-takes it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "xarabot-reconcile-"));
+    dirs.push(root);
+    const laneDir = join(root, "coordinator");
+    const fake = createFakeForge({ now: FORGE_NOW, main: mainFiles() });
+    const pr = await prOn(fake, "story/1.1");
+    const diff = ["src/a/x.ts"];
+    const last = coord("reconcile:4", { state: "merged", heartbeat_at: minutesBefore(12) });
+    const parked = rec({
+      unit: "story:1.1",
+      globs: ["src/a/**"],
+      state: "parked",
+      pr: pr.number,
+      pr_owner: "alice",
+      head_sha: pr.head,
+      passed_sha: pr.head,
+      heartbeat_at: minutesBefore(20),
+      park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: diff },
+    });
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([last, parked], { [COORDINATOR_PATH]: serializeCoordinator(claimRec()) }), deletes: [] });
+    fake.control.addReview(pr.number, { author: "alice", state: "approved", commit_sha: pr.head, submitted_at: minutesBefore(5) });
+    const committer: ReconcileCommitter = { commit: async () => err("git", "no status change expected") };
+    const story = async () => {
+      const l = parseLedger((await snapshotFiles(fake)).ledger);
+      if (!l.ok) throw new Error(l.error.message);
+      return l.value.units.get("story:1.1");
+    };
+    const at = (m: number) => {
+      fake.control.setNow(new Date(T0 + m * MIN).toISOString());
+      return T0 + m * MIN;
+    };
+
+    // Round 1: taken, the enqueue refused by the forge: left merging, its enqueue unrecorded.
+    fake.control.injectError("enqueue", { kind: "rejected", message: "422" });
+    await round(fake, committer, laneDir, T0);
+    expect(await story()).toMatchObject({ state: "merging", generation: 2, approved_sha: pr.head, passed_sha: null });
+    expect(fake.control.queue()).toEqual([]);
+
+    // Round 2: the same approval stands, so it is taken again and queued, with no comment asking for a review.
+    const two = await round(fake, committer, laneDir, at(11));
+    expect(two.sessions).toEqual([]);
+    expect(await story()).toMatchObject({ state: "merging", generation: 3, approved_sha: pr.head, passed_sha: pr.head });
+    expect(fake.control.queue()).toEqual([pr.number]);
+    expect(fake.control.comments(pr.number)).toEqual([]);
+
+    // Ejected by the queue: round 3 parks it for a fresh approval, and round 4 does not take it on the old one.
+    expect(fake.control.eject(pr.number)).toBe(true);
+    await round(fake, committer, laneDir, at(22));
+    expect(await story()).toMatchObject({ state: "parked", generation: 3, approved_sha: null, passed_sha: pr.head });
+    expect(fake.control.comments(pr.number)).toEqual([reparkComment("story:1.1", "not-queued")]);
+    await round(fake, committer, laneDir, at(33));
+    expect((await story())?.state).toBe("parked");
+    expect(fake.control.queue()).toEqual([]);
+  });
+
   async function snapshotFiles(fake: FakeForge) {
     const s = await fake.forge.snapshot(opts());
     if (!s.ok) throw new Error(s.error.message);
@@ -2049,5 +2209,94 @@ describe("createReconcileStep: retro items done (Story 2.10)", () => {
     expect(f.commits).toEqual([]);
     expect(out.reason).toContain(`${UNIT_X} merged but its item is not listed: skipped`);
     expect(await stateOf(f, UNIT_X)).toBe("merged");
+  });
+});
+
+// ------------------------------------------------------------------ ungated retro and retro-item PRs out of the queue
+
+describe("createReconcileStep: an ungated retro or retro-item PR out of the queue follows a Story's path", () => {
+  const X = "epic-1-retro-item-1-wire-it";
+  const UNIT_X = `retro-item:${X}`;
+  const BRANCH_X = `xarabot/retro-item-${X}`;
+
+  /** The item's PR open, queued by its own step when `queued`; the record merging under the coordinator with no approved_sha. */
+  async function ungatedWorld(queued: boolean, over: Partial<UnitRecord> = {}, unit = UNIT_X, branch = BRANCH_X) {
+    let pr = { number: 0, head: "" };
+    const f = await setup({}, async (fake) => {
+      pr = await prOn(fake, branch);
+      if (queued) expect((await fake.forge.enqueue(pr.number, pr.head, opts())).ok).toBe(true);
+      return [coord(unit, { state: "merging", globs: ["src/x/**"], pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head, attempts: 1, ...over })];
+    });
+    return { f, pr };
+  }
+
+  test.each([
+    ["Ejected (open, not queued)", "ejected", "is not in the merge queue"],
+    ["Closed", "closed", "is closed"],
+    ["Unknown to the queue (not-found)", "not-found", "is not known to the forge"],
+  ] as const)("%s: released with an attempt, its PR kept; never parked awaiting approval, no comment", async (_name, how, why) => {
+    const { f, pr } = await ungatedWorld(how === "ejected");
+    if (how === "ejected") expect(f.fake.control.eject(pr.number)).toBe(true);
+    if (how === "closed") expect((await f.fake.forge.closePr(pr.number, opts())).ok).toBe(true);
+    if (how === "not-found") f.fake.control.injectError("queueState", { kind: "not-found", message: "no such PR" });
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect((await f.ledger()).get(UNIT_X)).toMatchObject({ state: "released", attempts: 2, pr: pr.number, head_sha: pr.head, park: null, approved_sha: null });
+    expect(f.fake.control.comments(pr.number)).toEqual([]);
+    expect(swaps(f.events).slice(0, 1)).toEqual([`releaseEjected ${UNIT_X}`]);
+    expect(out.reason).toContain(`${UNIT_X}: PR #${pr.number} ${why}: released with an attempt, to be taken through CI again`);
+  });
+
+  test("an ungated retro, ejected: released with an attempt, never parked awaiting approval", async () => {
+    const { f, pr } = await ungatedWorld(true, { globs: [] }, "retro:1", "xarabot/retro-1");
+    expect(f.fake.control.eject(pr.number)).toBe(true);
+    await f.run();
+    expect((await f.ledger()).get("retro:1")).toMatchObject({ state: "released", attempts: 2, pr: pr.number });
+    expect(f.fake.control.comments(pr.number)).toEqual([]);
+  });
+
+  test("at the attempts cap: parked blocked attempts-cap", async () => {
+    const { f, pr } = await ungatedWorld(true, { attempts: 2 });
+    expect(f.fake.control.eject(pr.number)).toBe(true);
+    await f.run();
+    expect((await f.ledger()).get(UNIT_X)).toMatchObject({ state: "parked", attempts: 3, park: { kind: "blocked", reason: "attempts-cap" } });
+  });
+
+  test("still queued at its head: left merging", async () => {
+    const { f, pr } = await ungatedWorld(true);
+    const before = (await f.ledger()).get(UNIT_X);
+    await f.run();
+    expect((await f.ledger()).get(UNIT_X)).toEqual(before);
+    expect(f.fake.control.queue()).toEqual([pr.number]);
+  });
+
+  test("queued at another head: dequeued behind a fence, then released", async () => {
+    const { f } = await ungatedWorld(true, { head_sha: "d".repeat(40) });
+    await f.run();
+    expect(f.events.slice(0, 4)).toEqual(["queueState", "ledgerSwap heartbeat reconcile:5", "dequeue", `ledgerSwap releaseEjected ${UNIT_X}`]);
+    expect(f.fake.control.queue()).toEqual([]);
+    expect(await stateOf(f, UNIT_X)).toBe("released");
+  });
+
+  test("merged after the snapshot: queueState says merged, so markMerged", async () => {
+    const { f } = await ungatedWorld(true);
+    const forge: Forge = {
+      ...f.fake.forge,
+      queueState: (n, o) => {
+        f.fake.control.mergeQueueHead();
+        return f.fake.forge.queueState(n, o);
+      },
+    };
+    await f.run({ forge });
+    expect(await stateOf(f, UNIT_X)).toBe("merged");
+  });
+
+  test("a queueState error other than not-found leaves the record, with a note", async () => {
+    const { f, pr } = await ungatedWorld(false);
+    const before = (await f.ledger()).get(UNIT_X);
+    f.fake.control.injectError("queueState", { kind: "transient", message: "502" });
+    const out = await f.run();
+    expect(out.reason).toContain(`${UNIT_X}: queueState PR #${pr.number} transient: 502; left for a later run`);
+    expect((await f.ledger()).get(UNIT_X)).toEqual(before);
   });
 });

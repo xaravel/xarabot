@@ -146,6 +146,31 @@ type HarnessOpts = MainOpts & {
   readonly waitEnds?: readonly WaitEnd[];
 };
 
+/**
+ * `base` with the first ledger swap after a successful `openPr` failing: the
+ * forge refuses it (`rejected`), or, with `lose`, another writer bumps
+ * `unit`'s generation first, so the unit is lost.
+ */
+function failRecordAfterOpen(h: { readonly fake: FakeForge; ledger(): Promise<Map<string, UnitRecord>> }, base: Forge, unit: string, lose: boolean): Forge {
+  let opened = false;
+  return {
+    ...base,
+    openPr: async (r, o) => {
+      const x = await base.openPr(r, o);
+      opened = x.ok;
+      return x;
+    },
+    ledgerSwap: async (oldSha, commit, o) => {
+      if (!opened) return base.ledgerSwap(oldSha, commit, o);
+      opened = false;
+      if (!lose) return { ok: false, error: { kind: "rejected", message: "422" } };
+      const current = (await h.ledger()).get(unit) as UnitRecord;
+      h.fake.control.writeForeignLedger({ message: "bump [skip ci]", writes: tip([{ ...current, generation: current.generation + 1 }]), deletes: [] });
+      return base.ledgerSwap(oldSha, commit, o);
+    },
+  };
+}
+
 function spied(fake: FakeForge, events: string[]): Forge {
   const out = {} as Record<string, unknown>;
   for (const [name, fn] of Object.entries(fake.forge)) {
@@ -580,6 +605,28 @@ describe("createRetroStep: a valid result", () => {
     expect([out.outcome, out.state]).toEqual(["failed", "released"]);
     expect(out.reason).toMatch(/head is [0-9a-f]+, not /);
     expect(h.fake.control.queue()).toEqual([]);
+  });
+
+  test("the record beat fails after openPr: the new PR, which no record carries, is closed, then a failed attempt; no result kept", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const events: string[] = [];
+    const out = await h.run({}, { forge: failRecordAfterOpen(h, spied(h.fake, events), U, false) });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "released", attempts: 1, pr: null, retro_result: null });
+    expect((await prOnBranch(h, BRANCH))?.state).toBe("closed");
+    // The refused record swap never reaches the spy; the close comes before the failed attempt.
+    expect(events.slice(events.indexOf("openPr"))).toEqual(["openPr", "closePr", "ledgerSwap failAttempt retro:2"]);
+    expect(out.reason).toContain("which no record carries");
+  });
+
+  test("the unit lost at the record beat after openPr: the new PR is closed, no further edit", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const events: string[] = [];
+    const out = await h.run({}, { forge: failRecordAfterOpen(h, spied(h.fake, events), U, true) });
+    expect([out.outcome, out.state]).toEqual(["failed", null]);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "claimed", pr: null, retro_result: null });
+    expect((await prOnBranch(h, BRANCH))?.state).toBe("closed");
+    expect(events).not.toContain("ledgerSwap failAttempt retro:2");
   });
 
   test("openPr fails after the forge opened the PR: the orphan on the branch is closed, fenced, then a failed attempt", async () => {
