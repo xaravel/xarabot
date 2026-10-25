@@ -33,7 +33,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/schemas/snapshot.ts", "src/core/next/snapshot.ts", "src/core/next/coordinator.ts", "src/ports/forge.ts", "src/adapters/forge/github/github-forge.ts", "src/adapters/forge/fake/fake-forge.ts", "test/core/next/**", "test/core/schemas/**", "test/adapters/forge/**", "test/contracts/forge.contract.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-4-recover-claims-after-outages"
         text: "Make claims recover from outages: recognise a lost-ack swap followed by another lane's write as this lane's own claim, and retry recording a failed attempt before the trailing wait instead of holding the claim about 45 minutes (C4)"
         route: lane
