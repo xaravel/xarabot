@@ -2,20 +2,22 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Agent, AgentSettings } from "../../src/ports/agent.ts";
+import type { Agent, AgentLaunchSpec, AgentSettings } from "../../src/ports/agent.ts";
 import type { LaunchSpec, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { configDir } from "../../src/sandbox/environment.ts";
 import { createMacSandbox } from "../../src/sandbox/macos.ts";
 import { cliVersion, which } from "../../src/sandbox/tools.ts";
+import { isLive } from "../support/live.ts";
 import { canSandbox, liveSandboxTest, sandboxTest } from "../support/sandbox.ts";
 import { runContract } from "./run-contract.ts";
 
 /**
  * The `Agent` contract (AR1): pure properties of every adapter, then the
  * adapter's launch spec run through the real macOS sandbox with a stub CLI
- * (env, working directory, stdin, resume), then live sessions with the real
- * CLI under `XARABOT_LIVE=1`. Sandbox cases report skipped off macOS and under
- * `XARABOT_SANDBOXED=1`.
+ * (env, working directory, stdin, resume), then the real CLI (a start with a
+ * dummy credential, and live sessions), only under `XARABOT_LIVE=1`. Sandbox
+ * cases report skipped off macOS and under `XARABOT_SANDBOXED=1`; real-CLI
+ * cases also report skipped without `XARABOT_LIVE=1`.
  */
 
 export type AgentHarness = {
@@ -203,7 +205,7 @@ export function agentContract(h: AgentHarness): void {
       if (lane !== null) rmSync(lane.root, { recursive: true, force: true });
     });
 
-    async function runStub(unit: Parameters<Agent["launchSpec"]>[0]): Promise<{ spec: LaunchSpec; run: SandboxRun; report: Report }> {
+    async function runStub(unit: Parameters<Agent["launchSpec"]>[0]): Promise<{ spec: AgentLaunchSpec; run: SandboxRun; report: Report }> {
       const a = await agent();
       if (lane === null) throw new Error("no lane");
       const s = unwrap(a.launchSpec(unit, { effort: "high" }, lane.profile.resultPath));
@@ -251,9 +253,9 @@ export function agentContract(h: AgentHarness): void {
       return { lane: l, launching: process.env };
     }
 
-    // The real CLI with a dummy credential: it must start in the sandbox; auth may fail.
+    // The real CLI with a dummy credential, under `XARABOT_LIVE=1`: it must start in the sandbox; auth may fail.
     const probe = unwrap(h.make().launchSpec({ kind: "fresh", prompt: PROMPT }, h.live, RESULT));
-    const realCli = test.skipIf(!canSandbox || which(probe.argv[0] as string, process.env.PATH) === null) as typeof test;
+    const realCli = test.skipIf(!isLive || !canSandbox || which(probe.argv[0] as string, process.env.PATH) === null) as typeof test;
     realCli(
       "the real CLI passes the start check and starts in the sandbox without EPERM",
       async () => {

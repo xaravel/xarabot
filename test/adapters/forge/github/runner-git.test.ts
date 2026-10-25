@@ -12,6 +12,7 @@ import {
   type GitRun,
 } from "../../../../src/adapters/forge/github/runner-git.ts";
 import type { ForgeResult } from "../../../../src/ports/forge.ts";
+import { hostTest } from "../../../support/sandbox.ts";
 import { startGitServer, type GitServer } from "./git-server.ts";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -77,7 +78,7 @@ describe("openRunnerGit", () => {
 });
 
 describe("runGit hardening", () => {
-  test("hooks planted in hooks/ and through core.hooksPath never run", async () => {
+  hostTest("hooks planted in hooks/ and through core.hooksPath never run", async () => {
     const { gitDir } = await fresh();
     const marker = join(tempDir(), "hook-ran");
     const script = `#!/bin/sh\necho ran >> ${marker}\n`;
@@ -170,7 +171,7 @@ describe("runGit hardening", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  test("the credential goes only to its own URL: another remote never sees the token", async () => {
+  hostTest("the credential goes only to its own URL: another remote never sees the token", async () => {
     const { gitDir } = await fresh();
     const servers = await Promise.all(
       ["a", "b"].map((n) => startGitServer({ root: join(tempDir(), "remote"), owner: "acme", name: n, tokenValid: (t) => t === "ghs_scoped" })),

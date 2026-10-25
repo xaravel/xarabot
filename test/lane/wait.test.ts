@@ -7,6 +7,7 @@ import type { LaneStore } from "../../src/ports/lane-store.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type SpawnSleep } from "../../src/lane/wait.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -33,7 +34,7 @@ async function recorded(path: string): Promise<{ pid: number; command: string }>
 }
 
 describe("createSleepWaiter", () => {
-  test("a short wait elapses; wait.pid named the live sleep during it and is gone after", async () => {
+  hostTest("a short wait elapses; wait.pid named the live sleep during it and is gone after", async () => {
     const { store, waitPid } = setup();
     const pending = createSleepWaiter({ store, pollMs: 20 }).wait({ ms: 300 });
     const f = await recorded(waitPid);

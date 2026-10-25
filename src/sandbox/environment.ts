@@ -25,7 +25,7 @@ export const VENDOR_TMP_ENV: Readonly<Partial<Record<Vendor, string>>> = { claud
 /** Names a spec may not use for its own variables: the ones the sandbox sets or forbids. */
 export function isReservedEnvName(name: string): boolean {
   return (
-    ["PATH", "HOME", "TMPDIR", "LANG", "TERM", "UV_CACHE_DIR", "SSH_AUTH_SOCK"].includes(name) ||
+    ["PATH", "HOME", "TMPDIR", "TMPPREFIX", "LANG", "TERM", "UV_CACHE_DIR", "SSH_AUTH_SOCK"].includes(name) ||
     PROXY_VARS.includes(name) ||
     Object.values(VENDOR_TMP_ENV).includes(name) ||
     name.startsWith("LC_") ||
@@ -57,7 +57,10 @@ export type SessionEnvParts = {
 
 /**
  * The session's whole environment: an allowlist. Only `LANG`, `LC_*` and
- * `TERM` come from the launching env; proxy variables never do.
+ * `TERM` come from the launching env; proxy variables and `TMPPREFIX` never
+ * do. `TMPPREFIX` is `<tempDir>/zsh`: zsh writes its heredoc and here-string
+ * temp files at `<prefix><pid>…` (default `/tmp/zsh`, which the profile
+ * denies), so it is a prefix inside the temp folder, not a folder of its own.
  */
 export function buildSessionEnv(launching: LaunchingEnv, parts: SessionEnvParts): Result<Record<string, string>> {
   const names = [parts.vendorHomeEnv, ...(parts.credential === undefined ? [] : [parts.credential.name])];
@@ -73,6 +76,7 @@ export function buildSessionEnv(launching: LaunchingEnv, parts: SessionEnvParts)
     PATH: `${dirs.bin}:${SYSTEM_PATH}`,
     HOME: dirs.home,
     TMPDIR: parts.tempDir,
+    TMPPREFIX: join(parts.tempDir, "zsh"),
   };
   for (const [name, value] of Object.entries(launching)) {
     if (value === undefined || !ENV_NAME.test(name)) continue;

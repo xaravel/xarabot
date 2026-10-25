@@ -124,10 +124,12 @@ describe("createGitMerger", () => {
     const other = await setup();
     const base = await commit(repo.gitDir, { a: "a\n" });
     const head = await commit(repo.gitDir, { a: "A\n" }, [base]);
-    // main exists only in the other repo; it shares base by content.
-    const otherBase = await commit(other.gitDir, { a: "a\n" });
-    expect(otherBase).not.toBe(""); // commit times may differ; main's own parent is fetched along.
-    const main = await commit(other.gitDir, { a: "a\n", b: "b\n" }, [otherBase]);
+    // main exists only in the other repo, built on base itself, so the two
+    // histories share base whatever the commit times (a rebuilt base would
+    // match only within one second, and else merge-tree refuses unrelated histories).
+    await rg(repo.gitDir, ["update-ref", "refs/x/base", base]);
+    value(plainFetch(other.gitDir, repo.gitDir, "refs/x/base"));
+    const main = await commit(other.gitDir, { a: "a\n", b: "b\n" }, [base]);
     await rg(other.gitDir, ["update-ref", "refs/x/main", main]);
     const f = recordingFetch(async () => plainFetch(repo.gitDir, other.gitDir, "refs/x/main"));
     const m = createGitMerger({ gitDir: repo.gitDir, bot: BOT, fetch: f.fetch });

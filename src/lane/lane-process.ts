@@ -870,14 +870,18 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       return ok({ result: ran.result, specPath: ran.specPath, superseded: ran.superseded });
     };
 
-    /** The lockfile command under the agent's own launch spec, `argv` replaced and no stdin. */
+    /**
+     * The lockfile command under the agent's own launch spec, `argv` replaced,
+     * no stdin and no credential: a repo command the runner starts gets no
+     * vendor credential (AR19, A14).
+     */
     const regenerate: Regenerate = async ({ start: at, paths, command }) => {
       const setUpFailed = await setUp(at);
       if (setUpFailed !== null) return err("prepare", setUpFailed);
       const spec = agent.launchSpec({ kind: "fresh", prompt: "Regenerate the lockfiles." }, settings, layout.resultPath);
       if (!spec.ok) return err("launch-spec", spec.error.message);
       const s = spec.value;
-      const launch: LaunchSpec = { argv: [...command], vendor: s.vendor, vendorHomeEnv: s.vendorHomeEnv, credential: s.credential, apiHosts: s.apiHosts };
+      const launch: LaunchSpec = { argv: [...command], vendor: s.vendor, vendorHomeEnv: s.vendorHomeEnv, apiHosts: s.apiHosts };
       note(`lockfile command starts: ${command.join(" ")}`);
       const { run, timedOut } = await sandboxed(launch);
       if (!run.ok) return err("sandbox", `sandbox refused: ${run.error.message}`);

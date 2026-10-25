@@ -8,7 +8,7 @@ import { ok } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import { UnitJournalRecordSchema, type JournalRecord, type UnitJournalRecord } from "../../src/core/schemas/journal.ts";
 import type { CoordinatorRecord, LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts";
-import type { Agent, AgentUnit } from "../../src/ports/agent.ts";
+import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
@@ -20,6 +20,7 @@ import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import { BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -199,7 +200,7 @@ function harness(o: HarnessOpts = {}): Harness {
         ...(unit.kind === "resume" ? { resume: true } : {}),
         // The unit rides along for the assertions.
         unit,
-      } as LaunchSpec),
+      } as AgentLaunchSpec),
     parseUsage: () => {
       const i = usageCalls++;
       return {
@@ -1327,7 +1328,7 @@ describe("runLaneProcess waits and limits", () => {
     expect(readFileSync(rec.log, "utf8")).toContain("wip: if the session changed any file, its work is saved as refs/wip/story__1.1");
   });
 
-  test("with the sleep waiter, wait.pid names a live sleep during the trailing wait and is gone after", async () => {
+  hostTest("with the sleep waiter, wait.pid names a live sleep during the trailing wait and is gone after", async () => {
     const h = harness({ behaviors: [finishes("done")] });
     const store = createFsLaneStore({ laneDir: h.laneDir, hostStop: h.hostStop });
     const real = createSleepWaiter({ store, pollMs: 20 });

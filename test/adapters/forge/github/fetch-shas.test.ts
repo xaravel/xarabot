@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGitHubFetch } from "../../../../src/adapters/forge/github/fetch-shas.ts";
 import { openRunnerGit, runGit } from "../../../../src/adapters/forge/github/runner-git.ts";
 import type { ForgeResult } from "../../../../src/ports/forge.ts";
+import { hostTest } from "../../../support/sandbox.ts";
 import { createFakeGitHub, testKeys } from "./fake-github.ts";
 import { startGitServer } from "./git-server.ts";
 
@@ -48,7 +49,7 @@ async function setup() {
 }
 
 describe("createGitHubFetch", () => {
-  test("fetches the SHAs into runner.git with a minted token", async () => {
+  hostTest("fetches the SHAs into runner.git with a minted token", async () => {
     const { gh, server, fetch, a, b, has } = await setup();
     expect(await has(b)).toBe(false);
     expect(await fetch([b, a], live())).toEqual({ ok: true, value: undefined });
@@ -59,13 +60,13 @@ describe("createGitHubFetch", () => {
     expect(server.seen()).toContain(minted[0] as string);
   });
 
-  test("no SHAs: nothing fetched, no token", async () => {
+  hostTest("no SHAs: nothing fetched, no token", async () => {
     const { gh, fetch } = await setup();
     expect(await fetch([], live())).toEqual({ ok: true, value: undefined });
     expect(gh.control.mints()).toBe(0);
   });
 
-  test("a SHA the remote lacks is an error, and the token never shows", async () => {
+  hostTest("a SHA the remote lacks is an error, and the token never shows", async () => {
     const { gh, fetch } = await setup();
     const r = await fetch(["1".repeat(40)], live());
     expect(r.ok).toBe(false);
@@ -73,7 +74,7 @@ describe("createGitHubFetch", () => {
     for (const t of gh.control.tokens()) expect(text).not.toContain(t);
   });
 
-  test("a rejected token is an error with the token redacted", async () => {
+  hostTest("a rejected token is an error with the token redacted", async () => {
     const { gh, fetch, a, b } = await setup();
     // Mint with one fetch, then revoke, so the git server refuses the cached token.
     expect((await fetch([a], live())).ok).toBe(true);
@@ -88,7 +89,7 @@ describe("createGitHubFetch", () => {
     for (const t of gh.control.tokens()) expect(r.ok ? "" : r.error.message).not.toContain(t);
   });
 
-  test("a non-SHA is refused before any git run", async () => {
+  hostTest("a non-SHA is refused before any git run", async () => {
     const { gh, fetch } = await setup();
     const r = await fetch(["main"], live());
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");

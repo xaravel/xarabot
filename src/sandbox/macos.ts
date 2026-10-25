@@ -86,19 +86,22 @@ function validateSpec(spec: LaunchSpec): Refused | null {
   }
   if (spec.argv.some((a) => a.includes("\0"))) return refused("sandbox: an argument contains NUL");
   if (!isVendor(spec.vendor)) return refused(`sandbox: unknown vendor ${JSON.stringify(spec.vendor)}`);
-  const names = [spec.vendorHomeEnv, ...("env" in spec.credential ? [spec.credential.env] : [])];
+  // No credential: a repo command the runner starts (AR19); only the vendor home variable is checked.
+  const credential = spec.credential;
+  const names = [spec.vendorHomeEnv, ...(credential !== undefined && "env" in credential ? [credential.env] : [])];
   for (const name of names) {
     if (!ENV_NAME.test(name)) return refused(`sandbox: ${JSON.stringify(name)} is not a valid variable name`);
     if (isReservedEnvName(name)) return refused(`sandbox: ${name} is reserved`);
   }
-  if ("env" in spec.credential && spec.credential.env === spec.vendorHomeEnv) {
+  if (credential === undefined) return null;
+  if ("env" in credential && credential.env === spec.vendorHomeEnv) {
     return refused(`sandbox: ${spec.vendorHomeEnv} names both the vendor home and the credential`);
   }
-  if (!isPlainFileName(spec.credential.file)) {
-    return refused(`sandbox: credential ${JSON.stringify(spec.credential.file)} is not a plain file name`);
+  if (!isPlainFileName(credential.file)) {
+    return refused(`sandbox: credential ${JSON.stringify(credential.file)} is not a plain file name`);
   }
-  if ("homeFile" in spec.credential && !isPlainFileName(spec.credential.homeFile)) {
-    return refused(`sandbox: home file ${JSON.stringify(spec.credential.homeFile)} is not a plain file name`);
+  if ("homeFile" in credential && !isPlainFileName(credential.homeFile)) {
+    return refused(`sandbox: home file ${JSON.stringify(credential.homeFile)} is not a plain file name`);
   }
   return null;
 }
@@ -296,7 +299,7 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
     const seeded = seedVendorHome({
       launching,
       vendor: spec.vendor,
-      credential: spec.credential,
+      ...(spec.credential === undefined ? {} : { credential: spec.credential }),
       vendorHome: roots.vendorHome,
       keep: spec.resume === true,
     });

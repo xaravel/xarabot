@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPsProcessTable, killRecorded, parseLstart, readPidFile, type ProcessTable } from "../../src/lane/processes.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
 const children: { kill(): void }[] = [];
@@ -38,7 +39,7 @@ describe("parseLstart", () => {
 });
 
 describe("createPsProcessTable", () => {
-  test("inspects a live sleep: its start time and args", () => {
+  hostTest("inspects a live sleep: its start time and args", () => {
     const before = Date.now();
     const p = spawnSleep();
     const info = createPsProcessTable().inspect(p.pid);
@@ -84,7 +85,7 @@ describe("readPidFile", () => {
 });
 
 describe("killRecorded", () => {
-  test("kills a live recorded sleep", async () => {
+  hostTest("kills a live recorded sleep", async () => {
     const p = spawnSleep();
     const path = join(tmp(), "wait.pid");
     writeFileSync(path, `${p.pid}\nsleep\n`);
@@ -93,7 +94,7 @@ describe("killRecorded", () => {
     expect(p.signalCode).toBe("SIGTERM");
   });
 
-  test("a PID file older than the process: skipped started-later, not killed", () => {
+  hostTest("a PID file older than the process: skipped started-later, not killed", () => {
     const p = spawnSleep();
     const path = join(tmp(), "wait.pid");
     writeFileSync(path, `${p.pid}\nsleep\n`);
@@ -104,7 +105,7 @@ describe("killRecorded", () => {
     expect(p.exitCode).toBeNull();
   });
 
-  test("another command: skipped command, not killed", () => {
+  hostTest("another command: skipped command, not killed", () => {
     const p = spawnSleep();
     const path = join(tmp(), "agent.pid");
     writeFileSync(path, `${p.pid}\nclaude\n`);

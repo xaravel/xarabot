@@ -445,6 +445,7 @@ describe("environment", () => {
       PATH: `${tmp}/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
       HOME: `${tmp}/home`,
       TMPDIR: tmp,
+      TMPPREFIX: `${tmp}/zsh`,
       LANG: "en_US.UTF-8",
       LC_ALL: "en_US.UTF-8",
       CLAUDE_CODE_OAUTH_TOKEN: TOKEN,
@@ -482,6 +483,14 @@ describe("environment", () => {
     let t = 1_000;
     const r = (await ran(["true"], { sandbox: { now: () => (t += 500) } })).run;
     expect(r).toMatchObject({ startedAt: 1_500, endedAt: 2_000, durationMs: 500, exitCode: 0, signal: null });
+  });
+
+  // zsh writes a heredoc's temp file at `$TMPPREFIX<pid>…`; its default `/tmp/zsh` is denied.
+  toolTest("zsh")("a zsh heredoc succeeds: its temp file goes under TMPPREFIX", async () => {
+    const r = (await ran(["zsh", "-c", "cat <<EOF\nheredoc ok\nEOF"])).run;
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("heredoc ok\n");
   });
 });
 
@@ -561,6 +570,21 @@ describe("credentials", () => {
     expect(r.stdout).toBe(`t\n${TOKEN}`);
     const fresh = await sh('ls -A "$CLAUDE_CONFIG_DIR"');
     expect(fresh.stdout).toBe("");
+  });
+
+  sandboxTest("no credential: no credential variable and an empty vendor home, with no credential file read", async () => {
+    writeFileSync(join(lane, "vendor", "left-over"), "x");
+    writeCred(null);
+    try {
+      const r = await sh('printf %s "${CLAUDE_CODE_OAUTH_TOKEN:-unset}"; ls -A "$CLAUDE_CONFIG_DIR"; env | grep -c "^CLAUDE_CODE_OAUTH_TOKEN=" || true', {
+        spec: { credential: undefined },
+      });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("unset0\n");
+      expect(readdirSync(join(lane, "vendor"))).toEqual([]);
+    } finally {
+      writeCred(`${TOKEN}\n`);
+    }
   });
 
   sandboxTest("a resume with a bad credential still refuses", async () => {
@@ -647,6 +671,11 @@ describe("refusals", () => {
   sandboxTest("a credential variable named CLAUDE_CODE_TMPDIR", async () => {
     await refusedWith(["true"], { spec: { credential: { file: "oauth-token", env: "CLAUDE_CODE_TMPDIR" } } }, "reserved");
   });
+
+  sandboxTest("a credential variable or vendor home variable named TMPPREFIX", async () => {
+    await refusedWith(["true"], { spec: { credential: { file: "oauth-token", env: "TMPPREFIX" } } }, "TMPPREFIX is reserved");
+    await refusedWith(["true"], { spec: { vendorHomeEnv: "TMPPREFIX" } }, "TMPPREFIX is reserved");
+  });
 });
 
 describe("refusals before any check (any host)", () => {
@@ -661,6 +690,14 @@ describe("refusals before any check (any host)", () => {
     const r = await sandbox.run(spec(["true"]), { clone: "/c", vendorHome: "/v", tempDir: "/t", runnerGit: "/r", resultPath: "/t/r" }, new AbortController().signal);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.message).toContain("XARABOT_SANDBOXED=1");
+  });
+
+  test("a spec with no credential key still checks its vendor home variable: TMPPREFIX refuses", async () => {
+    const sandbox = createMacSandbox({ platform: "darwin", launchingEnv: { PATH: "/usr/bin:/bin", HOME: "/h" } });
+    const noCredential: LaunchSpec = { argv: ["true"], vendor: "claude", vendorHomeEnv: "TMPPREFIX", apiHosts: [] };
+    const r = await sandbox.run(noCredential, { clone: "/c", vendorHome: "/v", tempDir: "/t", runnerGit: "/r", resultPath: "/t/r" }, new AbortController().signal);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toContain("TMPPREFIX is reserved");
   });
 });
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createGitHubForge, mapPushResult } from "../../../../src/adapters/forge/github/github-forge.ts";
 import { openRunnerGit, runGit, runnerGitEnv } from "../../../../src/adapters/forge/github/runner-git.ts";
 import type { Forge, ForgeResult, PushLease } from "../../../../src/ports/forge.ts";
+import { hostTest } from "../../../support/sandbox.ts";
 import { createFakeGitHub, testKeys, type FakeGitHub } from "./fake-github.ts";
 import { startGitServer, type GitServer } from "./git-server.ts";
 
@@ -63,7 +64,7 @@ async function setup(extra: { hold?: (r: Request) => Promise<void>; runnerGit?: 
 }
 
 describe("pushBranch", () => {
-  test("new branch: a null lease creates it; a second null lease to another sha is conflict", async () => {
+  hostTest("new branch: a null lease creates it; a second null lease to another sha is conflict", async () => {
     const { forge, server, commit } = await setup();
     const [a, b] = [await commit(), await commit()];
     expect(value(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, live()))).toEqual({ sha: a });
@@ -72,7 +73,7 @@ describe("pushBranch", () => {
     expect(await server.refs()).toEqual({ "story/1.9": a });
   });
 
-  test("stale lease: remote at A, lease expects C is conflict and the remote is unchanged", async () => {
+  hostTest("stale lease: remote at A, lease expects C is conflict and the remote is unchanged", async () => {
     const { forge, server, commit } = await setup();
     const [a, b, c] = [await commit(), await commit(), await commit()];
     value(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, live()));
@@ -82,14 +83,14 @@ describe("pushBranch", () => {
     expect(await server.refs()).toEqual({ "story/1.9": b });
   });
 
-  test("a lease on a missing branch is conflict", async () => {
+  hostTest("a lease on a missing branch is conflict", async () => {
     const { forge, server, commit } = await setup();
     const [a, b] = [await commit(), await commit()];
     expect(kind(await forge.pushBranch({ branch: "story/2.2", expected_sha: a, sha: b }, live()))).toBe("conflict");
     expect(await server.refs()).toEqual({});
   });
 
-  test("up to date: remote at A, pushing A with a null lease is conflict; expecting A is ok", async () => {
+  hostTest("up to date: remote at A, pushing A with a null lease is conflict; expecting A is ok", async () => {
     const { forge, commit } = await setup();
     const a = await commit();
     value(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, live()));
@@ -97,7 +98,7 @@ describe("pushBranch", () => {
     expect(value(await forge.pushBranch({ branch: "story/1.9", expected_sha: a, sha: a }, live()))).toEqual({ sha: a });
   });
 
-  test("the pushed branch moves the emulator's ref, so an open PR's head follows", async () => {
+  hostTest("the pushed branch moves the emulator's ref, so an open PR's head follows", async () => {
     const { forge, gh, commit } = await setup();
     const [a, b] = [await commit(), await commit()];
     value(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, live()));
@@ -108,7 +109,7 @@ describe("pushBranch", () => {
     expect(value(await forge.listPrsByBranch("story/1.9", live()))[0]?.head_sha).toBe(b);
   });
 
-  test("unknown sha: valid hex not in runner.git, or not hex at all, is not-found", async () => {
+  hostTest("unknown sha: valid hex not in runner.git, or not hex at all, is not-found", async () => {
     const { forge, server } = await setup();
     expect(kind(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: "a".repeat(40) }, live()))).toBe("not-found");
     expect(kind(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: "HEAD" }, live()))).toBe("not-found");
@@ -117,7 +118,7 @@ describe("pushBranch", () => {
     expect(await server.refs()).toEqual({});
   });
 
-  test("reserved and invalid branches are forbidden", async () => {
+  hostTest("reserved and invalid branches are forbidden", async () => {
     const { forge, server, commit } = await setup();
     const a = await commit();
     for (const branch of ["main", "xarabot/claims", "bad..name", "a b", "x:y", "ends.lock", "", "-x/"]) {
@@ -126,13 +127,13 @@ describe("pushBranch", () => {
     expect(await server.refs()).toEqual({});
   });
 
-  test("without runnerGit the push is forbidden", async () => {
+  hostTest("without runnerGit the push is forbidden", async () => {
     const { forge } = await setup({ runnerGit: false });
     const r = await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: "a".repeat(40) }, live());
     expect(r.ok ? "ok" : r.error).toEqual({ kind: "forbidden", message: "pushBranch: no runner.git configured" });
   });
 
-  test("a revoked token is auth", async () => {
+  hostTest("a revoked token is auth", async () => {
     const { forge, gh, commit } = await setup();
     const a = await commit();
     value(await forge.snapshot(live()));
@@ -142,7 +143,7 @@ describe("pushBranch", () => {
     expect(value(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, live()))).toEqual({ sha: a });
   });
 
-  test("hooks and a credential helper planted in runner.git do nothing", async () => {
+  hostTest("hooks and a credential helper planted in runner.git do nothing", async () => {
     const { forge, server, gitDir, lane, commit } = await setup();
     const marker = join(lane, "hook-ran");
     const hooks = join(lane, "planted-hooks");
@@ -163,7 +164,7 @@ describe("pushBranch", () => {
     expect(server.seen()).not.toContain("planted");
   });
 
-  test("an aborted push changes nothing", async () => {
+  hostTest("an aborted push changes nothing", async () => {
     const { forge, server, commit } = await setup();
     const a = await commit();
     expect(kind(await forge.pushBranch({ branch: "story/1.9", expected_sha: null, sha: a }, { signal: AbortSignal.abort() }))).toBe("transient");
@@ -182,7 +183,7 @@ describe("token leak", () => {
     return out;
   }
 
-  test("a push held mid-request: ps, git's env, lane files, console, results and messages never hold the token; the server saw it", async () => {
+  hostTest("a push held mid-request: ps, git's env, lane files, console, results and messages never hold the token; the server saw it", async () => {
     const psDumps: string[] = [];
     const hold = async (r: Request) => {
       if (r.headers.get("authorization") === null) return;

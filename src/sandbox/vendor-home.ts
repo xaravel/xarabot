@@ -97,7 +97,8 @@ export function emptyDir(dir: string): void {
 export type SeedParams = {
   readonly launching: LaunchingEnv;
   readonly vendor: Vendor;
-  readonly credential: LaunchCredential;
+  /** Absent for a repo command the runner starts (AR19): nothing is read or seeded. */
+  readonly credential?: LaunchCredential;
   readonly vendorHome: string;
   /** Keep the vendor home's contents (a resume of the same session); default `false`. */
   readonly keep?: boolean;
@@ -112,15 +113,24 @@ export type Seeded = { readonly env?: { readonly name: string; readonly value: s
  * mode 600; in `env` mode the home stays empty and the trimmed credential is
  * returned for the variable. With `keep`, the home is not emptied (a resume
  * needs the session's transcript); a `homeFile` is still rewritten.
+ *
+ * With no credential (a repo command the runner starts, AR19) it only
+ * empties the home (or keeps it): it reads no credential file, so a missing
+ * one is no error, writes no home file and returns no variable.
  */
 export function seedVendorHome(params: SeedParams): Result<Seeded, "refused"> {
-  const path = credentialPath(params.launching, params.vendor, params.credential.file);
-  if (!path.ok) return path;
-  if ("homeFile" in params.credential && !isPlainFileName(params.credential.homeFile)) {
-    return err("refused", `credential: home file ${JSON.stringify(params.credential.homeFile)} is not a plain file name`);
+  const credential = params.credential;
+  let text: string | null = null;
+  if (credential !== undefined) {
+    const path = credentialPath(params.launching, params.vendor, credential.file);
+    if (!path.ok) return path;
+    if ("homeFile" in credential && !isPlainFileName(credential.homeFile)) {
+      return err("refused", `credential: home file ${JSON.stringify(credential.homeFile)} is not a plain file name`);
+    }
+    const read = readCredential(path.value);
+    if (!read.ok) return read;
+    text = read.value;
   }
-  const text = readCredential(path.value);
-  if (!text.ok) return text;
   try {
     if (params.keep === true) {
       mkdirSync(params.vendorHome, { recursive: true, mode: 0o700 });
@@ -128,17 +138,18 @@ export function seedVendorHome(params: SeedParams): Result<Seeded, "refused"> {
     } else {
       emptyDir(params.vendorHome);
     }
-    if ("homeFile" in params.credential) {
-      const target = join(params.vendorHome, params.credential.homeFile);
+    if (credential === undefined || text === null) return ok({});
+    if ("homeFile" in credential) {
+      const target = join(params.vendorHome, credential.homeFile);
       // On a resume the session may have left anything at this name: replace it.
       if (params.keep === true) removeTree(target);
       // Create it 600 from the start; chmod again in case the umask cleared more.
       closeSync(openSync(target, "wx", CREDENTIAL_MODE));
       chmodSync(target, CREDENTIAL_MODE);
-      writeFileSync(target, text.value);
+      writeFileSync(target, text);
       return ok({});
     }
-    return ok({ env: { name: params.credential.env, value: text.value.trim() } });
+    return ok({ env: { name: credential.env, value: text.trim() } });
   } catch (e) {
     return err("refused", `vendor home ${params.vendorHome}: cannot re-seed (${errCode(e)})`);
   }

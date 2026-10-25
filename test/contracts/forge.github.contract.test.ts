@@ -10,6 +10,7 @@ import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgePr, type F
 import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
 import { cleanupScratch, LIVE_LOGIN, liveCredentials, liveGithubEnabled, liveRepo, prefixed } from "../support/live-github.ts";
+import { isSandboxed } from "../support/sandbox.ts";
 import { forgeContract, type ForgeFixture } from "./forge.contract.ts";
 
 /** The operations the GitHub adapter implements: all of them (Stories 1.8 to 1.10). */
@@ -35,8 +36,11 @@ function signal(): AbortSignal {
 
 // ------------------------------------------------------------ emulator
 
+// The emulator's git remote binds a socket, which a session's profile denies:
+// inside a session (`XARABOT_SANDBOXED=1`) every emulator case reports skipped.
 forgeContract({
   name: "github (emulator)",
+  enabled: !isSandboxed,
   operations: IMPLEMENTED,
   controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes"],
   make: async (): Promise<ForgeFixture> => {

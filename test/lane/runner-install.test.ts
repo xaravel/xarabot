@@ -7,6 +7,7 @@ import { ok } from "../../src/core/result.ts";
 import type { ForgeResult } from "../../src/ports/forge.ts";
 import { installRunner, RUNNER_MARKER, type InstallDeps } from "../../src/lane/runner-install.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
+import { hostTest } from "../support/sandbox.ts";
 
 const TOKEN = "ghs_runner_install_token";
 const live = () => AbortSignal.timeout(60_000);
@@ -53,7 +54,7 @@ async function world(): Promise<World> {
 const leftovers = (root: string) => (existsSync(root) ? readdirSync(root).filter((n) => n.startsWith(".staging-")) : []);
 
 describe("installRunner", () => {
-  test("installs a tag: checked out, marked, no .git, dependencies installed", async () => {
+  hostTest("installs a tag: checked out, marked, no .git, dependencies installed", async () => {
     const w = await world();
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v0.2.0", url: w.server.repoUrl, credential: { url: w.server.repoUrl, token: TOKEN }, signal: live() });
     const dir = join(w.runnerRoot, "v0.2.0");
@@ -66,7 +67,7 @@ describe("installRunner", () => {
     expect(w.server.seen()).toContain(TOKEN);
   });
 
-  test("an annotated tag installs its commit", async () => {
+  hostTest("an annotated tag installs its commit", async () => {
     const w = await world();
     const deps: InstallDeps = async () => ok(undefined);
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v0.3.0", url: w.server.repoUrl, credential: { url: w.server.repoUrl, token: TOKEN }, signal: live(), installDeps: deps });
@@ -74,7 +75,7 @@ describe("installRunner", () => {
     expect(readFileSync(join(w.runnerRoot, "v0.3.0", RUNNER_MARKER), "utf8")).toBe(`v0.3.0\n${w.annotatedSha}\n`);
   });
 
-  test("already present: nothing fetched", async () => {
+  hostTest("already present: nothing fetched", async () => {
     const w = await world();
     mkdirSync(join(w.runnerRoot, "v0.2.0"), { recursive: true });
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v0.2.0", url: w.server.repoUrl, signal: live() });
@@ -82,7 +83,7 @@ describe("installRunner", () => {
     expect(w.server.seen()).toEqual([]);
   });
 
-  test("a missing tag: an error naming the fetch, no runner folder, no staging left", async () => {
+  hostTest("a missing tag: an error naming the fetch, no runner folder, no staging left", async () => {
     const w = await world();
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v9.9.9", url: w.server.repoUrl, credential: { url: w.server.repoUrl, token: TOKEN }, signal: live() });
     expect(r.ok ? "ok" : r.error.kind).toBe("fetch");
@@ -91,7 +92,7 @@ describe("installRunner", () => {
     expect(leftovers(w.runnerRoot)).toEqual([]);
   });
 
-  test("a failed dependency install leaves no runner folder and no staging", async () => {
+  hostTest("a failed dependency install leaves no runner folder and no staging", async () => {
     const w = await world();
     const deps: InstallDeps = async () => ({ ok: false, error: { kind: "deps", message: "boom" } });
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v0.2.0", url: w.server.repoUrl, credential: { url: w.server.repoUrl, token: TOKEN }, signal: live(), installDeps: deps });
@@ -100,7 +101,7 @@ describe("installRunner", () => {
     expect(leftovers(w.runnerRoot)).toEqual([]);
   });
 
-  test("losing the rename race to an existing folder counts as success", async () => {
+  hostTest("losing the rename race to an existing folder counts as success", async () => {
     const w = await world();
     const deps: InstallDeps = async () => {
       mkdirSync(join(w.runnerRoot, "v0.2.0", "src"), { recursive: true });
@@ -120,7 +121,7 @@ describe("installRunner", () => {
     expect(existsSync(runnerRoot)).toBe(false);
   });
 
-  test("a wrong token fails the fetch and the token is not in the message", async () => {
+  hostTest("a wrong token fails the fetch and the token is not in the message", async () => {
     const w = await world();
     const r = await installRunner({ runnerRoot: w.runnerRoot, version: "v0.2.0", url: w.server.repoUrl, credential: { url: w.server.repoUrl, token: "ghs_wrong" }, signal: live() });
     expect(r.ok ? "ok" : r.error.kind).toBe("fetch");
