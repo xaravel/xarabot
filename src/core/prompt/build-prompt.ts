@@ -94,6 +94,7 @@ const TemplateSchema = z.strictObject({
   loopback: z.string(),
   ci_fix: z.string(),
   rules: z.string(),
+  epic_context: z.string(),
   human_live_steps: z.string(),
   repo_sections: z.string(),
   result_build: z.string(),
@@ -164,8 +165,8 @@ function sectionsText(sections: readonly PromptSection[]): string {
 }
 
 /**
- * Builds a `story` prompt: task, rules, Human Live Steps, repo sections, and
- * the result step last. Placeholders are filled in one pass, so a value that
+ * Builds a `story` prompt: task, rules, the Epic context rule, Human Live
+ * Steps, repo sections, and the result step last. Placeholders are filled in one pass, so a value that
  * contains `{{x}}` is never re-expanded.
  */
 export function buildPrompt(input: BuildPromptInput): Result<string, BuildPromptError> {
@@ -205,7 +206,7 @@ export function buildPrompt(input: BuildPromptInput): Result<string, BuildPrompt
 
   const parts: string[] = [];
   parts.push(mode.mode === "build" ? t.first_build : mode.mode === "loopback" ? t.loopback : t.ci_fix);
-  parts.push(t.rules);
+  parts.push(t.rules, t.epic_context);
   if (steps.length > 0) parts.push(t.human_live_steps);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(mode.mode === "build" ? t.result_build : t.result_fix);
@@ -456,7 +457,7 @@ const RetroItemInputSchema = z.strictObject({
  * Builds a retro-item prompt (Story 2.10): the `retro_item` task (or
  * `retro_item_ci_fix` with the CI log), which runs no skill and names the
  * unit and the item (its id, Epic, action text on one line and globs), the
- * rules, the Human Live Steps, the repo sections, and the `build` result
+ * rules, the Epic context rule, the Human Live Steps, the repo sections, and the `build` result
  * step with its JSON Schema last. Pure; placeholders are filled in one pass,
  * so an item text holding `{{x}}` is never re-expanded.
  */
@@ -492,7 +493,7 @@ export function buildRetroItemPrompt(input: BuildRetroItemPromptInput): Result<s
   };
   if (mode.mode === "ci-fix") values.log_path = mode.log_path;
 
-  const parts: string[] = [mode.mode === "build" ? t.retro_item : t.retro_item_ci_fix, t.rules];
+  const parts: string[] = [mode.mode === "build" ? t.retro_item : t.retro_item_ci_fix, t.rules, t.epic_context];
   if (steps.length > 0) parts.push(t.human_live_steps);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_retro_item);
