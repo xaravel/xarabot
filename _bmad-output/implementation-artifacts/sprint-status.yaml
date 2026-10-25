@@ -76,7 +76,7 @@ development_status:
   2-8-the-graph-change-gate: done
   2-9-retro-units: done
   2-10-retro-item-units: done
-  2-11-several-builder-lanes-on-one-host: backlog
+  2-11-several-builder-lanes-on-one-host: done
   2-12-claims-race-verification: backlog
   epic-2-retrospective: optional
 
