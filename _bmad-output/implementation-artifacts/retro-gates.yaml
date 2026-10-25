@@ -6,9 +6,9 @@ epics:
       unit: "retro:2"
       recorded_at: "2026-10-25T18:01:08Z"
       go:
-        by: edanisko
+        by: "edanisko"
         at: "2026-10-25T18:19:26Z"
-        ruling: maintainer-pr
+        ruling: "maintainer-pr"
     items:
       - id: "epic-2-retro-item-1-record-the-story-2-12-live-runs"
         text: "Record Story 2.12's three live runs in docs/maintainer/evidence/epic-2.md: the claims race suite with the 30-minute case, bun-install.test.ts and the agent-contract live smoke, each with counts and duration, plus date, host, commit and bun version (A1)"
@@ -21,7 +21,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/retro-step.ts", "src/core/reconcile/**", "src/core/ledger/**", "test/lane/retro-step.test.ts", "test/core/reconcile/**", "test/core/ledger/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-3-keep-approvals-through-runner-failures"
         text: "Stop reconcile's queue handling losing approvals and attempts: re-enqueue a record left merging by the runner's own failure on its standing approval; do not re-park ungated retro and retro-item PRs awaiting-approval after an ejection; give a retro-item conflict a conflict session; close the open PR when the record beat fails after openPr (C2, C3, C6)"
         route: lane
