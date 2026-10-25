@@ -148,9 +148,9 @@ describe("repo sections and Human Live Steps", () => {
       expect(resultSection(build({ mode }))).toContain("the id of a step listed under Human Live Steps");
     }
   });
-  test("order: task, rules, steps, sections, result", () => {
+  test("order: task, rules, Epic context, steps, sections, result", () => {
     const p = build({ sections, human_live_steps: steps });
-    const at = ["# Task", "# Rules", "# Human Live Steps", "# Repository instructions", "# Result"].map((h) => p.indexOf(h));
+    const at = ["# Task", "# Rules", "# Epic context", "# Human Live Steps", "# Repository instructions", "# Result"].map((h) => p.indexOf(h));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
   });
@@ -660,7 +660,7 @@ describe("retro-item prompt (Story 2.10)", () => {
   });
   test("task, rules, Human Live Steps, sections, then the build result step with its JSON Schema last", () => {
     const p = item({ human_live_steps: steps, sections });
-    const order = ["# Task", "# Rules", "# Human Live Steps", "`dns`: Point the DNS", "# Repository instructions", "A section.", "B section.", "# Result"].map((x) => p.indexOf(x));
+    const order = ["# Task", "# Rules", "# Epic context", "# Human Live Steps", "`dns`: Point the DNS", "# Repository instructions", "A section.", "B section.", "# Result"].map((x) => p.indexOf(x));
     expect(order.every((x) => x >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(p).toContain(BUILD_RESULT_JSON_SCHEMA);
@@ -733,5 +733,56 @@ describe("retro-item prompt (Story 2.10)", () => {
     const e = itemFailure({ template: { ...PACKAGE_TEMPLATE, result_retro_item: undefined } as unknown as PromptTemplate });
     expect(e.kind).toBe("invalid-template");
     expect(e.message).toMatch(/template: result_retro_item/);
+  });
+});
+
+// ------------------------------------------------------------ Epic context and denials (Epic 2 retro item 8)
+
+describe("Epic context and denials (Epic 2 retro item 8)", () => {
+  const OWNS = "The runner owns each Epic context file, `epic-<N>-context.md` among the implementation artifacts, and reverts any change to it";
+  const SKIP = "Never compile, recompile or edit one, even when a planning artifact is newer than it: load it as it is.";
+  const DENIAL = "When your permission mode or the sandbox refuses an action, never work around it: do not retry it another way, such as with a changed environment variable, a disabled sandbox, another tool or another command. Record it in `denied_actions` in your result.";
+  const SUBAGENT = "Give each subagent you start the rule above, and record each action refused to a subagent in `denied_actions` too.";
+  const story = MODES.map((mode) => ({ name: `story ${mode.mode}`, p: build({ mode }) }));
+  const items = [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }].map((mode) => ({
+    name: `retro-item ${mode.mode}`,
+    p: item({ mode: mode as BuildRetroItemPromptInput["mode"] }),
+  }));
+  const others = [
+    { name: "status planning", p: planning({ unit: STATUS_UNIT }) },
+    { name: "graph planning", p: planning({ unit: GRAPH_UNIT }) },
+    { name: "retro", p: retro() },
+  ];
+
+  for (const c of [...story, ...items]) {
+    test(`${c.name}: says the runner owns and reverts the Epic context, so skip the recompile`, () => {
+      expect(c.p).toContain(OWNS);
+      expect(c.p).toContain(SKIP);
+      const at = ["# Rules", "# Epic context", "# Result"].map((h) => c.p.indexOf(h));
+      expect(at.every((i) => i >= 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
+    });
+  }
+  for (const c of others) {
+    test(`${c.name}: carries no Epic context part`, () => {
+      expect(c.p).not.toContain("# Epic context");
+      expect(c.p).not.toContain(OWNS);
+    });
+  }
+  for (const c of [...story, ...items, ...others]) {
+    test(`${c.name}: a denial is recorded in denied_actions, never retried another way, by subagents too`, () => {
+      const rules = c.p.slice(c.p.indexOf("# Rules\n"));
+      expect(rules).toContain(DENIAL);
+      expect(rules).toContain(SUBAGENT);
+    });
+  }
+  test("the Epic context part carries no banned word of any prompt kind", () => {
+    const text = PACKAGE_TEMPLATE.epic_context;
+    for (const table of [BANNED, PLANNING_BANNED, RETRO_BANNED]) expect(table.filter((b) => b.pattern.test(text)).map((b) => b.what)).toEqual([]);
+  });
+  test("a missing epic_context part", () => {
+    const e = failure({ template: { ...PACKAGE_TEMPLATE, epic_context: undefined } as unknown as PromptTemplate });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/template: epic_context/);
   });
 });

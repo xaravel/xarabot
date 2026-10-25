@@ -8,6 +8,9 @@
  * queue, approval, claim, `next`, ledger, sprint-status or selection word;
  * the retro-item parts (Story 2.10) carry no word the Story parts may not
  * carry (the CI-fix part may say "CI log" only). The runner does all of that.
+ * The Story and retro-item prompts also carry `epic_context`, so a build
+ * session skips the Epic context recompile that the runner always reverts;
+ * the planning prompts, which compile those files, never carry it.
  *
  * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopback only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
@@ -27,6 +30,8 @@ export type PromptTemplate = {
   readonly ci_fix: string;
   /** Rules for every session. */
   readonly rules: string;
+  /** The Epic context files are the runner's: Story and retro-item prompts only, never a planning prompt. */
+  readonly epic_context: string;
   /** The Human Live Steps list; omitted when the list is empty. */
   readonly human_live_steps: string;
   /** The repo's `.xarabot/prompts/` sections; omitted when there are none. */
@@ -122,7 +127,12 @@ Run no skill. The CI log for this Story's latest change is prefetched in \`{{log
 
 - Work only inside this clone, your current working directory, and your temp folder.
 - Leave your changes in the clone's working tree; the runner reads them from there.
-- When your permission mode refuses an action, never work around it: do not retry it another way. Record it in \`denied_actions\` in your result.`,
+- When your permission mode or the sandbox refuses an action, never work around it: do not retry it another way, such as with a changed environment variable, a disabled sandbox, another tool or another command. Record it in \`denied_actions\` in your result.
+- Give each subagent you start the rule above, and record each action refused to a subagent in \`denied_actions\` too.`,
+
+  epic_context: `# Epic context
+
+The runner owns each Epic context file, \`epic-<N>-context.md\` among the implementation artifacts, and reverts any change to it, so a compiled one is always thrown away. Never compile, recompile or edit one, even when a planning artifact is newer than it: load it as it is.`,
 
   human_live_steps: `# Human Live Steps
 
