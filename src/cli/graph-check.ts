@@ -7,8 +7,30 @@ import { ConfigSchema } from "../core/schemas/config.ts";
 
 const PREFIX = "xarabot graph check:";
 
-function git(cwd: string, args: readonly string[]): { ok: true; stdout: string } | { ok: false; message: string } {
-  const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+/** Each git call's default deadline. */
+export const GRAPH_GIT_TIMEOUT_MS = 60_000;
+
+export type GraphCheckOpts = {
+  /** Each git call's deadline; default 60 000 ms. */
+  readonly gitTimeoutMs?: number;
+  /** The git calls' environment; default `process.env`. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+};
+
+type GitOpts = { readonly timeoutMs: number; readonly env: Readonly<Record<string, string | undefined>> };
+
+/** One git call: never prompts, and is killed past its deadline (decision 33). */
+function git(cwd: string, args: readonly string[], o: GitOpts): { ok: true; stdout: string } | { ok: false; message: string } {
+  const proc = Bun.spawnSync(["git", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env: { ...o.env, GIT_TERMINAL_PROMPT: "0" },
+    timeout: o.timeoutMs,
+    killSignal: "SIGKILL",
+  });
+  if (proc.exitedDueToTimeout === true) return { ok: false, message: `git ${args[0] ?? ""}: ran past ${o.timeoutMs} ms` };
   if (proc.exitCode !== 0) {
     const reason = proc.stderr.toString().trim() || `exit ${proc.exitCode ?? "?"}`;
     return { ok: false, message: `git ${args[0] ?? ""}: ${reason}` };
@@ -46,17 +68,18 @@ function graphConfig(root: string): { ok: true; config: GraphConfig } | { ok: fa
  * top level of `cwd`, prints it to stdout and Story headings with no manifest
  * as warnings to stderr. Returns 0, or 1 on any failure.
  */
-export function graphCheck(cwd: string): number {
+export function graphCheck(cwd: string, opts: GraphCheckOpts = {}): number {
+  const gitOpts: GitOpts = { timeoutMs: opts.gitTimeoutMs ?? GRAPH_GIT_TIMEOUT_MS, env: opts.env ?? process.env };
   const fail = (message: string): number => {
     console.error(`${PREFIX} ${message}`);
     return 1;
   };
 
-  const top = git(cwd, ["rev-parse", "--show-toplevel"]);
+  const top = git(cwd, ["rev-parse", "--show-toplevel"], gitOpts);
   if (!top.ok) return fail(top.message);
   const root = top.stdout.trim();
 
-  const listed = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+  const listed = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], gitOpts);
   if (!listed.ok) return fail(listed.message);
   const tree = [...new Set(listed.stdout.split("\0").filter((p) => p !== ""))].filter((p) => existsSync(join(root, p))).sort();
 

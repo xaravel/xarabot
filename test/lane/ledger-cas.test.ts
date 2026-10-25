@@ -286,6 +286,103 @@ describe("swapLedger", () => {
     expect(control.ledgerLog()).toHaveLength(3);
   });
 
+  /** The fake's snapshot calls so far: each one reads the ledger first. */
+  const snapshots = (control: ReturnType<typeof createFakeForge>["control"]): number => control.trace().filter((t) => t === "ledger").length;
+
+  test("reconcile: a swap that lands but loses its ack at the deadline is ok with our commit", async () => {
+    const { forge, control } = createFakeForge();
+    control.loseSwapAck();
+    const ac = new AbortController();
+    // The deadline passes during the back-off after the lost ack.
+    const sleep: Sleep = async () => ac.abort();
+    const r = await swapLedger({ forge, edit: claimAlice, signal: ac.signal, sleep });
+    const log = control.ledgerLog();
+    expect(log).toHaveLength(2);
+    expect(snapshots(control)).toBe(2);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.tip).toBe(log[1]?.sha as string);
+    expect(r.value.commit?.message).toBe(log[1]?.message as string);
+    expect(r.value.tries).toBe(1);
+  });
+
+  test("reconcile: a lost ack on the last try is ok", async () => {
+    const { forge, control } = createFakeForge();
+    control.loseSwapAck();
+    const r = await swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep, maxTries: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.commit).not.toBeNull();
+    expect(r.value.tip).toBe(control.ledgerLog()[1]?.sha as string);
+    expect(snapshots(control)).toBe(2);
+  });
+
+  test("reconcile: a transient swap that did not land is exhausted after exactly one extra snapshot", async () => {
+    const { forge, control } = createFakeForge();
+    control.injectError("ledgerSwap", { kind: "transient", message: "timeout" });
+    const r = await swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep, maxTries: 1 });
+    expect(r.ok ? "ok" : r.error.kind).toBe("exhausted");
+    expect(snapshots(control)).toBe(2);
+    expect(control.ledgerLog()).toHaveLength(1);
+  });
+
+  test("reconcile: a failed reconciling read returns the original error", async () => {
+    const { forge, control } = createFakeForge();
+    control.loseSwapAck();
+    // The swap lands and loses its ack; the next snapshot, the reconciling one, fails.
+    control.beforeSwap(() => control.injectError("snapshot", { kind: "transient", message: "snapshot: down" }));
+    const r = await swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep, maxTries: 1 });
+    expect(r.ok ? "ok" : [r.error.kind, r.error.message]).toEqual(["exhausted", "ledger swap: gave up after 1 tries: ledgerSwap: ack lost"]);
+    expect(control.ledgerLog()).toHaveLength(2);
+  });
+
+  test("reconcile: a reconciling read that throws returns the original error", async () => {
+    const { forge, control } = createFakeForge();
+    let snaps = 0;
+    const throwing = {
+      ...forge,
+      snapshot: (o: Parameters<typeof forge.snapshot>[0]) => {
+        snaps += 1;
+        if (snaps === 2) throw new Error("boom");
+        return forge.snapshot(o);
+      },
+    };
+    control.loseSwapAck();
+    const r = await swapLedger({ forge: throwing, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep, maxTries: 1 });
+    expect(r.ok ? "ok" : r.error.kind).toBe("exhausted");
+    expect(snaps).toBe(2);
+  });
+
+  test("reconcile: the reconciling read runs under its own deadline, not the aborted caller's", async () => {
+    const { forge, control } = createFakeForge();
+    control.loseSwapAck();
+    const ac = new AbortController();
+    const signals: AbortSignal[] = [];
+    const watched = {
+      ...forge,
+      snapshot: (o: Parameters<typeof forge.snapshot>[0]) => {
+        signals.push(o.signal);
+        return forge.snapshot(o);
+      },
+    };
+    const r = await swapLedger({ forge: watched, edit: claimAlice, signal: ac.signal, sleep: async () => ac.abort(), reconcileMs: 1_000 });
+    expect(r.ok).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBe(ac.signal);
+    expect(signals[1]).not.toBe(ac.signal);
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
+  test("no reconcile without an unacked swap: a conflict exhausted on its last try takes no extra snapshot", async () => {
+    const { forge, control } = createFakeForge();
+    control.beforeSwap(({ n }) => {
+      if (n === 1) control.writeForeignLedger(foreign(1));
+    });
+    const r = await swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, sleep: recorder().sleep, maxTries: 1 });
+    expect(r.ok ? "ok" : r.error.kind).toBe("exhausted");
+    expect(snapshots(control)).toBe(1);
+  });
+
   test("maxTries must be a positive integer", async () => {
     const { forge } = createFakeForge();
     await expect(swapLedger({ forge, edit: claimAlice, signal: new AbortController().signal, maxTries: 0 })).rejects.toThrow(RangeError);

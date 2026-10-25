@@ -158,6 +158,49 @@ describe("xarabot stop", () => {
     expect(l.value.units.get("story:1.5")).toMatchObject({ state: "released", attempts: 1 });
   });
 
+  test("stop --now on a merging unit with a queued PR: a fencing heartbeat commit, then the dequeue, then the release", async () => {
+    const w = world();
+    const fake = createFakeForge({ now: "2026-10-22T10:10:00Z", main: { "README.md": "x\n" } });
+    const opts = { signal: AbortSignal.timeout(5000) };
+    const head = fake.control.makeCommit();
+    expect((await fake.forge.pushBranch({ branch: "story/1.5", expected_sha: null, sha: head }, opts)).ok).toBe(true);
+    const opened = await fake.forge.openPr({ branch: "story/1.5", base: "main", title: "t", body: "b" }, opts);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const pr = opened.value.number;
+    expect((await fake.forge.enqueue(pr, head, opts)).ok).toBe(true);
+    expect(fake.control.queue()).toEqual([pr]);
+    fake.control.writeForeignLedger({
+      message: "seed [skip ci]",
+      deletes: [],
+      writes: tip([rec({ unit: "story:1.5", state: "merging", pr, pr_owner: "alice", head_sha: head, passed_sha: head })]),
+    });
+    // The ledger commits already written when the dequeue is asked for.
+    let atDequeue: string[] | null = null;
+    const forge = {
+      ...fake.forge,
+      dequeue: (n: number, o: { readonly signal: AbortSignal }) => {
+        atDequeue = fake.control.ledgerLog().map((c) => c.message);
+        return fake.forge.dequeue(n, o);
+      },
+    };
+    const r = await run(["stop", "--now", "builder-1"], { env: w.env, forge: async () => ({ ok: true, forge }) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("released story:1.5");
+    expect(atDequeue as string[] | null).toEqual(["root", "seed [skip ci]", "ledger: heartbeat story:1.5 [skip ci]"]);
+    expect(fake.control.ledgerLog().map((c) => c.message)).toEqual([
+      "root",
+      "seed [skip ci]",
+      "ledger: heartbeat story:1.5 [skip ci]",
+      "ledger: release story:1.5 [skip ci]",
+    ]);
+    expect(fake.control.queue()).toEqual([]);
+    const s = await fake.forge.snapshot(opts);
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    expect(l.value.units.get("story:1.5")).toMatchObject({ state: "released", attempts: 0 });
+  });
+
   test("stop --now with no App credentials: STOP written, the release failure exits 1", async () => {
     const w = world();
     const r = await run(["stop", "--now", "builder-1"], { env: w.env });

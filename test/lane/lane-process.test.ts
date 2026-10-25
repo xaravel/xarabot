@@ -147,6 +147,10 @@ type HarnessOpts = MainOpts & {
   /** The cost `parseUsage` reports per run; default 0.5, an estimate. */
   readonly costs?: readonly ({ usd: number; estimate: boolean } | null)[];
   readonly prOutcome?: { outcome: "progress" | "failed" | "stop" | "idle"; state: UnitRecord["state"] | null };
+  /** The model `parseUsage` reports; default the lane's default model, `null` for none. */
+  readonly reportedModel?: string | null;
+  /** The model `parseUsage` reports per run, overriding `reportedModel`; past the end, none. */
+  readonly reportedModels?: readonly (string | null)[];
   /** The usage limit `parseUsage` reports per run; default none. */
   readonly usageLimits?: readonly ({ resetAt: number | null } | null)[];
   /** How each stub wait ends, in order; default `elapsed`. */
@@ -205,7 +209,7 @@ function harness(o: HarnessOpts = {}): Harness {
       const i = usageCalls++;
       return {
         sessionId,
-        model: "reported-model",
+        model: o.reportedModels !== undefined ? (o.reportedModels[i] ?? null) : o.reportedModel === undefined ? "claude-opus-5-5" : o.reportedModel,
         tokens: { input: 100, output: 20, cacheRead: 5, cacheCreation: 1 },
         cost: o.costs === undefined ? { usd: 0.5, estimate: true } : (o.costs[i] ?? null),
         usageLimit: o.usageLimits?.[i] ?? null,
@@ -646,6 +650,98 @@ describe("runLaneProcess", () => {
     expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", result: "blocked" });
   });
 
+  test("a session that ran another model: the attempt fails model-mismatch, the journal has the reported model", async () => {
+    const h = harness({ behaviors: [finishes("done")], reportedModel: "claude-sonnet-5-5" });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.prSteps).toHaveLength(0);
+    // The result file is there, but the run's model fails the session before any resume or result parse.
+    expect(h.runs).toHaveLength(1);
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "failed", state: "released", model: "claude-opus-5-5", reported_model: "claude-sonnet-5-5", attempts: 1 });
+    expect(rec.reason?.startsWith("model-mismatch: ")).toBe(true);
+    expect(rec.reason).toContain("claude-sonnet-5-5");
+    expect(rec.reason).toContain("claude-opus-5-5");
+  });
+
+  test("a session that reported no model: the attempt fails model-mismatch, no reported_model", async () => {
+    const h = harness({ behaviors: [finishes("done")], reportedModel: null });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    const rec = h.unitRecord();
+    expect(rec.reason?.startsWith("model-mismatch: ")).toBe(true);
+    expect(rec).not.toHaveProperty("reported_model");
+  });
+
+  test("a resume that ran another model fails the session too", async () => {
+    const h = harness({ behaviors: [() => {}, finishes("done")], reportedModels: ["claude-opus-5-5", "claude-sonnet-5-5"] });
+    expect((await h.run()).outcome).toBe("failed");
+    expect(h.runs.map((r) => r.unit.kind)).toEqual(["fresh", "resume"]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ model: "claude-opus-5-5", reported_model: "claude-sonnet-5-5", sessions: 2 });
+    expect(rec.reason?.startsWith("model-mismatch: ")).toBe(true);
+  });
+
+  const humanLiveStep = (stepId: string): Behavior =>
+    ({ profile }) => {
+      writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, specText("blocked"));
+      writeFileSync(profile.resultPath, buildResult("blocked", { blocked: { kind: "human-live-step", text: "rotate it", step_id: stepId } }));
+    };
+
+  test("a human-live-step naming an unconfigured step: result invalid, a failed attempt", async () => {
+    const h = harness({ behaviors: [humanLiveStep("nope")] });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    const rec = h.unitRecord();
+    expect(rec.reason?.startsWith("result invalid: ")).toBe(true);
+    expect(rec.reason).toContain('"nope"');
+    expect(rec.reason).toContain('"rotate-key"');
+  });
+
+  test("a human-live-step naming a configured step parks blocked human-live-step", async () => {
+    const h = harness({ behaviors: [humanLiveStep("rotate-key")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "human-live-step" } });
+    expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", result: "blocked" });
+  });
+
+  test("a failed Halt after the claim (markMerged fails) releases the unit at once: attempts + 1", async () => {
+    const h = harness();
+    await pr(h.fake, "1.1", "merged");
+    // The claim lands; the next swap, markMerged's, fails not-found.
+    h.fake.control.beforeSwap(({ n }) => {
+      if (n === 1) h.fake.control.injectError("ledgerSwap", { kind: "not-found", message: "ledgerSwap: gone" });
+    });
+    expect((await h.run()).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.fake.control.ledgerLog().map((c) => c.message)).toEqual(["root", "ledger: claim story:1.1 [skip ci]", "ledger: failAttempt story:1.1 [skip ci]"]);
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "failed", state: "released", attempts: 1 });
+    // The reasons gathered before the Halt stay; the Halt's is added.
+    expect(rec.reason).toStartWith("PR #");
+    expect(rec.reason).toContain("; markMerged: ");
+  });
+
+  test("a failed Halt whose failAttempt fails too: the state is unknown, the record left claimed", async () => {
+    const h = harness();
+    await pr(h.fake, "1.1", "merged");
+    // The claim lands; every later swap (markMerged's, then failAttempt's) fails not-found.
+    const f = h.fake.forge;
+    let swaps = 0;
+    const forge: Forge = {
+      ...f,
+      ledgerSwap: (old, commit, o) =>
+        ++swaps === 1 ? f.ledgerSwap(old, commit, o) : Promise.resolve({ ok: false as const, error: { kind: "not-found" as const, message: "ledgerSwap: gone" } }),
+    };
+    expect((await h.run({ forge })).outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", attempts: 0 });
+    const rec = h.unitRecord();
+    expect(rec).toMatchObject({ outcome: "failed", state: null });
+    expect(rec.reason).toContain("markMerged: ");
+    expect(rec.reason).toContain("failAttempt: ");
+  });
+
   test("no-op: parked blocked no-op, checked against a done spec", async () => {
     const h = harness({ behaviors: [finishes("no-op")] });
     expect((await h.run()).outcome).toBe("progress");
@@ -889,10 +985,10 @@ describe("runLaneProcess", () => {
     expect(h.runs).toHaveLength(0);
   });
 
-  test("model and effort in the journal are the lane's, never the agent's", async () => {
-    const h = harness({ behaviors: [finishes("done")] });
+  test("journal model is the lane's; reported_model is the session's", async () => {
+    const h = harness({ behaviors: [finishes("done")], reportedModel: "claude-sonnet-5" });
     await h.run({ lane: { ...LANE, model: "claude-sonnet-5", effort: "max" } });
-    expect(h.unitRecord()).toMatchObject({ model: "claude-sonnet-5", effort: "max" });
+    expect(h.unitRecord()).toMatchObject({ model: "claude-sonnet-5", reported_model: "claude-sonnet-5", effort: "max" });
   });
 
   /** A PR step that waits for the budget to pass, then returns `state`. */
@@ -1309,6 +1405,22 @@ describe("runLaneProcess waits and limits", () => {
       const rec = h.unitRecord();
       expect(rec.reason ?? "").not.toContain("spec:");
       expect(rec).toMatchObject({ state: "parked", wip_ref: "refs/wip/story__1.1" });
+    });
+
+    test("a CI-fix human-live-step naming an unconfigured step: result invalid, a failed attempt, no park", async () => {
+      const h = harness({
+        behaviors: [
+          finishes("done"),
+          ({ profile }) => {
+            writeFileSync(profile.resultPath, buildResult("blocked", { blocked: { kind: "human-live-step", text: "rotate it", step_id: "nope" } }));
+          },
+        ],
+      });
+      h.fake.control.setChecks(HEAD, [{ name: "test", status: "completed", conclusion: "failure" }]);
+      expect((await h.run({ prStep: prStepFor(h), ciStep: ciStepFor(h) })).outcome).toBe("failed");
+      expect(h.runs).toHaveLength(2);
+      expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+      expect(h.unitRecord().reason).toContain("result invalid: ");
     });
   });
 

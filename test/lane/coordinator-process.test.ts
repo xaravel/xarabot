@@ -294,6 +294,51 @@ describe("runCoordinatorProcess", () => {
     expect(beatsInWait).toBe(0);
   });
 
+  test("a failed Halt after the claim (the coordinator claim lost) fails the unit's attempt at once: released, attempts + 1", async () => {
+    const h = harness();
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      const foreign = claimRec({ ...OTHER, generation: 2 });
+      h.fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(foreign) }, deletes: [] });
+      h.pulse();
+      await abortOf(input.signal);
+      return { outcome: "progress", state: "claimed" };
+    };
+    expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.commits("ledger: failAttempt reconcile:1 ")).toBe(1);
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released", attempts: 1 });
+    expect(unit?.type === "unit" ? unit.reason : "").toStartWith("coordinator claim: coordinator.json lost");
+  });
+
+  test("a failed Halt whose failAttempt fails too: the state is unknown, the record left claimed", async () => {
+    const h = harness();
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      const foreign = claimRec({ ...OTHER, generation: 2 });
+      h.fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(foreign) }, deletes: [] });
+      h.pulse();
+      await abortOf(input.signal);
+      return { outcome: "progress", state: "claimed" };
+    };
+    const f = h.fake.forge;
+    const forge: Forge = {
+      ...f,
+      ledgerSwap: (old, commit, o) =>
+        commit.message.startsWith("ledger: failAttempt reconcile:1 ")
+          ? Promise.resolve({ ok: false as const, error: { kind: "not-found" as const, message: "ledgerSwap: gone" } })
+          : f.ledgerSwap(old, commit, o),
+    };
+    expect((await h.run({ forge, steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "claimed", attempts: 0 });
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: null });
+    const reason = unit?.type === "unit" ? (unit.reason ?? "") : "";
+    expect(reason).toContain("coordinator claim: coordinator.json lost");
+    expect(reason).toContain("failAttempt: ");
+  });
+
   test("a released coordinator unit with its PR open is claimed at generation + 1, adopting the PR", async () => {
     const h = harness();
     const pr = await openPr(h.fake, "xarabot/planning-status.1");

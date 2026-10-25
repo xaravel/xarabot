@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { checkModel } from "../adapters/agent/claude/usage.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
 import { failAttempt, heartbeat, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
@@ -460,12 +461,14 @@ export type UnitTrack = {
   cost: JournalCost | null;
   /** A run reported no cost. */
   uncosted: boolean;
+  /** The last model a run reported, or `null` when none did. */
+  reportedModel: string | null;
   reason: string | null;
 };
 
 /** A fresh track for `unit`, with no record, session or cost yet. */
 export function newTrack(p: { readonly unit: string; readonly startedMs: number; readonly logName: string; readonly state: UnitState | null }): UnitTrack {
-  return { ...p, record: null, sessions: 0, tokens: null, cost: null, uncosted: false, reason: null };
+  return { ...p, record: null, sessions: 0, tokens: null, cost: null, uncosted: false, reportedModel: null, reason: null };
 }
 
 /** Appends `reason` to the unit's reason unless it is already there. */
@@ -575,6 +578,8 @@ export type JournalEntry = {
   readonly result?: BuildResult | null;
   /** The wip ref a `blocked` park's work is saved under. */
   readonly wipRef?: string | null;
+  /** The last model a run reported, when any did. */
+  readonly reportedModel?: string | null;
 };
 
 /** Appends one unit journal record, after flushing the unit's log. */
@@ -593,6 +598,7 @@ export function journalUnit(d: JournalDeps, e: JournalEntry): void {
     duration_ms: Math.max(0, endedMs - e.startedMs),
     agent: d.agent,
     model: d.model,
+    ...(e.reportedModel !== undefined && e.reportedModel !== null ? { reported_model: e.reportedModel } : {}),
     effort: d.effort,
     tokens: e.tokens ?? null,
     cost: e.cost ?? null,
@@ -692,6 +698,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     resultPollMs: deps.limits?.resultPollMs ?? RESULT_POLL_MS,
   };
   const iso = (ms: number) => new Date(ms).toISOString();
+  /** The model every run must report. */
+  const configuredModel = settings.model ?? agent.defaultModel;
 
   const logRun = (what: string, r: SandboxRun): void =>
     log(
@@ -758,6 +766,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     readonly sessionId: string | null;
     readonly usageLimit: AgentUsage["usageLimit"];
     readonly timedOut: boolean;
+    /** The run reported no model: the `model-mismatch` reason, failing the session only where it would go on. */
+    readonly noModel: string | null;
   };
 
   /** One sandboxed run: its session id, usage limit and whether the session limit fired, else the failure. */
@@ -794,9 +804,14 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         estimate: (t.cost?.estimate ?? false) || (usage.cost?.estimate ?? true) || t.uncosted,
       };
     }
+    if (usage.model !== null) t.reportedModel = usage.model;
     // A unit the keeper lost or released during the run is abandoned here, before any resume.
     await ctx.checkHeld();
-    return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut };
+    // A run that ran another model fails the session at once; one that reported none fails it in `after` (Story 2.6b).
+    const model = checkModel(usage, configuredModel);
+    if (!model.ok && usage.model !== null) return { fail: `model-mismatch: ${model.error.message}` };
+    const noModel = model.ok ? null : `model-mismatch: ${model.error.message}`;
+    return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut, noModel };
   };
 
   const resultText = (): string | null => {
@@ -820,13 +835,18 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     const prompt = await buildPrompt();
     if (!prompt.ok) return { fail: prompt.reason };
 
-    /** After a run: the budget, then the result, the session limit and the usage limit decide. */
+    /**
+     * After a run: the budget, then the result, the session limit and the
+     * usage limit decide. A run that reported no model fails only where the
+     * session would go on: with a result, or with no limit hit.
+     */
     const after = (once: Once): Runs | null => {
       if (ctx.budget.aborted) return { fail: ctx.overBudget() };
       const text = resultText();
-      if (text !== null) return { text, limit: null };
+      if (text !== null) return once.noModel !== null ? { fail: once.noModel } : { text, limit: null };
       if (once.timedOut) return { fail: sessionPast() };
       if (once.usageLimit !== null) return { text: null, limit: once.usageLimit };
+      if (once.noModel !== null) return { fail: once.noModel };
       return null;
     };
     const first = await runOnce(ctx, { kind: "fresh", prompt: prompt.value });

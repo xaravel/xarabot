@@ -85,7 +85,6 @@ export const STEP_STORY: Readonly<Record<CoordinatorKind, string>> = {
   planning: "2.7",
   retro: "2.9",
   "retro-item": "2.10",
-  checkpoint: "4.4",
 };
 
 /** The idle reason for a unit kind with no step. */
@@ -374,6 +373,20 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
       if (e instanceof MarkerStop) markerStop = true;
       if (t !== null) addReason(t, e.reason);
       else note(e.reason);
+      // A failed `Halt` after the claim fails the attempt at once (AD-7's crash row, Story 2.6b).
+      if (t !== null && e.outcome === "failed" && !(e instanceof Abandon) && t.state === "claimed" && t.record?.state === "claimed") {
+        try {
+          await failUnit(t, t.reason ?? e.reason);
+        } catch (inner) {
+          // An abandoned unit keeps the state the keeper's end gave it.
+          if (!(inner instanceof Abandon)) t.state = null;
+          if (inner instanceof Halt) {
+            outcome = inner.outcome;
+            haltReason = inner.reason;
+            addReason(t, inner.reason);
+          }
+        }
+      }
     } else if (t !== null) {
       const reason = `unexpected error: ${message(e)}`;
       if (t.state !== "claimed") addReason(t, reason);
@@ -412,6 +425,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
           tokens: t.tokens,
           cost: t.cost,
           sessions: t.sessions,
+          reportedModel: t.reportedModel,
         },
       );
     }

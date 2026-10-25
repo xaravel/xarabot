@@ -121,3 +121,17 @@ export function checkBuildSpec(outcome: BuildResult["outcome"], specText: string
   }
   return ok({ status: want });
 }
+
+/**
+ * A `blocked` `human-live-step` result must name a configured step: its
+ * `step_id` must equal the `id` of a step in `.xarabot/human-live-steps.yaml`
+ * (`stepIds`, from the config the session's prompt was built from). Any other
+ * result passes.
+ */
+export function checkHumanLiveStep(result: BuildResult, stepIds: readonly string[]): Result<void, "invalid"> {
+  if (result.outcome !== "blocked" || result.blocked.kind !== "human-live-step") return ok(undefined);
+  const id = result.blocked.step_id;
+  if (stepIds.includes(id)) return ok(undefined);
+  const known = stepIds.length === 0 ? "none is configured" : `configured: ${stepIds.map((s) => JSON.stringify(s)).join(", ")}`;
+  return err("invalid", `blocked human-live-step names step_id ${JSON.stringify(id)}, which is not a step in .xarabot/human-live-steps.yaml (${known})`);
+}

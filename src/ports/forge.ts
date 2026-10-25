@@ -168,6 +168,8 @@ export type Forge = {
   ledgerSwap(oldSha: GitSha, commit: LedgerCommit, opts: CallOpts): Promise<ForgeResult<{ readonly tip: GitSha }>>;
   /** A remote head other than `lease.expected_sha` is `conflict`. */
   pushBranch(lease: PushLease, opts: CallOpts): Promise<ForgeResult<{ readonly sha: GitSha }>>;
+  /** The remote head of `branch`, or `null` when the branch does not exist: a push lease's `expected_sha`. Read-only. */
+  branchHead(branch: string, opts: CallOpts): Promise<ForgeResult<GitSha | null>>;
   /** A missing branch is `not-found`; a second open PR on one branch is `conflict`. */
   openPr(request: OpenPrRequest, opts: CallOpts): Promise<ForgeResult<ForgePr>>;
   /** Updating a merged PR is `conflict`. */
@@ -201,6 +203,7 @@ export const FORGE_OPERATIONS = [
   "snapshot",
   "ledgerSwap",
   "pushBranch",
+  "branchHead",
   "openPr",
   "updatePr",
   "closePr",

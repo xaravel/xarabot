@@ -67,6 +67,8 @@ export type FakeForgeControl = {
   refusePushes(branch: string): void;
   /** Runs `hook` before every swap's compare-and-set; `null` removes it. */
   beforeSwap(hook: BeforeSwapHook | null): void;
+  /** The next `ledgerSwap` that lands returns `transient` "ack lost", as a lost acknowledgement does. */
+  loseSwapAck(): void;
   /** Merges the PR at the head of the queue onto `main`; `null` when the queue is empty. */
   mergeQueueHead(): ForgePr | null;
   /** Takes a queued PR out of the queue without merging it, as an ejection does; `false` when it was not queued. */
@@ -159,6 +161,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const injected = new Map<ForgeOperation, ForgeError>();
   const refused = new Set<string>();
   let hook: BeforeSwapHook | null = null;
+  let loseAck = false;
   let swaps = 0;
   const trace: string[] = [];
 
@@ -250,7 +253,12 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         if (hook !== null) await hook({ n: swaps, oldSha });
         if (signal.aborted) return deadlinePassed("ledgerSwap");
         if (ledgerTip !== oldSha) return forgeErr("conflict", `ledgerSwap: tip is ${ledgerTip}, not ${oldSha}`);
-        return forgeOk({ tip: applyLedger(commit) });
+        const tip = applyLedger(commit);
+        if (loseAck) {
+          loseAck = false;
+          return forgeErr("transient", "ledgerSwap: ack lost");
+        }
+        return forgeOk({ tip });
       }),
 
     pushBranch: (lease, opts) =>
@@ -273,6 +281,8 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         }
         return forgeOk({ sha: lease.sha });
       }),
+
+    branchHead: (branch, opts) => call("branchHead", opts, () => forgeOk(branches.get(branch) ?? null)),
 
     openPr: (request, opts) =>
       call("openPr", opts, () => {
@@ -425,6 +435,9 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     },
     beforeSwap(h) {
       hook = h;
+    },
+    loseSwapAck() {
+      loseAck = true;
     },
     mergeQueueHead() {
       const number = queue.shift();

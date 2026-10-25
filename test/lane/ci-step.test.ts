@@ -684,7 +684,7 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
         apiHosts: ["api.example.com"],
         unit,
       } as AgentLaunchSpec),
-    parseUsage: () => ({ sessionId: null, model: "m", tokens: null, cost: null, usageLimit: null }),
+    parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
   };

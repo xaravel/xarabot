@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkBuildSpec, expectedSpecStatus, pickSpec, specMatches, specStatus, type SpecMatch } from "../../../src/core/lane/build-check.ts";
+import { checkBuildSpec, checkHumanLiveStep, expectedSpecStatus, pickSpec, specMatches, specStatus, type SpecMatch } from "../../../src/core/lane/build-check.ts";
 import type { BuildResult } from "../../../src/core/schemas/session-result.ts";
 
 const spec = (status: string, result: string | null, extra = "") =>
@@ -137,5 +137,28 @@ describe("specStatus", () => {
     ["no status key", "---\ntitle: x\n---\n", null],
   ] as const)("%s", (_name, text, want) => {
     expect(specStatus(text)).toBe(want);
+  });
+});
+
+describe("checkHumanLiveStep", () => {
+  const fields = { kind: "build" as const, summary: "S", body: "", verification: [] as string[], denied_actions: [] as string[] };
+  const liveStep = (step_id: string): BuildResult => ({ ...fields, outcome: "blocked", blocked: { kind: "human-live-step", text: "do it", step_id } });
+  const cases: readonly [string, BuildResult, readonly string[], string | null][] = [
+    ["a configured step", liveStep("rotate-key"), ["rotate-key"], null],
+    ["a configured step among several", liveStep("b"), ["a", "b"], null],
+    ["an unknown step", liveStep("nope"), ["rotate-key"], 'step_id "nope", which is not a step in .xarabot/human-live-steps.yaml (configured: "rotate-key")'],
+    ["no step configured", liveStep("rotate-key"), [], 'step_id "rotate-key", which is not a step in .xarabot/human-live-steps.yaml (none is configured)'],
+    ["ids compare exactly: case", liveStep("Rotate-Key"), ["rotate-key"], 'step_id "Rotate-Key"'],
+    ["another blocked kind needs no step", { ...fields, outcome: "blocked", blocked: { kind: "intent-gap", text: "t" } }, [], null],
+    ["done needs no step", { ...fields, outcome: "done" }, [], null],
+    ["no-op needs no step", { ...fields, outcome: "no-op" }, [], null],
+  ];
+  test.each(cases)("%s", (_name, result, ids, want) => {
+    const r = checkHumanLiveStep(result, ids);
+    if (want === null) expect(r).toEqual({ ok: true, value: undefined });
+    else {
+      expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+      expect(r.ok ? "" : r.error.message).toContain(want);
+    }
   });
 });

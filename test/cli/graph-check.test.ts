@@ -1,7 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { graphCheck } from "../../src/cli/graph-check.ts";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const MAIN = join(ROOT, "src", "cli", "main.ts");
@@ -163,5 +164,58 @@ describe("xarabot graph check", () => {
     ).length;
     const warnings = r.stderr.trimEnd().split("\n").filter((l) => /^warning: Story \S+ \(.+:\d+\) has no manifest$/.test(l));
     expect(warnings.length).toBe(expected);
+  });
+});
+
+describe("graph check's git calls (decision 33)", () => {
+  const realGit = Bun.which("git") ?? "/usr/bin/git";
+
+  /** A dir holding a `git` stub with `body`, for the front of `PATH`. */
+  function stubGit(body: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "xarabot-gitstub-"));
+    dirs.push(dir);
+    const path = join(dir, "git");
+    writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return dir;
+  }
+
+  /** `graphCheck` in process, with console output captured. */
+  function inProcess(cwd: string, opts: Parameters<typeof graphCheck>[1]): { code: number; stdout: string; stderr: string } {
+    const out: string[] = [];
+    const err: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    const error = spyOn(console, "error").mockImplementation((...a: unknown[]) => void err.push(a.join(" ")));
+    try {
+      return { code: graphCheck(cwd, opts), stdout: out.join("\n"), stderr: err.join("\n") };
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
+  }
+
+  test("a git call that runs past its deadline fails with exit 1, naming the call and the deadline", () => {
+    const bin = stubGit("sleep 5");
+    const dir = fixture({ [MD]: THREE });
+    const started = Date.now();
+    const r = inProcess(dir, { gitTimeoutMs: 200, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` } });
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe("xarabot graph check: git rev-parse: ran past 200 ms");
+  });
+
+  test("every git call runs with GIT_TERMINAL_PROMPT=0", () => {
+    const bin = stubGit(`[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 3\nexec ${JSON.stringify(realGit)} "$@"`);
+    const env: Record<string, string | undefined> = { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+    delete env["GIT_TERMINAL_PROMPT"];
+    const r = inProcess(fixture({ [MD]: THREE }), { env });
+    expect(r.stderr).not.toContain("xarabot graph check:");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/^graph sha256:[0-9a-f]{64}\n/);
+  });
+
+  test("the stub refuses a call without GIT_TERMINAL_PROMPT=0, so the check above is real", () => {
+    const bin = stubGit(`[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 3\nexec ${JSON.stringify(realGit)} "$@"`);
+    const p = Bun.spawnSync(["git", "--version"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, GIT_TERMINAL_PROMPT: "1" } });
+    expect(p.exitCode).toBe(3);
   });
 });

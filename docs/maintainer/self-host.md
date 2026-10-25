@@ -282,7 +282,7 @@ steps:
     text: Publish to npm or handle publish credentials.
 ```
 
-`steps: []` is the opt-out if you want no Human Live Steps in the prompt.
+`steps: []` is the opt-out if you want no Human Live Steps in the prompt. With no steps configured, a `human-live-step` block is an invalid result and fails the attempt (Story 2.6b), as is a block whose `step_id` is not listed.
 
 ### 9. The Standing Authority
 
@@ -526,7 +526,7 @@ decision, 2026-10-24).
 
   - `release` makes the record `released` with `attempts`, `loopbacks` and `ci_fixes` at 0. It keeps the PR, the SHAs and `builder_providers`, so the next claim adopts the open PR.
   - `rebuild` first closes the record's PR if it is open (`closed PR #<n>`), then releases it with the counters at 0 and `builder_providers`, `reviewed_sha`, `passed_sha` and `approved_sha` cleared. If the close lands but the edit fails, it exits 1 with `(PR #<n> was closed)`: run the same command again; the re-run finds the PR closed, skips the close and makes only the edit.
-  - Until Story 2.6b, after a `rebuild` delete the Story's branch before the lane claims it again (`git push origin --delete story/<id>`). Otherwise the next claim pushes as if the branch did not exist, conflicts on every attempt and parks again at `attempts-cap`.
+  - Until `runner_version` has Story 2.6b, after a `rebuild` delete the Story's branch before the lane claims it again (`git push origin --delete story/<id>`). Otherwise the next claim pushes as if the branch did not exist, conflicts on every attempt and parks again at `attempts-cap`. From Story 2.6b on, a claim with no open PR leases its push from the branch's real head, so the branch can stay. That push replaces whatever commits are on the Story branch, so keep no work on a Story branch with no open PR.
   - Either prints `released <unit> (<park kind>[ <reason>])` and exits 0. It refuses, exit 1 and the ledger unchanged, when the unit has no record, is not `parked` (`story:<id> is claimed, not parked`), or its record moved on before the edit. Any other verb (`approve`, `go`, …) prints `<verb>: not before Story 4.6`.
   - The edit is written as the repo's `coordinator` lane, or the lowest-numbered `builder-<n>` when the host has no coordinator lane; a non-Story unit (`planning:`, `retro:`, …) needs the coordinator lane. With lanes for several repos in `host.yaml`, add `--repo <owner>/<name>`.
 - **Lane stops.** Once `runner_version` has Story 2.5b, a run that ends `stop` for any reason but a STOP marker (a forge `auth`, `forbidden` or `uninstalled` error, an unknown ledger `schema_version`, or bad config, policy or graph on `main`) exits 1 and counts as a failed start, like a refused start. The third in a row writes the lane's `STOP` and posts `lane-start-failed`. A run that ends without a lane stop resets the count. A STOP marker never counts. Once you have fixed the cause, remove the lane's `STOP` (`rm ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/STOP`).

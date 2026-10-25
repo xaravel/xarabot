@@ -12,8 +12,9 @@ import { epicContextPath } from "./snapshot.ts";
  * The coordinator's side of `next` (FR4, AR14, AD-8, AD-9, AD-13): the globs
  * each coordinator unit kind holds, when `reconcile` is due, and the
  * coordinator's order. Only `reconcile` and an open coordinator PR exist so
- * far; planning, retro, retro items and checkpoint join the order in Stories
- * 2.7, 2.9, 2.10 and 4.4. Pure.
+ * far; planning, retro and retro items join the order in Stories 2.7, 2.9 and
+ * 2.10. No `checkpoint` unit runs: `checkpoint:<epic>` is only a `go`
+ * target (AR14). Pure.
  */
 
 /** The pseudo-glob a graph planning unit holds, so graph changes go one at a time (AD-11). */
@@ -22,14 +23,20 @@ export const GRAPH_PSEUDO_GLOB = "xarabot:graph";
 /** `reconcile` is due this long after its last run, by the forge's `now`. */
 export const RECONCILE_EVERY_MS = 10 * 60 * 1000;
 
-/** Every unit kind but `story`. */
-export type CoordinatorKind = Exclude<UnitKind, "story">;
+/** The unit kinds the coordinator works: every kind but `story` and `checkpoint` (only a `go` target). */
+export type CoordinatorKind = Exclude<UnitKind, "story" | "checkpoint">;
+
+const COORDINATOR_KINDS: Readonly<Record<CoordinatorKind, true>> = { reconcile: true, planning: true, retro: true, "retro-item": true };
+
+/** Whether `kind` is a kind the coordinator works. */
+export function isCoordinatorKind(kind: UnitKind): kind is CoordinatorKind {
+  return Object.hasOwn(COORDINATOR_KINDS, kind);
+}
 
 /** What `coordinatorGlobs` needs to know about a coordinator unit. */
 export type CoordinatorUnitSpec =
   | { readonly kind: "planning"; readonly planning: "graph" | "status" }
   | { readonly kind: "retro"; readonly epic: number }
-  | { readonly kind: "checkpoint"; readonly epic: number }
   | { readonly kind: "retro-item"; readonly globs: readonly string[] }
   | { readonly kind: "reconcile" };
 
@@ -54,8 +61,7 @@ export function statusFiles(config: Pick<Config, "sprint_status_path" | "retro_g
  * The globs a coordinator unit holds (AD-13). Graph planning: the graph
  * inputs and `xarabot:graph`. Status planning: the status files and every
  * Epic's context path. A retro: the status files, its Epic's context path
- * and retro document glob. A checkpoint: the status files and its Epic's
- * context path. A retro item: its own globs. `reconcile`: none.
+ * and retro document glob. A retro item: its own globs. `reconcile`: none.
  */
 export function coordinatorGlobs(spec: CoordinatorUnitSpec, config: CoordinatorGlobsConfig): string[] {
   switch (spec.kind) {
@@ -68,8 +74,6 @@ export function coordinatorGlobs(spec: CoordinatorUnitSpec, config: CoordinatorG
         epicContextPath(config.epic_context_path, spec.epic),
         config.retro_doc_glob.replaceAll("<N>", String(spec.epic)),
       ];
-    case "checkpoint":
-      return [...statusFiles(config), epicContextPath(config.epic_context_path, spec.epic)];
     case "retro-item":
       return [...spec.globs];
     case "reconcile":
@@ -285,7 +289,7 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   let open = false;
   for (const rec of snapshot.ledger.units) {
     const kind = unitKind(rec.unit);
-    if (kind === undefined || kind === "story" || rec.lane !== "coordinator" || !OPEN_PR_STATES.includes(rec.state)) continue;
+    if (kind === undefined || !isCoordinatorKind(kind) || rec.lane !== "coordinator" || !OPEN_PR_STATES.includes(rec.state)) continue;
     const pr = snapshot.prs[rec.unit];
     if (pr?.state !== "open") continue;
     if (kind === "reconcile" && (rec.state === "released" || (rec.state === "claimed" && isStale(rec, snapshot.now)))) continue;
@@ -307,6 +311,6 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   const messages = reasons.map((x) => x.message);
   if (open) return { kind: "idle", reason: ["waiting on an open coordinator PR", ...messages].join("; "), reasons };
 
-  // 3. Planning, retro, retro items and checkpoint arrive in Stories 2.7, 2.9, 2.10 and 4.4.
+  // 3. Planning, retro and retro items arrive in Stories 2.7, 2.9 and 2.10.
   return { kind: "idle", reason: [NOTHING_DUE, ...messages].join("; "), reasons };
 }
