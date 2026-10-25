@@ -60,7 +60,7 @@ development_status:
   1-20-canary-and-self-host-runbook: done
   epic-1-retrospective: done
 
-  epic-2: backlog
+  epic-2: done
   2-1-heartbeat-and-fencing: done
   2-2-stale-takeover: done
   2-3-the-0-x-write-check: done
