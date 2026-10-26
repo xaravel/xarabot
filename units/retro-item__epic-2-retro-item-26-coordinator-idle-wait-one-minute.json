@@ -1,0 +1,30 @@
+{
+  "schema_version": 4,
+  "unit": "retro-item:epic-2-retro-item-26-coordinator-idle-wait-one-minute",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "coordinator",
+  "generation": 1,
+  "globs": [
+    "docs/maintainer/self-host.md",
+    "src/core/lane/waits.ts",
+    "test/core/lane/waits.test.ts"
+  ],
+  "heartbeat_at": "2026-10-26T01:26:06Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "c5904168920c836636367a58301bf5b163e0c3bf",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "approved_sha": null,
+  "approved_graph": null,
+  "retro_result": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
