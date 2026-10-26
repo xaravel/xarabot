@@ -105,7 +105,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/reconcile/plan.ts", "src/core/reconcile/status-edit.ts", "test/core/reconcile/**", "test/lane/reconcile-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-17-void-a-stale-graph-approval-after-a-retake"
         text: "Story 2.8 follow-up review F1 (medium): approved_graph is written at the take but never read again, so after a runner failure that follows the take (refused fence, failed re-check snapshot or gate, non-conflict enqueue error), a later main graph change lets reconcile re-take and enqueue the PR on the Maintainer's approval of the older delta, and the new delta is never posted. Carry approved_graph through GatedTarget and untake's target; in the take, when it differs from the gate's current hash, void the approval and re-park for the Maintainer with the delta comment. Fix the test at test/lane/reconcile-step.test.ts (re-taken at a different hash and queued with no comment) to assert the void"
         route: lane
