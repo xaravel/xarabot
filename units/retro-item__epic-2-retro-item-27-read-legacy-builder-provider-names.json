@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-27-read-legacy-builder-provider-names",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -10,7 +10,7 @@
     "src/core/review/**",
     "test/core/review/**"
   ],
-  "heartbeat_at": "2026-10-26T08:54:05.604Z",
+  "heartbeat_at": "2026-10-26T08:55:52.164Z",
   "pr": 183,
   "pr_owner": "edanisko",
   "base_sha": "13880ebfbcc9fedda15e663b3537d29121dcbe30",
@@ -21,7 +21,15 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/review/reviewer.ts",
+      "test/core/review/reviewer.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
