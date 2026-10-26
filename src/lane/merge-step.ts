@@ -27,8 +27,10 @@ import { describeError, message, readsPath, stepKit, type StepOutput, type StepU
  * Before that gate, the graph-change gate (Story 2.8) recomputes the PR's
  * merge with fresh `main`: a refused merge result parks `blocked`
  * `graph-invalid`; a changed graph parks `awaiting-approval` for the
- * Maintainer, with one comment carrying the delta, then any gated paths; a
- * conflicting merge, or a `main` that does not resolve, is a failed attempt.
+ * Maintainer, with one comment carrying the delta, then any gated paths,
+ * posted before the park, which records the delta's hash (`graph_posted`)
+ * only once that comment succeeded (retro item 30); a conflicting merge, or
+ * a `main` that does not resolve, is a failed attempt.
  * Any other PR is fenced (the fence records `enqueued_sha`, the head it is
  * enqueued at), written `merging`, enqueued at its head and watched
  * until it merges, is ejected (back to `claimed`, for the CI step to run
@@ -189,18 +191,29 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       if (!changed.ok) return await failed(`diff paths ${changed.error.kind}: ${changed.error.message}`);
       const gated = approvalPaths(changed.value, gatedGlobs);
       if (graph !== null) {
-        await held(
-          "park",
-          park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value, inboxOwner: graph.maintainer }),
-        );
-        reasons.push(`awaiting the Maintainer's approval: the merge result changes the Epic graph to ${graph.delta.hash}${gated.length > 0 ? `; gated paths: ${gated.join(", ")}` : ""}`);
-        note(`parked awaiting-approval for the Maintainer ${graph.maintainer}: the graph changes to ${graph.delta.hash}`);
+        // The delta comment first, behind a fence; the park records its hash only once it is posted (retro item 30).
+        await beat("fence");
         const body = graphDeltaComment(subject, { delta: graph.delta, maintainer: graph.maintainer, gatedPaths: gated });
         const commented = await call("comment", (o) => forge.comment(pr, body, o));
         if (!commented.ok) {
           reasons.push(`graph delta comment on PR #${pr} failed: ${describeError(commented.error)}`);
           note(`graph delta comment failed: ${describeError(commented.error)}`);
         }
+        await held(
+          "park",
+          park({
+            unit,
+            by: identity,
+            now: forgeNow(),
+            generation,
+            kind: "awaiting-approval",
+            diffPaths: changed.value,
+            inboxOwner: graph.maintainer,
+            ...(commented.ok ? { graphPosted: graph.delta.hash } : {}),
+          }),
+        );
+        reasons.push(`awaiting the Maintainer's approval: the merge result changes the Epic graph to ${graph.delta.hash}${gated.length > 0 ? `; gated paths: ${gated.join(", ")}` : ""}`);
+        note(`parked awaiting-approval for the Maintainer ${graph.maintainer}: the graph changes to ${graph.delta.hash}`);
         throw end("progress", kit.record.state);
       }
       if (gated.length > 0) {
