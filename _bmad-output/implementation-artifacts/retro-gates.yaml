@@ -183,7 +183,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/lane-process.ts", "src/lane/retro-item-step.ts", "src/lane/planning-step.ts", "src/lane/retro-step.ts", "test/lane/lane-process.test.ts", "test/lane/merge-step.test.ts", "test/lane/retro-item-step.test.ts", "test/lane/planning-step.test.ts", "test/lane/retro-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-30-graph-parks-record-the-posted-delta"
         text: "Item 24's follow-up (PR #177; Maintainer decision Q1, 2026-10-25): the builder merge step and the graph planning step still park a graph change without graphPosted, so reconcile reads it as 'none posted', posts the delta again, re-parks, and the Maintainer must approve twice. In src/lane/merge-step.ts and src/lane/planning-step.ts, pass graphPosted (the hash of the delta just posted) to park, only after that delta comment succeeded; a failed comment parks with none posted, as now; tests: a graph park after a successful comment carries graph_posted and reconcile takes it on one later Maintainer approval with no second comment; a failed comment parks with none posted"
         route: lane
