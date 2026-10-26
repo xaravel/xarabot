@@ -123,7 +123,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/schemas/retro-gates.ts", "src/core/retro/validate.ts", "test/core/graph/retro-gates.test.ts", "test/core/retro/**", "test/core/schemas/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-20-write-check-content-rules"
         text: "Add content rules to the write check (Story 2.5a deferral, medium; Story 2.3 follow-up review F1, F2; Maintainer decision 2026-10-25, C3 in sprint-change-proposal-2026-10-25.md): a new refusal class credential refuses any added or changed blob in an agent diff that contains the seeded vendor credential or a string the sanitizer would redact as token-shaped, and the refusal names the path only, never the match; the Story file's status: line accepts only BMAD status values (2.3 F1); a test pins the quoted \"status\": key as refused, fail-closed (2.3 F2, accepted); tests for each"
         route: lane
