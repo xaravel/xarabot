@@ -256,11 +256,11 @@ export type ReconcileDue = {
  * parked head and the Maintainer's approval of that head standing in the
  * PR's snapshot `reviews` (Maintainer decision 2026-10-25, retro item 13).
  * The record must be one `reconcile` would try to take (`pr`, `pr_owner`
- * and `head_sha` set), and, as there, a coordinator re-park (`lane`
- * `coordinator` with an `enqueued_sha`) counts only an approval submitted after
- * its `heartbeat_at`. As there, a record other than a `reconcile:<n>` needs
- * a `passed_sha` (Story 3.5): an unreviewed one is never taken, so its
- * approval is no work.
+ * and `head_sha` set), and, as there, a coordinator re-park or a park with a
+ * posted graph delta counts only an approval submitted after its
+ * `heartbeat_at` (`approvalParkedAt`). As there, a record other than a
+ * `reconcile:<n>` needs a `passed_sha` (Story 3.5): an unreviewed one is
+ * never taken, so its approval is no work.
  */
 export function maintainerApproved(record: UnitRecord, snapshot: Snapshot): boolean {
   if (record.state !== "parked" || record.park?.kind !== "awaiting-approval") return false;
@@ -268,8 +268,21 @@ export function maintainerApproved(record: UnitRecord, snapshot: Snapshot): bool
   if (record.passed_sha === null && unitKind(record.unit) !== "reconcile") return false;
   const pr = snapshot.prs[record.unit];
   if (pr?.state !== "open" || pr.head_sha !== record.head_sha) return false;
-  const parkedAt = record.lane === "coordinator" && record.enqueued_sha !== null ? record.heartbeat_at : null;
-  return standingApproval(pr.reviews ?? [], { owner: snapshot.config.maintainer, head: record.head_sha, parkedAt }) !== null;
+  return standingApproval(pr.reviews ?? [], { owner: snapshot.config.maintainer, head: record.head_sha, parkedAt: approvalParkedAt(record) }) !== null;
+}
+
+/**
+ * When `record`'s awaiting-approval park began, for its approval: only an
+ * approval submitted after it counts. Its `heartbeat_at` for a coordinator
+ * re-park (`lane` `coordinator` with an `enqueued_sha`) and for a park with
+ * `graph_posted`, written only once the runner's delta comment succeeded,
+ * so an approval given before the delta was posted never takes a graph
+ * change (retro item 33, Maintainer decision 2026-10-25). `null` for any
+ * other park: any standing approval of the head counts.
+ */
+export function approvalParkedAt(record: UnitRecord): string | null {
+  const reparked = record.lane === "coordinator" && record.enqueued_sha !== null;
+  return reparked || record.park?.graph_posted !== undefined ? record.heartbeat_at : null;
 }
 
 /**
