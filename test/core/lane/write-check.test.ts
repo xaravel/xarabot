@@ -368,9 +368,43 @@ const CLAUDE_CASES: readonly Case[] = [
   },
 ];
 
-/** The write-check table, per adapter; Epic 3 fills the other adapters. */
+/**
+ * The `codex` cases: every `claude` case (the write check is the runner's,
+ * whatever agent made the diff), plus the paths codex itself writes or reads
+ * its instructions and skills from.
+ */
+const CODEX_CASES: readonly Case[] = [
+  ...CLAUDE_CASES,
+  {
+    name: "codex: a project .codex/config.toml (a trust entry) and a nested AGENTS.override.md",
+    covers: ["agent-config"],
+    changes: [p(".codex/config.toml"), p("src/AGENTS.override.md")],
+    refused: [no(".codex/config.toml", "agent-config"), no("src/AGENTS.override.md", "agent-config")],
+  },
+  {
+    name: "codex: a skill under .agents/skills, the tree codex reads natively",
+    covers: ["agent-config"],
+    changes: [p(".agents/skills/bmad-build-auto/SKILL.md"), p(".agents/skills/new-skill/SKILL.md")],
+    refused: [no(".agents/skills/bmad-build-auto/SKILL.md", "agent-config"), no(".agents/skills/new-skill/SKILL.md", "agent-config")],
+  },
+  {
+    name: "codex: the session's rollout files never reach the clone, but a copy there is ordinary",
+    covers: [],
+    changes: [p("sessions/2026/10/25/rollout-x.jsonl")],
+    refused: [],
+  },
+  {
+    name: "codex: a session that edits src, writes .codex/config.toml and changes the retro gates",
+    covers: ["agent-config", "coordinator-file"],
+    changes: [p("src/a.ts"), p(RETRO), p(".codex/config.toml")],
+    refused: [no(".codex/config.toml", "agent-config"), no(RETRO, "coordinator-file")],
+  },
+];
+
+/** The write-check table, per adapter; Story 3.2 adds `pi`. */
 const TABLE: Partial<Record<AdapterName, readonly Case[]>> = {
   claude: CLAUDE_CASES,
+  codex: CODEX_CASES,
 };
 
 for (const [adapter, cases] of Object.entries(TABLE)) {

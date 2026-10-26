@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { credentialPath, readCredential, seedVendorHome } from "../../src/sandbox/vendor-home.ts";
+import { credentialPath, homeFileChanged, readCredential, seedVendorHome } from "../../src/sandbox/vendor-home.ts";
 
 const dirs: string[] = [];
 
@@ -95,7 +95,7 @@ describe("seedVendorHome", () => {
     mkdirSync(s.vendorHome);
     writeFileSync(join(s.vendorHome, "stale"), "x");
     const r = seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile: ".credentials.json" }, vendorHome: s.vendorHome });
-    expect(r).toEqual({ ok: true, value: {} });
+    expect(r).toEqual({ ok: true, value: { homeFile: { path: join(s.vendorHome, ".credentials.json"), text: "tok-123\n" } } });
     expect(readdirSync(s.vendorHome)).toEqual([".credentials.json"]);
     const target = join(s.vendorHome, ".credentials.json");
     expect(statSync(target).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("seedVendorHome", () => {
     writeFileSync(join(s.vendorHome, "transcript"), "t");
     writeFileSync(join(s.vendorHome, ".credentials.json"), "tampered", { mode: 0o644 });
     const r = seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile: ".credentials.json" }, vendorHome: s.vendorHome, keep: true });
-    expect(r).toEqual({ ok: true, value: {} });
+    expect(r).toEqual({ ok: true, value: { homeFile: { path: join(s.vendorHome, ".credentials.json"), text: "tok-123\n" } } });
     expect(readdirSync(s.vendorHome).sort()).toEqual([".credentials.json", "transcript"]);
     const target = join(s.vendorHome, ".credentials.json");
     expect(statSync(target).mode & 0o777).toBe(0o600);
@@ -184,5 +184,38 @@ describe("seedVendorHome", () => {
   test.each(["", "..", "a/b"])("refuses the home file name %j", (homeFile) => {
     const s = setup();
     expect(seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile }, vendorHome: s.vendorHome }).ok).toBe(false);
+  });
+});
+
+describe("homeFileChanged", () => {
+  function seeded(): { path: string; text: string } {
+    const s = setup();
+    const r = seedVendorHome({ launching: s.launching, vendor: "claude", credential: { file: "oauth-token", homeFile: "auth.json" }, vendorHome: s.vendorHome });
+    if (!r.ok || r.value.homeFile === undefined) throw new Error("not seeded");
+    return r.value.homeFile;
+  }
+
+  test("an untouched home file is unchanged", () => {
+    const h = seeded();
+    expect(homeFileChanged(h)).toBe(false);
+  });
+
+  test.each<[string, (path: string) => void]>([
+    ["rewritten", (path) => writeFileSync(path, '{"tokens":"refreshed"}')],
+    ["removed", (path) => rmSync(path)],
+    ["replaced by a folder", (path) => {
+      rmSync(path);
+      mkdirSync(path);
+    }],
+    ["replaced by a symlink to the same text", (path) => {
+      const twin = `${path}.twin`;
+      writeFileSync(twin, readFileSync(path, "utf8"));
+      rmSync(path);
+      symlinkSync(twin, path);
+    }],
+  ])("a home file %s is changed", (_name, change) => {
+    const h = seeded();
+    change(h.path);
+    expect(homeFileChanged(h)).toBe(true);
   });
 });

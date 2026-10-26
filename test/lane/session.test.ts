@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
+import { createCodexAgent } from "../../src/adapters/agent/codex/codex-agent.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
 import { park } from "../../src/core/ledger/edits.ts";
@@ -29,7 +30,7 @@ import {
 } from "../../src/lane/session.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck } from "../../src/ports/forge.ts";
-import type { Sandbox } from "../../src/ports/sandbox.ts";
+import type { Sandbox, SandboxRun } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 
 const UNIT = "story:1.1";
@@ -676,5 +677,214 @@ describe("createSessionRunner: session()", () => {
     expect(r).toEqual({ ok: false, reason: "no prompt" });
     expect(w.runs).toEqual([]);
     expect(w.track.sessions).toBe(0);
+  });
+});
+
+describe("createSessionRunner: a codex session", () => {
+  const PLANNING = { kind: "planning", outcome: "done", summary: "Planned it", denied_actions: [] as string[] } as const;
+  const SID = "01a1752b-acea-7ed3-883a-77eb2ba61eae";
+
+  /** `codex exec --json` stdout for one run. */
+  const codexStdout = (end: "completed" | "failed" | "none", message = "boom"): string =>
+    [
+      { type: "thread.started", thread_id: SID },
+      { type: "turn.started" },
+      ...(end === "completed" ? [{ type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 40, cache_write_input_tokens: 0, output_tokens: 7 } }] : []),
+      ...(end === "failed" ? [{ type: "turn.failed", error: { message } }] : []),
+    ]
+      .map((l) => JSON.stringify(l))
+      .join("\n") + "\n";
+
+  /** The parent session file codex keeps in the vendor home. */
+  const rollout = (model: string | null, limits?: { used_percent: number; resets_at: number }): string =>
+    [
+      { type: "session_meta", payload: { id: SID, source: "exec" } },
+      ...(model === null ? [] : [{ type: "turn_context", payload: { model, effort: "high" } }]),
+      ...(limits === undefined ? [] : [{ type: "event_msg", payload: { type: "token_count", info: null, rate_limits: { primary: limits, secondary: null, rate_limit_reached_type: null } } }]),
+    ]
+      .map((l) => `${JSON.stringify(l)}\n`)
+      .join("");
+
+  /** One stub run: its stdout, the model its session file reports, whether it writes the result, and what the sandbox reports. */
+  type CodexRun = {
+    readonly end: "completed" | "failed" | "none";
+    readonly message?: string;
+    readonly model?: string | null;
+    readonly limit?: { used_percent: number; resets_at: number };
+    readonly result?: boolean;
+    readonly credentialRewritten?: boolean;
+    readonly proxyRequests?: SandboxRun["proxyRequests"];
+  };
+
+  function codexWorld(plan: readonly CodexRun[]) {
+    const root = mkdtempSync(join(tmpdir(), "xarabot-codex-runner-"));
+    dirs.push(root);
+    const laneDir = join(root, "lanes", "builder-1");
+    const layout = laneLayout(laneDir);
+    const store = createFsLaneStore({ laneDir, hostStop: join(root, "home", ".xarabot", "STOP") });
+    const specs: AgentLaunchSpec[] = [];
+    const usageCalls: unknown[][] = [];
+    const logs: string[] = [];
+    const notes: string[] = [];
+    const waits: number[] = [];
+    const real = createCodexAgent({ credential: "auth-json" });
+    const agent: Agent = {
+      ...real,
+      parseUsage: (...args) => {
+        usageCalls.push(args);
+        return real.parseUsage(...args);
+      },
+    };
+    const sandbox: Sandbox = {
+      async run(spec, profile) {
+        const i = specs.length;
+        specs.push(spec as AgentLaunchSpec);
+        const p = plan[i] ?? { end: "completed" };
+        const day = join(profile.vendorHome, "sessions", "2026", "10", "25");
+        mkdirSync(day, { recursive: true });
+        writeFileSync(join(day, `rollout-2026-10-25T15-26-00-${SID}.jsonl`), rollout(p.model === undefined ? "gpt-6.1-sol" : p.model, p.limit));
+        if (p.result === true) writeFileSync(profile.resultPath, JSON.stringify(PLANNING));
+        return ok({
+          pid: 999,
+          exitCode: p.end === "completed" ? 0 : 1,
+          signal: null,
+          startedAt: 1000 * (i + 1),
+          endedAt: 1000 * (i + 1) + 500,
+          durationMs: 500,
+          stdout: codexStdout(p.end, p.message),
+          stderr: "Reading additional input from stdin...\n",
+          ...(p.proxyRequests !== undefined ? { proxyRequests: p.proxyRequests } : {}),
+          ...(p.credentialRewritten !== undefined ? { credentialRewritten: p.credentialRewritten } : {}),
+        });
+      },
+    };
+    const runner = createSessionRunner({
+      agent,
+      sandbox,
+      store,
+      workspace: { prepare: async (p) => ok({ sha: p.start, resumed: false }) },
+      waiter: {
+        wait: async (p) => {
+          waits.push(p.ms);
+          return { end: "elapsed" as const };
+        },
+      },
+      layout,
+      settings: { effort: "high" },
+      clock: Date.now,
+      note: (t) => notes.push(t),
+      log: (t) => logs.push(t),
+      reportStore: () => {},
+    });
+    const track = newTrack({ unit: "story:3.1", startedMs: 0, logName: "story-3.1.log", state: "claimed" });
+    const ctx: SessionContext = {
+      track,
+      branch: "story/3.1",
+      profile: { clone: layout.clone, vendorHome: layout.vendorHome, tempDir: layout.tmp, runnerGit: layout.runnerGit, resultPath: layout.resultPath, repoHosts: [] },
+      budget: new AbortController().signal,
+      overBudget: () => "over budget",
+      signals: () => [],
+      checkHeld: async () => {},
+      onLimitStop: async () => {},
+    };
+    const journal = (): JournalRecord[] =>
+      (existsSync(layout.journal) ? readFileSync(layout.journal, "utf8") : "")
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => JSON.parse(l) as JournalRecord);
+    const session = () => runner.session(ctx, { at: "a".repeat(40), kind: "planning", prompt: () => ({ ok: true, value: "Plan." }) });
+    return { session, specs, usageCalls, logs, notes, waits, track, layout, journal };
+  }
+
+  test("a run that leaves no result resumes once with codex exec … resume <thread_id> -- <the result prompt>", async () => {
+    const w = codexWorld([{ end: "completed" }, { end: "completed", result: true }]);
+    expect(await w.session()).toEqual({ ok: true, result: PLANNING });
+    expect(w.specs).toHaveLength(2);
+    const [fresh, resume] = w.specs as [AgentLaunchSpec, AgentLaunchSpec];
+    expect(fresh.argv.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(fresh.argv.slice(-2)).toEqual(["--", "Plan."]);
+    expect(resume.argv.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(resume.argv.slice(-4, -1)).toEqual(["resume", SID, "--"]);
+    expect(resume.argv.at(-1)).toContain(w.layout.resultPath);
+    expect(resume.resume).toBe(true);
+    // Both runs' tokens are summed: (100 - 40) input, 40 cached, 7 output each.
+    expect(w.track.tokens).toEqual({ input: 120, output: 14, cacheRead: 80, cacheCreation: 0 });
+    expect(w.track.reportedModel).toBe("gpt-6.1-sol");
+  });
+
+  test("parseUsage gets the run's stdout, the lane's vendor home and the run's start", async () => {
+    const w = codexWorld([{ end: "completed", result: true }]);
+    await w.session();
+    expect(w.usageCalls).toEqual([[codexStdout("completed"), w.layout.vendorHome, 1000]]);
+  });
+
+  test("a failed turn (not a usage limit) fails the attempt, with no resume", async () => {
+    const w = codexWorld([{ end: "failed", message: "Invalid response.create payload (HTTP 400)" }]);
+    const r = await w.session();
+    expect(r).toEqual({ ok: false, reason: "agent turn failed: Invalid response.create payload (HTTP 400)" });
+    expect(w.specs).toHaveLength(1);
+    expect(w.waits).toEqual([]);
+  });
+
+  test("a failed turn at a usage limit sleeps until the reset, then the session starts again", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    const w = codexWorld([{ end: "failed", message: "You've hit your usage limit.", limit: { used_percent: 100, resets_at: reset } }, { end: "completed", result: true }]);
+    expect(await w.session()).toEqual({ ok: true, result: PLANNING });
+    expect(w.waits).toHaveLength(1);
+    expect(w.specs.map((s) => s.resume === true)).toEqual([false, false]);
+    expect(w.journal().filter((j) => j.type === "span" && j.span === "usage-limit")).toHaveLength(1);
+    expect(w.notes.join("\n")).toContain(`reset ${new Date(reset * 1000).toISOString()}`);
+  });
+
+  test.each([
+    ["another model", "gpt-6-luna", "ran gpt-6-luna, not the configured gpt-6.1-sol"],
+    ["no model", null, "reported no model; configured gpt-6.1-sol"],
+  ] as const)("model-mismatch: the session file names %s", async (_name, model, says) => {
+    const w = codexWorld([{ end: "completed", model, result: true }]);
+    const r = await w.session();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe(`model-mismatch: codex: the session ${says}`);
+    expect(w.specs).toHaveLength(1);
+  });
+
+  test("a rewritten auth.json is journaled as one credential-rewrite span over the run, and noted", async () => {
+    const w = codexWorld([{ end: "completed", credentialRewritten: true }, { end: "completed", result: true, credentialRewritten: false }]);
+    expect((await w.session()).ok).toBe(true);
+    const spans = w.journal().filter((j) => j.type === "span");
+    expect(spans).toEqual([
+      {
+        schema_version: 1,
+        type: "span",
+        span: "credential-rewrite",
+        reason: "run 1 (fresh) rewrote auth.json in the vendor home; not copied back",
+        started_at: new Date(1000).toISOString(),
+        ended_at: new Date(1500).toISOString(),
+      },
+    ]);
+    expect(w.notes).toContain("run 1 (fresh) rewrote auth.json in the vendor home; the operator's credential is left as it is");
+  });
+
+  test("every proxy request goes in the unit log, after stdout and stderr", async () => {
+    const w = codexWorld([
+      {
+        end: "completed",
+        result: true,
+        proxyRequests: [
+          { target: "chatgpt.com:443", allowed: true, reason: null },
+          { target: "chatgpt.com:443", allowed: true, reason: null },
+          { target: "files.openai.com:443", allowed: false, reason: '"files.openai.com" is not on the allowlist' },
+        ],
+      },
+    ]);
+    await w.session();
+    const log = w.logs.join("");
+    expect(log).toContain('--- proxy ---\nallow chatgpt.com:443\nallow chatgpt.com:443\ndeny files.openai.com:443 ("files.openai.com" is not on the allowlist)\n');
+    expect(log.indexOf("--- stderr ---")).toBeLessThan(log.indexOf("--- proxy ---"));
+  });
+
+  test("a run with no proxy record logs no proxy section", async () => {
+    const w = codexWorld([{ end: "completed", result: true }]);
+    await w.session();
+    expect(w.logs.join("")).not.toContain("--- proxy ---");
   });
 });

@@ -11,7 +11,7 @@ import { parseSessionResult, type BuildResult, type ResultKind, type SessionResu
 import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
 import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
-import type { LaunchSpec, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
+import type { LaunchSpec, ProxyRequest, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
 import type { Heartbeat } from "./heartbeat.ts";
 import { swapLedger, writtenRecord, type Sleep } from "./ledger-cas.ts";
@@ -42,8 +42,12 @@ import type { Workspace } from "./workspace.ts";
  * - `createSessionRunner`: prepare, the sandboxed run under the unit budget
  *   and the session limit, the kill `RESULT_LINGER_MS` after the result file
  *   first appears, the fresh run plus one resume, the usage-limit sleep with
- *   its `usage-limit` span, and the result parse for a `ResultKind`. It holds
- *   no Story logic: the caller passes the prompt and the result kind.
+ *   its `usage-limit` span, and the result parse for a `ResultKind`. Usage is
+ *   read from each run's stdout and the lane's vendor home; a failed turn the
+ *   agent reports fails the attempt with no resume, a rewritten home
+ *   credential is journaled as a `credential-rewrite` span, and every proxy
+ *   request goes in the unit log. It holds no Story logic: the caller passes
+ *   the prompt and the result kind.
  *
  * `heartbeat.ts` must never import this module.
  */
@@ -60,6 +64,11 @@ const HOUR_MS = 60 * MINUTE_MS;
  * reads none of their contents, and a repo holds hundreds of files there.
  */
 const UNREAD_TREES = [".claude/", ".agents/", "_bmad/"];
+
+/** One proxy request as a unit-log line. */
+function proxyLine(p: ProxyRequest): string {
+  return `${p.allowed ? "allow" : "deny"} ${p.target}${p.reason === null ? "" : ` (${p.reason})`}\n`;
+}
 
 /** The `main` paths a snapshot reads the contents of. */
 export function readsPath(path: string): boolean {
@@ -961,7 +970,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     log(
       `== ${iso(clock())} ${what} pid ${r.pid} exit ${r.exitCode ?? "none"} signal ${r.signal ?? "none"} ${r.durationMs} ms ==\n` +
         `--- stdout ---\n${r.stdout}${r.stdout.endsWith("\n") || r.stdout === "" ? "" : "\n"}` +
-        `--- stderr ---\n${r.stderr}${r.stderr.endsWith("\n") || r.stderr === "" ? "" : "\n"}`,
+        `--- stderr ---\n${r.stderr}${r.stderr.endsWith("\n") || r.stderr === "" ? "" : "\n"}` +
+        (r.proxyRequests === undefined ? "" : `--- proxy ---\n${r.proxyRequests.map(proxyLine).join("")}`),
     );
 
   const prepare = async (ctx: SessionContext, at: string): Promise<string | null> => {
@@ -1018,6 +1028,22 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   };
   const sessionPast = (): string => `agent session ran past ${limits.sessionMs / HOUR_MS} h`;
 
+  /** A run whose CLI rewrote the credential seeded in its vendor home: one `credential-rewrite` span over the run. */
+  const credentialRewrite = (n: number, u: AgentUnit, r: SandboxRun, spec: LaunchSpec): void => {
+    if (r.credentialRewritten !== true) return;
+    const file = spec.credential !== undefined && "homeFile" in spec.credential ? spec.credential.homeFile : "the credential file";
+    note(`run ${n} (${u.kind}) rewrote ${file} in the vendor home; the operator's credential is left as it is`);
+    const span = store.appendJournal({
+      schema_version: 1,
+      type: "span",
+      span: "credential-rewrite",
+      reason: `run ${n} (${u.kind}) rewrote ${file} in the vendor home; not copied back`,
+      started_at: iso(r.startedAt),
+      ended_at: iso(r.endedAt),
+    });
+    reportStore(span, "journal");
+  };
+
   type Once = {
     readonly sessionId: string | null;
     readonly usageLimit: AgentUsage["usageLimit"];
@@ -1042,7 +1068,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     t.sessions = n;
     const r = run.value;
     logRun(`run ${n} (${u.kind})`, r);
-    const usage = agent.parseUsage(r.stdout);
+    credentialRewrite(n, u, r, spec.value);
+    const usage = agent.parseUsage(r.stdout, ctx.profile.vendorHome, r.startedAt);
     if (usage.tokens !== null) {
       const a = t.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
       t.tokens = {
@@ -1066,6 +1093,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     // A run that ran another model fails the session at once; one that reported none fails it in `after` (Story 2.6b).
     const model = agent.checkModel(usage, configuredModel);
     if (!model.ok && usage.model !== null) return { fail: `model-mismatch: ${model.error.message}` };
+    // A turn the CLI reports failed (not a usage limit) fails the attempt, with no resume.
+    if (usage.failure !== undefined) return { fail: `agent turn failed: ${usage.failure}` };
     const noModel = model.ok ? null : `model-mismatch: ${model.error.message}`;
     return { sessionId: usage.sessionId, usageLimit: usage.usageLimit, timedOut, noModel };
   };

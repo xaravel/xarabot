@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Socket, TCPSocketListener } from "bun";
-import { decideConnect, MAX_HEAD_BYTES, startProxy, type Proxy, type ProxyOpts } from "../../src/sandbox/proxy.ts";
+import { CODEX_API_HOSTS, CODEX_API_KEY_HOST } from "../../src/adapters/agent/codex/codex-agent.ts";
+import { buildAllowlist } from "../../src/core/network/hosts.ts";
+import { decideConnect, firstLine, MAX_HEAD_BYTES, startProxy, type ConnectDecision, type Proxy, type ProxyOpts } from "../../src/sandbox/proxy.ts";
 import { liveTest } from "../support/live.ts";
 import { hostDescribe, hostTest, isSandboxed } from "../support/sandbox.ts";
 
@@ -174,6 +176,45 @@ describe("decideConnect", () => {
     const d = decideConnect(head, ALLOW, [443]);
     if (want === "allow") expect(d).toEqual({ allow: true, host: "pypi.org", port: 443 });
     else expect(d).toMatchObject({ allow: false, status: want });
+  });
+});
+
+describe("firstLine", () => {
+  test.each([
+    ["CONNECT a.test:443 HTTP/1.1\r\nHost: a.test\r\n\r\n", "CONNECT a.test:443 HTTP/1.1"],
+    ["CONNECT a.test:443 HTTP/1.1\n\n", "CONNECT a.test:443 HTTP/1.1"],
+    ["no newline", "no newline"],
+    ["", ""],
+  ])("%j -> %j", (head, line) => {
+    expect(firstLine(head)).toBe(line);
+  });
+});
+
+describe("decideConnect: a codex session's allowlist", () => {
+  const allow = (hosts: readonly string[]): readonly string[] => {
+    const a = buildAllowlist(hosts, []);
+    if (!a.ok) throw new Error(a.error.message);
+    return a.value;
+  };
+  const CHATGPT = allow(CODEX_API_HOSTS);
+  const API_KEY = allow([...CODEX_API_HOSTS, CODEX_API_KEY_HOST]);
+  const connect = (host: string) => `CONNECT ${host}:443 HTTP/1.1\r\n\r\n`;
+
+  test.each(["chatgpt.com", "ab.chatgpt.com", "auth.openai.com", "pypi.org"])("ChatGPT login: %s is allowed", (host) => {
+    expect(decideConnect(connect(host), CHATGPT, [443]).allow).toBe(true);
+  });
+
+  test.each(["api.openai.com", "files.openai.com", "chat.openai.com", "github.com", "evil.chatgpt.com.example"])("ChatGPT login: %s is denied", (host) => {
+    expect(decideConnect(connect(host), CHATGPT, [443])).toMatchObject({ allow: false, status: 403 });
+  });
+
+  test("API key: api.openai.com is allowed too; files.openai.com stays denied", () => {
+    expect(decideConnect(connect("api.openai.com"), API_KEY, [443]).allow).toBe(true);
+    expect(decideConnect(connect("files.openai.com"), API_KEY, [443]).allow).toBe(false);
+  });
+
+  test("the unresolved Cloudflare address the spike saw is an IP literal, never allowed", () => {
+    expect(decideConnect("CONNECT [2606:4700:440b::ac40:9034]:443 HTTP/1.1\r\n\r\n", API_KEY, [443])).toMatchObject({ allow: false, status: 403 });
   });
 });
 
@@ -366,6 +407,46 @@ hostDescribe("the proxy", () => {
     },
     15_000,
   );
+});
+
+hostDescribe("onRequest", () => {
+  test("every complete head is reported with its first line and decision, allowed or denied", async () => {
+    const seen: [string, ConnectDecision][] = [];
+    const p = start({ onRequest: (line, decision) => seen.push([line, decision]) });
+    try {
+      const c = await connect(p.proxy.port);
+      c.send(`CONNECT ${HOST}:${echoPort} HTTP/1.1\r\nHost: x\r\n\r\n`);
+      await c.waitFor((t) => t === ESTABLISHED);
+      c.socket.end();
+      expect(await answer(p.proxy, "CONNECT github.com:443 HTTP/1.1\r\n\r\n")).toBe(status(403, "Forbidden"));
+      expect(await answer(p.proxy, "GET http://pypi.org/ HTTP/1.1\r\n\r\n")).toBe(status(405, "Method Not Allowed"));
+      expect(seen.map(([line, d]) => [line, d.allow])).toEqual([
+        [`CONNECT ${HOST}:${echoPort} HTTP/1.1`, true],
+        ["CONNECT github.com:443 HTTP/1.1", false],
+        ["GET http://pypi.org/ HTTP/1.1", false],
+      ]);
+      expect(seen[1]?.[1]).toMatchObject({ allow: false, reason: '"github.com" is a GitHub host' });
+    } finally {
+      p.proxy.stop();
+    }
+  });
+
+  test("a hook that throws changes nothing: the allowed tunnel still opens", async () => {
+    const p = start({
+      onRequest: () => {
+        throw new Error("hook down");
+      },
+    });
+    try {
+      const c = await connect(p.proxy.port);
+      c.send(`CONNECT ${HOST}:${echoPort} HTTP/1.1\r\n\r\n`);
+      await c.waitFor((t) => t === ESTABLISHED);
+      c.socket.end();
+      expect(await answer(p.proxy, "CONNECT github.com:443 HTTP/1.1\r\n\r\n")).toBe(status(403, "Forbidden"));
+    } finally {
+      p.proxy.stop();
+    }
+  });
 });
 
 hostDescribe("upstream down", () => {

@@ -1,13 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createClaudeAgent } from "../adapters/agent/claude/claude-agent.ts";
+import { codexCredentialKind, createCodexAgent } from "../adapters/agent/codex/codex-agent.ts";
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
-import type { Result } from "../core/result.ts";
+import { err, ok, type Result } from "../core/result.ts";
+import type { AdapterName } from "../core/schemas/policy.ts";
 import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
@@ -100,9 +102,57 @@ export type LaneRunDeps = {
   };
 };
 
-/** The adapter for an agent name; only `claude` has one before Epic 6. */
-function adapterFor(agent: string): Agent | null {
-  return agent === "claude" ? createClaudeAgent() : null;
+/** True when anything, even a broken symlink, is at `path`. */
+function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The adapter for an agent name: `claude`, or `codex` with the credential
+ * kind its one credential file names (both files, or neither, refuse).
+ * `pi` has none yet (Story 3.2).
+ */
+export function adapterFor(agent: AdapterName, env: CredentialEnv): Result<Agent, "refused"> {
+  if (agent === "claude") return ok(createClaudeAgent());
+  if (agent === "codex") {
+    const dir = credentialPath(env, "codex", "auth.json");
+    if (!dir.ok) return err("refused", dir.error.message);
+    const folder = dirname(dir.value);
+    const kind = codexCredentialKind((file) => present(join(folder, file)), folder);
+    return kind.ok ? ok(createCodexAgent({ credential: kind.value })) : kind;
+  }
+  return err("refused", `no adapter for agent ${agent} (only claude and codex have one)`);
+}
+
+/**
+ * The exact strings the forge-bound text redaction takes for a credential:
+ * the file's text and, for a JSON file such as codex's `auth.json`, every
+ * string value in it of 16 characters or more (its tokens).
+ */
+export function credentialSecrets(text: string): string[] {
+  const out = [text];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return out;
+  }
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") {
+      if (v.trim().length >= 16) out.push(v);
+    } else if (Array.isArray(v)) {
+      for (const x of v) walk(x);
+    } else if (v !== null && typeof v === "object") {
+      for (const x of Object.values(v)) walk(x);
+    }
+  };
+  walk(parsed);
+  return out;
 }
 
 function readText(path: string): string | null {
@@ -285,8 +335,9 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     if (!repoConfig.ok) return failedStart(`repo config ${repoConfig.error.kind}: ${repoConfig.error.message}`);
     const unattended = unattendedRefusal(repoConfig.value.repo.policy, lane.agent);
     if (!unattended.ok) return failedStart(unattended.error.message);
-    const agent = adapterFor(lane.agent);
-    if (agent === null) return failedStart(`no adapter for agent ${lane.agent} (only claude has one)`);
+    const adapter = adapterFor(lane.agent, deps.env);
+    if (!adapter.ok) return failedStart(adapter.error.message);
+    const agent = adapter.value;
     const settings = { ...(lane.model !== undefined ? { model: lane.model } : {}), effort: lane.effort };
     const spec = agent.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, settings, layout.resultPath);
     if (!spec.ok) return failedStart(spec.error.message);
@@ -337,7 +388,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const merger = createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch });
     const diffPaths = createGitDiffPaths({ gitDir: runnerGit, fetch });
     const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
-    const secrets = [credential.value];
+    const secrets = credentialSecrets(credential.value);
     if (claimed !== null) {
       // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
       const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, secrets };

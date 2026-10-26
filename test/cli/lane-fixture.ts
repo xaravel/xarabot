@@ -61,7 +61,7 @@ export type World = {
 /** The tools `lane install` needs on the plist's `PATH`, written as stubs in `bin` (`git` as a link to the real one). */
 export function writeToolBin(bin: string): void {
   mkdirSync(bin, { recursive: true });
-  for (const tool of ["claude", "bun", "uv"]) {
+  for (const tool of ["claude", "codex", "bun", "uv"]) {
     writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n");
     chmodSync(join(bin, tool), 0o755);
   }
@@ -102,6 +102,19 @@ export function writeCredential(w: World): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "oauth-token"), "sk-ant-oat-fake\n");
   chmodSync(join(dir, "oauth-token"), 0o600);
+}
+
+/** A fake codex refresh token, inside `CODEX_AUTH`. */
+export const CODEX_REFRESH = "rt_fake-codex-refresh-token-0123456789";
+/** A fake codex `auth.json` (ChatGPT login). */
+export const CODEX_AUTH = `${JSON.stringify({ OPENAI_API_KEY: null, tokens: { id_token: "eyJfake.eyJfake.sig", access_token: "eyJfake.eyJaccess.sig", refresh_token: CODEX_REFRESH, account_id: "acct" } })}\n`;
+
+/** Writes one codex credential file, mode 600: `auth.json` (`CODEX_AUTH`) or `api-key`. */
+export function writeCodexCredential(w: World, file: "auth.json" | "api-key"): void {
+  const dir = join(w.xdg, "xarabot", "vendors", "codex");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, file), file === "auth.json" ? CODEX_AUTH : "sk-proj-fake-codex-key\n");
+  chmodSync(join(dir, file), 0o600);
 }
 
 export type FakeConnectRecord = {
