@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-36-cache-the-bot-user-id",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/cli/lane-run.test.ts",
     "test/lane/lane-store.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T16:53:35.212Z",
+  "heartbeat_at": "2026-10-26T16:53:45.157Z",
   "pr": 206,
   "pr_owner": "edanisko",
   "base_sha": "dffb01cc1ed7e6f13292381104d1fc1303aeff95",
@@ -28,7 +28,17 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/cli/lane-run.ts",
+      "src/lane/lane-store.ts",
+      "test/cli/lane-run.test.ts",
+      "test/lane/lane-store.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
