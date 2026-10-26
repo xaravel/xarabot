@@ -47,6 +47,14 @@ export type ApprovalTarget = {
   readonly parked_at: string | null;
   /** The paths the PR's diff changes (the park's `globs_held`). */
   readonly globs: readonly string[];
+  /**
+   * The graph hash the standing approval was taken on: for a taken record
+   * the runner never enqueued, returned to its park (`untake`), the taken
+   * record's `approved_graph`; else the parked record's (a park from
+   * `merging` clears it). A take whose merge result now hashes otherwise
+   * voids the approval.
+   */
+  readonly approved_graph: string | null;
 };
 
 /** A coordinator-held `merging` record taken on approval, whose queue is checked. */
@@ -57,6 +65,8 @@ export type GatedTarget = {
   readonly pr_owner: string | null;
   readonly head_sha: string | null;
   readonly approved_sha: string | null;
+  /** The merge result's graph hash the Maintainer's approval was taken on; `null` when the take held no graph change. */
+  readonly approved_graph: string | null;
   /**
    * The head the coordinator enqueued it at, or fenced before parking it
    * again; `null` while the runner has not enqueued it since the take.
@@ -333,6 +343,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       pr_owner: r.pr_owner,
       head_sha: r.head_sha,
       approved_sha: r.approved_sha,
+      approved_graph: r.approved_graph,
       passed_sha: r.passed_sha,
       globs: r.globs,
     });
@@ -353,6 +364,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       head_sha: r.head_sha,
       parked_at: r.lane === "coordinator" && r.passed_sha !== null ? r.heartbeat_at : null,
       globs: r.park.globs_held,
+      approved_graph: r.approved_graph,
     });
   }
 

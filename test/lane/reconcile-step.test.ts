@@ -1756,22 +1756,58 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       expect(f.fake.control.queue()).toEqual([r3.number]);
     });
 
-    test("a graph change the runner never enqueued: parked on the Maintainer's standing approval, the gate run again, taken and queued with the graph", async () => {
+    /** story:1.1 taken on the Maintainer's approval with `approvedGraph`, never enqueued; the PR open, out of the queue. */
+    async function untakenGraph(approvedGraph: string) {
       let pr = { number: 0, head: "" };
       const f = await setup({}, async (fake) => {
         pr = await prOn(fake, "story/1.1");
         fake.control.addReview(pr.number, review(pr.head, 30, { author: "edanisko" }));
-        return [gatedRec(pr, { globs: [...DIFF, "xarabot:graph"].sort(), approved_graph: `sha256:${"b".repeat(64)}`, passed_sha: null })];
+        return [gatedRec(pr, { globs: [...DIFF, "xarabot:graph"].sort(), approved_graph: approvedGraph, passed_sha: null })];
       });
+      return { f, pr };
+    }
+
+    test("a graph change the runner never enqueued, its merge result's hash unchanged: parked on the Maintainer's standing approval, the gate run again, taken and queued with the graph", async () => {
+      const expected = checkGraphChange({ main: treeOf(MAIN_GRAPH), merged: treeOf(ADDED), ledgerUnits: [] });
+      if (expected.kind !== "checked") throw new Error("the graph change does not check");
+      const { f, pr } = await untakenGraph(expected.mergedHash);
       const g = stubGraphTrees(CHANGE);
       const out = await f.run({ graphTrees: g.trees });
       expect(out.state).toBe("merged");
       expect(g.calls).toHaveLength(1);
       const r = (await f.ledger()).get(S);
-      expect(r).toMatchObject({ state: "merging", generation: 3, approved_sha: pr.head, passed_sha: pr.head });
+      expect(r).toMatchObject({ state: "merging", generation: 3, approved_sha: pr.head, approved_graph: expected.mergedHash, passed_sha: pr.head });
       expect(r?.globs).toEqual([...DIFF, "xarabot:graph"].sort());
       expect(f.fake.control.queue()).toEqual([pr.number]);
       expect(f.fake.control.comments(pr.number)).toEqual([]);
+    });
+
+    test("a graph change the runner never enqueued, re-taken at a different hash: the approval is void, parked again for the Maintainer with the new delta, not queued", async () => {
+      const stale = `sha256:${"b".repeat(64)}`;
+      const { f, pr } = await untakenGraph(stale);
+      const g = stubGraphTrees(CHANGE);
+      const out = await f.run({ graphTrees: g.trees });
+      expect(g.calls).toHaveLength(1);
+      expect(f.fake.control.queue()).toEqual([]);
+      expect((await f.ledger()).get(S)).toMatchObject({
+        state: "parked",
+        generation: 3,
+        lane: "coordinator",
+        approved_sha: null,
+        approved_graph: null,
+        passed_sha: pr.head,
+        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF },
+      });
+      expect(out.reason).toContain(`not the approved ${stale}: the approval is void`);
+      const comments = f.fake.control.comments(pr.number);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]).toContain("no longer counts");
+      expect(comments[0]).toContain("+2.2");
+      // The fenced passed_sha makes the next take need a Maintainer approval after the re-park: the voided one never re-takes it.
+      f.events.length = 0;
+      await f.run({ graphTrees: g.trees });
+      expect(swaps(f.events)).not.toContain("takeApproved story:1.1");
+      expect(await stateOf(f, S)).toBe("parked");
     });
 
     test("main unmoved at enqueue: no second gate run", async () => {
