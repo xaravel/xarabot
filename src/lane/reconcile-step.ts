@@ -92,6 +92,10 @@ import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOu
  * re-reads fresh `main`: when it moved, the gate runs again, and a refusal
  * parks `blocked` `graph-invalid`, a different hash voids the approval (parked
  * again for the Maintainer, with the new delta), and an equal hash enqueues.
+ * A record taken again after the runner never enqueued it keeps its
+ * `approved_graph` for the re-take: a merge result that hashes otherwise
+ * voids the approval the same way, so a stale approval never queues a
+ * delta the Maintainer has not seen.
  *
  * Story 2.9: each `retro:<N>` record `merged` as of the run, with a
  * `retro_result` and no `retro` entry for `<N>` on `main`, has its verdict
@@ -375,13 +379,24 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * `head` and out of the queue: parked again with `passed_sha` unset, so
      * its standing approval still counts, and returned as a candidate for
      * this run's takes, which re-check that approval, fresh `main` and the
-     * graph gate before enqueueing it. No comment: the owner has nothing to do.
+     * graph gate before enqueueing it, its `approved_graph` carried so a
+     * merge result that now hashes otherwise voids the approval. No comment:
+     * the owner has nothing to do.
      */
     const untake = async (t: GatedTarget, head: string): Promise<ApprovalTarget | null> => {
       if (!(await parkAwaiting(t, null))) return null;
       reasons.push(`${t.unit}: PR #${t.pr} was never enqueued after its take: parked on its standing approval, to be taken again`);
       if (t.pr_owner === null) return null;
-      return { unit: t.unit, generation: t.generation, pr: t.pr, pr_owner: t.pr_owner, head_sha: head, parked_at: null, globs: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB) };
+      return {
+        unit: t.unit,
+        generation: t.generation,
+        pr: t.pr,
+        pr_owner: t.pr_owner,
+        head_sha: head,
+        parked_at: null,
+        globs: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
+        approved_graph: t.approved_graph,
+      };
     };
 
     /**
@@ -492,8 +507,12 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     type AfterTake =
       | { readonly kind: "refuse"; readonly refusals: readonly string[] }
       | { readonly kind: "conflict"; readonly paths: readonly string[] }
-      /** The graph changes and only the owner approved: parked again for the Maintainer, with the delta. */
-      | { readonly kind: "maintainer"; readonly maintainer: string; readonly delta: GraphDelta; readonly hash: string }
+      /**
+       * The graph changes and only the owner approved, or (with `voided`, the
+       * hash the Maintainer's approval was taken on) a re-take's merge result
+       * now hashes otherwise: parked again for the Maintainer, with the delta.
+       */
+      | { readonly kind: "maintainer"; readonly maintainer: string; readonly delta: GraphDelta; readonly hash: string; readonly voided?: string }
       | null;
 
     /**
@@ -570,6 +589,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         pr_owner: t.pr_owner,
         head_sha: head,
         approved_sha: head,
+        approved_graph: graph?.hash ?? null,
         passed_sha: null,
         globs: graph !== null ? [...new Set([...t.globs, GRAPH_PSEUDO_GLOB])] : t.globs,
       };
@@ -583,9 +603,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       if (after?.kind === "refuse") return await blockGraph(takenTarget, after.refusals);
       if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict");
       if (after?.kind === "maintainer") {
-        return await repark(takenTarget, `changes the Epic graph to ${after.hash}: only the Maintainer's (${after.maintainer}) approval counts`, null, {
+        const why =
+          after.voided === undefined
+            ? `changes the Epic graph to ${after.hash}: only the Maintainer's (${after.maintainer}) approval counts`
+            : `merge result's graph is now ${after.hash}, not the approved ${after.voided}: the approval is void`;
+        return await repark(takenTarget, why, null, {
           inboxOwner: after.maintainer,
-          body: graphDeltaComment(`Unit ${t.unit}`, { delta: after.delta, maintainer: after.maintainer }),
+          body: graphDeltaComment(`Unit ${t.unit}`, { delta: after.delta, maintainer: after.maintainer, ...(after.voided !== undefined ? { voided: true } : {}) }),
         });
       }
       if (graph !== null && !(await recheckGraph(t, takenTarget, graph))) return;
@@ -707,6 +731,12 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
               // Only the owner's approval stands: parked again in the Maintainer's inbox, with the delta.
               note(`${t.unit}: the graph changes; no standing approval from the Maintainer ${maintainer}${since}; parked again for the Maintainer`);
               await take(t, approver, settled, null, { kind: "maintainer", maintainer, delta: g.delta, hash: g.mergedHash });
+              continue;
+            }
+            if (t.approved_graph !== null && t.approved_graph !== g.mergedHash) {
+              // A re-take whose merge result moved since the Maintainer approved it: that approval is void.
+              note(`${t.unit}: the merge result's graph is now ${g.mergedHash}, not the approved ${t.approved_graph}; parked again for the Maintainer`);
+              await take(t, approver, settled, null, { kind: "maintainer", maintainer, delta: g.delta, hash: g.mergedHash, voided: t.approved_graph });
               continue;
             }
             await take(t, approval.author ?? maintainer, settled, { hash: g.mergedHash, mainSha: snap.main.sha });
