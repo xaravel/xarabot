@@ -11,7 +11,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/profile.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T11:50:52.125Z",
+  "heartbeat_at": "2026-10-26T11:50:56.795Z",
   "pr": 198,
   "pr_owner": "edanisko",
   "base_sha": "a245533d980cc2b923d05e530ef74819b3282601",
