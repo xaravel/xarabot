@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-26-coordinator-idle-wait-one-minute",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "src/core/lane/waits.ts",
     "test/core/lane/waits.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T01:29:27.442Z",
+  "heartbeat_at": "2026-10-26T02:16:32Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "c5904168920c836636367a58301bf5b163e0c3bf",
@@ -22,12 +22,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "verification",
-    "inbox_owner": "edanisko",
-    "globs_held": []
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
