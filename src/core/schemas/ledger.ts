@@ -11,16 +11,17 @@ import { RETRO_ITEM_ID_PATTERN, RetroRecordResultSchema } from "./retro-gates.ts
 
 /**
  * The ledger's own `schema_version` (Story 2.7; 3 since Story 2.8 added
- * `approved_graph`, 4 since Story 2.9 added `retro_result`): every record
+ * `approved_graph`, 4 since Story 2.9 added `retro_result`, 5 since Story 3.5
+ * added `enqueued_sha`): every record
  * written carries it; the reader accepts each of `LEDGER_SCHEMA_VERSIONS`.
  * The other versioned files keep `SCHEMA_VERSION` (1).
  */
-export const LEDGER_SCHEMA_VERSION = 4;
+export const LEDGER_SCHEMA_VERSION = 5;
 
 /** The ledger `schema_version`s this runner reads. */
-export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, 2, 3, LEDGER_SCHEMA_VERSION];
+export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, 2, 3, 4, LEDGER_SCHEMA_VERSION];
 
-export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(LEDGER_SCHEMA_VERSION)]);
+export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(LEDGER_SCHEMA_VERSION)]);
 
 /** A `resolveGraph` hash: `sha256:` and 64 lowercase hex digits. */
 export const GraphHash = z.string().regex(/^sha256:[0-9a-f]{64}$/, "must be sha256: and 64 lowercase hex digits");
@@ -139,6 +140,7 @@ export const RUNNER_CAUSES = [
   "unclaimable",
   "graph-invalid",
   "readiness",
+  "review-findings",
 ] as const;
 
 export const UnitState = z.enum(UNIT_STATES);
@@ -181,7 +183,14 @@ export const UnitRecordSchema = z
     base_sha: GitSha.nullable(),
     head_sha: GitSha.nullable(),
     reviewed_sha: GitSha.nullable(),
+    /** The head a review round with no blocking pass passed (Story 3.5: only a review round sets it). */
     passed_sha: GitSha.nullable(),
+    /**
+     * The head the runner enqueued the PR at, or fenced before re-parking a
+     * taken record (Story 3.5); a v1 to v4 record reads with the mapping in
+     * `codec.ts`.
+     */
+    enqueued_sha: GitSha.nullable().default(null),
     approved_sha: GitSha.nullable(),
     /** The merge result's graph hash the Maintainer approved (Story 2.8); a v1 or v2 record without it reads as `null`. */
     approved_graph: GraphHash.nullable().default(null),

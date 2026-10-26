@@ -20,6 +20,7 @@ import {
   forgeOps,
   Halt,
   newTrack,
+  sessionAllowance,
   stepKit,
   stepOps,
   ZERO_SHA,
@@ -677,6 +678,91 @@ describe("createSessionRunner: session()", () => {
     expect(r).toEqual({ ok: false, reason: "no prompt" });
     expect(w.runs).toEqual([]);
     expect(w.track.sessions).toBe(0);
+  });
+
+  test("an allowance refusal (Story 3.5): no prepare, no sandbox run, the session fails with the reason", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }));
+    let asked = 0;
+    const ctx: SessionContext = {
+      ...w.ctx,
+      allowed: async () => {
+        asked += 1;
+        return "allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)";
+      },
+    };
+    const r = await w.runner.session(ctx, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(r).toEqual({ ok: false, reason: "allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)" });
+    expect(asked).toBe(1);
+    expect(w.prepared).toEqual([]);
+    expect(w.runs).toEqual([]);
+    expect(w.track.sessions).toBe(0);
+  });
+
+  test("allowed runs before each fresh session: again after a usage-limit restart, which a revoked allowance then fails", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }), { runs: [{ usageLimit: { resetAt: null }, result: false }, {}] });
+    const answers: (string | null)[] = [null, null];
+    let asked = 0;
+    const ok2 = await w.runner.session({ ...w.ctx, allowed: async () => answers[asked++] ?? null }, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(ok2).toEqual({ ok: true, result: PLANNING });
+    expect(asked).toBe(2);
+    expect(w.runs).toHaveLength(2);
+
+    const v = runnerWorld(() => ({ ok: true, value: "Plan." }), { runs: [{ usageLimit: { resetAt: null }, result: false }, {}] });
+    const verdicts: (string | null)[] = [null, "allowance: revoked"];
+    let n = 0;
+    const r = await v.runner.session({ ...v.ctx, allowed: async () => verdicts[n++] ?? null }, { at: v.at, kind: "planning", prompt: v.prompt });
+    expect(r).toEqual({ ok: false, reason: "allowance: revoked" });
+    expect(n).toBe(2);
+    expect(v.waits).toHaveLength(1);
+    expect(v.runs).toHaveLength(1);
+  });
+
+  test("an allowed check that throws is a refusal, never a throw", async () => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }));
+    const r = await w.runner.session(
+      {
+        ...w.ctx,
+        allowed: async () => {
+          throw new Error("boom");
+        },
+      },
+      { at: w.at, kind: "planning", prompt: w.prompt },
+    );
+    expect(r).toEqual({ ok: false, reason: "allowance: boom" });
+    expect(w.runs).toEqual([]);
+  });
+});
+
+describe("sessionAllowance (Story 3.5)", () => {
+  const policyMain = (policy: string): Record<string, string> => ({
+    ".xarabot/config.yaml": "schema_version: 1\nrunner_version: \"0.1.0\"\nmaintainer: edanisko\nstanding_authority_path: docs/sa.md\n",
+    ".xarabot/policy.yaml": policy,
+    ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
+    "docs/sa.md": "---\nschema_version: 1\ngranted_by: edanisko\ngranted_at: 2026-10-01\nrepo: xaravel/xarabot\n---\n\nGranted.\n",
+  });
+  const check = (main: Record<string, string>, o: { agent?: string; also?: readonly string[] } = {}) => {
+    const fake = createFakeForge({ now: "2026-10-25T10:00:00Z", main });
+    return sessionAllowance({ forge: fake.forge, repo: "xaravel/xarabot", agent: o.agent ?? "claude", builderProviders: () => ["anthropic"], also: () => o.also ?? [], callTimeoutMs: 5000 });
+  };
+  test("an allowed agent with a reviewer: null", async () => {
+    expect(await check(policyMain("schema_version: 1\nunattended_adapters: [claude]\n"))()).toBeNull();
+  });
+  test("an agent fresh main's policy no longer allows: the unattendedRefusal text", async () => {
+    expect(await check(policyMain("schema_version: 1\nunattended_adapters: [codex]\n"))()).toBe(
+      "allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)",
+    );
+  });
+  test("another adapter the session runs (a reviewer) must be allowed too", async () => {
+    expect(await check(policyMain("schema_version: 1\nunattended_adapters: [claude]\n"), { also: ["codex"] })()).toBe(
+      "allowance: agent codex is not in .xarabot/policy.yaml unattended_adapters (allowed: claude)",
+    );
+  });
+  test("an invalid config, or a failed snapshot, is a refusal reason", async () => {
+    expect(await check(policyMain("schema_version: 9\n"))()).toStartWith("allowance: config ");
+    const fake = createFakeForge({ now: "2026-10-25T10:00:00Z", main: policyMain("schema_version: 1\nunattended_adapters: [claude]\n") });
+    fake.control.injectError("snapshot", { kind: "transient", message: "down" });
+    const r = await sessionAllowance({ forge: fake.forge, repo: "xaravel/xarabot", agent: "claude", builderProviders: () => [], callTimeoutMs: 5000 })();
+    expect(r).toBe("allowance: snapshot transient: down");
   });
 });
 

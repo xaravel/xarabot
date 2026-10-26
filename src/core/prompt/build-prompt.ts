@@ -110,6 +110,7 @@ const TemplateSchema = z.strictObject({
   result_retro: z.string(),
   retro_item: z.string(),
   retro_item_ci_fix: z.string(),
+  retro_item_loopback: z.string(),
   result_retro_item: z.string(),
   review: z.string(),
   review_followup: z.string(),
@@ -439,8 +440,15 @@ export type RetroItemPromptUnit = {
   };
 };
 
-/** A retro-item session's mode: its first build, or a CI fix with the prefetched log's absolute path. */
-export type RetroItemPromptMode = { readonly mode: "build" } | { readonly mode: "ci-fix"; readonly log_path: string };
+/**
+ * A retro-item session's mode: its first build, a CI fix with the
+ * prefetched log's absolute path, or a loopback (Story 3.5) with the
+ * prefetched review findings' absolute path.
+ */
+export type RetroItemPromptMode =
+  | { readonly mode: "build" }
+  | { readonly mode: "ci-fix"; readonly log_path: string }
+  | { readonly mode: "loopback"; readonly findings_path: string };
 
 export type BuildRetroItemPromptInput = {
   readonly template: PromptTemplate;
@@ -465,7 +473,11 @@ const RetroItemInputSchema = z.strictObject({
     })
     .refine((u) => u.id === `retro-item:${u.item.id}`, { message: "must be retro-item:<item id>", path: ["id"] })
     .refine((u) => RETRO_ITEM_ID_PATTERN.exec(u.item.id)?.[1] === String(u.item.epic), { message: "must be an item of its Epic", path: ["item", "epic"] }),
-  mode: z.discriminatedUnion("mode", [z.strictObject({ mode: z.literal("build") }), z.strictObject({ mode: z.literal("ci-fix"), log_path: AbsolutePath })]),
+  mode: z.discriminatedUnion("mode", [
+    z.strictObject({ mode: z.literal("build") }),
+    z.strictObject({ mode: z.literal("ci-fix"), log_path: AbsolutePath }),
+    z.strictObject({ mode: z.literal("loopback"), findings_path: AbsolutePath }),
+  ]),
   sections: SectionsSchema,
   human_live_steps: InputSchema.shape.human_live_steps,
   result_path: AbsolutePath,
@@ -473,7 +485,8 @@ const RetroItemInputSchema = z.strictObject({
 
 /**
  * Builds a retro-item prompt (Story 2.10): the `retro_item` task (or
- * `retro_item_ci_fix` with the CI log), which runs no skill and names the
+ * `retro_item_ci_fix` with the CI log, or `retro_item_loopback` with the
+ * review findings, Story 3.5), which runs no skill and names the
  * unit and the item (its id, Epic, action text on one line and globs), the
  * rules, the Epic context rule, the Human Live Steps, the repo sections, and the `build` result
  * step with its JSON Schema last. Pure; placeholders are filled in one pass,
@@ -510,8 +523,10 @@ export function buildRetroItemPrompt(input: BuildRetroItemPromptInput): Result<s
     sections: sectionsText(sections),
   };
   if (mode.mode === "ci-fix") values.log_path = mode.log_path;
+  if (mode.mode === "loopback") values.findings_path = mode.findings_path;
 
-  const parts: string[] = [mode.mode === "build" ? t.retro_item : t.retro_item_ci_fix, t.rules, t.epic_context];
+  const task = mode.mode === "build" ? t.retro_item : mode.mode === "ci-fix" ? t.retro_item_ci_fix : t.retro_item_loopback;
+  const parts: string[] = [task, t.rules, t.epic_context];
   if (steps.length > 0) parts.push(t.human_live_steps);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_retro_item);

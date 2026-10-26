@@ -2,6 +2,7 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ATTEMPTS_CAP, ejected, heartbeat, markMerged, park, startMerging } from "../core/ledger/edits.ts";
+import { allowanceRefusal } from "../core/review/allowance.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type Forge, type ForgeSnapshot } from "../ports/forge.ts";
@@ -10,12 +11,17 @@ import type { DiffPaths } from "./diff-paths.ts";
 import { gateGraph } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
+import type { PassedGate } from "./passed-gate.ts";
 import { describeError, message, readsPath, stepKit, type StepOutput, type StepUnit } from "./session.ts";
 
 /**
  * The merge step after CI passes (FR6, FR13, FR22, AR7, AR8, AR20, AR21). It
  * re-checks the config and Standing Authority on fresh `main`, then reads the
- * PR's changed paths. A PR touching an owner-approval or protected path parks
+ * PR's changed paths. Before any gate (Story 3.5), fresh `main`'s policy
+ * must still allow the lane's agent and a reviewer (`allowanceRefusal`),
+ * and the head must pass the passed gate (`passed_sha`, or its clean merge
+ * with `main`); either failing is a failed attempt, with no park and no
+ * enqueue. A PR touching an owner-approval or protected path parks
  * `awaiting-approval` for its owner; once the owner approves its current head,
  * the coordinator's `reconcile` queues it (Story 2.6).
  * Before that gate, the graph-change gate (Story 2.8) recomputes the PR's
@@ -23,12 +29,14 @@ import { describeError, message, readsPath, stepKit, type StepOutput, type StepU
  * `graph-invalid`; a changed graph parks `awaiting-approval` for the
  * Maintainer, with one comment carrying the delta, then any gated paths; a
  * conflicting merge, or a `main` that does not resolve, is a failed attempt.
- * Any other PR is fenced, written `merging`, enqueued at its head and watched
+ * Any other PR is fenced (the fence records `enqueued_sha`, the head it is
+ * enqueued at), written `merging`, enqueued at its head and watched
  * until it merges, is ejected (back to `claimed`, for the CI step to run
  * again) or fails. Every enqueue retry is fenced again, and every move out
  * of `merging` other than to `merged` fences and dequeues the PR first.
- * A record already `merging` (a stale takeover, Story 2.2) skips the gate,
- * the fence, `startMerging` and the enqueue, and is only watched.
+ * A record already `merging` (a stale takeover, Story 2.2) skips the gates,
+ * the fence, `startMerging` and the enqueue, and is only watched, when its
+ * `enqueued_sha` is its head; else a failed attempt.
  * With `watch: false` (a coordinator unit, Story 2.10) the step ends
  * `progress` once the PR is enqueued, `merging`, with no queue watch: a
  * coordinator-held `merging` record has no heartbeat (AD-6), and later
@@ -67,6 +75,10 @@ export type MergeStepDeps = {
   readonly identity: LaneIdentity;
   /** The repo slug, for the Standing Authority check. */
   readonly repo: string;
+  /** The lane's agent, which fresh `main`'s policy must still allow before an enqueue (Story 3.5). */
+  readonly agent: string;
+  /** Whether the head is one a review passed (Story 3.5). */
+  readonly passed: PassedGate;
   /** Each forge call's (and the diff's) deadline; default 60 000 ms. */
   readonly callTimeoutMs?: number;
   /** The host clock in epoch ms; default `Date.now`. */
@@ -204,7 +216,7 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       }
 
       // 3. Fence, merging, enqueue.
-      await beat("fence", { passed_sha: head });
+      await beat("fence", { enqueued_sha: head });
       // The queue heartbeat counts from the host time after each beat's swap.
       kit.lastBeat = clock();
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
@@ -294,12 +306,25 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
       note(`PR #${pr} at ${head}, fresh main ${main}`);
 
       if (input.record.state === "merging") {
-        // A stale takeover's record: already gated, fenced, merging and queued, but only at its passed head.
-        if (kit.record.passed_sha !== head) {
-          return await failed(`PR #${pr} is queued at ${head}, not at its passed_sha ${kit.record.passed_sha ?? "none"}`);
+        // A stale takeover's record: already gated, fenced, merging and queued, but only at the head it was enqueued at.
+        if (kit.record.enqueued_sha !== head) {
+          return await failed(`PR #${pr} is queued at ${head}, not at its enqueued_sha ${kit.record.enqueued_sha ?? "none"}`);
         }
         note(`watching PR #${pr}, already merging at ${head}`);
       } else {
+        // The allowance, then the passed gate (Story 3.5): no park and no enqueue for a head no review passed.
+        const refused = allowanceRefusal(policy, deps.agent, kit.record.builder_providers);
+        if (refused !== null) return await failed(`allowance: ${refused}`);
+        let gate: Awaited<ReturnType<PassedGate>>;
+        try {
+          gate = await deps.passed({ headSha: head, passedSha: kit.record.passed_sha, mainSha: main, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
+        } catch (e) {
+          gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
+        }
+        await budgetPassed();
+        if (!gate.ok) return await failed(`passed gate ${gate.error.kind}: ${gate.error.message}`);
+        if (gate.value.kind === "unreviewed") return await failed(`passed gate: unreviewed: ${gate.value.why}`);
+        note(`passed gate: ${head} passed (${gate.value.how})`);
         const graph = await graphGate(head, pr, main, snap);
         await gateAndEnqueue(head, pr, main, [...policy.owner_approval_paths, ...policy.effective_protected_paths], graph === null ? null : { delta: graph, maintainer: loaded.value.repo.config.maintainer });
       }

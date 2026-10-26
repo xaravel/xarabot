@@ -20,6 +20,8 @@ import type { DiffPaths } from "./diff-paths.ts";
 import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "./heartbeat.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName } from "./lane-store.ts";
+import type { PassedGate } from "./passed-gate.ts";
+import type { ReviewStep } from "./review-step.ts";
 import {
   Abandon,
   addReason,
@@ -65,8 +67,8 @@ import type { Workspace } from "./workspace.ts";
  * 2.10) gets the unit's track and may end the run through a `Halt`: a STOP
  * during its usage-limit sleep releases the unit and ends the run `stop`
  * with no lane stop, as the lane process does. A retro item's PR goes the
- * Story path (CI with fix sessions, the graph and approval gates) up to its
- * enqueue; the step then ends `merging` and later `reconcile` runs check the
+ * Story path (CI with fix sessions, the review gate with its loopbacks, the
+ * graph and approval gates) up to its enqueue; the step then ends `merging` and later `reconcile` runs check the
  * queue (Story 2.6).
  *
  * The forge and ledger helpers, the unit keeper check (`checkHeld`), the
@@ -106,8 +108,8 @@ export type CoordinatorSteps = Partial<Readonly<Record<CoordinatorKind, Coordina
 
 /**
  * What every coordinator step that runs an agent session shares (planning,
- * retro and retro-item; Epic 3's reviews next). `lane run` builds it once
- * and adds each step's own dependencies.
+ * retro and retro-item, each reviewed before its enqueue, Story 3.5). `lane
+ * run` builds it once and adds each step's own dependencies.
  */
 export type SessionStepDeps = {
   readonly forge: Forge;
@@ -127,6 +129,10 @@ export type SessionStepDeps = {
   readonly identity: LaneIdentity;
   /** The lane's session vendor, added to a unit's `builder_providers` at each agent-commit push fence (AD-16). */
   readonly provider: Provider;
+  /** One review round on a unit's open PR (Story 3.4), for the review gate before an enqueue (Story 3.5). */
+  readonly review: ReviewStep;
+  /** Whether a PR's head is one a review passed (Story 3.5). */
+  readonly passed: PassedGate;
   /** The lane's credentials, redacted from the commit message, the PR text and the comments; default none. */
   readonly secrets?: readonly string[];
   readonly limits?: SessionLimits;

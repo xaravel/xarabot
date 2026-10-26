@@ -9,7 +9,8 @@ import type { NextStory } from "../../src/core/next/next.ts";
 import { err, ok } from "../../src/core/result.ts";
 import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { DiffPaths, DiffPathsRequest } from "../../src/lane/diff-paths.ts";
-import { createMergeStep, gateComment, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
+import { createMergeStep, gateComment, type MergeStep, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
+import { headPassedGate } from "../../src/lane/passed-gate.ts";
 import type { Forge } from "../../src/ports/forge.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
@@ -17,12 +18,14 @@ import { createCiStep } from "../../src/lane/ci-step.ts";
 import type { Committer } from "../../src/lane/committer.ts";
 import { runLaneProcess } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
-import type { Merger } from "../../src/lane/merger.ts";
+import type { MergeOutcome, Merger } from "../../src/lane/merger.ts";
+import { createReviewGateStep } from "../../src/lane/review-gate.ts";
+import { BLOCKER, NIT, reviewPass, reviewStub } from "./review-stub.ts";
 import { createPrStep } from "../../src/lane/pr-step.ts";
 import type { Workspace } from "../../src/lane/workspace.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
-import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
+import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
 import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
@@ -35,10 +38,10 @@ const BRANCH = "story/1.1";
 const T0 = Date.parse("2026-10-23T10:00:00.000Z");
 const opts = () => ({ signal: AbortSignal.timeout(5000) });
 
-type MainOpts = { readonly authority?: boolean; readonly ownerPaths?: readonly string[] };
+type MainOpts = { readonly authority?: boolean; readonly ownerPaths?: readonly string[]; readonly adapters?: readonly string[] };
 
 function mainFiles(o: MainOpts = {}): Record<string, string> {
-  const policy = ["schema_version: 1"];
+  const policy = ["schema_version: 1", `unattended_adapters: [${(o.adapters ?? ["claude", "codex"]).join(", ")}]`];
   if (o.ownerPaths !== undefined) policy.push(`owner_approval_paths: ${JSON.stringify(o.ownerPaths)}`);
   const files: Record<string, string> = {
     ".xarabot/config.yaml": [
@@ -130,7 +133,8 @@ async function world(o: WorldOpts = {}): Promise<World> {
   const opened = await fake.forge.openPr({ branch: BRANCH, base: "main", title: "Story 1.1: Story 1.1", body: "Did it" }, opts());
   if (!opened.ok) throw new Error(opened.error.message);
   const pr = opened.value.number;
-  const record = rec({ unit: UNIT, globs: ["src/s0/**"], pr, pr_owner: "alice", head_sha: head, base_sha: main, ...o.record });
+  // A record a review round passed at its head (Story 3.5), unless the case says otherwise.
+  const record = rec({ unit: UNIT, globs: ["src/s0/**"], pr, pr_owner: "alice", head_sha: head, base_sha: main, passed_sha: head, builder_providers: ["anthropic"], ...o.record });
   fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([record]), deletes: [] });
 
   const events: string[] = [];
@@ -164,6 +168,8 @@ async function world(o: WorldOpts = {}): Promise<World> {
         graphTrees: unchangedGraph(),
         identity: ALICE,
         repo: "xaravel/xarabot",
+        agent: "claude",
+        passed: headPassedGate,
         now: () => t,
         sleep: async (ms) => {
           const i = sleeps.length;
@@ -369,7 +375,7 @@ describe("the graph-change gate", () => {
 
   test("a merging takeover skips the graph gate", async () => {
     const w = await world({ onSleep: mergeAtFirst, record: { state: "merging", generation: 2 } });
-    const record: UnitRecord = { ...w.record, passed_sha: w.head };
+    const record: UnitRecord = { ...w.record, passed_sha: w.head, enqueued_sha: w.head };
     w.fake.control.writeForeignLedger({ message: "seed passed [skip ci]", writes: tip([record]), deletes: [] });
     value(await w.fake.forge.enqueue(w.pr, w.head, opts()));
     const g = stubGraphTrees({ error: "never called" });
@@ -423,10 +429,80 @@ function value<T>(r: { ok: true; value: T } | { ok: false; error: { kind: string
   return r.value;
 }
 
+// -------------------------------------------------------------- the passed gate and the allowance
+
+describe("the passed gate and the allowance (Story 3.5)", () => {
+  test("merge step unreviewed: passed_sha not the head and no clean merge: a failed attempt, no park, no enqueue, no diff", async () => {
+    const w = await world({ ownerPaths: ["**"], record: { passed_sha: null } });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("passed gate: unreviewed");
+    expect(w.diffs).toEqual([]);
+    expect(w.events).not.toContain("enqueue");
+    expect(w.events).not.toContain("ledgerSwap park");
+    expect(w.fake.control.comments(w.pr)).toEqual([]);
+    expect(await w.ledger()).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("passed_sha at an older head is unreviewed too", async () => {
+    const w = await world({ record: { passed_sha: "a".repeat(40) } });
+    const out = await w.run();
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("the gate gets the head, the record's passed_sha and fresh main; a clean merge passes and is enqueued", async () => {
+    const w = await world({ onSleep: mergeAtFirst, record: { passed_sha: "a".repeat(40) } });
+    const asked: unknown[] = [];
+    const out = await w.run({}, {
+      passed: async (r) => {
+        asked.push({ head: r.headSha, passed: r.passedSha, main: r.mainSha });
+        return ok({ kind: "passed", how: "clean-merge" });
+      },
+    });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    // Fresh main as the step read it: the world's main, before the queue merged the PR.
+    expect(asked).toEqual([{ head: w.head, passed: "a".repeat(40), main: w.record.base_sha }]);
+  });
+
+  test("a passed gate error is a failed attempt, with no enqueue", async () => {
+    const w = await world();
+    const out = await w.run({}, { passed: async () => err("fetch", "offline") });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("passed gate fetch: offline");
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("revoked allowance, enqueue: fresh main's policy drops the lane's adapter: a failed attempt naming it, no gate, no enqueue", async () => {
+    const w = await world({ adapters: ["codex"], ownerPaths: ["**"] });
+    let gated = 0;
+    const out = await w.run({}, {
+      passed: async () => {
+        gated += 1;
+        return ok({ kind: "passed", how: "head" });
+      },
+    });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(gated).toBe(0);
+    expect(w.diffs).toEqual([]);
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("a merging takeover is watched with no allowance or passed gate", async () => {
+    const w = await world({ adapters: ["codex"], onSleep: mergeAtFirst, record: { state: "merging", generation: 2 } });
+    const record: UnitRecord = { ...w.record, passed_sha: null, enqueued_sha: w.head };
+    w.fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([record]), deletes: [] });
+    value(await w.fake.forge.enqueue(w.pr, w.head, opts()));
+    const out = await w.run({ record }, { passed: async () => err("fetch", "never called") });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+  });
+});
+
 // -------------------------------------------------------------- enqueue
 
 describe("enqueue", () => {
-  test("an ungated PR: heartbeat passed_sha, startMerging, then enqueue at its head; merged when the queue merges it", async () => {
+  test("an ungated PR: heartbeat enqueued_sha, startMerging, then enqueue at its head; merged when the queue merges it", async () => {
     const w = await world({ onSleep: mergeAtFirst });
     const out = await w.run();
     expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
@@ -436,7 +512,27 @@ describe("enqueue", () => {
     const after = await w.ledger();
     expect(after?.state).toBe("merged");
     expect(after?.passed_sha).toBe(w.head);
+    expect(after?.enqueued_sha).toBe(w.head);
     expect(w.fake.control.comments(w.pr)).toEqual([]);
+  });
+
+  test("the enqueue fence records enqueued_sha and never sets passed_sha (Story 3.5)", async () => {
+    const w = await world({ onSleep: mergeAtFirst });
+    const fences: Record<string, unknown>[] = [];
+    const forge: Forge = {
+      ...w.fake.forge,
+      ledgerSwap: (oldSha, commit, o) => {
+        if (editName(commit.message) === "heartbeat") for (const t of Object.values(commit.writes)) fences.push(JSON.parse(t) as Record<string, unknown>);
+        return w.fake.forge.ledgerSwap(oldSha, commit, o);
+      },
+    };
+    // A head that passed through a clean merge: the gate says passed, but passed_sha stays the reviewed head.
+    const reviewed = "a".repeat(40);
+    const record: UnitRecord = { ...w.record, passed_sha: reviewed };
+    w.fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([record]), deletes: [] });
+    const out = await w.run({ record }, { forge, passed: async () => ok({ kind: "passed", how: "clean-merge" }) });
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    expect(fences[0]).toMatchObject({ enqueued_sha: w.head, passed_sha: reviewed });
   });
 
   test("a lost fence before startMerging: no enqueue and the record untouched by the lane", async () => {
@@ -553,11 +649,11 @@ describe("watch: false (a coordinator unit, Story 2.10)", () => {
 describe("a merging record (a stale takeover): watch only", () => {
   /**
    * A world whose record is already `merging` at generation 2 and whose PR is
-   * queued at its head; the record's `passed_sha` is `passed` (default the head).
+   * queued at its head; the record's `enqueued_sha` is `enqueued` (default the head).
    */
-  async function merging(onSleep: OnSleep, gate: Partial<WorldOpts> = {}, passed?: string): Promise<{ w: World; record: UnitRecord }> {
+  async function merging(onSleep: OnSleep, gate: Partial<WorldOpts> = {}, enqueued?: string): Promise<{ w: World; record: UnitRecord }> {
     const w = await world({ ...gate, onSleep, record: { state: "merging", generation: 2, attempts: 1 } });
-    const record: UnitRecord = { ...w.record, passed_sha: passed ?? w.head };
+    const record: UnitRecord = { ...w.record, enqueued_sha: enqueued ?? w.head };
     w.fake.control.writeForeignLedger({ message: "seed passed [skip ci]", writes: tip([record]), deletes: [] });
     await w.fake.forge.enqueue(w.pr, w.head, opts());
     return { w, record };
@@ -583,12 +679,12 @@ describe("a merging record (a stale takeover): watch only", () => {
     expect(await w.ledger()).toMatchObject({ state: "claimed", attempts: 2, generation: 2, owner: "alice" });
   });
 
-  test("queued at a head other than its passed_sha: fenced, dequeued and released with attempts + 1, never watched to merged", async () => {
-    const passed = "a".repeat(40);
-    const { w, record } = await merging(mergeAtFirst, {}, passed);
+  test("queued at a head other than its enqueued_sha: fenced, dequeued and released with attempts + 1, never watched to merged", async () => {
+    const enqueued = "a".repeat(40);
+    const { w, record } = await merging(mergeAtFirst, {}, enqueued);
     const out = await w.run({ record });
     expect([out.outcome, out.state]).toEqual(["failed", "released"]);
-    expect(out.reason).toContain(passed);
+    expect(out.reason).toContain(enqueued);
     expect(out.reason).toContain(w.head);
     expect(w.fake.control.queue()).toEqual([]);
     dequeueBefore(w.events, "failAttempt");
@@ -774,17 +870,48 @@ type LaneRun = {
   readonly checksAsked: string[];
   readonly journal: JournalRecord[];
   readonly record: UnitRecord | undefined;
+  /** Each builder session's prompt, in order. */
+  readonly prompts: string[];
+  /** The review findings file each builder session found in its temp folder, or `null`. */
+  readonly findings: (string | null)[];
+  /** Each review pass's prompt, in order. */
+  readonly reviewPrompts: string[];
+  /** The merge step's inputs' heads, in order. */
+  readonly enqueuedAt: string[];
+  /** The run's lane stop, if it ended in one. */
+  readonly laneStop: string | undefined;
+};
+
+type LaneRunOpts = {
+  readonly prepare?: (fake: FakeForge) => Promise<void>;
+  readonly onQueueSleep?: (fake: FakeForge) => void;
+  /** Each review run's result, in order; past the end, a clean pass. */
+  readonly reviews?: readonly ((head: string) => string)[];
+  /** Runs after each review run; `n` counts from 0. */
+  readonly onReview?: (n: number, fake: FakeForge) => void;
+  /** CI fails on the `n`th checks read (from 0) when this says so; default every head passes. */
+  readonly ciFails?: (n: number) => boolean;
+  /** The merger's outcome per call, in order; past the end, `up-to-date`. */
+  readonly merges?: readonly ((fake: FakeForge) => MergeOutcome)[];
+  /** Before each builder session; `n` counts from 0. */
+  readonly onSession?: (n: number, fake: FakeForge) => void;
+  /** The builder run (from 0) that reports a usage limit and writes no result; default none. */
+  readonly limitAt?: number;
+  /** How each wait ends, in order; default `elapsed`. */
+  readonly waitEnds?: readonly ("elapsed" | "stopped")[];
 };
 
 /**
- * One lane process with a stub agent, the real PR, CI and merge steps on the
- * fake forge, and `prepare` run before it (to seed state). Every head passes
- * CI; `onQueueSleep` runs at each of the merge step's sleeps.
+ * One lane process with a stub agent, the real PR, CI, review gate and
+ * merge steps on the fake forge, and `prepare` run before it (to seed
+ * state). Every head passes CI and every review passes unless the options
+ * say otherwise; `onQueueSleep` runs at each of the merge step's sleeps.
  */
-async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void>; readonly onQueueSleep?: (fake: FakeForge) => void } = {}): Promise<LaneRun> {
+async function laneRun(o: LaneRunOpts = {}): Promise<LaneRun> {
   const root = mkdtempSync(join(tmpdir(), "xarabot-merge-lane-"));
   dirs.push(root);
   const laneDir = join(root, "lanes", "builder-1");
+  const hostStop = join(root, "home", ".xarabot", "STOP");
   const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles() });
   await o.prepare?.(fake);
   const events: string[] = [];
@@ -792,23 +919,35 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
   const checksAsked: string[] = [];
   const realChecks = forge.checks;
   (forge as { checks: Forge["checks"] }).checks = async (sha, callOpts) => {
+    const n = checksAsked.length;
     checksAsked.push(sha);
-    fake.control.setChecks(sha, [{ name: "test", status: "completed", conclusion: "success" }]);
+    fake.control.setChecks(sha, [{ name: "test", status: "completed", conclusion: o.ciFails?.(n) === true ? "failure" : "success" }]);
     return realChecks(sha, callOpts);
   };
+  const prompts: string[] = [];
+  const findings: (string | null)[] = [];
+  let usageCalls = 0;
+  let waits = 0;
+  const enqueuedAt: string[] = [];
   const agent: Agent = {
     vendor: "claude",
     defaultModel: "claude-opus-5-5",
     minVersion: "2.1.304",
     launchSpec: (unit, settings, resultPath) =>
       ok({ argv: ["stub-agent", settings.effort, resultPath], stdin: unit.kind === "fresh" ? unit.prompt : "resume", vendor: "claude", vendorHomeEnv: "STUB_HOME", credential: { file: "token", env: "STUB_TOKEN" }, apiHosts: ["api.example.com"] } as AgentLaunchSpec),
-    parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: null }),
+    parseUsage: () => ({ sessionId: null, model: "claude-opus-5-5", tokens: null, cost: null, usageLimit: usageCalls++ === o.limitAt ? { resetAt: null } : null }),
     effortValues: () => ["high"],
     startCheck: () => ok({ model: "claude-opus-5-5", version: "2.1.309" }),
     checkModel,
   };
   const sandbox: Sandbox = {
-    async run(_spec, profile) {
+    async run(spec, profile) {
+      o.onSession?.(prompts.length, fake);
+      const n = prompts.length;
+      prompts.push(spec.stdin ?? "");
+      const path = join(profile.tempDir, "review-findings.md");
+      findings.push(existsSync(path) ? readFileSync(path, "utf8") : null);
+      if (n === o.limitAt) return ok({ pid: 999, exitCode: 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
       writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, SPEC_TEXT);
       writeFileSync(profile.resultPath, JSON.stringify({ kind: "build", outcome: "done", summary: "Did it", body: "", verification: ["bun test"], denied_actions: [] }));
       return ok({ pid: 999, exitCode: 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
@@ -823,7 +962,8 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     },
   };
   const committer: Committer = { commit: async (r) => ok({ kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() }) };
-  const merger: Merger = { merge: async () => ok({ kind: "up-to-date" }) };
+  let merges = 0;
+  const merger: Merger = { merge: async () => ok(o.merges?.[merges++]?.(fake) ?? { kind: "up-to-date" }) };
   let t = T0;
   const now = () => t;
   const sleep = async (ms: number) => {
@@ -831,12 +971,14 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
   };
   const prStep = createPrStep({ forge, committer, identity: ALICE, repo: LANE.repo, provider: "anthropic", sleep: async () => {}, random: () => 0 });
   const ciStep = createCiStep({ forge, merger, identity: ALICE, repo: LANE.repo, now, sleep, random: () => 0 });
-  const mergeStep = createMergeStep({
+  const realMergeStep = createMergeStep({
     forge,
     diffPaths: async () => ok(["src/s0/a.ts"]),
     graphTrees: unchangedGraph(),
     identity: ALICE,
     repo: LANE.repo,
+    agent: LANE.agent,
+    passed: headPassedGate,
     now,
     sleep: async (ms) => {
       t += ms;
@@ -844,14 +986,31 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     },
     random: () => 0,
   });
+  const mergeStep: MergeStep = (input) => {
+    enqueuedAt.push(input.record.head_sha ?? "none");
+    return realMergeStep(input);
+  };
+  const stub = reviewStub({
+    forge,
+    laneDir,
+    hostStop,
+    lane: LANE,
+    identity: ALICE,
+    results: o.reviews ?? [],
+    files: () => ({ [`${SPEC_DIR}/spec-1-1-first.md`]: SPEC_TEXT }),
+    now,
+    onRun: (n) => o.onReview?.(n, fake),
+  });
+  const reviewGate = createReviewGateStep({ forge, identity: ALICE, repo: LANE.repo, review: stub.review, passed: headPassedGate, now, sleep: async () => {}, random: () => 0 });
   const r = await runLaneProcess({
     forge,
     agent,
     sandbox,
-    store: createFsLaneStore({ laneDir, hostStop: join(root, "home", ".xarabot", "STOP") }),
+    store: createFsLaneStore({ laneDir, hostStop }),
     workspace,
     prStep,
     ciStep,
+    reviewGate,
     mergeStep,
     laneDir,
     identity: ALICE,
@@ -860,7 +1019,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
     now,
     sleep: async () => {},
     random: () => 0,
-    waiter: { wait: async () => ({ end: "elapsed" as const }) },
+    waiter: { wait: async () => ({ end: o.waitEnds?.[waits++] ?? ("elapsed" as const) }) },
   });
   const path = join(laneDir, "journal.jsonl");
   const journal = existsSync(path)
@@ -873,7 +1032,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
   if (!snap.ok) throw new Error(snap.error.message);
   const l = parseLedger(snap.value.ledger.files);
   if (!l.ok) throw new Error(l.error.message);
-  return { outcome: r.outcome, fake, events, checksAsked, journal, record: l.value.units.get(UNIT) };
+  return { outcome: r.outcome, fake, events, checksAsked, journal, record: l.value.units.get(UNIT), prompts, findings, reviewPrompts: stub.prompts, enqueuedAt, laneStop: r.laneStop };
 }
 
 /** Seeds a `state` record for UNIT whose PR then merges (the Maintainer queued it by hand); its PR number. */
@@ -996,5 +1155,164 @@ describe("runLaneProcess with createMergeStep", () => {
     expect(e.outcome).toBe("failed");
     expect(e.record?.state).toBe("parked");
     expect(e.journal.filter((x) => x.type === "unit")).toEqual([]);
+  });
+});
+
+describe("runLaneProcess with the review gate (Story 3.5)", () => {
+  const swapsOf = (e: LaneRun) => e.fake.control.ledgerLog().map((c) => editName(c.message));
+  const mergeOnce = (fake: FakeForge) => void fake.control.mergeQueueHead();
+  const reviewedHeads = (e: LaneRun) => e.events.filter((x) => x === "postReview").length;
+
+  test("review passes: CI, one review round, passed_sha the head, then the merge step enqueues with enqueued_sha the head", async () => {
+    const e = await laneRun({ onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(reviewedHeads(e)).toBe(1);
+    // CI before the review, the review before the enqueue.
+    expect(e.events.indexOf("checks")).toBeLessThan(e.events.indexOf("postReview"));
+    expect(e.events.indexOf("postReview")).toBeLessThan(e.events.indexOf("enqueue"));
+    expect(e.record).toMatchObject({ state: "merged", loopbacks: 0, ci_fixes: 0 });
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.record?.enqueued_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.enqueuedAt).toEqual([e.record?.head_sha ?? "none"]);
+  });
+
+  test("loopback: a blocking round: loopbacks 1, the loopback session's prompt names findings_path holding the finding; the fix pushed, then CI and review again", async () => {
+    const e = await laneRun({ reviews: [reviewPass([BLOCKER, NIT]), reviewPass()], onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(e.prompts).toHaveLength(2);
+    expect(e.prompts[1]).toContain("Revise Story 1.1");
+    expect(e.prompts[1]).toMatch(/review-findings\.md`/);
+    expect(e.findings[0]).toBeNull();
+    expect(e.findings[1]).toContain("- high, blocking, `src/a.ts`: the loop never ends.");
+    expect(e.findings[1]).toMatch(/^# Review findings for Story 1\.1 at [0-9a-f]{40}\n/);
+    expect(e.checksAsked).toHaveLength(2);
+    expect(e.reviewPrompts).toHaveLength(2);
+    expect(e.enqueuedAt).toHaveLength(1);
+    expect(e.record).toMatchObject({ state: "merged", loopbacks: 1, ci_fixes: 0 });
+    expect(e.enqueuedAt[0]).toBe(e.checksAsked[1] ?? "none");
+    expect(swapsOf(e)).toContain("loopback");
+  });
+
+  test.each([
+    ["blocking", reviewPass([BLOCKER])],
+    ["passing", reviewPass()],
+  ] as const)("loopback cap: after 2 loopbacks the next round (%s) parks blocked review-cap in the owner's inbox; no enqueue", async (_name, third) => {
+    const e = await laneRun({ reviews: [reviewPass([BLOCKER]), reviewPass([BLOCKER]), third] });
+    expect(e.outcome).toBe("progress");
+    expect(e.reviewPrompts).toHaveLength(3);
+    expect(e.prompts).toHaveLength(3);
+    expect(e.record).toMatchObject({ state: "parked", loopbacks: 2, park: { kind: "blocked", reason: "review-cap", inbox_owner: ALICE.owner } });
+    expect(e.enqueuedAt).toEqual([]);
+    expect(e.events).not.toContain("enqueue");
+  });
+
+  test("CI fix: CI fails once, the fix pushed: ci_fixes 1, loopbacks 0; the review runs on the new head", async () => {
+    const e = await laneRun({ ciFails: (n) => n === 0, onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(e.prompts).toHaveLength(2);
+    expect(e.prompts[1]).toContain("Repair Story 1.1");
+    expect(e.reviewPrompts).toHaveLength(1);
+    const [first, second] = e.checksAsked;
+    expect(first).not.toBe(second);
+    expect(e.record).toMatchObject({ state: "merged", ci_fixes: 1, loopbacks: 0, reviewed_sha: second, passed_sha: second, enqueued_sha: second });
+  });
+
+  test("conflict session: a merge that needs a session: ci_fixes 1, loopbacks 0; the review runs on the new head", async () => {
+    const e = await laneRun({
+      merges: [(fake) => ({ kind: "needs-session", candidate_sha: fake.control.makeCommit(), paths: ["src/s0/a.ts"], lockfiles: [] })],
+      onQueueSleep: mergeOnce,
+    });
+    expect(e.outcome).toBe("progress");
+    expect(e.prompts).toHaveLength(2);
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.record).toMatchObject({ state: "merged", ci_fixes: 1, loopbacks: 0 });
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+  });
+
+  test("ejection, same head: CI again, no review, enqueued again", async () => {
+    let ejectedOnce = false;
+    const e = await laneRun({
+      onQueueSleep: (fake) => {
+        const [pr] = fake.control.queue();
+        if (pr === undefined) return;
+        if (!ejectedOnce) {
+          ejectedOnce = true;
+          fake.control.eject(pr);
+        } else fake.control.mergeQueueHead();
+      },
+    });
+    expect(e.outcome).toBe("progress");
+    expect(e.checksAsked).toHaveLength(2);
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.events.filter((x) => x === "enqueue")).toHaveLength(2);
+    expect(e.record).toMatchObject({ state: "merged", attempts: 1 });
+  });
+
+  test("takeover: a stale claimed record whose review blocked: the review SHAs cleared, so a new review passes before any enqueue", async () => {
+    let head = "";
+    const e = await laneRun({
+      prepare: async (fake) => {
+        head = fake.control.makeCommit();
+        value(await fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts()));
+        const number = value(await fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts())).number;
+        const stale = rec({
+          unit: UNIT,
+          globs: ["src/s0/**"],
+          owner: BOB.owner,
+          host: BOB.host,
+          lane: BOB.lane,
+          generation: 2,
+          heartbeat_at: "2026-10-23T09:00:00Z",
+          pr: number,
+          pr_owner: BOB.owner,
+          head_sha: head,
+          reviewed_sha: head,
+          passed_sha: null,
+          loopbacks: 1,
+          builder_providers: ["anthropic"],
+        });
+        fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([stale]), deletes: [] });
+      },
+      onQueueSleep: mergeOnce,
+    });
+    expect(e.outcome).toBe("progress");
+    const swaps = swapsOf(e);
+    expect(swaps).toContain("takeOverStale");
+    expect(e.reviewPrompts.length).toBeGreaterThanOrEqual(1);
+    expect(e.events.indexOf("postReview")).toBeGreaterThan(-1);
+    expect(e.events.indexOf("postReview")).toBeLessThan(e.events.indexOf("enqueue"));
+    expect(e.record).toMatchObject({ state: "merged", owner: ALICE.owner, generation: 3, loopbacks: 1 });
+  });
+
+  test("a STOP during the loopback session's usage-limit sleep: outcome stop, released with attempts unchanged, no lane stop", async () => {
+    const e = await laneRun({ reviews: [reviewPass([BLOCKER])], limitAt: 1, waitEnds: ["stopped"] });
+    expect(e.outcome).toBe("stop");
+    expect(e.laneStop).toBeUndefined();
+    expect(e.prompts).toHaveLength(2);
+    expect(e.prompts[1]).toContain("Revise Story 1.1");
+    expect(e.record).toMatchObject({ state: "released", attempts: 0, loopbacks: 1 });
+    expect(e.events).not.toContain("enqueue");
+    const units = e.journal.filter((x): x is UnitJournalRecord => x.type === "unit");
+    expect(units[0]?.reason).toContain("STOP during a usage-limit sleep");
+  });
+
+  test("revoked allowance, session: fresh main's policy drops the lane's adapter before the session: no sandbox run, a failed attempt naming it", async () => {
+    const e = await laneRun({ prepare: async (fake) => void fake.control.setMain(mainFiles({ adapters: ["codex"] })) });
+    expect(e.outcome).toBe("failed");
+    expect(e.prompts).toEqual([]);
+    expect(e.record).toMatchObject({ state: "released", attempts: 1 });
+    const units = e.journal.filter((x): x is UnitJournalRecord => x.type === "unit");
+    expect(units[0]?.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+  });
+
+  test("revoked allowance, enqueue: the policy drops the adapter after the review and before the merge step: no enqueue, a failed attempt", async () => {
+    const e = await laneRun({ onReview: (_n, fake) => void fake.control.setMain(mainFiles({ adapters: ["codex"] })) });
+    expect(e.outcome).toBe("failed");
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.events).not.toContain("enqueue");
+    expect(e.record).toMatchObject({ state: "released", attempts: 1 });
+    const units = e.journal.filter((x): x is UnitJournalRecord => x.type === "unit");
+    expect(units[0]?.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml");
   });
 });

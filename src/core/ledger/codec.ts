@@ -22,7 +22,7 @@ export type Ledger = {
 
 export type LedgerParseErrorKind = "stop" | "invalid";
 
-/** `1, 2, 3 and 4`. */
+/** `1, 2, 3, 4 and 5`. */
 function readable(versions: readonly number[]): string {
   const head = versions.slice(0, -1);
   const last = versions[versions.length - 1];
@@ -31,7 +31,28 @@ function readable(versions: readonly number[]): string {
 
 type Parsed<T> = Result<T, LedgerParseErrorKind>;
 
-function parseRecord<S extends z.ZodType>(path: string, text: string, schema: S): Parsed<z.infer<S>> {
+/** The ledger version that added `enqueued_sha` (Story 3.5). */
+const ENQUEUED_SHA_VERSION = 5;
+
+/**
+ * A unit record as read, before its schema: a record below version 5 with
+ * no `enqueued_sha` key was written when only the enqueue paths set
+ * `passed_sha`, so its `passed_sha` is read as `enqueued_sha` and
+ * `passed_sha` as `null` (Story 3.5). The stored record is never rewritten.
+ */
+function legacyUnit(value: Record<string, unknown>): Record<string, unknown> {
+  const version = value["schema_version"];
+  if (typeof version !== "number" || version >= ENQUEUED_SHA_VERSION || Object.hasOwn(value, "enqueued_sha")) return value;
+  if (!Object.hasOwn(value, "passed_sha")) return value;
+  return { ...value, enqueued_sha: value["passed_sha"], passed_sha: null };
+}
+
+function parseRecord<S extends z.ZodType>(
+  path: string,
+  text: string,
+  schema: S,
+  map: (value: Record<string, unknown>) => Record<string, unknown> = (v) => v,
+): Parsed<z.infer<S>> {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -45,7 +66,7 @@ function parseRecord<S extends z.ZodType>(path: string, text: string, schema: S)
   if (typeof version === "number" && Number.isInteger(version) && !LEDGER_SCHEMA_VERSIONS.includes(version)) {
     return err("stop", `${path}: unsupported schema_version ${version} (this runner reads ${readable(LEDGER_SCHEMA_VERSIONS)})`);
   }
-  const parsed = schema.safeParse(value);
+  const parsed = schema.safeParse(map(value as Record<string, unknown>));
   if (!parsed.success) return err("invalid", `${path}: ${describeIssues(parsed.error)}`);
   return ok(parsed.data);
 }
@@ -73,7 +94,7 @@ export function parseLedger(files: Readonly<Record<string, string>>): Result<Led
       continue;
     }
     if (!path.startsWith("units/")) continue;
-    const r = parseRecord(path, raw, UnitRecordSchema);
+    const r = parseRecord(path, raw, UnitRecordSchema, legacyUnit);
     if (!r.ok && r.error.kind === "stop") return r;
     const id = unitFromPath(path);
     if (id === undefined) {
@@ -125,6 +146,7 @@ export function serializeUnitRecord(r: UnitRecord): string {
     head_sha: r.head_sha,
     reviewed_sha: r.reviewed_sha,
     passed_sha: r.passed_sha,
+    enqueued_sha: r.enqueued_sha,
     approved_sha: r.approved_sha,
     approved_graph: r.approved_graph,
     retro_result:

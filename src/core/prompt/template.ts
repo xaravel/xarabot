@@ -14,14 +14,14 @@
  * session skips the Epic context recompile that the runner always reverts;
  * the planning prompts, which compile those files, never carry it.
  *
- * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopback only),
+ * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopbacks only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
  * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`
  * and `planning_contexts` (status), `planning_headings`, `manifests_dir`
  * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
  * `prs_path`; for a retro item `retro_item_unit`, `retro_item_id`,
  * `retro_item_epic`, `retro_item_text` and `retro_item_globs` (and
- * `log_path` in its CI fix); for a review `review_unit`, `review_sha`,
+ * `log_path` in its CI fix, `findings_path` in its loopback); for a review `review_unit`, `review_sha`,
  * `review_main_sha`, `review_spec` (the sentence naming the spec, or saying
  * there is none) and `spec_path` (the follow-up pass only).
  */
@@ -58,7 +58,9 @@ export type PromptTemplate = {
   readonly retro_item: string;
   /** A retro-item CI fix: applies the prefetched CI log; no skill. */
   readonly retro_item_ci_fix: string;
-  /** The result step of a retro-item unit, in either mode: always the prompt's last part. */
+  /** A retro-item loopback (Story 3.5): applies the prefetched review findings; no skill. */
+  readonly retro_item_loopback: string;
+  /** The result step of a retro-item unit, in any mode: always the prompt's last part. */
   readonly result_retro_item: string;
   /** A review pass (Story 3.4): reviews the unit's change `main...HEAD` at one SHA; no skill, no file changed. */
   readonly review: string;
@@ -282,6 +284,16 @@ Run no skill. The action item says:
 {{retro_item_text}}
 
 The CI log for this item's latest change is prefetched in \`{{log_path}}\`, in your temp folder. Read it, find the cause of each failure it reports, fix it in this clone, changing only files these globs cover: {{retro_item_globs}}, and re-run the failing commands here. Never change agent configuration (such as a \`CLAUDE.md\` or \`AGENTS.md\` file), the tracking files, the planning artifacts, \`.xarabot/\`, \`.github/\`, the Standing Authority file, the Maintainer's evidence files or the repository's Protected Paths, even inside those globs.`,
+
+  retro_item_loopback: `# Task
+
+Revise the action item \`{{retro_item_id}}\` from Epic {{retro_item_epic}}'s retrospective (\`{{retro_item_unit}}\`).
+
+Run no skill. The action item says:
+
+{{retro_item_text}}
+
+The review findings for this item's change are prefetched in \`{{findings_path}}\`, in your temp folder. Read them, fix every blocking finding in this clone, and fix the others where they are correct, changing only files these globs cover: {{retro_item_globs}}. Never change agent configuration (such as a \`CLAUDE.md\` or \`AGENTS.md\` file), the tracking files, the planning artifacts, \`.xarabot/\`, \`.github/\`, the Standing Authority file, the Maintainer's evidence files or the repository's Protected Paths, even inside those globs. Then run the verification commands that cover your change.`,
 
   result_retro_item: `${RESULT_HEAD}
 

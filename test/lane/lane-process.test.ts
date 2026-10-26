@@ -13,9 +13,12 @@ import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
+import { Halt } from "../../src/lane/session.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createCiStep } from "../../src/lane/ci-step.ts";
 import { createMergeStep } from "../../src/lane/merge-step.ts";
+import { headPassedGate } from "../../src/lane/passed-gate.ts";
+import { createReviewGateStep } from "../../src/lane/review-gate.ts";
 import { defaultSleep, type Sleep } from "../../src/lane/ledger-cas.ts";
 import { createPsProcessTable, readPidFile } from "../../src/lane/processes.ts";
 import { createSleepWaiter, type WaitEnd, type WaitParams } from "../../src/lane/wait.ts";
@@ -69,7 +72,7 @@ function mainFiles(o: MainOpts = {}): Record<string, string> {
   for (const s of stories) status.push(`  ${key(s)}: ${(o.done ?? []).includes(s.id) ? "done" : "backlog"}`);
   const files: Record<string, string> = {
     ".xarabot/config.yaml": `${config.join("\n")}\n`,
-    ".xarabot/policy.yaml": "schema_version: 1\n",
+    ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [claude]\n",
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps:\n  - id: rotate-key\n    text: Rotate the deploy key.\n",
     ".xarabot/prompts/house.md": "HOUSE RULE: run bun test.\n",
     "_bmad-output/planning-artifacts/epics.md": `${epics.join("\n")}\n`,
@@ -1007,7 +1010,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown ledger schema_version alerts ledger-schema-version and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 5 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 6 });
     h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.2.json": v2 }, deletes: [] });
     const main = await mainSha(h.fake);
     expect((await h.run()).outcome).toBe("stop");
@@ -1018,7 +1021,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown schema_version found by the claim's swap alerts and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 5 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 6 });
     h.fake.control.beforeSwap(({ n }) => {
       if (n === 1) h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.3.json": v2 }, deletes: [] });
     });
@@ -1974,7 +1977,7 @@ describe("runLaneProcess stale takeover", () => {
     const open = await pr(h.fake, "1.1", "open");
     if (queued) expect((await h.fake.forge.enqueue(open.number, open.head, callOpts())).ok).toBe(true);
     const main = await mainSha(h.fake);
-    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: open.head, passed_sha: open.head, base_sha: main, attempts: 1 })]);
+    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: open.head, passed_sha: open.head, enqueued_sha: open.head, base_sha: main, attempts: 1 })]);
     return open;
   }
 
@@ -2004,6 +2007,8 @@ describe("runLaneProcess stale takeover", () => {
       graphTrees: unchangedGraph(),
       identity: IDENTITY,
       repo: LANE.repo,
+      agent: LANE.agent,
+      passed: headPassedGate,
       sleep: async () => {
         await onSleep(i);
         i += 1;
@@ -2023,7 +2028,7 @@ describe("runLaneProcess stale takeover", () => {
       h.fake.control.mergeQueueHead();
     });
     expect((await h.run({ forge, mergeStep })).outcome).toBe("progress");
-    expect(during).toMatchObject({ state: "merging", ...held, generation: 4, attempts: 1, pr: open.number, head_sha: open.head, passed_sha: open.head });
+    expect(during).toMatchObject({ state: "merging", ...held, generation: 4, attempts: 1, pr: open.number, head_sha: open.head, passed_sha: open.head, enqueued_sha: open.head });
     expect(h.runs).toHaveLength(0);
     expect(h.prepares).toHaveLength(0);
     expect(calls.enqueue).toBe(0);
@@ -2050,12 +2055,12 @@ describe("runLaneProcess stale takeover", () => {
     expect((await h.ledger()).get("story:1.1")?.state).toBe("merged");
   });
 
-  test("a stale merging takeover adopts the queue's head; a head other than passed_sha then fails in the merge step", async () => {
+  test("a stale merging takeover adopts the queue's head; a head other than enqueued_sha then fails in the merge step", async () => {
     const h = harness();
     const open = await pr(h.fake, "1.1", "open");
     expect((await h.fake.forge.enqueue(open.number, open.head, callOpts())).ok).toBe(true);
     const old = "a".repeat(40);
-    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: old, passed_sha: old, attempts: 1 })]);
+    foreignRecords(h.fake, [bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: old, passed_sha: old, enqueued_sha: old, attempts: 1 })]);
     const r = await h.run({ mergeStep: mergeStepOn(h.fake.forge, () => {}) });
     expect(r.outcome).toBe("failed");
     const takeover = h.fake.control.ledgerLog().findIndex((c) => c.message === "ledger: takeOverStale story:1.1 [skip ci]");
@@ -2064,13 +2069,13 @@ describe("runLaneProcess stale takeover", () => {
     const edits = messages(h.fake).slice(takeover).map((m) => /^ledger: (\S+)/.exec(m)?.[1] ?? m);
     expect(edits).toEqual(["takeOverStale", "heartbeat", "failAttempt"]);
     expect(h.fake.control.queue()).toEqual([]);
-    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", ...held, generation: 4, attempts: 2, head_sha: open.head, passed_sha: old });
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", ...held, generation: 4, attempts: 2, head_sha: open.head, enqueued_sha: old });
     const j = h.unitRecord();
     expect(j).toMatchObject({ outcome: "failed", state: "released" });
     expect(j.reason).toContain(old);
   });
 
-  test("ejected after the takeover: fenced and dequeued, claimed with attempts + 1, then the CI step and merge step run as usual", async () => {
+  test("ejected after the takeover: fenced and dequeued, claimed with attempts + 1, then CI, the review gate (the head passed: no review) and the merge step", async () => {
     const h = harness();
     const open = await staleMerging(h, true);
     const { forge, calls } = counted(h.fake);
@@ -2079,6 +2084,7 @@ describe("runLaneProcess stale takeover", () => {
       else h.fake.control.mergeQueueHead();
     });
     const ciInputs: UnitRecord[] = [];
+    let reviews = 0;
     const r = await h.run({
       forge,
       mergeStep,
@@ -2086,8 +2092,21 @@ describe("runLaneProcess stale takeover", () => {
         ciInputs.push(input.record);
         return { outcome: "progress", state: "claimed", record: input.record };
       },
+      reviewGate: createReviewGateStep({
+        forge,
+        identity: IDENTITY,
+        repo: LANE.repo,
+        review: async () => {
+          reviews += 1;
+          throw new Error("no review: the head passed");
+        },
+        passed: headPassedGate,
+        sleep: async () => {},
+        random: () => 0,
+      }),
     });
     expect(r.outcome).toBe("progress");
+    expect(reviews).toBe(0);
     expect(ciInputs).toHaveLength(1);
     expect(ciInputs[0]).toMatchObject({ state: "claimed", ...held, generation: 4, attempts: 2, pr: open.number });
     expect(calls.dequeue).toBe(1);
@@ -2168,6 +2187,130 @@ describe("runLaneProcess stale takeover", () => {
     expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]"]);
     expect(h.runs).toHaveLength(0);
     expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "stop" });
+  });
+});
+
+describe("runLaneProcess: the CI, review and merge sequence (Story 3.5)", () => {
+  const HEAD = "c".repeat(40);
+  /** The build's PR step records PR #7 at HEAD; a fix's PR step records a new head. */
+  const prStepFor = (h: Harness): LaneDeps["prStep"] => async (input) => {
+    h.prSteps.push(input);
+    if (input.kind === "fix") return { outcome: "progress", state: "claimed", record: { ...input.record, head_sha: "d".repeat(40) } };
+    return { outcome: "progress", state: "claimed", record: { ...input.record, pr: 7, head_sha: HEAD } };
+  };
+  const passingCi: LaneDeps["ciStep"] = async (input) => ({ outcome: "progress", state: "claimed", record: input.record });
+
+  test("with no review gate the run ends after the CI step and never reaches the merge step", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    let merges = 0;
+    const r = await h.run({
+      prStep: prStepFor(h),
+      ciStep: passingCi,
+      mergeStep: async (input) => {
+        merges += 1;
+        return { outcome: "progress", state: "merged", record: input.record };
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(merges).toBe(0);
+  });
+
+  test("CI, the gate, then the merge step; a pushed loopback fix goes back to CI, and the gate runs again on the new head", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const order: string[] = [];
+    let gates = 0;
+    const r = await h.run({
+      prStep: prStepFor(h),
+      ciStep: async (input) => {
+        order.push(`ci ${input.record.head_sha ?? "none"}`);
+        return { outcome: "progress", state: "claimed", record: input.record };
+      },
+      reviewGate: async (input) => {
+        gates += 1;
+        order.push(`gate ${input.record.head_sha ?? "none"}`);
+        expect(input).toMatchObject({ storyId: "1.1", needsSpec: true, unit: { unit: "story:1.1", subject: "Story 1.1" } });
+        if (gates === 1) return { outcome: "progress", state: "claimed", record: { ...input.record, head_sha: "d".repeat(40) }, pushed: true };
+        return { outcome: "progress", state: "claimed", record: input.record };
+      },
+      mergeStep: async (input) => {
+        order.push(`merge ${input.record.head_sha ?? "none"}`);
+        return { outcome: "progress", state: "merged", record: { ...input.record, state: "merged" } };
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(order).toEqual([`ci ${HEAD}`, `gate ${HEAD}`, `ci ${"d".repeat(40)}`, `gate ${"d".repeat(40)}`, `merge ${"d".repeat(40)}`]);
+  });
+
+  test("the gate's loopback session: loopback mode, the findings in tmp/review-findings.md; a done fix picks its spec and goes to the PR step as a fix", async () => {
+    let seen = null as string | null;
+    const h = harness({
+      behaviors: [
+        finishes("done"),
+        (ctx) => {
+          const path = join(ctx.profile.tempDir, "review-findings.md");
+          seen = existsSync(path) ? readFileSync(path, "utf8") : null;
+          finishes("done")(ctx);
+        },
+      ],
+    });
+    let fixOut: unknown = null;
+    const r = await h.run({
+      prStep: prStepFor(h),
+      ciStep: passingCi,
+      reviewGate: async (input) => {
+        const ran = await input.session({ start: HEAD, findingsText: "# Review findings for Story 1.1\n\n- high, blocking, `src/a.ts`: broken.\n" });
+        if (!ran.ok) throw new Error(ran.error.message);
+        fixOut = await input.pushFix({ record: input.record, result: ran.value.result, specPath: ran.value.specPath, superseded: ran.value.superseded });
+        return { outcome: "failed", state: "claimed", reason: "stub: stop here" };
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect(seen).toBe("# Review findings for Story 1.1\n\n- high, blocking, `src/a.ts`: broken.\n");
+    const loopbackRun = h.runs[1];
+    if (loopbackRun?.unit.kind !== "fresh") throw new Error("expected a fresh loopback run");
+    expect(loopbackRun.unit.prompt).toContain("Revise Story 1.1");
+    expect(loopbackRun.unit.prompt).toContain(join(h.laneDir, "tmp", "review-findings.md"));
+    expect(h.prepares[1]).toMatchObject({ start: HEAD });
+    expect(h.prSteps[1]).toMatchObject({ kind: "fix", specPath: `${SPEC_DIR}/spec-1-1-first.md` });
+    expect(fixOut).toMatchObject({ outcome: "progress", state: "claimed" });
+    // The build's result stays the journal's: a loopback's never replaces it.
+    expect(h.unitRecord().result).toBe("done");
+  });
+
+  test("a Halt from the review gate ends the run as a session's would", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const r = await h.run({
+      prStep: prStepFor(h),
+      ciStep: passingCi,
+      reviewGate: async () => {
+        throw new Halt("stop", "forge-forbidden: postReview");
+      },
+    });
+    expect(r).toMatchObject({ outcome: "stop", laneStop: "forge-forbidden: postReview" });
+  });
+
+  test("a review gate that throws otherwise is a failed attempt", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    const r = await h.run({
+      prStep: prStepFor(h),
+      ciStep: passingCi,
+      reviewGate: async () => {
+        throw new Error("gate blew up");
+      },
+    });
+    expect(r.outcome).toBe("failed");
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain("review gate threw: gate blew up");
+  });
+
+  test("revoked allowance, session: the policy drops the lane's adapter: no sandbox run, a failed attempt naming the allowance", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    h.fake.control.setMain({ ...mainFiles(), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+    const r = await h.run();
+    expect(r.outcome).toBe("failed");
+    expect(h.runs).toHaveLength(0);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", attempts: 1 });
+    expect(h.unitRecord().reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
   });
 });
 

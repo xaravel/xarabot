@@ -2,9 +2,11 @@ import { lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
+import { unattendedRefusal } from "../core/lane/runner.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
 import { failAttempt, failClaimed, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
+import { allowanceRefusal } from "../core/review/allowance.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
 import type { LaneIdentity, ParkReason, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
 import { parseSessionResult, type BuildResult, type ResultKind, type SessionResultOf } from "../core/schemas/session-result.ts";
@@ -36,6 +38,8 @@ import type { Workspace } from "./workspace.ts";
  * - `stepOps`: what the CI step and the coordinator steps share on top of a
  *   kit: the abort check, the `blocked` park, fresh `main`, the CI poll, and
  *   closing the PRs no record carries; with `describeError` and `message`.
+ * - `sessionAllowance` (Story 3.5): the policy re-check a session context's
+ *   `allowed` runs before each fresh session, on one fresh snapshot.
  * - The unit track both processes keep: the keeper check, a held edit on the
  *   unit, a failed attempt, its retry before the trailing wait when the
  *   ledger did not take it, and the unit's journal record.
@@ -78,6 +82,51 @@ export function readsPath(path: string): boolean {
 
 /** The CI-fix session's log file in `tmp`. */
 export const CI_FIX_LOG = "ci-fix-log.md";
+
+/** The loopback session's review findings file in `tmp` (Story 3.5). */
+export const REVIEW_FINDINGS = "review-findings.md";
+
+export type AllowanceParams = {
+  readonly forge: Forge;
+  /** The repo slug, for the config loaded from the snapshot. */
+  readonly repo: string;
+  /** The lane's agent, which the policy must allow unattended. */
+  readonly agent: string;
+  /** The unit's `builder_providers[]` now, for the reviewer choice. */
+  readonly builderProviders: () => readonly string[];
+  /** Other adapters the session runs, which the policy must allow too (a reviewer); default none. */
+  readonly also?: () => readonly string[];
+  /** The snapshot's deadline. */
+  readonly callTimeoutMs: number;
+};
+
+/**
+ * The allowance re-check a session context runs before each session (Story
+ * 3.5, AD-16, AD-21): one snapshot of fresh `main` and its config, then
+ * `allowanceRefusal` on its policy. A failed snapshot or an invalid config
+ * is a refusal reason too. `null` when the session may run. Never throws.
+ */
+export function sessionAllowance(p: AllowanceParams): () => Promise<string | null> {
+  return async () => {
+    try {
+      const snapped = await p.forge.snapshot({ signal: AbortSignal.timeout(p.callTimeoutMs), read: readsPath });
+      if (!snapped.ok) return `allowance: snapshot ${snapped.error.kind}: ${snapped.error.message}`;
+      const snap = snapped.value;
+      const loaded = loadRepoConfig({ repo: p.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
+      if (!loaded.ok) return `allowance: config ${loaded.error.kind}: ${loaded.error.message}`;
+      const policy = loaded.value.repo.policy;
+      const refused = allowanceRefusal(policy, p.agent, p.builderProviders());
+      if (refused !== null) return `allowance: ${refused}`;
+      for (const other of p.also?.() ?? []) {
+        const r = unattendedRefusal(policy, other);
+        if (!r.ok) return `allowance: ${r.error.message}`;
+      }
+      return null;
+    } catch (e) {
+      return `allowance: ${message(e)}`;
+    }
+  };
+}
 
 /**
  * The unit a PR, CI or merge step works on (Story 2.10): its id, and the
@@ -918,6 +967,13 @@ export type SessionContext = {
   readonly checkHeld: () => Promise<void>;
   /** A STOP ended a usage-limit sleep: release the unit; the session then fails with `LIMIT_STOP_REASON`. */
   readonly onLimitStop: () => Promise<void>;
+  /**
+   * The allowance re-check (Story 3.5): run at the start of each fresh
+   * session, a restart after a usage limit included. A reason fails the
+   * session with it, before any sandbox run; `null` lets it run. Default:
+   * no check.
+   */
+  readonly allowed?: () => Promise<string | null>;
 };
 
 /** A prompt for the fresh run, built after `prepare`, else the failure's reason. */
@@ -1110,11 +1166,23 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   type Runs = { readonly text: string | null; readonly limit: NonNullable<AgentUsage["usageLimit"]> | null } | { readonly fail: string };
 
   /**
-   * Prepares the clone at `at`, builds the prompt and runs the session with
-   * its one resume. A run that hit a usage limit and left no result returns
+   * Re-checks the allowance (`ctx.allowed`), prepares the clone at `at`,
+   * builds the prompt and runs the session with its one resume. A run that hit a usage limit and left no result returns
    * that `limit`, with no further run.
    */
   const sessionRuns = async (ctx: SessionContext, at: string, buildPrompt: SessionRequest<ResultKind>["prompt"]): Promise<Runs> => {
+    if (ctx.allowed !== undefined) {
+      let refused: string | null;
+      try {
+        refused = await ctx.allowed();
+      } catch (e) {
+        refused = `allowance: ${message(e)}`;
+      }
+      if (refused !== null) {
+        note(`no session: ${refused}`);
+        return { fail: refused };
+      }
+    }
     const setUpFailed = await prepare(ctx, at);
     if (setUpFailed !== null) return { fail: setUpFailed };
     const prompt = await buildPrompt();

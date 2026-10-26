@@ -39,6 +39,7 @@ import { DEFAULT_CALL_TIMEOUT_MS, type Sleep } from "./ledger-cas.ts";
 import { laneLayout, logFileName, type LaneLayout } from "./lane-store.ts";
 import type { MergeStep } from "./merge-step.ts";
 import { createRegenerate } from "./regenerate.ts";
+import type { LoopbackSession, ReviewGateStep } from "./review-gate.ts";
 import {
   Abandon,
   addReason,
@@ -56,6 +57,8 @@ import {
   newTrack,
   readRegular,
   readsPath,
+  REVIEW_FINDINGS,
+  sessionAllowance,
   storySubject,
   trackOps,
   type JournalEntry,
@@ -116,7 +119,10 @@ export { CI_FIX_LOG, readsPath, type LaneProcessResult, type PrStep, type PrStep
  * and ledger helpers and the unit track live in `session.ts` (Story 2.6a),
  * shared with the coordinator process and the steps. This module keeps the
  * claim loop, the takeovers, the builder prompt, the spec pick and the PR,
- * CI and merge sequence; the lockfile regeneration is `regenerate.ts`'s,
+ * CI, review and merge sequence (Story 3.5: the PR step, then CI, the
+ * review gate and the merge step in a loop; a pushed loopback fix and an
+ * ejection both go back to CI, and every fresh session first re-checks the
+ * allowance on fresh `main`); the lockfile regeneration is `regenerate.ts`'s,
  * shared with the retro-item step (Story 2.10).
  */
 
@@ -132,9 +138,17 @@ export type LaneDeps = {
   /** Takes the open PR through CI (Story 1.17); without it the run ends after the PR step. */
   readonly ciStep?: CiStep;
   /**
-   * Takes a PR whose CI passed through the approval gate and the merge queue
-   * (Story 1.17a); without it the run ends after the CI step. After an
-   * ejection the CI step runs again, then this step.
+   * The review gate after CI passes (Story 3.5): a head no review passed
+   * gets a review round, and a blocking one a loopback session whose pushed
+   * fix goes through CI again. Without it the run ends after the CI step and
+   * never reaches the merge step.
+   */
+  readonly reviewGate?: ReviewGateStep;
+  /**
+   * Takes a PR whose CI passed and whose head a review passed through the
+   * approval gate and the merge queue (Story 1.17a); without it the run ends
+   * after the review gate. After an ejection the CI step runs again, then
+   * the review gate and this step.
    */
   readonly mergeStep?: MergeStep;
   /** The lane folder (AR37). */
@@ -165,6 +179,9 @@ export type LaneDeps = {
 };
 
 const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
+
+/** A builder session's mode, with the text its prompt's file holds: the CI log, or the review findings. */
+type SessionMode = { readonly mode: "build" } | { readonly mode: "ci-fix"; readonly text: string } | { readonly mode: "loopback"; readonly text: string };
 
 /** The Story being built, for its journal record: the shared track plus the Story and its build result. */
 type BuilderTrack = UnitTrack & {
@@ -352,23 +369,29 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         await held(t, (now, gen) => release({ unit: story.unit, by: identity, now, generation: gen }), "release");
         limitStop = { record: t.record, state: t.state };
       },
+      // Before each fresh session: fresh main's policy must still allow the lane's agent and a reviewer (Story 3.5).
+      allowed: sessionAllowance({ forge, repo: lane.repo, agent: lane.agent, builderProviders: () => t.record?.builder_providers ?? [], callTimeoutMs }),
     };
 
     /** The human-live step ids the last builder prompt offered: a `human-live-step` result must name one. */
     let promptedStepIds: readonly string[] = [];
 
-    /** The builder prompt, after `prepare`: with `ciLog` in `ci-fix` mode, its log written to `tmp/ci-fix-log.md`. */
-    const builderPrompt = (ciLog: string | null): PromptOutcome => {
+    /**
+     * The builder prompt, after `prepare`: in `ci-fix` mode its log written
+     * to `tmp/ci-fix-log.md`; in `loopback` mode the review findings written
+     * to `tmp/review-findings.md`.
+     */
+    const builderPrompt = (session: SessionMode): PromptOutcome => {
       promptedStepIds = [];
       let mode: PromptMode = { mode: "build" };
-      if (ciLog !== null) {
-        const logPath = join(layout.tmp, CI_FIX_LOG);
+      if (session.mode !== "build") {
+        const path = join(layout.tmp, session.mode === "ci-fix" ? CI_FIX_LOG : REVIEW_FINDINGS);
         try {
-          writeFileSync(logPath, ciLog);
+          writeFileSync(path, session.text);
         } catch (e) {
-          return { ok: false, reason: `ci-fix log: cannot write ${logPath}: ${message(e)}` };
+          return { ok: false, reason: `${session.mode === "ci-fix" ? "ci-fix log" : "review findings"}: cannot write ${path}: ${message(e)}` };
         }
-        mode = { mode: "ci-fix", log_path: logPath };
+        mode = session.mode === "ci-fix" ? { mode: "ci-fix", log_path: path } : { mode: "loopback", findings_path: path };
       }
       const repo = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
       if (!repo.ok) return { ok: false, reason: `config: ${repo.error.message}` };
@@ -405,23 +428,23 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     /**
      * One builder session at `at` through the shared runner, then the spec
-     * pick by status (`pickSpec`). With `ciLog` the session runs in `ci-fix`
-     * mode, its log in `tmp/ci-fix-log.md`, and only a `done` result picks a
-     * spec.
+     * pick by status (`pickSpec`). In `ci-fix` mode (its log in
+     * `tmp/ci-fix-log.md`) and `loopback` mode (the findings in
+     * `tmp/review-findings.md`) only a `done` result picks a spec.
      */
-    const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
+    const sessionAt = async (at: string, session: SessionMode): Promise<Ran> => {
       const fail = (reason: string): Ran => ({ ok: false, reason });
-      const ran = await runner.session(ctx, { at, kind: "build", prompt: () => builderPrompt(ciLog) });
+      const ran = await runner.session(ctx, { at, kind: "build", prompt: () => builderPrompt(session) });
       if (!ran.ok) return fail(ran.reason);
       const result = ran.result;
-      if (ciLog === null) t.result = result;
+      if (session.mode === "build") t.result = result;
       note(`result: ${result.outcome}`);
       // A `human-live-step` must name a step the prompt offered (Story 2.6b).
       const step = checkHumanLiveStep(result, promptedStepIds);
       if (!step.ok) return fail(`result ${step.error.kind}: ${step.error.message}`);
 
-      // A CI session's `blocked` or `no-op` result parks as it is: only a `done` fix needs a spec file.
-      if (ciLog !== null && result.outcome !== "done") return { ok: true, result, specPath: null, specText: null, superseded: [] };
+      // A CI or loopback session's `blocked` or `no-op` result parks as it is: only a `done` fix needs a spec file.
+      if (session.mode !== "build" && result.outcome !== "done") return { ok: true, result, specPath: null, specText: null, superseded: [] };
       const glob = storySpecGlob(config.story_spec_path, story.story_id);
       if (!glob.ok) return fail(`spec: ${glob.error.message}`);
       let paths: string[];
@@ -457,7 +480,14 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     /** The CI step's fix and conflict sessions: no spec status cross-check; a `done` fix picks its spec file. */
     const ciSession: CiSession = async ({ start: at, logText }) => {
-      const ran = await sessionAt(at, logText);
+      const ran = await sessionAt(at, { mode: "ci-fix", text: logText });
+      if (!ran.ok) return err("session", ran.reason);
+      return ok({ result: ran.result, specPath: ran.specPath, superseded: ran.superseded });
+    };
+
+    /** The review gate's loopback session: no spec status cross-check; a `done` fix picks its spec file. */
+    const loopbackSession: LoopbackSession = async ({ start: at, findingsText }) => {
+      const ran = await sessionAt(at, { mode: "loopback", text: findingsText });
       if (!ran.ok) return err("session", ran.reason);
       return ok({ result: ran.result, specPath: ran.specPath, superseded: ran.superseded });
     };
@@ -488,7 +518,7 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
 
     /** The build session at `start` and the PR step: the run's outcome, or the PR step's output for CI. */
     const build = async (at: string): Promise<{ readonly end: LaneOutcome } | { readonly next: PrStepOutput }> => {
-      const ran = await sessionAt(at, null);
+      const ran = await sessionAt(at, { mode: "build" });
       if (!ran.ok) {
         const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
         if (stopped !== null) return { end: stopAfterLimit(stopped) };
@@ -528,14 +558,15 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     };
 
     const ciStep = deps.ciStep;
+    const reviewGate = deps.reviewGate;
     const mergeStep = deps.mergeStep;
     /** The Story as the CI and merge steps name it. */
     const stepUnit = { unit: story.unit, subject: storySubject(story.story_id) };
     const ciUnit: CiUnit = { ...stepUnit, branch: (c) => `${c.branches.story}${story.story_id}`, needsSpec: true };
-    /** A CI fix goes through the Story's PR step, its title and body kept. */
+    /** A CI or loopback fix goes through the Story's PR step, its title and body kept. */
     const pushFix: PushFix = async (fix) => {
-      // The CI step hands on a `done` fix only with its spec file (`needsSpec`).
-      if (fix.specPath === null) return { outcome: "failed", state: fix.record.state, record: fix.record, reason: "a done CI fix with no spec file" };
+      // The CI step and the review gate hand on a `done` fix only with its spec file (`needsSpec`).
+      if (fix.specPath === null) return { outcome: "failed", state: fix.record.state, record: fix.record, reason: "a done fix with no spec file" };
       return deps.prStep({ unit: story, record: fix.record, result: fix.result, specPath: fix.specPath, superseded: fix.superseded, clone: layout.clone, signal: budget, log: note, kind: "fix" });
     };
     /** The claimed record with a PR a step may take on, else `null`. */
@@ -603,9 +634,35 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       }
       const ciEnd = await settle(ci, "CI step");
       if (ciEnd !== null) return ciEnd;
-      const passed = claimedWithPr(ci);
-      if (mergeStep === undefined || passed === null) return ci.outcome;
-      const merged = await mergeRound(mergeStep, passed);
+      const ciPassed = claimedWithPr(ci);
+      if (reviewGate === undefined || ciPassed === null) return ci.outcome;
+
+      // The review gate: a head no review passed is reviewed; a blocking round's loopback fix goes through CI again.
+      let gated: Awaited<ReturnType<ReviewGateStep>>;
+      await checkHeld(t);
+      try {
+        gated = await reviewGate({ unit: stepUnit, storyId: story.story_id, record: ciPassed, track: t, signal: budget, log: note, needsSpec: true, session: loopbackSession, pushFix });
+      } catch (e) {
+        if (e instanceof Halt) throw e;
+        const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+        if (stopped !== null) return stopAfterLimit(stopped);
+        return failUnit(t, `review gate threw: ${message(e)}`);
+      }
+      {
+        // A STOP during a loopback session's usage-limit sleep released the unit: the gate's own ending is moot.
+        const stopped = limitStop as { readonly record: UnitRecord | null; readonly state: UnitState | null } | null;
+        if (stopped !== null) return stopAfterLimit(stopped);
+      }
+      const gateEnd = await settle(gated, "review gate");
+      if (gateEnd !== null) return gateEnd;
+      if (gated.pushed === true) {
+        note("loopback fix pushed: CI again on the new head");
+        last = gated;
+        continue;
+      }
+      const reviewed = claimedWithPr(gated);
+      if (mergeStep === undefined || reviewed === null) return gated.outcome;
+      const merged = await mergeRound(mergeStep, reviewed);
       if ("end" in merged) return merged.end;
       last = merged.next;
     }

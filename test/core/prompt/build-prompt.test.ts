@@ -654,7 +654,7 @@ function itemFailure(patch: Partial<BuildRetroItemPromptInput>): { kind: string;
   return r.error;
 }
 
-const ITEM_PARTS: readonly string[] = ["retro_item", "retro_item_ci_fix", "result_retro_item"];
+const ITEM_PARTS: readonly string[] = ["retro_item", "retro_item_ci_fix", "retro_item_loopback", "result_retro_item"];
 
 describe("retro-item prompt (Story 2.10)", () => {
   const steps = [{ id: "dns", text: "Point the DNS record at the host." }];
@@ -699,6 +699,20 @@ describe("retro-item prompt (Story 2.10)", () => {
     expect(p).toContain("`src/x/**`, `docs/x.md`");
     expect(p).toContain(BUILD_RESULT_JSON_SCHEMA);
   });
+  test("loopback mode (Story 3.5): the findings' absolute path, the item, its globs and the Never-change list", () => {
+    const p = item({ mode: { mode: "loopback", findings_path: FINDINGS } });
+    expect(p).toContain("Revise the action item");
+    expect(p).toContain(`\`${ITEM_ID}\``);
+    expect(p).toContain(`\`retro-item:${ITEM_ID}\``);
+    expect(p).toContain(`\`${FINDINGS}\``);
+    expect(p).toContain("review findings");
+    expect(p).toContain("Fix the x helper.");
+    expect(p).toContain("`src/x/**`, `docs/x.md`");
+    expect(p).toContain("Never change agent configuration (such as a `CLAUDE.md` or `AGENTS.md` file), the tracking files, the planning artifacts, `.xarabot/`, `.github/`");
+    expect(p).not.toContain(LOG);
+    expect(p).toContain(BUILD_RESULT_JSON_SCHEMA);
+    expect(p).not.toMatch(/\{\{[^{}]*\}\}/);
+  });
   test("an item text holding a placeholder is not re-expanded", () => {
     expect(item({ unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, text: "Keep {{log_path}} as it is." } } })).toContain("Keep {{log_path}} as it is.");
   });
@@ -707,7 +721,7 @@ describe("retro-item prompt (Story 2.10)", () => {
       const text = PACKAGE_TEMPLATE[part as keyof PromptTemplate];
       expect({ part, hits: BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
     }
-    for (const mode of [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }] as const) {
+    for (const mode of [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }, { mode: "loopback", findings_path: FINDINGS }] as const) {
       for (const extra of [{}, { human_live_steps: steps, sections }]) {
         expect(BANNED.filter((b) => b.pattern.test(item({ mode, ...extra }))).map((b) => b.what)).toEqual([]);
       }
@@ -721,6 +735,7 @@ describe("retro-item prompt (Story 2.10)", () => {
     { name: "no globs", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, globs: [] } } }, field: /unit\.item\.globs/ },
     { name: "a backtick in a glob", patch: { unit: { ...ITEM_UNIT, item: { ...ITEM_UNIT.item, globs: ["src/`x`"] } } }, field: /unit\.item\.globs/ },
     { name: "a relative log path", patch: { mode: { mode: "ci-fix", log_path: "ci.log" } }, field: /mode\.log_path/ },
+    { name: "a relative findings path", patch: { mode: { mode: "loopback", findings_path: "findings.md" } }, field: /mode\.findings_path/ },
     { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
     { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },
     { name: "a duplicate step", patch: { human_live_steps: [...steps, ...steps] }, field: /duplicate step id/ },
@@ -756,7 +771,7 @@ describe("Epic context and denials (Epic 2 retro item 8)", () => {
   const DENIAL = "When your permission mode or the sandbox refuses an action, never work around it: do not retry it another way, such as with a changed environment variable, a disabled sandbox, another tool or another command. Record it in `denied_actions` in your result.";
   const SUBAGENT = "Give each subagent you start the rule above, and record each action refused to a subagent in `denied_actions` too.";
   const story = MODES.map((mode) => ({ name: `story ${mode.mode}`, p: build({ mode }) }));
-  const items = [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }].map((mode) => ({
+  const items = [{ mode: "build" }, { mode: "ci-fix", log_path: LOG }, { mode: "loopback", findings_path: FINDINGS }].map((mode) => ({
     name: `retro-item ${mode.mode}`,
     p: item({ mode: mode as BuildRetroItemPromptInput["mode"] }),
   }));

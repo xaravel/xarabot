@@ -7,7 +7,7 @@ import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/f
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
 import { assembleSnapshot } from "../../src/core/next/snapshot.ts";
-import { ok, type Result } from "../../src/core/result.ts";
+import { err, ok, type Result } from "../../src/core/result.ts";
 import { EpicPrsSchema } from "../../src/core/schemas/epic-prs.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
@@ -27,6 +27,8 @@ import type { WaitEnd } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { watchPushes } from "./push-providers.ts";
+import { headPassedGate } from "../../src/lane/passed-gate.ts";
+import { stubReviewStep } from "./review-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -288,6 +290,9 @@ function harness(o: HarnessOpts = {}): Harness {
     },
     identity: COORD,
     provider: "anthropic",
+    // A clean review round on the unspied forge: it records passed_sha, and the call log stays the step's own.
+    review: stubReviewStep({ forge: fake.forge, identity: COORD }).review,
+    passed: headPassedGate,
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -750,6 +755,76 @@ describe("createRetroStep: a valid result", () => {
   });
 });
 
+describe("createRetroStep: the review before the gate (Story 3.5)", () => {
+  test("an unreviewed head gets one review round after CI, before the enqueue; enqueued_sha the head", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]).toMatchObject({ storyId: null, unit: { unit: U, subject: `Unit ${U}` } });
+    const r = (await h.ledger()).get(U);
+    expect(r?.passed_sha).toBe(r?.head_sha ?? "none");
+    expect(r?.enqueued_sha).toBe(r?.head_sha ?? "none");
+  });
+
+  test("a blocking round parks blocked review-findings, with no loopback and no enqueue", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect(h.fake.control.queue()).toEqual([]);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "parked", loopbacks: 0, passed_sha: null, park: { kind: "blocked", reason: "review-findings", inbox_owner: "edanisko" } });
+    expect(out.reason).toContain("1 blocking finding(s) of 2");
+  });
+
+  test("a passed gate error is a failed attempt; a Halt from the review reaches the process", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const out = await h.run(undefined, { passed: async () => err("fetch", "offline") });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("passed gate fetch: offline");
+
+    const h2 = harness({ behaviors: [writes(retroResult())] });
+    const review = async (): Promise<never> => {
+      throw new MarkerStop("stop", LIMIT_STOP_REASON);
+    };
+    await expect(h2.run(undefined, { review })).rejects.toBeInstanceOf(MarkerStop);
+  });
+
+  test("the allowance before the session: fresh main's policy drops the lane's agent at session time: no sandbox run, a failed attempt naming it", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    let snapshots = 0;
+    const forge: Forge = {
+      ...h.fake.forge,
+      snapshot: (o) => {
+        // The first snapshot in the step is the session's allowance check.
+        if (++snapshots === 1) h.fake.control.setMain({ ...mainFiles(), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+        return h.fake.forge.snapshot(o);
+      },
+    };
+    const out = await h.run(undefined, { forge });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(h.prompts).toEqual([]);
+  });
+
+  test("the allowance before the enqueue: a policy that drops the lane's agent after the review is a failed attempt", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const review: typeof stub.review = async (input) => {
+      const out = await stub.review(input);
+      const s = await h.fake.forge.snapshot({ signal: AbortSignal.timeout(5000), read: readsPath });
+      if (!s.ok) throw new Error(s.error.message);
+      h.fake.control.setMain({ ...s.value.main.files, ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+      return out;
+    };
+    const out = await h.run(undefined, { review });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(h.fake.control.queue()).toEqual([]);
+  });
+});
+
 describe("createRetroStep: validation", () => {
   const failedNothingPushed = async (h: Harness, out: PrStepOutput, why: RegExp) => {
     expect([out.outcome, out.state]).toEqual(["failed", "released"]);
@@ -838,6 +913,16 @@ describe("createRetroStep: resuming an adopted PR", () => {
     h.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([coord(U, { globs: RETRO_GLOBS, generation: 2, pr, pr_owner: COORD.owner, head_sha: head, ...over })]), deletes: [] });
     return { pr, head };
   };
+
+  test("a Halt from the adopted PR's review reaches the process (runKit), with no session", async () => {
+    const h = harness();
+    await adopt(h, { retro_result: { verdict: "accepted", items: [] } });
+    const review = async (): Promise<never> => {
+      throw new MarkerStop("stop", LIMIT_STOP_REASON);
+    };
+    await expect(h.run(undefined, { review })).rejects.toBeInstanceOf(MarkerStop);
+    expect(h.prompts).toEqual([]);
+  });
 
   test("with its retro_result: no session, CI at the record's head, then the gate (merging, enqueued)", async () => {
     const h = harness();

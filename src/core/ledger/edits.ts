@@ -228,6 +228,7 @@ function fresh(ctx: Ctx, state: UnitState, globs: string[], park: Park | null): 
     head_sha: null,
     reviewed_sha: null,
     passed_sha: null,
+    enqueued_sha: null,
     approved_sha: null,
     approved_graph: null,
     retro_result: null,
@@ -322,6 +323,7 @@ export function claim(p: ClaimParams): LedgerEdit {
         ...prFields,
         reviewed_sha: null,
         passed_sha: null,
+        enqueued_sha: null,
         approved_sha: null,
         approved_graph: null,
         // A retro's result belongs to its PR: kept only when the claim adopts the PR at the head it was validated at (Story 2.9).
@@ -337,12 +339,6 @@ export type ParkNewParams = EditBase & {
   readonly kind: "needs-approval" | "blocked";
   /** Whose inbox the park lands in; defaults to the writer's owner. */
   readonly inboxOwner?: string;
-  /**
-   * The head a park from `merging` sets `passed_sha` to: a re-park of a
-   * record the coordinator took, so only an approval submitted after it
-   * re-takes the PR. Absent: `passed_sha` is kept.
-   */
-  readonly passedSha?: string;
 };
 
 /** `none → parked`: an unapproved Infrastructure Story or an open Escalation. */
@@ -373,6 +369,8 @@ export const HeartbeatSetSchema = z.strictObject({
   head_sha: GitSha.nullable().optional(),
   reviewed_sha: GitSha.nullable().optional(),
   passed_sha: GitSha.nullable().optional(),
+  /** The head the PR is enqueued at (Story 3.5): the enqueue fence sets it. */
+  enqueued_sha: GitSha.nullable().optional(),
   builder_providers: z.array(NonEmpty).optional(),
   /** A retro unit's validated result, recorded with its PR (Story 2.9). */
   retro_result: RetroRecordResultSchema.nullable().optional(),
@@ -518,6 +516,7 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
       base_sha: adopted?.value.base_sha ?? baseSha,
       reviewed_sha: null,
       passed_sha: null,
+      enqueued_sha: null,
       approved_sha: null,
       approved_graph: null,
       retro_result: adopted === null ? null : boundRetroResult(r, adopted.value.pr, adopted.value.head_sha),
@@ -532,13 +531,17 @@ export function takeOverStale(p: TakeOverStaleParams): LedgerEdit {
 
 // ---------------------------------------------------------------- startMerging
 
-/** `claimed → merging`: fenced and enqueued at `passed_sha`. */
+/**
+ * `claimed → merging`: fenced and enqueued. The record needs a `passed_sha`
+ * (a review round passed it), except a `reconcile:<n>` unit, whose PR gets
+ * no review (Story 3.5).
+ */
 export function startMerging(p: HeldParams): LedgerEdit {
   return makeEdit("startMerging", p, (ctx) => {
     const rec = requireHeld(ctx, p.generation, ["claimed"]);
     if (!rec.ok) return rec;
     if (rec.value.pr === null) return pre(`${ctx.unit} has no PR`);
-    if (rec.value.passed_sha === null) return pre(`${ctx.unit} has no passed_sha`);
+    if (rec.value.passed_sha === null && unitKind(ctx.unit) !== "reconcile") return pre(`${ctx.unit} has no passed_sha`);
     return to("merging", stamp(ctx, rec.value, { state: "merging" }));
   });
 }
@@ -554,18 +557,18 @@ export type ParkParams = HeldParams & {
   /** Whose inbox the park lands in; defaults to the writer's owner. */
   readonly inboxOwner?: string;
   /**
-   * The head a park from `merging` sets `passed_sha` to: a re-park of a
+   * The head a park from `merging` sets `enqueued_sha` to: a re-park of a
    * record the coordinator took, so only an approval submitted after it
-   * re-takes the PR. Absent: `passed_sha` is kept.
+   * re-takes the PR. Absent: `enqueued_sha` is kept.
    */
-  readonly passedSha?: string;
+  readonly enqueuedSha?: string;
 };
 
 /**
  * `claimed → parked` and, for an approval-gated ejection, `merging → parked`
  * (`awaiting-approval`; a coordinator-held record may also park `blocked`
  * `graph-invalid`, Story 2.8). A park from `merging` clears `approved_sha`
- * and `approved_graph`, and sets `passed_sha` to `passedSha` when given. The record must be held by the writer at
+ * and `approved_graph`, and sets `enqueued_sha` to `enqueuedSha` when given. The record must be held by the writer at
  * `generation`, except a `merging` record held by a coordinator lane: any
  * coordinator-lane writer may park it at its `generation` (as
  * `releaseDisposable` releases one), so a coordinator that moved hosts
@@ -577,8 +580,8 @@ export function park(p: ParkParams): LedgerEdit {
     if (!reason.ok) return reason;
     const inbox = check("park inboxOwner", GitHubLogin, p.inboxOwner ?? ctx.by.owner);
     if (!inbox.ok) return inbox;
-    const passed = check("park passedSha", GitSha.nullable(), p.passedSha ?? null);
-    if (!passed.ok) return passed;
+    const enqueued = check("park enqueuedSha", GitSha.nullable(), p.enqueuedSha ?? null);
+    if (!enqueued.ok) return enqueued;
     let held: string[] = [];
     if (p.kind === "awaiting-approval") {
       if (p.diffPaths === undefined) return bad("park: awaiting-approval needs diffPaths");
@@ -602,10 +605,10 @@ export function park(p: ParkParams): LedgerEdit {
       if (p.kind !== "awaiting-approval" && !graphInvalid) {
         return pre(`${ctx.unit} is merging; only awaiting-approval${coordinator ? " or blocked graph-invalid" : ""} parks it`);
       }
-      const fencedAt = passed.value !== null ? { passed_sha: passed.value } : {};
+      const fencedAt = enqueued.value !== null ? { enqueued_sha: enqueued.value } : {};
       return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value, approved_sha: null, approved_graph: null, ...fencedAt }));
     }
-    if (passed.value !== null) return bad("park: passedSha is only for a park from merging");
+    if (enqueued.value !== null) return bad("park: enqueuedSha is only for a park from merging");
     return to("parked", stamp(ctx, rec.value, { state: "parked", park: parkValue.value }));
   });
 }
@@ -720,9 +723,10 @@ export type TakeApprovedParams = EditBase & {
  * With `approvedGraph`, the record's `globs` are the park's `globs_held` plus
  * `xarabot:graph` and `approved_graph` is set; another record holding a glob
  * that overlaps `xarabot:graph` refuses the take (precondition).
- * `passed_sha` is cleared: the taker sets it at the head once the enqueue
+ * `enqueued_sha` is cleared: the taker sets it at the head once the enqueue
  * succeeds (or before it parks the record again), so a taken record with no
- * `passed_sha` is one the runner never enqueued, and its approval stands.
+ * `enqueued_sha` is one the runner never enqueued, and its approval stands.
+ * `passed_sha` is kept: the review that passed the head still stands.
  */
 export function takeApproved(p: TakeApprovedParams): LedgerEdit {
   return makeEdit("takeApproved", p, (ctx) => {
@@ -756,7 +760,7 @@ export function takeApproved(p: TakeApprovedParams): LedgerEdit {
         generation: rec.value.generation + 1,
         approved_sha: sha.value,
         approved_graph: graph.value,
-        passed_sha: null,
+        enqueued_sha: null,
         globs,
         park: null,
       }),
@@ -777,7 +781,7 @@ export type ApplyRulingParams = EditBase & {
  * `parked → released` under a ruling, by any lane identity: the coordinator's
  * comment rulings (4.6) or the Maintainer's `xarabot rule`. The record must be
  * `parked` at `generation`; `release` and `rebuild` zero the counters, and
- * `rebuild` also clears the providers, the reviewed, passed and approved SHAs,
+ * `rebuild` also clears the providers, the reviewed, passed, enqueued and approved SHAs,
  * `approved_graph` and `retro_result`.
  */
 export function applyRuling(p: ApplyRulingParams): LedgerEdit {
@@ -811,6 +815,7 @@ export function applyRuling(p: ApplyRulingParams): LedgerEdit {
           builder_providers: [],
           reviewed_sha: null,
           passed_sha: null,
+          enqueued_sha: null,
           approved_sha: null,
           approved_graph: null,
           retro_result: null,

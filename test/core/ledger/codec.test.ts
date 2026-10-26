@@ -29,14 +29,14 @@ describe("serializeUnitRecord", () => {
     const parsed = JSON.parse(text);
     expect(Object.keys(parsed)).toEqual([
       "schema_version", "unit", "state", "owner", "host", "lane", "generation", "globs", "heartbeat_at",
-      "pr", "pr_owner", "base_sha", "head_sha", "reviewed_sha", "passed_sha", "approved_sha",
+      "pr", "pr_owner", "base_sha", "head_sha", "reviewed_sha", "passed_sha", "enqueued_sha", "approved_sha",
       "approved_graph", "retro_result", "builder_providers", "park", "attempts", "loopbacks", "ci_fixes", "approval",
     ]);
     expect(parsed.globs).toEqual(["src/a/**", "src/b/**"]);
     expect(parsed.builder_providers).toEqual(["anthropic", "openai"]);
     expect(Object.keys(parsed.park)).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
     expect(parsed.park.globs_held).toEqual(["a.ts", "z.ts"]);
-    expect(text).toContain('\n  "schema_version": 4,\n');
+    expect(text).toContain('\n  "schema_version": 5,\n');
   });
 });
 
@@ -77,14 +77,72 @@ describe("parseLedger", () => {
     expect(parseLedger({})).toEqual({ ok: true, value: { units: new Map(), coordinator: null } });
   });
 
-  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 4', `"schema_version": ${n}`);
+  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 5', `"schema_version": ${n}`);
   const cv = (n: number) => serializeCoordinator(COORDINATOR).replace('"schema_version": 2', `"schema_version": ${n}`);
 
-  test.each([1, 2, 3, 4])("unit and coordinator records at schema_version %p both parse (Stories 2.7, 2.8, 2.9)", (n) => {
+  test.each([1, 2, 3, 4, 5])("unit and coordinator records at schema_version %p both parse (Stories 2.7, 2.8, 2.9, 3.5)", (n) => {
     const r = parseLedger({ "units/story__1.5.json": v(n), [COORDINATOR_PATH]: cv(n) });
     if (!r.ok) throw new Error(r.error.message);
-    expect(r.value.units.get("story:1.5")?.schema_version).toBe(n as 1 | 2 | 3 | 4);
-    expect(r.value.coordinator?.schema_version).toBe(n as 1 | 2 | 3 | 4);
+    expect(r.value.units.get("story:1.5")?.schema_version).toBe(n as 1 | 2 | 3 | 4 | 5);
+    expect(r.value.coordinator?.schema_version).toBe(n as 1 | 2 | 3 | 4 | 5);
+  });
+
+  describe("enqueued_sha (Story 3.5)", () => {
+    const S = "a".repeat(40);
+    const E = "b".repeat(40);
+    /** A record at `n` with `passed_sha` S, and `enqueued_sha` dropped or set. */
+    const raw = (n: number, enqueued: string | null | undefined): string => {
+      const o = JSON.parse(serializeUnitRecord(rec({ pr: 7, head_sha: S, passed_sha: S }))) as Record<string, unknown>;
+      o["schema_version"] = n;
+      if (enqueued === undefined) delete o["enqueued_sha"];
+      else o["enqueued_sha"] = enqueued;
+      return JSON.stringify(o);
+    };
+    const read = (text: string) => {
+      const r = parseLedger({ "units/story__1.5.json": text });
+      if (!r.ok) throw new Error(r.error.message);
+      return r.value.units.get("story:1.5");
+    };
+
+    test.each([1, 2, 3, 4])("a schema_version %p record with no enqueued_sha key reads passed_sha as enqueued_sha, passed_sha null", (n) => {
+      const text = raw(n, undefined);
+      const got = read(text);
+      expect(got?.enqueued_sha).toBe(S);
+      expect(got?.passed_sha).toBeNull();
+      // The stored text is never rewritten by the reader.
+      expect(JSON.parse(text)).toMatchObject({ passed_sha: S });
+    });
+    test("a schema_version 4 record with no enqueued_sha and no passed_sha reads both null", () => {
+      const o = JSON.parse(raw(4, undefined)) as Record<string, unknown>;
+      o["passed_sha"] = null;
+      const got = read(JSON.stringify(o));
+      expect(got?.enqueued_sha).toBeNull();
+      expect(got?.passed_sha).toBeNull();
+    });
+    test("a schema_version 4 record that has the enqueued_sha key is read as it is", () => {
+      const got = read(raw(4, E));
+      expect(got?.enqueued_sha).toBe(E);
+      expect(got?.passed_sha).toBe(S);
+    });
+    test("a schema_version 5 record with no enqueued_sha key reads it as null and keeps passed_sha", () => {
+      const got = read(raw(5, undefined));
+      expect(got?.enqueued_sha).toBeNull();
+      expect(got?.passed_sha).toBe(S);
+    });
+    test("a schema_version 5 record round-trips both, enqueued_sha right after passed_sha", () => {
+      const text = serializeUnitRecord(rec({ pr: 7, head_sha: S, passed_sha: S, enqueued_sha: E }));
+      const keys = Object.keys(JSON.parse(text) as object);
+      expect(keys.indexOf("enqueued_sha")).toBe(keys.indexOf("passed_sha") + 1);
+      const got = read(text);
+      expect(got?.passed_sha).toBe(S);
+      expect(got?.enqueued_sha).toBe(E);
+      expect(serializeUnitRecord(got as never)).toBe(text);
+    });
+    test("a bad enqueued_sha is invalid", () => {
+      const r = parseLedger({ "units/story__1.5.json": raw(5, "nope") });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.kind).toBe("invalid");
+    });
   });
 
   test.each([1, 2, 3])("a schema_version %p record with no retro_result reads it as null, and a write stamps 4 with it (Story 2.9)", (n) => {
@@ -138,31 +196,31 @@ describe("parseLedger", () => {
     }
   });
 
-  test("a tip mixing schema_version 2 and 4 records parses", () => {
+  test("a tip mixing schema_version 2 and 5 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(2), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(2) });
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value.units.get("story:1.5")?.schema_version).toBe(2);
-    expect(r.value.units.get("story:1.6")?.schema_version).toBe(4);
+    expect(r.value.units.get("story:1.6")?.schema_version).toBe(5);
   });
 
-  test("a tip mixing schema_version 1 and 4 records parses", () => {
+  test("a tip mixing schema_version 1 and 5 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(1), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(1) });
     expect(r.ok).toBe(true);
   });
 
   const stop: readonly [string, Record<string, string>][] = [
-    ["unit schema_version 5", { "units/story__1.5.json": v(5) }],
+    ["unit schema_version 6", { "units/story__1.5.json": v(6) }],
     ["unit schema_version 0", { "units/story__1.5.json": v(0) }],
-    ["coordinator schema_version 5", { [COORDINATOR_PATH]: cv(5) }],
+    ["coordinator schema_version 6", { [COORDINATOR_PATH]: cv(6) }],
     ["coordinator schema_version 0", { [COORDINATOR_PATH]: cv(0) }],
-    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(5) }],
+    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(6) }],
   ];
   for (const [name, files] of stop) {
     test(`${name} -> stop`, () => {
       const r = parseLedger(files);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.kind).toBe("stop");
-      if (!r.ok) expect(r.error.message).toContain("this runner reads 1, 2, 3 and 4");
+      if (!r.ok) expect(r.error.message).toContain("this runner reads 1, 2, 3, 4 and 5");
     });
   }
 
@@ -175,7 +233,7 @@ describe("parseLedger", () => {
     ["nested path", { "units/x/story__1.5.json": good }],
     ["bad park.reason", { "units/story__1.5.json": serializeUnitRecord(rec({ state: "parked", park: { kind: "blocked", reason: "x" as never, inbox_owner: "alice", globs_held: [] } })) }],
     ["park on a non-parked record", { "units/story__1.5.json": serializeUnitRecord(rec({ park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } })) }],
-    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 4', '"schema_version": "4"') }],
+    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 5', '"schema_version": "5"') }],
     ["bad coordinator", { [COORDINATOR_PATH]: "{}" }],
   ];
   for (const [name, files] of invalid) {

@@ -25,12 +25,14 @@ import { runCoordinatorProcess, type CoordinatorStepInput } from "../../src/lane
 import type { DiffPathsRequest } from "../../src/lane/diff-paths.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPlanningStep, planningPrText, type PlanningStepDeps } from "../../src/lane/planning-step.ts";
-import { newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.ts";
+import { MarkerStop, newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.ts";
 import type { WaitEnd, WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
 import { watchPushes } from "./push-providers.ts";
+import { headPassedGate } from "../../src/lane/passed-gate.ts";
+import { stubReviewStep } from "./review-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -277,6 +279,9 @@ function harness(o: HarnessOpts = {}): Harness {
     graphTrees: unchangedGraph(),
     identity: COORD,
     provider: "anthropic",
+    // A clean review round on the unspied forge: it records passed_sha, and the call log stays the step's own.
+    review: stubReviewStep({ forge: fake.forge, identity: COORD }).review,
+    passed: headPassedGate,
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -808,6 +813,128 @@ describe("createPlanningStep: done", () => {
   });
 });
 
+describe("createPlanningStep: the review before the gate (Story 3.5)", () => {
+  const done = () => harness({ contextMissing: true, behaviors: [writes(planningResult("done"))], diff: [STATUS, CONTEXT_2] });
+
+  test("an unreviewed head gets one review round (no Story id, so the normal pass) after CI, before the enqueue; enqueued_sha the head", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]).toMatchObject({ storyId: null, unit: { unit: "planning:status.1", subject: "Unit planning:status.1" } });
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "merging", passed_sha: h.head, enqueued_sha: h.head });
+  });
+
+  test("a blocking round parks blocked review-findings, with no loopback and no enqueue", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true });
+    const out = await h.run(undefined, undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect(out.reason).toContain("no loopback");
+    expect(h.prompts).toHaveLength(1);
+    expect(h.fake.control.queue()).toEqual([]);
+    expect(h.events).not.toContain("enqueue");
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "parked", loopbacks: 0, passed_sha: null, park: { kind: "blocked", reason: "review-findings", inbox_owner: "edanisko" } });
+  });
+
+  test("a round blocked by its verdict alone names the verdict in the park reason", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true, findings: () => [] });
+    const out = await h.run(undefined, undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect(out.reason).toContain("its verdict changes-requested, with no blocking finding of 0");
+  });
+
+  test("after a review round every check runs again on fresh main: CI polled again, the diff read against the main the review left", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    let movedTo = "";
+    const review: typeof stub.review = async (input) => {
+      const out = await stub.review(input);
+      movedTo = h.fake.control.setMain({ ...mainFiles({ contextMissing: true }), "README.md": "moved during the review\n" });
+      return out;
+    };
+    const out = await h.run(undefined, undefined, { review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(stub.calls).toHaveLength(1);
+    expect(h.events.filter((e) => e === "checks").length).toBeGreaterThanOrEqual(2);
+    expect(h.diffs.map((d) => d.mainSha)).toEqual([movedTo]);
+  });
+
+  test("the allowance runs before the approval gate: a graph PR whose policy drops the lane's agent is a failed attempt, never parked awaiting approval", async () => {
+    const h = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("done"))], diff: [EPICS, "stories/2.2.md"] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const review: typeof stub.review = async (input) => {
+      const out = await stub.review(input);
+      h.fake.control.setMain({ ...mainFiles({ graph: true }), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+      return out;
+    };
+    const out = await h.run("planning:graph.1", undefined, { review });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml");
+    expect(h.diffs).toEqual([]);
+  });
+
+  test("a graph PR's blocking round parks review-findings before the approval park", async () => {
+    const h = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("done"))], diff: [EPICS, "stories/2.2.md"] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true });
+    const out = await h.run("planning:graph.1", undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect((await h.ledger()).get("planning:graph.1")).toMatchObject({ park: { kind: "blocked", reason: "review-findings" } });
+  });
+
+  test("a head the gate passes is not reviewed again", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, undefined, { review: stub.review, passed: async () => ok({ kind: "passed", how: "clean-merge" }) });
+    expect(stub.calls).toHaveLength(0);
+    // No review round recorded a passed_sha, so startMerging refuses: the record must carry a reviewed head.
+    expect(out.outcome).toBe("failed");
+  });
+
+  test("a passed gate error is a failed attempt with no review", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, undefined, { review: stub.review, passed: async () => err("fetch", "offline") });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("passed gate fetch: offline");
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  test("a Halt from the review reaches the coordinator process", async () => {
+    const h = done();
+    const review = async (): Promise<never> => {
+      throw new MarkerStop("stop", "STOP during a usage-limit sleep");
+    };
+    await expect(h.run(undefined, undefined, { review })).rejects.toBeInstanceOf(MarkerStop);
+  });
+
+  test("the allowance before the enqueue: a policy that drops the lane's agent after the review is a failed attempt, no enqueue", async () => {
+    const h = done();
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const review: typeof stub.review = async (input) => {
+      const out = await stub.review(input);
+      h.fake.control.setMain({ ...mainFiles({ contextMissing: true }), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+      return out;
+    };
+    const out = await h.run(undefined, undefined, { review });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(h.events).not.toContain("enqueue");
+  });
+
+  test("the allowance before the session: a policy that drops the lane's agent runs no session", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))] });
+    const at = await h.input();
+    h.fake.control.setMain({ ...mainFiles({ contextMissing: true }), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+    const out = await h.run(undefined, at);
+    expect(out.outcome).toBe("failed");
+    expect(h.prompts).toEqual([]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+  });
+});
+
 describe("createPlanningStep: resuming an adopted PR", () => {
   test("no session: CI polled at the record's head, then the gate (status: merging, enqueued)", async () => {
     const h = harness({ contextMissing: true });
@@ -825,6 +952,21 @@ describe("createPlanningStep: resuming an adopted PR", () => {
     expect(out.state).toBe("merging");
     expect(h.fake.control.queue()).toEqual([pr]);
     expect(h.diffs[0]?.headSha).toBe(head);
+  });
+
+  test("a Halt from the adopted PR's review reaches the process (runKit), with no session", async () => {
+    const h = harness({ contextMissing: true });
+    const head = h.fake.control.makeCommit();
+    h.fake.control.setChecks(head, PASS);
+    expect((await h.fake.forge.pushBranch({ branch: "xarabot/planning-status.1", expected_sha: null, sha: head }, opts())).ok).toBe(true);
+    const opened = await h.fake.forge.openPr({ branch: "xarabot/planning-status.1", base: "main", title: "t", body: "b" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    h.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([coord("planning:status.1", { globs: STATUS_GLOBS, generation: 2, pr: opened.value.number, pr_owner: COORD.owner, head_sha: head })]), deletes: [] });
+    const review = async (): Promise<never> => {
+      throw new MarkerStop("stop", "STOP during a usage-limit sleep");
+    };
+    await expect(h.run(undefined, undefined, { review })).rejects.toBeInstanceOf(MarkerStop);
+    expect(h.prompts).toEqual([]);
   });
 });
 

@@ -6,6 +6,8 @@ import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { checkWrite } from "../../src/core/lane/write-check.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
+import { headPassedGate } from "../../src/lane/passed-gate.ts";
+import { stubReviewStep } from "./review-stub.ts";
 import { assembleSnapshot } from "../../src/core/next/snapshot.ts";
 import { ok } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
@@ -287,6 +289,9 @@ function harness(o: HarnessOpts = {}): Harness {
     graphTrees: unchangedGraph(),
     identity: COORD,
     provider: "anthropic",
+    // A clean review round on the unspied forge: it records passed_sha, and the call log stays the step's own.
+    review: stubReviewStep({ forge: fake.forge, identity: COORD }).review,
+    passed: headPassedGate,
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -751,6 +756,80 @@ describe("createRetroItemStep: CI", () => {
     expect(h.ciLogs[1]).toContain("merged into this unit's PR");
     expect(h.prepares[1]?.start).toBe("c".repeat(40));
     expect((await h.ledger()).get(U)?.ci_fixes).toBe(1);
+  });
+});
+
+describe("createRetroItemStep: the review gate (Story 3.5)", () => {
+  test("a clean review after CI, then the enqueue: one round, no Story id, enqueued_sha the head", async () => {
+    const h = harness({ behaviors: [writes(built())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]).toMatchObject({ storyId: null, unit: { unit: U, subject: `Unit ${U}` } });
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", loopbacks: 0, passed_sha: h.heads[0], enqueued_sha: h.heads[0] });
+  });
+
+  test("retro-item loopback: a blocking review runs the retro_item_loopback prompt, loopbacks + 1, the fix pushed, then CI and review again", async () => {
+    const h = harness({ behaviors: [writes(built()), writes(built({ summary: "Fix the review findings" }))] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: (n) => n === 0 });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[1]).toContain("Revise the action item");
+    expect(h.prompts[1]).toContain(join(h.laneDir, "tmp", "review-findings.md"));
+    expect(h.prompts[1]).toContain("`src/x/**`");
+    expect(h.prepares[1]?.start).toBe(h.heads[0]);
+    expect(stub.calls.map((c) => c.record.head_sha)).toEqual([h.heads[0] ?? null, h.heads[1] ?? null]);
+    expect(h.events.filter((e) => e === "openPr")).toHaveLength(1);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", loopbacks: 1, ci_fixes: 0, head_sha: h.heads[1], passed_sha: h.heads[1], enqueued_sha: h.heads[1] });
+  });
+
+  test("the same cap: after 2 loopbacks the next round parks review-cap, whatever its verdict; no enqueue", async () => {
+    const h = harness({ records: [coord(U, { globs: GLOBS, loopbacks: 2 })], behaviors: [writes(built())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect(h.prompts).toHaveLength(1);
+    expect(h.fake.control.queue()).toEqual([]);
+    expect((await h.ledger()).get(U)).toMatchObject({ park: { kind: "blocked", reason: "review-cap" }, loopbacks: 2 });
+  });
+
+  test("the allowance before the session: fresh main's policy drops the lane's agent at session time: no sandbox run, a failed attempt naming it", async () => {
+    const h = harness({ behaviors: [writes(built())] });
+    let snapshots = 0;
+    const forge: Forge = {
+      ...h.fake.forge,
+      snapshot: (o) => {
+        // The first snapshot in the step is the build session's allowance check.
+        if (++snapshots === 1) h.fake.control.setMain({ ...mainFiles(), ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [codex]\n" });
+        return h.fake.forge.snapshot(o);
+      },
+    };
+    const out = await h.run(undefined, { forge });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(h.prompts).toEqual([]);
+  });
+
+  test("a STOP during the loopback session's usage-limit sleep: the unit released, attempts unchanged, and the step throws MarkerStop", async () => {
+    // Run 1 builds; run 2, the loopback, hits a usage limit with no result, and the sleep ends on a STOP.
+    const h = harness({ behaviors: [writes(built())], usageLimits: [null, { resetAt: null }], waitEnds: ["stopped"] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true });
+    const run = h.run(undefined, { review: stub.review });
+    await expect(run).rejects.toBeInstanceOf(MarkerStop);
+    await expect(run).rejects.toMatchObject({ reason: LIMIT_STOP_REASON });
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[1]).toContain("Revise the action item");
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "released", attempts: 0, loopbacks: 1 });
+  });
+
+  test("a Halt from the review reaches the process", async () => {
+    const h = harness({ behaviors: [writes(built())] });
+    const review = async (): Promise<never> => {
+      throw new MarkerStop("stop", "STOP during a usage-limit sleep");
+    };
+    await expect(h.run(undefined, { review })).rejects.toBeInstanceOf(MarkerStop);
   });
 });
 
