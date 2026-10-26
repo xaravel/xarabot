@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-33-graph-park-counts-only-later-approvals",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "test/core/next/coordinator.test.ts",
     "test/core/reconcile/plan.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T11:25:01.311Z",
+  "heartbeat_at": "2026-10-26T11:36:44.018Z",
   "pr": 194,
   "pr_owner": "edanisko",
   "base_sha": "09d95c46f665675d085097799e40c1a436e23333",
