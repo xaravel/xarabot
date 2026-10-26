@@ -177,4 +177,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/sandbox/environment.ts", "src/adapters/agent/codex/codex-agent.ts", "test/sandbox/environment.test.ts", "test/adapters/agent/codex/codex-agent.test.ts"]
-        status: open
+        status: done
