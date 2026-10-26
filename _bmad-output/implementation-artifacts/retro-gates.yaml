@@ -208,3 +208,9 @@ epics:
         blocking: false
         globs: ["src/core/reconcile/plan.ts", "src/core/next/coordinator.ts", "test/core/reconcile/plan.test.ts", "test/core/next/coordinator.test.ts"]
         status: open
+      - id: "epic-2-retro-item-34-allow-the-configd-lookup"
+        text: "Maintainer decision 2026-10-26 (Epic 3 live run, ~/epic3-live on the Xarabot host): sandboxed codex 0.163.0 sessions hang at startup, intermittently, before any request: reqwest's proxy setup (hyper_util Matcher::from_system -> SCDynamicStoreCreateWithOptions) blocks in bootstrap_look_up3 on com.apple.SystemConfiguration.configd, which MACH_SERVICES leaves out, so the session waits out SESSION_MS (two cross-vendor cases hit the 40-minute deadline; a stack sample showed the wait). The Maintainer allows it: add \"com.apple.SystemConfiguration.configd\" to MACH_SERVICES in src/sandbox/profile.ts, with a comment saying it gives read access to the system's network and proxy settings and opens no network; keep every other service unchanged (still no securityd or keychain service); tests in test/sandbox/profile.test.ts (the profile lists it, the keychain services stay absent) and a sandboxed case in test/sandbox/macos.test.ts that `scutil --proxy` returns; the Maintainer's session re-runs the codex live checks and the cross-vendor suite after the runner tag"
+        route: lane
+        blocking: false
+        globs: ["src/sandbox/profile.ts", "test/sandbox/profile.test.ts", "test/sandbox/macos.test.ts"]
+        status: open
