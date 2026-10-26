@@ -1,0 +1,32 @@
+{
+  "schema_version": 5,
+  "unit": "retro-item:epic-3-retro-item-11-a-passing-round-after-the-cap-proceeds",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "coordinator",
+  "generation": 1,
+  "globs": [
+    "src/core/review/gate.ts",
+    "src/lane/review-gate.ts",
+    "test/core/review/gate.test.ts",
+    "test/lane/review-gate.test.ts"
+  ],
+  "heartbeat_at": "2026-10-26T21:04:42Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "008d2753064b7a2adbd3d4c3a89dce6c940d5214",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "enqueued_sha": null,
+  "approved_sha": null,
+  "approved_graph": null,
+  "retro_result": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
