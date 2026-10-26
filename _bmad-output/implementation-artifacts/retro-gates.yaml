@@ -153,7 +153,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/reconcile-step.ts", "src/lane/graph-gate.ts", "src/core/reconcile/**", "src/core/ledger/**", "src/core/schemas/ledger.ts", "test/lane/reconcile-step.test.ts", "test/core/reconcile/**", "test/core/ledger/**", "test/core/graph/graph-gate.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-25-planning-attempts-across-runs"
         text: "Make the planning attempts cap trip across runs (Story 2.7 deferral, A4; Maintainer decision C4, 2026-10-25): a new planning record starts with the attempts of the newest released record of its kind (status or graph), so the 3rd failed run in a row parks attempts-cap; a done or nothing-due run resets the count; tests for three failed runs in a row, a failure after a done run, and the two kinds counted apart"
         route: lane
