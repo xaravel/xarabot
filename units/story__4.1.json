@@ -12,7 +12,7 @@
     "test/core/graph/**",
     "test/core/next/**"
   ],
-  "heartbeat_at": "2026-10-26T18:15:24.628Z",
+  "heartbeat_at": "2026-10-26T18:19:44.041Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "797c878d82fcafe04cdf457de6b92158f25da04b",
@@ -23,7 +23,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
