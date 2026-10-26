@@ -87,10 +87,33 @@ cross-vendor single-vendor: 1-6-xv-single-vendor-4daf397e PR #25 merged at ce6e6
   - Kernel-side denials (file, network) return at once.
   - The hang is intermittent: 2 of 4 resumes hung. It is the same mechanism as run 1's configd hang.
 - **To change:** retro item 35 (Maintainer decision 2026-10-26, option A) denies every unlisted Mach lookup with `(with no-report)` before the allow list. Permissions do not change. The cost is that denied lookups no longer appear in the sandbox deny log.
-- **Still to run:** after item 35 is on `main`, `XARABOT_LIVE=1 bun test test/adapters/agent/codex/codex-live.test.ts` is run again and its result is added here. Codex stays out of `unattended_adapters` until it passes.
+- **Re-run:** see run 3 below.
+
+## Run 3: 2026-10-26 at about 17:35Z, `main` 61e2264 (item 35 merged as #209; tagged `runner-13` at 8169989, with no `src/` or `test/` change between them)
+
+Epic 3 retro item 2 asks for this re-run. The host's sandbox suite had already been run at item 35's PR head 8bedee7: `bun test test/sandbox/` gave 336 pass, 3 skip, 0 fail, and the new case `mach lookups > a lookup of an unlisted service fails at once instead of hanging; a listed one still succeeds` passed in 28 ms.
+
+| Command | Result | Time |
+|---|---|---|
+| `XARABOT_LIVE=1 bun test test/adapters/agent/codex/codex-live.test.ts` | 5 pass, 0 skip, 0 fail | 53 s |
+
+- **The cases that failed before:**
+  - `codex live > resume: a run that wrote no result is resumed with codex exec … resume <thread_id> and writes it` passed in 14.3 s. In run 2 it hung for 244.9 s.
+  - `codex live > outcome mapping: …` passed in 12.3 s.
+  - Neither case prints more than its pass line. The test does not print the resumed run's model, so that is unverified here.
+- **What it printed:**
+  - **Subagent tokens:** the parent's `turn.completed` is input 4768, output 108, cacheRead 66944, and two children were counted (2003/5/12032 and 211/5/…).
+  - `credentialRewritten: false`.
+  - **Proxy hosts:** `allow ab.chatgpt.com:443`, `allow chatgpt.com:443`, and `deny` for the four `sdmntpr*.oaiusercontent.com:443` hosts.
+
+## Story 3.1's host list (retro finding A3)
+
+- **The spike's unresolved address:** `2606:4700:440b::ac40:9034` (spike note, question 8) is one of the two AAAA records of all four `sdmntpr{central,northcentral,southcentral,westcentral}us.oaiusercontent.com` hosts. The other is `2a06:98c1:310d::6812:2bcc`, looked up on 2026-10-26. The proxy denies those four hosts in every run, so they are the connection the spike saw.
+- **Maintainer decision (2026-10-26):** the four hosts stay denied. With them denied, codex passes the cross-vendor suite (76/76), the codex contract (11/11) and the codex live checks (5/5).
+- **The final list:** for a ChatGPT login it is `chatgpt.com`, `ab.chatgpt.com` and `auth.openai.com`, plus `api.openai.com` in API-key mode. `files.openai.com` stays out: no run reached it.
+- **Still open:** the comment in `src/adapters/agent/codex/codex-agent.ts`, which says the list waits for this run, is corrected by Epic 3 retro item 12.
 
 ## Open follow-ups
 
-- Retro item 35, as above.
-- A session that blocks with no output waits out `SESSION_MS` (3 h), and the harness stopped first at 40 min. A no-output watchdog is a separate design decision, not yet routed.
-- The switch after Epic 3 (`self-host.md` § "The switch after Epic 3") waits for the codex rerun above.
+- A session that blocks with no output waits out `SESSION_MS` (3 h), and the harness stopped first at 40 min. A no-output watchdog is a separate design decision (Epic 3 retro item 7), not yet routed.
+- The switch after Epic 3 (`self-host.md` § "The switch after Epic 3") also waits for Epic 3 retro item 1 (finding C1) to merge in a runner tag.
