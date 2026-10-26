@@ -147,7 +147,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/lane-lock.ts", "src/lane/processes.ts", "src/lane/wait.ts", "src/lane/heartbeat.ts", "test/lane/lane-lock.test.ts", "test/lane/processes.test.ts", "test/lane/wait.test.ts", "test/lane/heartbeat.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-24-bind-graph-approval-to-the-posted-delta"
         text: "Bind a graph-change approval to the delta the runner posted (Story 2.8 follow-up review F2-F4 and spec-2-8's deferral; Maintainer decisions Q1-Q3, 2026-10-25): every graph-change park counts only an approval submitted after the runner's delta comment (Q1); store the hash of the posted delta in a new park field, park.graph_posted (ledger schema_version 5), and at reconcile's take, when the gate's current hash differs from it or none was posted, re-park (the spine's parked -> parked edge), post the new delta and wait for a later approval (Q2); stamp the re-park with the forge now of the snapshot taken before the reviews are read, never a later time (Q3); tests for an approval before the delta, one after it, a hash change between park and take, no posted delta, and an approval in the gap between the review read and the re-park"
         route: lane
