@@ -80,13 +80,13 @@ development_status:
   2-12-claims-race-verification: done
   epic-2-retrospective: done
 
-  epic-3: backlog
+  epic-3: done
   3-1-the-codex-adapter: done
   3-2-the-pi-adapter: done
   3-3-session-vendors-and-the-reviewer-choice: done
   3-4-review-sessions: done
   3-5-the-review-gate-and-loopbacks: done
-  3-6-cross-vendor-verification: backlog
+  3-6-cross-vendor-verification: done
   epic-3-retrospective: optional
 
   epic-4: backlog
