@@ -283,7 +283,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/session.ts", "src/lane/passed-gate.ts", "src/lane/review-gate.ts", "src/lane/review-step.ts", "src/lane/merge-step.ts", "src/lane/reconcile-step.ts", "src/lane/planning-step.ts", "src/lane/retro-step.ts", "src/lane/ci-step.ts", "src/lane/merger.ts", "src/lane/graph-trees.ts", "src/lane/diff-paths.ts", "src/core/lane/write-check.ts", "src/core/review/agent-config.ts", "src/cli/lane-run.ts", "test/boundaries.test.ts", "test/support/boundaries.ts", "test/lane/**", "test/core/lane/**", "test/core/review/**", "test/cli/lane-run.test.ts"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-9-close-the-epic-3-verification-gaps"
         text: "Close Epic 3's verification gaps: tests for a takeover after a blocking review round and a codex usage-limit turn.failed with no rate_limits (pin today's behaviour); flagged-spec and loopback rehearsals in the cross-vendor suite; fix self-host.md's stale expected sandbox counts and note that pre-v5 awaiting-approval parks need a release (C4, C8)"
         route: lane
