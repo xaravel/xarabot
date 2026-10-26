@@ -2,10 +2,10 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { ok } from "../../src/core/result.ts";
+import { err as refused, ok } from "../../src/core/result.ts";
 import { redactSecrets } from "../../src/core/sanitize.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
-import { composeReviewers, credentialSecrets, laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
+import { checkReviewerCli, composeReviewers, credentialSecrets, laneRun, LANE_START_FAILED, type CliVersion, type LaneRunDeps } from "../../src/cli/lane-run.ts";
 import { PI_DEFERRAL } from "../../src/cli/pi-deferral.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
@@ -170,7 +170,8 @@ type Setup = {
   readonly codex?: readonly ("auth.json" | "api-key")[];
   readonly installed?: readonly string[];
   readonly env?: Record<string, string>;
-  readonly version?: string;
+  /** Each CLI's `--version` output by command, `null` for one not on PATH; over `VERSIONS`. */
+  readonly versions?: Versions;
   readonly installFails?: string;
   readonly connectFail?: string;
   readonly botUserFails?: boolean;
@@ -187,6 +188,20 @@ type Setup = {
   /** The lock's owner and process table; default `LOCK_OWNER` with no process for any PID. */
   readonly lock?: LaneRunDeps["lock"];
 };
+
+type Versions = Readonly<Record<string, string | null>>;
+
+/** The `--version` output of each agent CLI on a test host: both at their minimum version or newer. */
+const VERSIONS: Versions = { claude: "2.1.309 (Claude Code)", codex: "codex-cli 0.163.0" };
+
+/** A `--version` probe answering from `versions` over `VERSIONS`, recording each command it is asked for in `asked`. */
+function fakeCliVersion(versions: Versions = {}, asked: string[] = []): CliVersion {
+  return async (cmd) => {
+    asked.push(cmd);
+    const out = { ...VERSIONS, ...versions }[cmd] ?? null;
+    return out === null ? refused("refused", `agent CLI ${JSON.stringify(cmd)} not found on PATH`) : ok(out);
+  };
+}
 
 /** This run's lock owner in the lane-run tests. */
 const LOCK_OWNER = { pid: 777, command: "bun", startedMs: Date.parse("2026-10-23T10:00:00.250Z") };
@@ -210,6 +225,8 @@ type Ran = {
   /** The run lane's folder. */
   readonly laneDir: string;
   readonly installs: { version: string }[];
+  /** The commands the `--version` probe was asked for, in order. */
+  readonly asked: string[];
   readonly record: ReturnType<typeof fakeConnect>["record"];
   readonly w: World;
   /** How many times the run read the bot user id from the connection. */
@@ -278,11 +295,12 @@ async function laneRunWith(
   const coordinatorStarts: CoordinatorDeps[] = [];
   const out: string[] = [];
   const err: string[] = [];
+  const asked: string[] = [];
   const deps: LaneRunDeps = {
     env: w.env,
     connect,
     installRunner: installer.install,
-    cliVersion: async () => ok(o.version ?? "2.1.309 (Claude Code)"),
+    cliVersion: fakeCliVersion(o.versions, asked),
     start:
       start ??
       (async (d) => {
@@ -309,6 +327,7 @@ async function laneRunWith(
     coordinatorStarts,
     laneDir,
     installs: installer.calls,
+    asked,
     record: conn.record,
     w,
     botReads: () => botReads,
@@ -549,7 +568,7 @@ describe("xarabot lane run: refusals", () => {
     ["a pi-only policy", { main: { unattended: ["pi"] } }, `allows neither claude nor codex (allowed: pi), so the only reviewer would be pi: ${PI_DEFERRAL}`],
     ["an empty policy", { main: { unattended: [] } }, `allows neither claude nor codex (allowed: none), so the only reviewer would be pi: ${PI_DEFERRAL}`],
     ["effort refused", { host: hostYaml({ lanes: [{ model: "claude-opus-4-6", effort: "xhigh" }] }) }, "does not offer effort xhigh"],
-    ["CLI too old", { version: "2.0.0 (Claude Code)" }, "is older than"],
+    ["CLI too old", { versions: { claude: "2.0.0 (Claude Code)" } }, "is older than"],
     ["no credential", { credential: false }, "missing"],
     ["builders over the limit", { host: hostYaml({ lanes: [{}, other] }) }, "more than XARABOT_MAX_BUILDERS=1"],
     ["an invalid XARABOT_MAX_BUILDERS", { env: { XARABOT_MAX_BUILDERS: "many" } }, "is not a positive integer"],
@@ -754,7 +773,7 @@ describe("xarabot lane run: a passing start", () => {
 
 describe("xarabot lane run: a codex lane", () => {
   const CODEX_HOST = hostYaml({ lanes: [{ agent: "codex" }] });
-  const CODEX = { host: CODEX_HOST, main: { unattended: ["codex"] }, credential: false, version: "codex-cli 0.163.0" } as const;
+  const CODEX = { host: CODEX_HOST, main: { unattended: ["codex"] }, credential: false } as const;
 
   test("auth.json and codex-cli 0.163.0: the codex adapter is composed and every start check passes", async () => {
     const r = await laneRunWith({ ...CODEX, codex: ["auth.json"] });
@@ -787,15 +806,15 @@ describe("xarabot lane run: a codex lane", () => {
   });
 
   test("a bare X.Y.Z version is read too", async () => {
-    const r = await laneRunWith({ ...CODEX, codex: ["auth.json"], version: "0.164.2\n" });
+    const r = await laneRunWith({ ...CODEX, codex: ["auth.json"], versions: { codex: "0.164.2\n" } });
     expect(r.code).toBe(0);
   });
 
   test.each([
     ["both credential files", { codex: ["auth.json", "api-key"] }, "both auth.json and api-key exist"],
     ["no credential file", { codex: [] }, "codex: credential missing: neither auth.json nor api-key"],
-    ["an older CLI", { codex: ["auth.json"], version: "codex-cli 0.162.9" }, "codex: CLI 0.162.9 is older than 0.163.0"],
-    ["an unreadable version", { codex: ["auth.json"], version: "garbage" }, "codex: cannot read the CLI version"],
+    ["an older CLI", { codex: ["auth.json"], versions: { codex: "codex-cli 0.162.9" } }, "codex: CLI 0.162.9 is older than 0.163.0"],
+    ["an unreadable version", { codex: ["auth.json"], versions: { codex: "garbage" } }, "codex: cannot read the CLI version"],
     ["an unknown model", { codex: ["auth.json"], host: hostYaml({ lanes: [{ agent: "codex", model: "gpt-9-nope" }] }) }, "does not offer effort high (offered: none)"],
     ["a claude model on a codex lane", { codex: ["auth.json"], host: hostYaml({ lanes: [{ agent: "codex", model: "claude-opus-5-5" }] }) }, "codex: model claude-opus-5-5 does not offer effort high"],
   ] as const)("%s: a failed start, reason named", async (_name, o, why) => {
@@ -837,7 +856,7 @@ describe("credentialSecrets", () => {
 
 describe("xarabot lane run: the reviewer and the session vendor (Story 3.3)", () => {
   const CLAUDE_CREDENTIAL = "sk-ant-oat-fake\n";
-  const CODEX_LANE = { host: hostYaml({ lanes: [{ agent: "codex" }] }), credential: false, version: "codex-cli 0.163.0" } as const;
+  const CODEX_LANE = { host: hostYaml({ lanes: [{ agent: "codex" }] }), credential: false } as const;
   const BOTH = { unattended: ["claude", "codex"] } as const;
   /** The deps of the one PR step this run built. */
   const prDeps = (): prStep.PrStepDeps => {
@@ -991,11 +1010,11 @@ describe("xarabot lane run: the reviewers and the review gate (Story 3.5)", () =
 describe("composeReviewers (Story 3.5)", () => {
   const AGENT = { vendor: "claude", defaultModel: "claude-opus-5-5" } as Agent;
 
-  test("a failing reviewer that is not the start check's choice is left out, with a line; the others are composed", () => {
+  test("a failing reviewer that is not the start check's choice is left out, with a line; the others are composed", async () => {
     const w = world(dirs);
     const said: string[] = [];
     // No codex credential on this host: codex is not the choice here, so it is left out.
-    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: (t) => said.push(t) });
+    const r = await composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", cliVersion: fakeCliVersion(), say: (t) => said.push(t) });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(Object.keys(r.value.reviewers)).toEqual(["claude"]);
@@ -1004,26 +1023,125 @@ describe("composeReviewers (Story 3.5)", () => {
     expect(said[0]).toStartWith("reviewer codex left out: codex: credential missing: neither auth.json nor api-key");
   });
 
-  test("the start check's choice failing refuses", () => {
+  test("the start check's choice failing refuses", async () => {
     const w = world(dirs);
-    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "codex", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    const r = await composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "codex", choiceCredential: null, env: w.env, resultPath: "/r/result.json", cliVersion: fakeCliVersion(), say: () => {} });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.message).toContain("reviewer codex: codex: credential missing");
   });
 
-  test("another lane's adapter with its credential read joins, its text kept for the secrets", () => {
+  test("another lane's adapter with its credential read joins, its text kept for the secrets", async () => {
     const w = world(dirs);
     writeCodexCredential(w, "auth.json");
-    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    const r = await composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", cliVersion: fakeCliVersion(), say: () => {} });
     expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude", "codex"]);
     expect(r.ok && r.value.credentials).toEqual([CODEX_AUTH]);
   });
 
-  test("an adapter the policy does not allow is never composed; pi is never a reviewer", () => {
+  test("a reviewer that is not the choice is left out when its CLI is too old, with a line", async () => {
     const w = world(dirs);
     writeCodexCredential(w, "auth.json");
-    const r = composeReviewers({ allowed: ["claude", "pi"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    const said: string[] = [];
+    const cliVersion = fakeCliVersion({ codex: "codex-cli 0.162.9" });
+    const r = await composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", cliVersion, say: (t) => said.push(t) });
     expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude"]);
+    expect(r.ok && r.value.credentials).toEqual([]);
+    expect(said).toEqual(["reviewer codex left out: codex: CLI 0.162.9 is older than 0.163.0"]);
+  });
+
+  test("the start check's choice, already checked, is not probed again; the lane's own agent never is", async () => {
+    const w = world(dirs);
+    writeCodexCredential(w, "auth.json");
+    const asked: string[] = [];
+    const r = await composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "codex", choiceCredential: CODEX_AUTH, env: w.env, resultPath: "/r/result.json", cliVersion: fakeCliVersion({}, asked), say: () => {} });
+    expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude", "codex"]);
+    expect(asked).toEqual([]);
+  });
+
+  test("an adapter the policy does not allow is never composed; pi is never a reviewer", async () => {
+    const w = world(dirs);
+    writeCodexCredential(w, "auth.json");
+    const r = await composeReviewers({ allowed: ["claude", "pi"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", cliVersion: fakeCliVersion(), say: () => {} });
+    expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude"]);
+  });
+});
+
+describe("xarabot lane run: the reviewers' CLIs at lane start (retro item 3)", () => {
+  const BOTH = { unattended: ["claude", "codex"] } as const;
+  const CODEX_LANE = { host: hostYaml({ lanes: [{ agent: "codex" }] }), credential: true, codex: ["auth.json"] } as const;
+
+  test.each([
+    ["no codex on PATH", { codex: null }, 'start refused: reviewer codex: agent CLI "codex" not found on PATH'],
+    ["a codex older than 0.163.0", { codex: "codex-cli 0.162.9" }, "start refused: reviewer codex: codex: CLI 0.162.9 is older than 0.163.0"],
+    ["an unreadable codex version", { codex: "garbage" }, "start refused: reviewer codex: codex: cannot read the CLI version"],
+  ] as const)("a claude lane, policy [claude, codex], the codex credential present, %s: refused, failed-starts + 1", async (_name, versions, why) => {
+    const r = await laneRunWith({ main: BOTH, codex: ["auth.json"], versions });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(why);
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.starts).toEqual([]);
+    expect(r.asked).toEqual(["claude", "codex"]);
+  });
+
+  test("a codex lane, policy [claude, codex], a claude older than its minimum: refused naming the reviewer claude", async () => {
+    const r = await laneRunWith({ ...CODEX_LANE, main: BOTH, versions: { claude: "2.0.0 (Claude Code)" } });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("start refused: reviewer claude: claude: CLI 2.0.0 is older than");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.starts).toEqual([]);
+  });
+
+  test("a coordinator with a codex older than 0.163.0 is refused before its claim", async () => {
+    const r = await laneRunWith(
+      { host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] }), main: BOTH, codex: ["auth.json"], versions: { codex: "codex-cli 0.162.9" } },
+      [REPO, "coordinator"],
+    );
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("start refused: reviewer codex: codex: CLI 0.162.9 is older than 0.163.0");
+    expect(r.coordinatorStarts).toEqual([]);
+    expect(r.fake.control.ledgerLog()).toHaveLength(1);
+  });
+
+  test("both CLIs at their minimum: the lane starts, each CLI probed once", async () => {
+    const r = await laneRunWith({ main: BOTH, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.starts).toHaveLength(1);
+    expect(r.asked).toEqual(["claude", "codex"]);
+  });
+
+  test("policy [claude]: codex is no reviewer, so a host without it starts", async () => {
+    const r = await laneRunWith({ main: { unattended: ["claude"] }, versions: { codex: null } });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.asked).toEqual(["claude"]);
+  });
+});
+
+describe("checkReviewerCli (retro item 3)", () => {
+  test("probes the reviewer's own command and checks it at the default model and effort high", async () => {
+    const w = world(dirs);
+    writeCodexCredential(w, "auth.json");
+    const asked: string[] = [];
+    const r = await checkReviewerCli("codex", w.env, "/r/result.json", fakeCliVersion({ codex: "codex-cli 0.164.0" }, asked));
+    expect(r).toEqual(ok({ model: "gpt-6.1-sol", version: "0.164.0" }));
+    expect(asked).toEqual(["codex"]);
+  });
+
+  test("a CLI under the adapter's minimum version, or not on PATH, refuses", async () => {
+    const w = world(dirs);
+    const old = await checkReviewerCli("claude", w.env, "/r/result.json", fakeCliVersion({ claude: "2.0.0 (Claude Code)" }));
+    expect(!old.ok && old.error.message).toContain("claude: CLI 2.0.0 is older than");
+    const missing = await checkReviewerCli("claude", w.env, "/r/result.json", fakeCliVersion({ claude: null }));
+    expect(!missing.ok && missing.error.message).toBe('agent CLI "claude" not found on PATH');
+  });
+
+  test("an adapter that cannot be built refuses before any probe", async () => {
+    const w = world(dirs);
+    const asked: string[] = [];
+    const r = await checkReviewerCli("codex", w.env, "/r/result.json", fakeCliVersion({}, asked));
+    expect(!r.ok && r.error.message).toContain("codex: credential missing: neither auth.json nor api-key");
+    expect(asked).toEqual([]);
   });
 });
 
