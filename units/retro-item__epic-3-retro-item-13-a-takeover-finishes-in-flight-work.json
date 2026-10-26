@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-13-a-takeover-finishes-in-flight-work",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -10,7 +10,7 @@
     "src/core/next/next.ts",
     "test/core/next/next.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T21:20:36.183Z",
+  "heartbeat_at": "2026-10-26T21:23:20.020Z",
   "pr": 231,
   "pr_owner": "edanisko",
   "base_sha": "6661ba705b347f1060287a794eb8caa3ec19cadb",
