@@ -6,8 +6,11 @@ import {
   buildPrompt,
   buildRetroItemPrompt,
   buildRetroPrompt,
+  buildReviewPrompt,
   BUILD_RESULT_JSON_SCHEMA,
   RETRO_RESULT_JSON_SCHEMA,
+  REVIEW_RESULT_JSON_SCHEMA,
+  type BuildReviewPromptInput,
   type BuildRetroItemPromptInput,
   type BuildRetroPromptInput,
   type BuildPlanningPromptInput,
@@ -17,7 +20,7 @@ import {
   type StatusPlanningPromptUnit,
 } from "../../../src/core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE, type PromptTemplate } from "../../../src/core/prompt/template.ts";
-import { BuildResultSchema, PlanningResultSchema, RetroResultSchema } from "../../../src/core/schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema, RetroResultSchema, ReviewResultSchema } from "../../../src/core/schemas/session-result.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const KEY = "1-7-forge-port-fake-forge-and-contract-suite";
@@ -761,6 +764,8 @@ describe("Epic context and denials (Epic 2 retro item 8)", () => {
     { name: "status planning", p: planning({ unit: STATUS_UNIT }) },
     { name: "graph planning", p: planning({ unit: GRAPH_UNIT }) },
     { name: "retro", p: retro() },
+    { name: "normal review", p: review() },
+    { name: "follow-up review", p: review({ pass: "followup" }) },
   ];
 
   for (const c of [...story, ...items]) {
@@ -793,5 +798,136 @@ describe("Epic context and denials (Epic 2 retro item 8)", () => {
     const e = failure({ template: { ...PACKAGE_TEMPLATE, epic_context: undefined } as unknown as PromptTemplate });
     expect(e.kind).toBe("invalid-template");
     expect(e.message).toMatch(/template: epic_context/);
+  });
+});
+
+// ------------------------------------------------------------ review prompts (Story 3.4)
+
+const HEAD = "a".repeat(40);
+const MAIN = "b".repeat(40);
+const SPEC = "_bmad-output/implementation-artifacts/spec-3-4-review-sessions.md";
+const REVIEW_PARTS: readonly string[] = ["review", "review_followup", "review_rules", "result_review"];
+
+function reviewInput(patch: Partial<BuildReviewPromptInput> = {}): BuildReviewPromptInput {
+  return { template: PACKAGE_TEMPLATE, unit: { id: "story:3.4", head_sha: HEAD, main_sha: MAIN, spec_path: SPEC }, pass: "normal", result_path: RESULT, ...patch };
+}
+
+function review(patch: Partial<BuildReviewPromptInput> = {}): string {
+  const r = buildReviewPrompt(reviewInput(patch));
+  if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
+  return r.value;
+}
+
+function reviewFailure(patch: Partial<BuildReviewPromptInput>): { kind: string; message: string } {
+  const r = buildReviewPrompt(reviewInput(patch));
+  if (r.ok) throw new Error("expected an error");
+  return r.error;
+}
+
+describe("review prompt (Story 3.4)", () => {
+  const noSpec = { id: "retro-item:epic-2-retro-item-1-fix-x", head_sha: HEAD, main_sha: MAIN, spec_path: null };
+
+  test("names the unit, the reviewed SHA, main's SHA, the main...HEAD diff and the spec; runs no skill", () => {
+    const p = review();
+    expect(p).toContain("Review the change of `story:3.4` at commit `" + HEAD + "`.");
+    expect(p).toContain(`\`main\` is at \`${MAIN}\``);
+    expect(p).toContain("`git diff main...HEAD`");
+    expect(p).toContain(`The spec for this change is \`${SPEC}\``);
+    expect(p).toContain("Run no skill");
+    expect(p).not.toMatch(/\bbmad-/);
+    expect(p).toContain("show as uncommitted changes");
+    expect(p).toContain("change no tracked file in this checkout");
+    expect(p).toContain("Files the verification commands write are thrown away with the checkout.");
+  });
+  test("the review rules: work only here, denials and subagents, but no changes left for the runner and no clone", () => {
+    for (const pass of ["normal", "followup"] as const) {
+      const p = review({ pass });
+      const rules = p.slice(p.indexOf("# Rules\n"), p.indexOf("# Result"));
+      expect(rules).toContain("- Work only inside this checkout, your current working directory, and your temp folder.");
+      expect(rules).toContain("Record it in `denied_actions` in your result.");
+      expect(rules).toContain("Give each subagent you start the rule above");
+      expect(p).not.toContain("Leave your changes");
+      expect(p).not.toContain("the runner reads them from there");
+      expect(p).not.toMatch(/\bclone\b/);
+      expect(p).not.toContain(PACKAGE_TEMPLATE.rules);
+    }
+  });
+  test("a unit with no spec says so and names no spec", () => {
+    const p = review({ unit: noSpec });
+    expect(p).toContain("Review the change of `retro-item:epic-2-retro-item-1-fix-x`");
+    expect(p).toContain("This unit has no spec file");
+    expect(p).not.toContain("spec-");
+    expect(p).not.toContain("# Follow-up review");
+  });
+  test("task, rules, then the review result step with ReviewResultSchema's JSON Schema, last", () => {
+    for (const pass of ["normal", "followup"] as const) {
+      const p = review({ pass });
+      const order = ["# Task", ...(pass === "followup" ? ["# Follow-up review"] : []), "# Rules", "# Result"].map((x) => p.indexOf(x));
+      expect(order.every((x) => x >= 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+      const r = resultSection(p);
+      expect(p.endsWith(r)).toBe(true);
+      expect(r).toContain("`$XARABOT_RESULT`");
+      expect(r).toContain(`\`${RESULT}\``);
+      expect(r).toContain("for a `review` result");
+      expect(r).toContain(`- \`reviewed_sha\`: \`${HEAD}\``);
+      for (const f of ["`verdict`", "`pass`", "`changes-requested`", "`findings`", "`severity`", "`blocking`", "`file`", "`text`", "`denied_actions`"]) expect(r).toContain(f);
+      const m = /```json\n([\s\S]*?)\n```/.exec(r);
+      expect(JSON.parse(m?.[1] ?? "null")).toEqual(z.toJSONSchema(ReviewResultSchema));
+      expect(p).toContain(REVIEW_RESULT_JSON_SCHEMA);
+      expect(p.trimEnd().endsWith("Write this file last, and do nothing after it.")).toBe(true);
+      expect(p).not.toMatch(/\{\{[^{}]*\}\}/);
+    }
+  });
+  test("the follow-up names the spec and its Auto Run Result risks", () => {
+    const p = review({ pass: "followup" });
+    const f = p.slice(p.indexOf("# Follow-up review"), p.indexOf("# Rules"));
+    expect(f).toContain(`The spec \`${SPEC}\` asks for this follow-up review.`);
+    expect(f).toContain("`## Auto Run Result`");
+    expect(f).toContain("risks its build left unverified");
+    expect(review()).not.toContain("# Follow-up review");
+  });
+  test("BANNED finds nothing in either pass, with or without a spec, nor in any review part", () => {
+    for (const p of [review(), review({ pass: "followup" }), review({ unit: noSpec })]) {
+      expect(BANNED.filter((b) => b.pattern.test(p)).map((b) => b.what)).toEqual([]);
+    }
+    for (const part of REVIEW_PARTS) {
+      const text = PACKAGE_TEMPLATE[part as keyof PromptTemplate];
+      expect({ part, hits: BANNED.filter((b) => b.pattern.test(text)).map((b) => b.what) }).toEqual({ part, hits: [] });
+    }
+  });
+  test("carries no Epic context part", () => {
+    expect(review()).not.toContain("# Epic context");
+  });
+  const cases: { name: string; patch: Partial<BuildReviewPromptInput>; field: RegExp }[] = [
+    { name: "a follow-up with no spec", patch: { unit: noSpec, pass: "followup" }, field: /follow-up review needs a spec_path/ },
+    { name: "a short head SHA", patch: { unit: { id: "story:3.4", head_sha: "abc123", main_sha: MAIN, spec_path: SPEC } }, field: /unit\.head_sha/ },
+    { name: "an uppercase main SHA", patch: { unit: { id: "story:3.4", head_sha: HEAD, main_sha: MAIN.toUpperCase(), spec_path: SPEC } }, field: /unit\.main_sha/ },
+    { name: "an empty unit id", patch: { unit: { id: "", head_sha: HEAD, main_sha: MAIN, spec_path: SPEC } }, field: /unit\.id/ },
+    { name: "a backtick in the spec path", patch: { unit: { id: "story:3.4", head_sha: HEAD, main_sha: MAIN, spec_path: "a`b.md" } }, field: /unit\.spec_path/ },
+    { name: "a newline in the unit id", patch: { unit: { id: "story:3.4\nx", head_sha: HEAD, main_sha: MAIN, spec_path: SPEC } }, field: /unit\.id/ },
+    { name: "an unknown pass", patch: { pass: "third" as unknown as BuildReviewPromptInput["pass"] }, field: /pass/ },
+    { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
+  ];
+  for (const c of cases) {
+    test(`invalid input: ${c.name}`, () => {
+      const e = reviewFailure(c.patch);
+      expect(e.kind).toBe("invalid-input");
+      expect(e.message).toMatch(c.field);
+    });
+  }
+  test("a spec placeholder with no spec has no value", () => {
+    const e = reviewFailure({ unit: noSpec, template: { ...PACKAGE_TEMPLATE, review: "x {{spec_path}}" } });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/\{\{spec_path\}\} has no value in a normal review prompt/);
+  });
+  test("a Story placeholder in a review part has no value", () => {
+    const e = reviewFailure({ template: { ...PACKAGE_TEMPLATE, review_followup: "x {{story_id}}" }, pass: "followup" });
+    expect(e.message).toMatch(/\{\{story_id\}\} has no value in a follow-up review prompt/);
+  });
+  test("a missing review part", () => {
+    const e = reviewFailure({ template: { ...PACKAGE_TEMPLATE, result_review: undefined } as unknown as PromptTemplate });
+    expect(e.kind).toBe("invalid-template");
+    expect(e.message).toMatch(/template: result_review/);
   });
 });

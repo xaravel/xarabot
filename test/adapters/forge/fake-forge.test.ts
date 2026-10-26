@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFakeForge, gitBlobSha } from "../../../src/adapters/forge/fake/fake-forge.ts";
+import { createFakeForge, FAKE_BOT_LOGIN, gitBlobSha } from "../../../src/adapters/forge/fake/fake-forge.ts";
 import { serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
 import { unitPath } from "../../../src/core/schemas/ledger.ts";
 import { rec } from "../../core/ledger/fixtures.ts";
@@ -69,6 +69,28 @@ describe("fake forge", () => {
     value(await forge.comment(7, "🤖 hi", live()));
     expect(control.comments(7)).toEqual(["🤖 hi"]);
     expect(control.comments(8)).toEqual([]);
+  });
+
+  test("postReview records a commented review at commit_sha by the bot, and keeps the body", async () => {
+    const { forge, control } = createFakeForge({ now: "2026-10-25T10:00:00Z", firstPrNumber: 7 });
+    const head = control.makeCommit();
+    value(await forge.pushBranch({ branch: "story/3.4", expected_sha: null, sha: head }, live()));
+    value(await forge.openPr({ branch: "story/3.4", base: "main", title: "t", body: "b" }, live()));
+    value(await forge.postReview(7, { commit_sha: head, body: "🤖 review" }, live()));
+    expect(value(await forge.reviews(7, live()))).toEqual([{ author: FAKE_BOT_LOGIN, state: "commented", commit_sha: head, submitted_at: "2026-10-25T10:00:00Z" }]);
+    expect(control.reviewBodies(7)).toEqual(["🤖 review"]);
+    expect(control.comments(7)).toEqual([]);
+    const missing = await forge.postReview(8, { commit_sha: head, body: "x" }, live());
+    expect(missing.ok ? "ok" : missing.error.kind).toBe("not-found");
+  });
+
+  test("botLogin names the account postReview's reviews are by", async () => {
+    const { forge, control } = createFakeForge({ botLogin: "alice-xarabot[bot]" });
+    const head = control.makeCommit();
+    value(await forge.pushBranch({ branch: "story/3.4", expected_sha: null, sha: head }, live()));
+    const pr = value(await forge.openPr({ branch: "story/3.4", base: "main", title: "t", body: "b" }, live()));
+    value(await forge.postReview(pr.number, { commit_sha: head, body: "x" }, live()));
+    expect(value(await forge.reviews(pr.number, live())).map((r) => r.author)).toEqual(["alice-xarabot[bot]"]);
   });
 
   test("snapshot traces ledger, main, prs in order, once each", async () => {

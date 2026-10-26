@@ -37,7 +37,12 @@ export type FakeForgeOptions = {
   readonly firstPrNumber?: number;
   /** The ledger root's files (path → JSON text); default none. */
   readonly ledger?: Readonly<Record<string, string>>;
+  /** The login `postReview`'s reviews are by; default `FAKE_BOT_LOGIN`. */
+  readonly botLogin?: string;
 };
+
+/** The bot account the fake's own reviews are by, unless `botLogin` names another. */
+export const FAKE_BOT_LOGIN = "fake-xarabot[bot]";
 
 /** One commit on the ledger branch. `parent` is `null` for the empty root. */
 export type FakeLedgerCommit = {
@@ -77,6 +82,8 @@ export type FakeForgeControl = {
   addReview(pr: number, review: ForgeReview): void;
   /** Comment bodies on PR `pr`, oldest first. */
   comments(pr: number): string[];
+  /** The bodies of the reviews `postReview` posted on PR `pr`, oldest first. */
+  reviewBodies(pr: number): string[];
   alerts(): FakeAlert[];
   /** Queued PR numbers, head first. */
   queue(): number[];
@@ -155,6 +162,8 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   let nextPr = options.firstPrNumber ?? 1;
   const comments = new Map<number, string[]>();
   const reviews = new Map<number, ForgeReview[]>();
+  const reviewBodies = new Map<number, string[]>();
+  const botLogin = options.botLogin ?? FAKE_BOT_LOGIN;
   let nextComment = 1;
   const checks = new Map<GitSha, ForgeCheck[]>();
   const ciLogs = new Map<GitSha, Map<string, string>>();
@@ -366,6 +375,17 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         return forgeOk({ id: String(nextComment++) });
       }),
 
+    postReview: (pr, review, opts) =>
+      call("postReview", opts, () => {
+        const found = findPr(pr, "postReview");
+        if (!found.ok) return found;
+        const list = reviews.get(pr) ?? [];
+        list.push({ author: botLogin, state: "commented", commit_sha: review.commit_sha, submitted_at: now });
+        reviews.set(pr, list);
+        reviewBodies.set(pr, [...(reviewBodies.get(pr) ?? []), review.body]);
+        return forgeOk({ id: String(nextComment++) });
+      }),
+
     checks: (sha, opts) => call("checks", opts, () => forgeOk({ checks: (checks.get(sha) ?? []).map((c) => ({ ...c })) })),
 
     enqueue: (pr, expectedHead, opts) =>
@@ -478,6 +498,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       reviews.set(pr, list);
     },
     comments: (pr) => [...(comments.get(pr) ?? [])],
+    reviewBodies: (pr) => [...(reviewBodies.get(pr) ?? [])],
     alerts: () => alerts.map((a) => ({ ...a })),
     queue: () => [...queue],
     trace: () => [...trace],

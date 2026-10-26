@@ -61,6 +61,8 @@ export const GITHUB_OPERATIONS = {
   createPull: { name: "createPull", method: "POST", permission: "pull_requests: write" },
   updatePull: { name: "updatePull", method: "PATCH", permission: "pull_requests: write" },
   createComment: { name: "createComment", method: "POST", permission: "pull_requests: write" },
+  /** A comment-only review (`event: "COMMENT"`): never an approval or a change request. */
+  createReview: { name: "createReview", method: "POST", permission: "pull_requests: write" },
   listCheckRuns: { name: "listCheckRuns", method: "GET", permission: "checks: read", notFoundOn: 422 },
   getCombinedStatus: { name: "getCombinedStatus", method: "GET", permission: "statuses: read", notFoundOn: 422 },
   pullQueueState: { name: "pullQueueState", method: "POST", permission: "pull_requests: write" },

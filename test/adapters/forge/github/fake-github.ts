@@ -101,6 +101,8 @@ export type FakeReview = {
   readonly state: string;
   readonly commit_id: string | null;
   readonly submitted_at: string | null;
+  /** The review's body; default `""`. */
+  readonly body?: string;
 };
 
 /** A comment on an issue or PR. */
@@ -141,6 +143,10 @@ export type FakeGitHubControl = {
   commentRecords(number: number): FakeComment[];
   /** Appends a review to PR `number`, which must exist. */
   addReview(number: number, review: FakeReview): void;
+  /** Every review on PR `number`, oldest first, as `POST /pulls/<n>/reviews` and `addReview` stored them. */
+  reviews(number: number): FakeReview[];
+  /** The bodies of the bot's reviews on PR `number` (`POST /pulls/<n>/reviews`), oldest first. */
+  reviewBodies(number: number): string[];
   /** Adds a comment by `login` on issue or PR `number`, at the clock's time. */
   addComment(number: number, body: string, login: string): void;
   /** Every issue (not PRs), ascending by number. */
@@ -670,8 +676,23 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
         state: r.state,
         commit_id: r.commit_id,
         submitted_at: r.submitted_at,
+        body: r.body ?? "",
       }));
       return json(200, list.slice((page - 1) * perPage, page * perPage));
+    }
+    if (method === "POST" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(route)) !== null) {
+      const n = Number(m[1]);
+      const p = pulls.get(n);
+      if (p === undefined) return notFound();
+      const commitId = b?.["commit_id"];
+      const text = b?.["body"];
+      const event = b?.["event"];
+      if (typeof commitId !== "string" || typeof text !== "string" || typeof event !== "string") return unprocessable("Invalid request.");
+      // An App's installation token may only comment here: an approval or a change request is refused.
+      if (event !== "COMMENT") return unprocessable(`Unprocessable Entity: event ${event} is not allowed`);
+      const review = { login: botLogin, state: "COMMENTED", commit_id: commitId, submitted_at: iso(clock), body: text, id: reviewCounter++ };
+      reviews.set(n, [...(reviews.get(n) ?? []), review]);
+      return json(200, { id: review.id, user: { login: botLogin }, state: review.state, commit_id: commitId, submitted_at: review.submitted_at, body: text });
     }
     if (method === "POST" && route === "/pulls") {
       const title = b?.["title"];
@@ -900,6 +921,8 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       if (!pulls.has(number)) throw new Error(`addReview: no PR #${number}`);
       reviews.set(number, [...(reviews.get(number) ?? []), { ...review, id: reviewCounter++ }]);
     },
+    reviews: (number) => (reviews.get(number) ?? []).map(({ id: _id, ...r }) => ({ ...r })),
+    reviewBodies: (number) => (reviews.get(number) ?? []).filter((r) => r.login === botLogin).map((r) => r.body ?? ""),
     addComment(number, text, login) {
       addComment(number, text, login);
     },

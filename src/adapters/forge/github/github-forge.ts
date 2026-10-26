@@ -19,6 +19,7 @@ import {
   type ForgeReview,
   type ForgeSnapshot,
   type GitSha,
+  type PostReviewRequest,
   type PrefetchRequest,
   type PushLease,
   type QueueState,
@@ -49,8 +50,9 @@ import { createTokenSource } from "./tokens.ts";
  * API (`snapshot` reads blobs and each unit's PR, with its reviewers' latest
  * decisive reviews, over GraphQL); `pushBranch` runs `git push
  * --force-with-lease` from the lane's private `runner.git`; the PR
- * operations, `comment`, `checks` (check runs plus the combined commit
- * status) and the CI-log prefetch use REST; `enqueue` and
+ * operations, `comment`, `postReview` (a comment-only review: the adapter
+ * never sends an `APPROVE` or `REQUEST_CHANGES` event), `checks` (check runs
+ * plus the combined commit status) and the CI-log prefetch use REST; `enqueue` and
  * `dequeue` read the PR's merge-queue state over GraphQL (as the read-only
  * `queueState` does) and then call `enqueuePullRequest` or
  * `dequeuePullRequest` (the merge queue is the only merge path; the adapter
@@ -756,6 +758,19 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     });
   }
 
+  async function postReview(pr: number, review: PostReviewRequest, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>> {
+    return guarded("postReview", opts, async (ctx) => {
+      const found = await getPr(ctx, pr);
+      if (!found.ok) return found;
+      const op = GITHUB_OPERATIONS.createReview;
+      const r = await api(ctx, op, `/pulls/${pr}/reviews`, { commit_id: review.commit_sha, body: review.body, event: "COMMENT" });
+      if (!r.ok) return r;
+      const id = asObj(r.value.body)?.["id"];
+      if (typeof id !== "number" && typeof id !== "string") return malformed(op, "no id");
+      return forgeOk({ id: String(id) });
+    });
+  }
+
   // ------------------------------------------------------------ prefetch
 
   /** The log text of one Actions job: downloaded from the redirect without `Authorization`. */
@@ -1062,6 +1077,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     listPrsByBranch,
     reviews,
     comment,
+    postReview,
     checks,
     enqueue,
     dequeue,

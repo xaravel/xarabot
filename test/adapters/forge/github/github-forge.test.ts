@@ -484,6 +484,7 @@ describe("every operation", () => {
       listPrsByBranch: () => f.listPrsByBranch("story/9.9", o),
       reviews: () => f.reviews(1, o),
       comment: () => f.comment(1, "b", o),
+      postReview: () => f.postReview(1, { commit_sha: sha, body: "b" }, o),
       checks: () => f.checks(sha, o),
       enqueue: () => f.enqueue(1, sha, o),
       dequeue: () => f.dequeue(1, o),

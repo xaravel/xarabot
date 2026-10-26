@@ -9,7 +9,9 @@ import type { PrState } from "../core/schemas/snapshot.ts";
  * `ForgeResult`. Every call takes an `AbortSignal` deadline as its last
  * argument; a call whose signal is aborted before it completes returns
  * `transient` and changes nothing. There is deliberately no approve, merge,
- * admin-merge, auto-merge or branch-delete operation.
+ * admin-merge, auto-merge or branch-delete operation: a review the runner
+ * posts (`postReview`) is a comment-only review, never an approval or a
+ * change request.
  *
  * Error kinds: `auth`, `forbidden` and `uninstalled` stop the lane;
  * `rate-limited` and `transient` are backed off and retried; `rejected` (the
@@ -166,6 +168,9 @@ export type ForgeReview = {
   readonly submitted_at: string | null;
 };
 
+/** A review `postReview` posts: its body, on the commit it reviewed. */
+export type PostReviewRequest = { readonly commit_sha: GitSha; readonly body: string };
+
 export type Forge = {
   snapshot(opts: SnapshotOpts): Promise<ForgeResult<ForgeSnapshot>>;
   /** Fast-forward only: the tip must still be `oldSha`, else `conflict`. One new commit. */
@@ -186,6 +191,12 @@ export type Forge = {
   reviews(pr: number, opts: CallOpts): Promise<ForgeResult<readonly ForgeReview[]>>;
   /** Posts `body` verbatim as one comment on PR `pr`. */
   comment(pr: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>>;
+  /**
+   * Posts `review.body` verbatim as one comment-only review of PR `pr` at
+   * `review.commit_sha` (FR8, AR17): never an approval or a change request.
+   * A missing PR is `not-found`.
+   */
+  postReview(pr: number, review: PostReviewRequest, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>>;
   /** The checks on `sha`; an empty list means pending. */
   checks(sha: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly checks: readonly ForgeCheck[] }>>;
   /** The PR must be open with head `expectedHead`, else `conflict`. Already queued is `ok`. */
@@ -214,6 +225,7 @@ export const FORGE_OPERATIONS = [
   "listPrsByBranch",
   "reviews",
   "comment",
+  "postReview",
   "checks",
   "enqueue",
   "dequeue",

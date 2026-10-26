@@ -2,6 +2,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { runGit, type GitIdentity, type GitRun, type RunGitOpts } from "../adapters/forge/github/runner-git.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import { isAgentConfigPath } from "../core/review/agent-config.ts";
 import { isUnitId, unitFileName, type UnitRecord } from "../core/schemas/ledger.ts";
 import { removeTree } from "../sandbox/vendor-home.ts";
 
@@ -292,6 +293,79 @@ function fsError(what: string, e: unknown): { readonly ok: false; readonly error
   return err("git", `${what}: ${e instanceof Error ? e.message : String(e)}`);
 }
 
+/** What `git init` probed for runner.git's file system, and its object format: what a hand-written `.git` repeats. */
+export type GitDirSettings = { readonly sha256: boolean; readonly probed: readonly (readonly [string, string])[] };
+
+/** `gitDir`'s object format and the `core.ignorecase` and `core.precomposeunicode` it recorded. */
+export async function gitDirSettings(gitDir: string, signal: AbortSignal): Promise<CloneResult<GitDirSettings>> {
+  const objectFormat = await git(gitDir, ["rev-parse", "--show-object-format"], { signal });
+  if (!objectFormat.ok) return objectFormat;
+  const sha256 = objectFormat.value.trim() === "sha256";
+  // What `git init` probed for this file system, as runner.git recorded it.
+  const probed: [string, string][] = [];
+  for (const key of ["ignorecase", "precomposeunicode"]) {
+    const got = await gitRun(gitDir, ["config", "--type=bool", "--get", `core.${key}`], { signal });
+    if (!got.ok) return got;
+    const v = got.value.stdout.trim();
+    if (got.value.code === 0 && (v === "true" || v === "false")) probed.push([key, v]);
+  }
+  return ok({ sha256, probed });
+}
+
+/** Removes `dir` (unlocking it first) and makes it again, empty, mode 755. Throws on a filesystem error. */
+export function freshDir(dir: string): void {
+  removeTree(dir);
+  mkdirSync(dirname(dir), { recursive: true });
+  mkdirSync(dir, { mode: 0o755 });
+}
+
+export type DotGit = {
+  /** `HEAD`'s text, without its newline: `ref: refs/heads/<branch>`, or a SHA for a detached `HEAD`. */
+  readonly head: string;
+  /** Full ref name → SHA, each written as a loose ref file. */
+  readonly refs: Readonly<Record<string, string>>;
+  readonly settings: GitDirSettings;
+  /** Lines added to `[core]` after the probed keys, such as `hooksPath = /dev/null`. */
+  readonly core?: readonly string[];
+};
+
+/** Writes a fresh `.git` by hand at `dotGit`: its folders, refs, `HEAD` and config, no objects. Throws on a filesystem error. */
+export function writeDotGit(dotGit: string, d: DotGit): void {
+  for (const dir of ["refs/tags", "objects/info", "objects/pack"]) mkdirSync(join(dotGit, dir), { recursive: true });
+  for (const [ref, sha] of Object.entries(d.refs)) {
+    const file = join(dotGit, ...ref.split("/"));
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${sha}\n`);
+  }
+  writeFileSync(join(dotGit, "HEAD"), `${d.head}\n`);
+  const { sha256, probed } = d.settings;
+  let config = `[core]\n\trepositoryformatversion = ${sha256 ? 1 : 0}\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n`;
+  for (const [key, v] of probed) config += `\t${key} = ${v}\n`;
+  for (const line of d.core ?? []) config += `\t${line}\n`;
+  if (sha256) config += "[extensions]\n\tobjectformat = sha256\n";
+  writeFileSync(join(dotGit, "config"), config);
+}
+
+/** One pack of everything reachable from `tips`, made in a temp folder inside `gitDir`, then copied into `dotGit`. */
+export async function copyPack(gitDir: string, dotGit: string, tips: readonly string[], what: string, signal: AbortSignal): Promise<CloneResult<void>> {
+  let packDir: string;
+  try {
+    packDir = mkdtempSync(join(gitDir, "xarabot-pack-"));
+  } catch (e) {
+    return fsError(`${what}: cannot create a temp pack folder`, e);
+  }
+  try {
+    const packed = await git(gitDir, ["pack-objects", "--quiet", "--revs", join(packDir, "pack")], { signal, stdin: tips.map((t) => `${t}\n`).join("") });
+    if (!packed.ok) return packed;
+    for (const f of readdirSync(packDir)) copyFileSync(join(packDir, f), join(dotGit, "objects", "pack", f));
+  } catch (e) {
+    return fsError(`${what}: cannot copy the pack`, e);
+  } finally {
+    rmSync(packDir, { recursive: true, force: true });
+  }
+  return ok(undefined);
+}
+
 /**
  * Rebuilds the clone, `.git` included, from `runner.git` at `sha` on
  * `branch`: saves any session's work as a wip, removes the clone, writes a
@@ -315,58 +389,25 @@ export async function rebuildClone(params: RebuildParams): Promise<CloneResult<R
   if (format.value.code !== 0) return err("invalid", `rebuildClone: ${JSON.stringify(branch)} is not a valid branch name`);
   const exists = await needCommit(gitDir, sha, "rebuildClone", signal);
   if (!exists.ok) return exists;
-  const objectFormat = await git(gitDir, ["rev-parse", "--show-object-format"], { signal });
-  if (!objectFormat.ok) return objectFormat;
-  const sha256 = objectFormat.value.trim() === "sha256";
+  const settings = await gitDirSettings(gitDir, signal);
+  if (!settings.ok) return settings;
   const tree = await git(gitDir, ["rev-parse", `${sha}^{tree}`], { signal });
   if (!tree.ok) return tree;
-
-  // What `git init` probed for this file system, as runner.git recorded it.
-  const probed: [string, string][] = [];
-  for (const key of ["ignorecase", "precomposeunicode"]) {
-    const got = await gitRun(gitDir, ["config", "--type=bool", "--get", `core.${key}`], { signal });
-    if (!got.ok) return got;
-    const v = got.value.stdout.trim();
-    if (got.value.code === 0 && (v === "true" || v === "false")) probed.push([key, v]);
-  }
 
   // 2. Save the session's work, then remove the clone.
   const saved = await saveWip({ gitDir, clone, signal });
   if (!saved.ok) return saved;
   const dotGit = join(clone, ".git");
   try {
-    removeTree(clone);
-    mkdirSync(dirname(clone), { recursive: true });
-    mkdirSync(clone, { mode: 0o755 });
-    for (const d of ["refs/tags", "objects/info", "objects/pack"]) mkdirSync(join(dotGit, d), { recursive: true });
-    const headFile = join(dotGit, "refs", "heads", ...branch.split("/"));
-    mkdirSync(dirname(headFile), { recursive: true });
-    writeFileSync(headFile, `${sha}\n`);
-    writeFileSync(join(dotGit, "HEAD"), `ref: refs/heads/${branch}\n`);
-    let config = `[core]\n\trepositoryformatversion = ${sha256 ? 1 : 0}\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n`;
-    for (const [key, v] of probed) config += `\t${key} = ${v}\n`;
-    if (sha256) config += "[extensions]\n\tobjectformat = sha256\n";
-    writeFileSync(join(dotGit, "config"), config);
+    freshDir(clone);
+    writeDotGit(dotGit, { head: `ref: refs/heads/${branch}`, refs: { [`refs/heads/${branch}`]: sha }, settings: settings.value });
   } catch (e) {
     return fsError("rebuildClone: cannot write the clone", e);
   }
 
   // 3. The pack: made in a temp folder inside runner.git, then copied in.
-  let packDir: string;
-  try {
-    packDir = mkdtempSync(join(gitDir, "xarabot-pack-"));
-  } catch (e) {
-    return fsError("rebuildClone: cannot create a temp pack folder", e);
-  }
-  try {
-    const packed = await git(gitDir, ["pack-objects", "--quiet", "--revs", join(packDir, "pack")], { signal, stdin: `${sha}\n` });
-    if (!packed.ok) return packed;
-    for (const f of readdirSync(packDir)) copyFileSync(join(packDir, f), join(dotGit, "objects", "pack", f));
-  } catch (e) {
-    return fsError("rebuildClone: cannot copy the pack", e);
-  } finally {
-    rmSync(packDir, { recursive: true, force: true });
-  }
+  const packed = await copyPack(gitDir, dotGit, [sha], "rebuildClone", signal);
+  if (!packed.ok) return packed;
 
   // 4. Working tree and index.
   const indexFile = join(dotGit, "index");
@@ -392,6 +433,123 @@ export async function rebuildClone(params: RebuildParams): Promise<CloneResult<R
   const marked = await writeMarker(gitDir, { unit, generation, branch, start: sha }, tree.value.trim(), signal);
   if (!marked.ok) return marked;
   return ok({ sha, branch, resumed });
+}
+
+// ------------------------------------------------------- review checkout
+
+/** The branch name the review checkout's `main` ref has: the reviewer diffs `main...HEAD`. */
+export const REVIEW_MAIN_REF = "refs/heads/main";
+
+export type ReviewCheckoutParams = {
+  readonly gitDir: string;
+  /** The checkout folder, `<lane>/review`; never the agent's clone. */
+  readonly dir: string;
+  /** The reviewed SHA: the checkout's detached `HEAD`. */
+  readonly head: string;
+  /** `main`'s SHA: the checkout's `main`, and the source of its agent config. */
+  readonly main: string;
+  readonly signal: AbortSignal;
+};
+
+/** One `ls-tree -r -z` entry. */
+type TreeLine = { readonly mode: string; readonly sha: string; readonly path: string };
+
+/** Every blob, symlink and gitlink entry of `rev`'s tree, recursively. */
+async function treeLines(gitDir: string, rev: string, signal: AbortSignal): Promise<CloneResult<TreeLine[]>> {
+  const r = await git(gitDir, ["ls-tree", "-r", "-z", "--full-tree", rev], { signal });
+  if (!r.ok) return r;
+  const out: TreeLine[] = [];
+  for (const line of r.value.split("\0")) {
+    if (line === "") continue;
+    const m = /^(\d+) \w+ ([0-9a-f]+)\t([\s\S]+)$/.exec(line);
+    if (m === null) return err("git", `ls-tree: cannot read ${JSON.stringify(line)}`);
+    out.push({ mode: m[1] as string, sha: m[2] as string, path: m[3] as string });
+  }
+  return ok(out);
+}
+
+/**
+ * The tree the review checkout's working tree is written from: `head`'s,
+ * with every agent config path (`isAgentConfigPath`) replaced by `main`'s version, or
+ * removed when `main` has none. Made through a temp index inside `gitDir`.
+ */
+async function reviewTree(gitDir: string, head: string, main: string, signal: AbortSignal): Promise<CloneResult<string>> {
+  const headLines = await treeLines(gitDir, head, signal);
+  if (!headLines.ok) return headLines;
+  const mainLines = await treeLines(gitDir, main, signal);
+  if (!mainLines.ok) return mainLines;
+  const drop = headLines.value.filter((l) => isAgentConfigPath(l.path));
+  const take = mainLines.value.filter((l) => isAgentConfigPath(l.path));
+  if (drop.length === 0 && take.length === 0) {
+    const tree = await git(gitDir, ["rev-parse", `${head}^{tree}`], { signal });
+    return tree.ok ? ok(tree.value.trim()) : tree;
+  }
+  let tmp: string;
+  try {
+    tmp = mkdtempSync(join(gitDir, "xarabot-review-"));
+  } catch (e) {
+    return fsError(`review checkout: cannot create a temp index in ${gitDir}`, e);
+  }
+  const indexFile = join(tmp, "index");
+  try {
+    const seeded = await git(gitDir, ["read-tree", head], { signal, indexFile });
+    if (!seeded.ok) return seeded;
+    // `--index-info` needs no work tree; a mode-0 line removes the path, and `-z` takes any path.
+    // `--replace`: a restored path whose folder is a file at `head` (or the reverse) replaces that entry.
+    const info = [...drop.map((l) => `0 ${"0".repeat(l.sha.length)}\t${l.path}\0`), ...take.map((l) => `${l.mode} ${l.sha}\t${l.path}\0`)].join("");
+    const updated = await git(gitDir, ["update-index", "--add", "--replace", "-z", "--index-info"], { signal, indexFile, stdin: info });
+    if (!updated.ok) return updated;
+    const written = await git(gitDir, ["write-tree"], { signal, indexFile });
+    if (!written.ok) return written;
+    return ok(written.value.trim());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Writes the review checkout (Story 3.4, AR16, AR22) at `dir` from
+ * `runner.git`: removes `dir`, then writes its `.git` by hand, as
+ * `rebuildClone` does, with a detached `HEAD` at `head`, `main`'s ref at
+ * `main`, `core.hooksPath = /dev/null` and one pack of everything reachable
+ * from both. The working tree is `head`'s with every agent config path
+ * (`isAgentConfigPath`) replaced by `main`'s version, or removed when `main` has
+ * none; the index stays at `head`, so the restored paths show as
+ * uncommitted changes. It reads and writes no marker ref, no wip ref and
+ * nothing of the agent's clone.
+ */
+export async function writeReviewCheckout(params: ReviewCheckoutParams): Promise<CloneResult<{ readonly sha: string }>> {
+  const { head, main, signal } = params;
+  if (!isAbsolute(params.dir)) return err("invalid", `review checkout: ${JSON.stringify(params.dir)} is not absolute`);
+  const gitDir = resolve(params.gitDir);
+  const dir = resolve(params.dir);
+  if (within(gitDir, dir) || within(dir, gitDir)) return err("invalid", `review checkout: ${dir} and runner.git ${gitDir} overlap`);
+  const hasHead = await needCommit(gitDir, head, "review checkout head", signal);
+  if (!hasHead.ok) return hasHead;
+  const hasMain = await needCommit(gitDir, main, "review checkout main", signal);
+  if (!hasMain.ok) return hasMain;
+  const settings = await gitDirSettings(gitDir, signal);
+  if (!settings.ok) return settings;
+  const tree = await reviewTree(gitDir, head, main, signal);
+  if (!tree.ok) return tree;
+
+  const dotGit = join(dir, ".git");
+  try {
+    freshDir(dir);
+    writeDotGit(dotGit, { head, refs: { [REVIEW_MAIN_REF]: main }, settings: settings.value, core: ["hooksPath = /dev/null"] });
+  } catch (e) {
+    return fsError("review checkout: cannot write it", e);
+  }
+  const packed = await copyPack(gitDir, dotGit, [head, main], "review checkout", signal);
+  if (!packed.ok) return packed;
+
+  // The working tree from the review tree; then the index back at `head`, with no `-u`.
+  const indexFile = join(dotGit, "index");
+  const written = await git(gitDir, ["read-tree", "--reset", "-u", tree.value], { signal, workTree: dir, indexFile });
+  if (!written.ok) return written;
+  const reset = await git(gitDir, ["read-tree", "--reset", head], { signal, workTree: dir, indexFile });
+  if (!reset.ok) return reset;
+  return ok({ sha: head });
 }
 
 // ------------------------------------------------------------ start SHA

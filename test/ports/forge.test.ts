@@ -30,6 +30,7 @@ type Operations =
   | "listPrsByBranch"
   | "reviews"
   | "comment"
+  | "postReview"
   | "checks"
   | "enqueue"
   | "dequeue"
@@ -65,7 +66,7 @@ function feed(s: ForgeSnapshot): Pick<AssembleInput, "now" | "main_sha" | "tree"
 describe("Forge port", () => {
   test("lists the operations and the nine AR33 error kinds", () => {
     expect([...FORGE_OPERATIONS].sort()).toEqual(
-      ["alert", "branchHead", "checks", "closePr", "comment", "dequeue", "enqueue", "ledgerSwap", "listPrsByBranch", "openPr", "prefetch", "pushBranch", "queueState", "reviews", "snapshot", "updatePr"],
+      ["alert", "branchHead", "checks", "closePr", "comment", "dequeue", "enqueue", "ledgerSwap", "listPrsByBranch", "openPr", "postReview", "prefetch", "pushBranch", "queueState", "reviews", "snapshot", "updatePr"],
     );
     expect([...FORGE_ERROR_KINDS].sort()).toEqual(
       ["auth", "conflict", "forbidden", "not-fast-forward", "not-found", "rate-limited", "rejected", "transient", "uninstalled"],

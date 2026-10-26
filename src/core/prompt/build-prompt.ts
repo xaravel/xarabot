@@ -2,8 +2,9 @@ import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
 import { describeIssues } from "../schemas/common.ts";
 import { HumanLiveStepSchema, type HumanLiveStep } from "../schemas/human-live-steps.ts";
+import { GitSha } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
-import { BuildResultSchema, PlanningResultSchema, RetroResultSchema } from "../schemas/session-result.ts";
+import { BuildResultSchema, PlanningResultSchema, RetroResultSchema, ReviewResultSchema } from "../schemas/session-result.ts";
 import { STORY_ID_PATTERN } from "../story-id.ts";
 import { PLACEHOLDERS, type Placeholder, type PromptTemplate } from "./template.ts";
 
@@ -43,6 +44,9 @@ export const PLANNING_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(Plannin
 
 /** The `retro` result's JSON Schema, embedded in a retro prompt's result step (Story 2.9). */
 export const RETRO_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(RetroResultSchema), null, 2);
+
+/** The `review` result's JSON Schema, embedded in a review prompt's result step (Story 3.4). */
+export const REVIEW_RESULT_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(ReviewResultSchema), null, 2);
 
 const PATH_MESSAGE = "must be an absolute path with no control character or backtick";
 
@@ -107,6 +111,10 @@ const TemplateSchema = z.strictObject({
   retro_item: z.string(),
   retro_item_ci_fix: z.string(),
   result_retro_item: z.string(),
+  review: z.string(),
+  review_followup: z.string(),
+  review_rules: z.string(),
+  result_review: z.string(),
 });
 
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
@@ -508,4 +516,77 @@ export function buildRetroItemPrompt(input: BuildRetroItemPromptInput): Result<s
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_retro_item);
   return fill(parts, values, `a retro-item ${mode.mode} prompt`);
+}
+
+// ------------------------------------------------------------ review prompts
+
+/**
+ * The unit a review pass reviews (Story 3.4): its id, the SHA the runner
+ * checked out, `main`'s SHA (the change is `main...HEAD`), and, for a Story,
+ * its spec file's repo-relative path; `null` for a unit with no spec.
+ */
+export type ReviewPromptUnit = {
+  readonly id: string;
+  readonly head_sha: string;
+  readonly main_sha: string;
+  readonly spec_path: string | null;
+};
+
+/** The normal review, or the follow-up review a spec flags. */
+export type ReviewPass = "normal" | "followup";
+
+export type BuildReviewPromptInput = {
+  readonly template: PromptTemplate;
+  readonly unit: ReviewPromptUnit;
+  readonly pass: ReviewPass;
+  readonly result_path: string;
+};
+
+const ReviewInputSchema = z.strictObject({
+  unit: z.strictObject({
+    id: SafeText,
+    head_sha: GitSha,
+    main_sha: GitSha,
+    spec_path: SafeText.nullable(),
+  }),
+  pass: z.enum(["normal", "followup"]),
+  result_path: AbsolutePath,
+});
+
+/**
+ * Builds a review prompt (Story 3.4, FR8, AR15): the `review` task, which
+ * runs no skill and names the unit, the reviewed SHA, `main`'s SHA and the
+ * spec (or says there is none); in the follow-up pass the `review_followup`
+ * part after it, naming the spec and its Auto Run Result risks; the review
+ * rules (no changes left for the runner);
+ * and the `review` result step with its JSON Schema last. A follow-up with
+ * no spec is `invalid-input`. Pure; placeholders are filled in one pass.
+ */
+export function buildReviewPrompt(input: BuildReviewPromptInput): Result<string, BuildPromptError> {
+  const template = checkTemplate(input.template);
+  if (!template.ok) return template;
+  const t = template.value;
+
+  const parsed = ReviewInputSchema.safeParse({ unit: input.unit, pass: input.pass, result_path: input.result_path });
+  if (!parsed.success) return err("invalid-input", describeIssues(parsed.error));
+  const { unit, pass, result_path } = parsed.data;
+  if (pass === "followup" && unit.spec_path === null) return err("invalid-input", "pass: a follow-up review needs a spec_path");
+
+  const values: Partial<Record<Placeholder, string>> = {
+    review_unit: unit.id,
+    review_sha: unit.head_sha,
+    review_main_sha: unit.main_sha,
+    review_spec:
+      unit.spec_path === null
+        ? "This unit has no spec file: review the change against what its commits say it does and against the code around it."
+        : `The spec for this change is \`${unit.spec_path}\`: it states the intent, the boundaries and the acceptance criteria the change must meet. Review the change against it.`,
+    result_path,
+    result_schema: REVIEW_RESULT_JSON_SCHEMA,
+  };
+  if (unit.spec_path !== null) values.spec_path = unit.spec_path;
+
+  const parts: string[] = [t.review];
+  if (pass === "followup") parts.push(t.review_followup);
+  parts.push(t.review_rules, t.result_review);
+  return fill(parts, values, `a ${pass === "followup" ? "follow-up" : "normal"} review prompt`);
 }
