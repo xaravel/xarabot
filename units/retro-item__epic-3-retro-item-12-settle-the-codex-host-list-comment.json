@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-12-settle-the-codex-host-list-comment",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -9,7 +9,7 @@
   "globs": [
     "src/adapters/agent/codex/codex-agent.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:41:18.823Z",
+  "heartbeat_at": "2026-10-26T18:41:31.216Z",
   "pr": 216,
   "pr_owner": "edanisko",
   "base_sha": "e7499d0df6410d3774dd389d3667599917999670",
@@ -23,7 +23,14 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/adapters/agent/codex/codex-agent.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
