@@ -185,6 +185,27 @@ describe("parseCodexUsage: with the vendor home", () => {
     expect(descendants(codexSessions(h), PARENT).map((s) => s.id).sort()).toEqual([CHILD_A, CHILD_B, GRANDCHILD].sort());
   });
 
+  test("a subagent file with its parent's session_meta after its own (codex 0.163.0) keeps its own id and is counted", () => {
+    const h = home({
+      [PARENT]: PARENT_FILE,
+      [CHILD_A]: lines(meta(CHILD_A, PARENT), meta(PARENT), turnContext("gpt-6.1-sol"), tokenCount({ input_tokens: 1000, cached_input_tokens: 100, output_tokens: 10 })),
+    });
+    const sessions = codexSessions(h);
+    expect(sessions.find((s) => s.file === rollout(h, CHILD_A))).toMatchObject({ id: CHILD_A, parentId: PARENT });
+    expect(descendants(sessions, PARENT).map((s) => s.id)).toEqual([CHILD_A]);
+    expect(parseCodexUsage(stdout(), h).tokens).toEqual({ input: 78219 - 71040 + 900, output: 140, cacheRead: 71040 + 100, cacheCreation: 0 });
+  });
+
+  test("the model and rate limits come from the parent's file, never a child's that repeats its session_meta", () => {
+    // Sorts before PARENT, so a child taking the parent's id would be found first.
+    const early = "01a1752c-7000-7000-8000-00000000000c";
+    const h = home({
+      [PARENT]: PARENT_FILE,
+      [early]: lines(meta(early, PARENT), meta(PARENT), turnContext("gpt-6-luna"), tokenCount({ input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 }, { primary: { used_percent: 100, resets_at: RESET_S } })),
+    });
+    expect(parseCodexUsage(stdout({ end: "none" }), h)).toMatchObject({ model: "gpt-6.1-sol", usageLimit: null });
+  });
+
   test("subagent files touched before `since` are not counted", () => {
     const h = home({
       [PARENT]: PARENT_FILE,
