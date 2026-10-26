@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
 import { graphReadPaths, type GraphTree } from "../core/graph/graph-gate.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { failed, git, gitRun, needCommit, type CloneResult } from "./clone.ts";
-import { message } from "./session.ts";
+import { failed, git, gitRun, type CloneResult } from "./clone.ts";
+import { haveCommits, message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -75,29 +75,8 @@ export function createGitGraphTrees(params: GitGraphTreesParams): GraphTrees {
     const { headSha, mainSha, signal } = r;
 
     // 1. Both SHAs in runner.git, fetching only what is missing.
-    const missing: string[] = [];
-    for (const [what, sha] of [
-      ["headSha", headSha],
-      ["mainSha", mainSha],
-    ] as const) {
-      const has = await needCommit(gitDir, sha, `graph trees: ${what}`, signal);
-      if (has.ok) continue;
-      if (has.error.kind !== "missing-object") return has;
-      if (!missing.includes(sha)) missing.push(sha);
-    }
-    if (missing.length > 0) {
-      let fetched: Result<void>;
-      try {
-        fetched = await fetch(missing, signal);
-      } catch (e) {
-        fetched = err("fetch", message(e));
-      }
-      if (!fetched.ok) return err("fetch", `graph trees: fetching ${missing.join(", ")}: ${fetched.error.message}`);
-      for (const sha of missing) {
-        const has = await needCommit(gitDir, sha, "graph trees: after fetch", signal);
-        if (!has.ok) return has;
-      }
-    }
+    const have = await haveCommits(gitDir, fetch, "graph trees", [["headSha", headSha], ["mainSha", mainSha]], signal);
+    if (!have.ok) return have;
 
     // 2. The merge result, in runner.git only.
     const mergeArgs = ["merge-tree", "--write-tree", "-z", "--name-only", "--no-messages", headSha, mainSha];

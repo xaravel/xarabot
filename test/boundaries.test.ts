@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import {
+  AGENT_CONFIG_RULE_HOME,
+  agentConfigRules,
   ALLOWED,
   checkSource,
   checkTree,
@@ -16,6 +18,7 @@ import {
   laneSources,
   OWN_COPIES,
   SHARED_HELPERS,
+  sourcesUnder,
   strip,
   type Layer,
   type Violation,
@@ -479,6 +482,11 @@ describe("the step helpers live only in src/lane/session.ts", () => {
     ["const closeOrphan = async (pr: number) => {};", ["closeOrphan"]],
     ["const closeOrphans = async (k: StepKit): Promise<void> => {};", ["closeOrphans"]],
     ["const recordPr = async (pr: number, set: HeartbeatSet): Promise<void> => {};", ["recordPr"]],
+    ["const pushSessionFix = async (what: string, done: CiSessionDone): Promise<void> => {};", ["pushSessionFix"]],
+    ["function allowanceReason(policy: Policy, agent: string): string | null {}", ["allowanceReason"]],
+    ["async function callPassedGate(p: PassedGateCall) {}", ["callPassedGate"]],
+    ["const passedGate = async (kit: StepKit) => {};", ["passedGate"]],
+    ["async function haveCommits(gitDir: string, fetch: FetchShas) {}", ["haveCommits"]],
   ])("a copy is found: %s", (source, expected) => {
     expect(helperCopies(source)).toEqual(expected);
   });
@@ -495,7 +503,27 @@ describe("the step helpers live only in src/lane/session.ts", () => {
     "const message = `${unit}: ${result.summary}`;",
     "const poll = setInterval(() => check(), 100);",
     "const budgetPassed = async (): Promise<void> => {};",
+    "const gate = await passedGate(kit, { passed, headSha, mainSha, signal, callTimeoutMs, after: aborted });",
+    "const { aborted, freshMain, poll, pushSessionFix } = stepOps(params);",
   ])("not a copy: %s", (source) => {
     expect(helperCopies(source)).toEqual([]);
+  });
+});
+
+describe("the agent config rule lives only in src/core/review/agent-config.ts", () => {
+  test("no other src file declares it, and its home declares both names", async () => {
+    const files = await sourcesUnder(ROOT, "src");
+    const declared = Object.entries(files).flatMap(([name, source]) => agentConfigRules(source).map((rule) => `${name}: ${rule}`));
+    expect(declared).toEqual([`${AGENT_CONFIG_RULE_HOME}: AGENT_CONFIG_DIRS`, `${AGENT_CONFIG_RULE_HOME}: isAgentConfigPath`]);
+  });
+
+  test.each([
+    ['const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set([".claude"]);', ["AGENT_CONFIG_DIRS"]],
+    ["export function isAgentConfigPath(path: string): boolean {}", ["isAgentConfigPath"]],
+    ["// const AGENT_CONFIG_DIRS = new Set();", []],
+    ["if (isAgentConfigPath(path)) return true;", []],
+    ['import { AGENT_CONFIG_DIRS } from "./agent-config.ts";', []],
+  ])("agentConfigRules: %s", (source, expected) => {
+    expect(agentConfigRules(source)).toEqual(expected);
   });
 });

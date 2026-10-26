@@ -3,8 +3,8 @@ import { join, resolve } from "node:path";
 import { isLockfile, mergeStatusYaml } from "../core/ci/status-merge.ts";
 import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { failed, git, gitRun, headRef, needCommit, RUNNER_IDENTITY, type CloneResult } from "./clone.ts";
-import { message } from "./session.ts";
+import { failed, git, gitRun, headRef, RUNNER_IDENTITY, type CloneResult } from "./clone.ts";
+import { haveCommits, message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -130,29 +130,8 @@ export function createGitMerger(params: GitMergerParams): Merger {
     if (!isBotIdentity(bot)) return err("invalid", `merge: ${JSON.stringify(bot)} is not a bot identity`);
 
     // 1. Both SHAs in runner.git, fetching only what is missing.
-    const missing: string[] = [];
-    for (const [what, sha] of [
-      ["headSha", headSha],
-      ["mainSha", mainSha],
-    ] as const) {
-      const has = await needCommit(gitDir, sha, `merge: ${what}`, signal);
-      if (has.ok) continue;
-      if (has.error.kind !== "missing-object") return has;
-      if (!missing.includes(sha)) missing.push(sha);
-    }
-    if (missing.length > 0) {
-      let fetched: Result<void>;
-      try {
-        fetched = await fetch(missing, signal);
-      } catch (e) {
-        fetched = err("fetch", message(e));
-      }
-      if (!fetched.ok) return err("fetch", `merge: fetching ${missing.join(", ")}: ${fetched.error.message}`);
-      for (const sha of missing) {
-        const has = await needCommit(gitDir, sha, "merge: after fetch", signal);
-        if (!has.ok) return has;
-      }
-    }
+    const have = await haveCommits(gitDir, fetch, "merge", [["headSha", headSha], ["mainSha", mainSha]], signal);
+    if (!have.ok) return have;
 
     // 2. Already merged?
     const ancestorArgs = ["merge-base", "--is-ancestor", mainSha, headSha];

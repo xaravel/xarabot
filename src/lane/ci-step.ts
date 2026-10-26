@@ -5,11 +5,10 @@ import type { Result } from "../core/result.ts";
 import type { Config } from "../core/schemas/config.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
-import type { BuildResult } from "../core/schemas/session-result.ts";
 import type { Forge } from "../ports/forge.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import type { MergeOutcome, Merger } from "./merger.ts";
-import { describeError, message, stepKit, stepOps, type PrStepOutput, type StepUnit } from "./session.ts";
+import { describeError, message, stepKit, stepOps, type CiSessionDone, type PrStepOutput, type PushFix, type StepUnit } from "./session.ts";
 
 /**
  * The CI step after the PR is open (FR6, AR8, AR20, AR21, AR44, AD-19). Each
@@ -32,13 +31,7 @@ export type CiSessionRequest = {
   readonly logText: string;
 };
 
-export type CiSessionDone = {
-  readonly result: BuildResult;
-  /** The spec file's repo-relative path in the clone; `null` for a `blocked` or `no-op` result, or a unit that needs none. */
-  readonly specPath: string | null;
-  /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
-  readonly superseded: readonly string[];
-};
+export type { CiFix, CiSessionDone, PushFix } from "./session.ts";
 
 /** One builder session in `ci-fix` mode; a failure is a failed attempt. Never throws. */
 export type CiSession = (request: CiSessionRequest) => Promise<Result<CiSessionDone>>;
@@ -61,19 +54,6 @@ export type CiUnit = StepUnit & {
   /** Whether a `done` fix needs a spec file: a Story's does, a retro item's does not. */
   readonly needsSpec: boolean;
 };
-
-/** A `done` CI-fix or conflict session's fix, to push to the open PR. */
-export type CiFix = {
-  /** The claimed record as the CI step last saw it, with its `pr` and `head_sha`. */
-  readonly record: UnitRecord;
-  readonly result: BuildResult;
-  /** The spec file's path; `null` for a unit that needs none. */
-  readonly specPath: string | null;
-  readonly superseded: readonly string[];
-};
-
-/** Commits and pushes a fix to the open PR, keeping its title and body. Never throws. */
-export type PushFix = (fix: CiFix) => Promise<PrStepOutput>;
 
 export type CiStepInput = {
   readonly unit: CiUnit;
@@ -196,7 +176,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
     });
     const { generation, reasons, note, end, forgeNow, call, failed, held, beat } = kit;
     // An aborted signal is the unit budget passed: the record is left as it is for the lane's budget rule.
-    const { aborted, parkBlocked, freshMain, poll } = stepOps({
+    const { aborted, freshMain, poll, pushSessionFix } = stepOps({
       kit,
       forge,
       identity,
@@ -264,21 +244,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       }
       aborted();
       if (!ran.ok) return await failed(`${what} session ${ran.error.kind}: ${ran.error.message}`);
-      const { result, specPath, superseded } = ran.value;
-      note(`${what} result: ${result.outcome}`);
-      if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`);
-      if (result.outcome === "no-op") return await parkBlocked("no-op", `${what}: no-op`);
-      if (ciUnit.needsSpec && specPath === null) return await failed(`${what} session: a done result with no spec file`);
-      let out: PrStepOutput;
-      try {
-        out = await input.pushFix({ record: kit.record, result, specPath, superseded });
-      } catch (e) {
-        return await failed(`PR step threw: ${message(e)}`);
-      }
-      if (out.record !== undefined) kit.record = out.record;
-      if (out.reason !== undefined) reasons.push(out.reason);
-      note(`PR step (fix): ${out.outcome} (${out.state ?? "unknown"})`);
-      if (out.outcome !== "progress" || out.state !== "claimed") throw end(out.outcome, out.state);
+      await pushSessionFix(what, ran.value, ciUnit.needsSpec, input.pushFix);
     };
 
     const ciFixLog = async (sha: string, failing: readonly string[]): Promise<string> => {

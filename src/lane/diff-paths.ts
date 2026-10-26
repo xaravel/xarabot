@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { err, ok, type Result } from "../core/result.ts";
-import { failed, git, gitRun, needCommit } from "./clone.ts";
-import { message } from "./session.ts";
+import { failed, git, gitRun } from "./clone.ts";
+import { haveCommits, message } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -35,29 +35,8 @@ export function createGitDiffPaths(params: GitDiffPathsParams): DiffPaths {
     const { headSha, mainSha, signal } = r;
 
     // 1. Both SHAs in runner.git, fetching only what is missing.
-    const missing: string[] = [];
-    for (const [what, sha] of [
-      ["headSha", headSha],
-      ["mainSha", mainSha],
-    ] as const) {
-      const has = await needCommit(gitDir, sha, `diff paths: ${what}`, signal);
-      if (has.ok) continue;
-      if (has.error.kind !== "missing-object") return has;
-      if (!missing.includes(sha)) missing.push(sha);
-    }
-    if (missing.length > 0) {
-      let fetched: Result<void>;
-      try {
-        fetched = await fetch(missing, signal);
-      } catch (e) {
-        fetched = err("fetch", message(e));
-      }
-      if (!fetched.ok) return err("fetch", `diff paths: fetching ${missing.join(", ")}: ${fetched.error.message}`);
-      for (const sha of missing) {
-        const has = await needCommit(gitDir, sha, "diff paths: after fetch", signal);
-        if (!has.ok) return has;
-      }
-    }
+    const have = await haveCommits(gitDir, fetch, "diff paths", [["headSha", headSha], ["mainSha", mainSha]], signal);
+    if (!have.ok) return have;
 
     // 2. The merge base, or the empty tree when the histories never met.
     const baseArgs = ["merge-base", headSha, mainSha];

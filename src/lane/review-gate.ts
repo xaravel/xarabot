@@ -1,22 +1,25 @@
-import { loopback, park } from "../core/ledger/edits.ts";
+import { loopback, markMerged, park } from "../core/ledger/edits.ts";
 import type { Result } from "../core/result.ts";
 import { findingsText } from "../core/review/findings.ts";
 import { LOOPBACK_CAP, reviewNext } from "../core/review/gate.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import type { ReviewFinding } from "../core/schemas/session-result.ts";
 import type { Forge } from "../ports/forge.ts";
-import type { CiSessionDone, PushFix } from "./ci-step.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
-import type { PassedGate } from "./passed-gate.ts";
 import type { ReviewStep, ReviewStepInput } from "./review-step.ts";
 import {
+  allowanceReason,
   describeError,
   End,
   Halt,
   message,
+  passedGate,
   stepKit,
   stepOps,
-  type PrStepOutput,
+  type CiSessionDone,
+  type FreshMain,
+  type PassedGate,
+  type PushFix,
   type StepKit,
   type StepOps,
   type StepOutput,
@@ -121,7 +124,7 @@ export function createReviewGateStep(deps: ReviewGateDeps): ReviewGateStep {
       ...(deps.random !== undefined ? { random: deps.random } : {}),
     });
     const { generation, reasons, note, end, forgeNow, failed, held } = kit;
-    const { aborted, parkBlocked, freshMain } = stepOps({
+    const { aborted, parkBlocked, freshMain, pushSessionFix } = stepOps({
       kit,
       forge,
       identity,
@@ -151,21 +154,7 @@ export function createReviewGateStep(deps: ReviewGateDeps): ReviewGateStep {
       }
       aborted();
       if (!ran.ok) return await failed(`loopback session ${ran.error.kind}: ${ran.error.message}`);
-      const { result, specPath, superseded } = ran.value;
-      note(`loopback result: ${result.outcome}`);
-      if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `loopback blocked ${result.blocked.kind}: ${result.blocked.text}`);
-      if (result.outcome === "no-op") return await parkBlocked("no-op", "loopback: no-op");
-      if (input.needsSpec && specPath === null) return await failed("loopback session: a done result with no spec file");
-      let out: PrStepOutput;
-      try {
-        out = await input.pushFix({ record: kit.record, result, specPath, superseded });
-      } catch (e) {
-        return await failed(`PR step threw: ${message(e)}`);
-      }
-      if (out.record !== undefined) kit.record = out.record;
-      if (out.reason !== undefined) reasons.push(out.reason);
-      note(`PR step (fix): ${out.outcome} (${out.state ?? "unknown"})`);
-      if (out.outcome !== "progress" || out.state !== "claimed") throw end(out.outcome, out.state);
+      await pushSessionFix("loopback", ran.value, input.needsSpec, input.pushFix);
     };
 
     const steps = async (): Promise<ReviewGateOutput> => {
@@ -180,19 +169,12 @@ export function createReviewGateStep(deps: ReviewGateDeps): ReviewGateStep {
       const main = fresh.value.snap.main.sha;
 
       // 2. The passed gate at the record's head.
-      let gate: Awaited<ReturnType<PassedGate>>;
-      try {
-        gate = await deps.passed({ headSha: head, passedSha: kit.record.passed_sha, mainSha: main, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
-      } catch (e) {
-        gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
-      }
-      aborted();
-      if (!gate.ok) return await failed(`passed gate ${gate.error.kind}: ${gate.error.message}`);
-      if (gate.value.kind === "passed") {
-        note(`passed gate: ${head} passed (${gate.value.how}): no review`);
+      const gate = await passedGate(kit, { passed: deps.passed, headSha: head, mainSha: main, signal: input.signal, callTimeoutMs, after: aborted });
+      if (gate.kind === "passed") {
+        note(`passed gate: ${head} passed (${gate.how}): no review`);
         throw end("progress", kit.record.state);
       }
-      note(`passed gate: unreviewed: ${gate.value.why}`);
+      note(`passed gate: unreviewed: ${gate.why}`);
 
       // 3. One review round; the session runs outside `kit.run`, so a `Halt` reaches the caller.
       const out = await deps.review({ unit: input.unit, storyId: input.storyId, record: kit.record, track: input.track, signal: input.signal, log: input.log });
@@ -259,19 +241,12 @@ export type ReviewOrParkParams = {
  */
 export async function reviewOrPark(p: ReviewOrParkParams): Promise<boolean> {
   const { kit, head } = p;
-  let gate: Awaited<ReturnType<PassedGate>>;
-  try {
-    gate = await p.passed({ headSha: head, passedSha: kit.record.passed_sha, mainSha: p.mainSha, signal: AbortSignal.any([p.input.signal, AbortSignal.timeout(p.callTimeoutMs)]) });
-  } catch (e) {
-    gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
-  }
-  p.aborted();
-  if (!gate.ok) return await kit.failed(`passed gate ${gate.error.kind}: ${gate.error.message}`);
-  if (gate.value.kind === "passed") {
-    kit.note(`passed gate: ${head} passed (${gate.value.how}): no review`);
+  const gate = await passedGate(kit, { passed: p.passed, headSha: head, mainSha: p.mainSha, signal: p.input.signal, callTimeoutMs: p.callTimeoutMs, after: p.aborted });
+  if (gate.kind === "passed") {
+    kit.note(`passed gate: ${head} passed (${gate.how}): no review`);
     return false;
   }
-  kit.note(`passed gate: unreviewed: ${gate.value.why}`);
+  kit.note(`passed gate: unreviewed: ${gate.why}`);
   const out = await p.review({ ...p.input, record: kit.record });
   if (out.record !== undefined) kit.record = out.record;
   if (out.reason !== undefined) kit.reasons.push(out.reason);
@@ -287,6 +262,73 @@ export async function reviewOrPark(p: ReviewOrParkParams): Promise<boolean> {
   }
   kit.note(`review of ${round.sha} passed`);
   return true;
+}
+
+export type CoordinatorChecksParams = Omit<ReviewOrParkParams, "maintainer" | "mainSha" | "aborted"> & {
+  readonly ops: Pick<StepOps, "aborted" | "parkBlocked" | "freshMain" | "poll">;
+  /** The lane's agent, which fresh `main`'s policy must still allow. */
+  readonly agent: string;
+  readonly pr: number;
+  /** The round's `ci_max_wait_minutes`, in ms. */
+  readonly ciWaitMs: number;
+  /** The round's `expected_checks`. */
+  readonly expectedChecks: readonly string[];
+};
+
+/**
+ * The checks before a coordinator PR's approval gate or enqueue (Stories
+ * 2.7, 2.9 and 3.5: planning and retro), at its `head`:
+ *
+ * 1. CI, with no fix session: failing checks park `blocked` `verification`.
+ * 2. Fresh `main` (an invalid config ends the step `stop`, a failed
+ *    snapshot is a failed attempt), and the PR as it shows it: merged ends
+ *    the step `progress` `merged`; unknown, closed or at another head is a
+ *    failed attempt.
+ * 3. `reviewOrPark`. A review round that passed took a session's time, so
+ *    every check runs again once on fresh `main`, where the gate now passes
+ *    the head; a head still unreviewed then is a failed attempt.
+ * 4. The allowance on fresh `main`'s policy (`allowanceReason`): refused is
+ *    a failed attempt.
+ *
+ * Returns fresh `main` once all pass; otherwise ends the caller's step
+ * through its kit. A `Halt` from the review reaches the caller.
+ */
+export async function coordinatorChecks(p: CoordinatorChecksParams): Promise<FreshMain> {
+  const { kit, ops, head, pr } = p;
+  for (let again = false; ; again = true) {
+    // 1. CI, with no fix session.
+    const polled = await ops.poll(head, p.ciWaitMs, p.expectedChecks);
+    if (polled !== "passed") return await ops.parkBlocked("verification", `CI failed on ${head}: ${polled.join(", ")}`);
+    kit.note(`CI passed on ${head}`);
+
+    // 2. Fresh main: the Standing Authority re-check, and the PR as the forge shows it.
+    const fresh = await ops.freshMain();
+    if (!fresh.ok) return await kit.failed(`snapshot ${describeError(fresh.error)}`);
+    const { snap, config: repo } = fresh.value;
+    const prState = snap.prs[kit.unit];
+    if (prState?.state === "merged") {
+      await kit.held("markMerged", markMerged({ unit: kit.unit, by: p.identity, now: kit.forgeNow() }));
+      if (kit.record.state !== "merged") kit.record = { ...kit.record, state: "merged", park: null };
+      kit.reasons.push(`PR #${pr} merged`);
+      throw kit.end("progress", kit.record.state);
+    }
+    if (prState === undefined) return await kit.failed(`PR #${pr} is not known to the forge`);
+    if (prState.state === "closed") return await kit.failed(`PR #${pr} is closed`);
+    if (prState.head_sha !== head) return await kit.failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
+
+    // 3. The passed gate, then one review round for a head no review passed (Story 3.5): a blocking one parks.
+    const reviewed = await reviewOrPark({ ...p, aborted: ops.aborted, maintainer: repo.repo.config.maintainer, mainSha: snap.main.sha });
+    if (reviewed) {
+      if (again) return await kit.failed(`the passed gate still finds ${head} unreviewed after its review passed`);
+      kit.note(`review of ${head} passed: CI and the gates again on fresh main`);
+      continue;
+    }
+
+    // 4. The allowance (Story 3.5): fresh main's policy must still allow the lane's agent and a reviewer.
+    const refused = allowanceReason(repo.repo.policy, p.agent, kit.record.builder_providers);
+    if (refused !== null) return await kit.failed(refused);
+    return fresh.value;
+  }
 }
 
 /** What blocked a round: its blocking findings, or, with none, its `changes-requested` verdict. */

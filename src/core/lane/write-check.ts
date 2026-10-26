@@ -1,5 +1,5 @@
-import { AGENT_CONFIG_PATHS } from "../config/protected-paths.ts";
 import { parseRetroGates } from "../graph/retro-gates.ts";
+import { fold, isAgentConfigPath } from "../review/agent-config.ts";
 import { parseYaml } from "../schemas/common.ts";
 import type { Config } from "../schemas/config.ts";
 import type { Policy } from "../schemas/policy.ts";
@@ -252,16 +252,6 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
   };
 }
 
-/**
- * Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with
- * `s` and `k`, and a composed `é` with `e` and a combining accent (NFD,
- * as APFS compares names).
- */
-const fold = (s: string): string => s.normalize("NFD").toUpperCase().toLowerCase();
-
-/** The agent config folder names, folded: a path ending in one is agent config whatever it is. */
-const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set([".agents", ".claude", ".codex", ".pi"]);
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 }
@@ -358,8 +348,8 @@ function classify(rules: RefusedPaths, path: string): WriteClass | null {
   }
   if (fold(rules.standingAuthorityPath) === p) return "standing-authority";
   if (p === ".github" || p.startsWith(".github/")) return "github";
-  // A bare agent config folder name (a file or symlink there) counts too.
-  if (matchesProtected(AGENT_CONFIG_PATHS, p) || AGENT_CONFIG_DIRS.has(p.slice(p.lastIndexOf("/") + 1))) return "agent-config";
+  // The one agent config rule, the review checkout's too: a bare agent config folder name (a file or symlink there) counts.
+  if (isAgentConfigPath(path)) return "agent-config";
   if (matchesProtected(rules.protectedPaths, p)) return "protected-path";
   return null;
 }

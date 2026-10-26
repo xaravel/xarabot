@@ -6,20 +6,23 @@ import { unattendedRefusal } from "../core/lane/runner.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
 import { failAttempt, failClaimed, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
+import { err, ok, type Result } from "../core/result.ts";
 import { allowanceRefusal } from "../core/review/allowance.ts";
 import type { JournalCost, JournalTokens, LaneOutcome, UnitJournalRecord } from "../core/schemas/journal.ts";
 import type { LaneIdentity, ParkReason, UnitRecord, UnitState } from "../core/schemas/ledger.ts";
+import type { Policy } from "../core/schemas/policy.ts";
 import { parseSessionResult, type BuildResult, type ResultKind, type SessionResultOf } from "../core/schemas/session-result.ts";
 import type { Agent, AgentSettings, AgentUnit, AgentUsage } from "../ports/agent.ts";
 import { isBackoffKind, isLaneStopKind, type CallOpts, type Forge, type ForgeError, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { LaunchSpec, ProxyRequest, Sandbox, SandboxProfile, SandboxResult, SandboxRun } from "../ports/sandbox.ts";
 import { emptyDir } from "../sandbox/vendor-home.ts";
+import { needCommit } from "./clone.ts";
 import type { Heartbeat } from "./heartbeat.ts";
 import { swapLedger, writtenRecord, type Sleep } from "./ledger-cas.ts";
 import type { LaneLayout } from "./lane-store.ts";
 import type { Waiter, WaitResult } from "./wait.ts";
-import type { Workspace } from "./workspace.ts";
+import type { FetchShas, Workspace, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
  * The one session runner and step helper set (Story 2.6a, AR1, AR3, AR23).
@@ -37,9 +40,13 @@ import type { Workspace } from "./workspace.ts";
  *   its own record (`held`, `beat`, `failed`, `lost`), on top of `forgeOps`.
  * - `stepOps`: what the CI step and the coordinator steps share on top of a
  *   kit: the abort check, the `blocked` park, fresh `main`, the CI poll, and
- *   closing the PRs no record carries; with `describeError` and `message`.
- * - `sessionAllowance` (Story 3.5): the policy re-check a session context's
- *   `allowed` runs before each fresh session, on one fresh snapshot.
+ *   closing the PRs no record carries, and a fix session's result pushed;
+ *   with `describeError` and `message`.
+ * - The review plumbing (Story 3.5): `allowanceReason`, the allowance
+ *   re-check on a fresh `main` policy, which `sessionAllowance` runs before
+ *   each fresh session on one fresh snapshot; `callPassedGate` and
+ *   `passedGate`, the passed gate under its deadline; and `haveCommits`, the
+ *   commits a runner.git check needs, fetching only the missing ones.
  * - The unit track both processes keep: the keeper check, a held edit on the
  *   unit, a failed attempt, its retry before the trailing wait when the
  *   ledger did not take it, and the unit's journal record.
@@ -101,9 +108,19 @@ export type AllowanceParams = {
 };
 
 /**
+ * The allowance re-check on fresh `main`'s policy (Story 3.5, AD-16):
+ * `allowance: <why>` when it no longer allows the lane's `agent` unattended,
+ * or a reviewer for `builderProviders`; `null` when it does.
+ */
+export function allowanceReason(policy: Pick<Policy, "unattended_adapters">, agent: string, builderProviders: readonly string[]): string | null {
+  const refused = allowanceRefusal(policy, agent, builderProviders);
+  return refused === null ? null : `allowance: ${refused}`;
+}
+
+/**
  * The allowance re-check a session context runs before each session (Story
  * 3.5, AD-16, AD-21): one snapshot of fresh `main` and its config, then
- * `allowanceRefusal` on its policy. A failed snapshot or an invalid config
+ * `allowanceReason` on its policy. A failed snapshot or an invalid config
  * is a refusal reason too. `null` when the session may run. Never throws.
  */
 export function sessionAllowance(p: AllowanceParams): () => Promise<string | null> {
@@ -115,8 +132,8 @@ export function sessionAllowance(p: AllowanceParams): () => Promise<string | nul
       const loaded = loadRepoConfig({ repo: p.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
       if (!loaded.ok) return `allowance: config ${loaded.error.kind}: ${loaded.error.message}`;
       const policy = loaded.value.repo.policy;
-      const refused = allowanceRefusal(policy, p.agent, p.builderProviders());
-      if (refused !== null) return `allowance: ${refused}`;
+      const refused = allowanceReason(policy, p.agent, p.builderProviders());
+      if (refused !== null) return refused;
       for (const other of p.also?.() ?? []) {
         const r = unattendedRefusal(policy, other);
         if (!r.ok) return `allowance: ${r.error.message}`;
@@ -178,6 +195,41 @@ export type StepOutput = PrStepOutput & { readonly ejected?: true };
 
 /** Commits, pushes and opens the PR (Story 1.16a). Never throws. */
 export type PrStep = (input: PrStepInput) => Promise<PrStepOutput>;
+
+/** A fix session's result (a CI-fix, conflict or loopback session). */
+export type CiSessionDone = {
+  readonly result: BuildResult;
+  /** The spec file's repo-relative path in the clone; `null` for a `blocked` or `no-op` result, or a unit that needs none. */
+  readonly specPath: string | null;
+  /** The `blocked` spec files the `done` spec supersedes: dropped from the squash. */
+  readonly superseded: readonly string[];
+};
+
+/** A `done` CI-fix, conflict or loopback session's fix, to push to the open PR. */
+export type CiFix = CiSessionDone & {
+  /** The claimed record as the step last saw it, with its `pr` and `head_sha`. */
+  readonly record: UnitRecord;
+};
+
+/** Commits and pushes a fix to the open PR, keeping its title and body. Never throws. */
+export type PushFix = (fix: CiFix) => Promise<PrStepOutput>;
+
+export type PassedGateRequest = {
+  /** The PR's head. */
+  readonly headSha: string;
+  /** The record's `passed_sha`; `null` when no review round passed a head. */
+  readonly passedSha: string | null;
+  /** The fresh `main`. */
+  readonly mainSha: string;
+  readonly signal: AbortSignal;
+};
+
+export type PassedGateOutcome =
+  | { readonly kind: "passed"; readonly how: "head" | "clean-merge" }
+  | { readonly kind: "unreviewed"; readonly why: string };
+
+/** Whether the head passed a review (`passed-gate.ts`); an error when git cannot tell. Never throws. */
+export type PassedGate = (request: PassedGateRequest) => Promise<Result<PassedGateOutcome, WorkspaceErrorKind>>;
 
 /** An agent session's limits (AR3); defaults 3 h, 5 min and 5 s. */
 export type SessionLimits = {
@@ -595,6 +647,15 @@ export type StepOps = {
    * the attempt failed.
    */
   recordPr(pr: number, set: HeartbeatSet): Promise<void>;
+  /**
+   * A `what` session's result (a CI-fix, conflict or loopback session):
+   * `blocked` parks with its kind, `no-op` parks `no-op`, a `done` one with
+   * no spec when `needsSpec` is a failed attempt; otherwise the fix goes
+   * through `push` and its record is adopted. Returns once the fix is pushed
+   * and the unit is still `claimed`; any other ending of the push ends the
+   * step with it.
+   */
+  pushSessionFix(what: string, done: CiSessionDone, needsSpec: boolean, push: PushFix): Promise<void>;
 };
 
 export function stepOps(p: StepOpsParams): StepOps {
@@ -690,7 +751,95 @@ export function stepOps(p: StepOpsParams): StepOps {
     await kit.failed(`record: ${recorded.message}`);
   };
 
-  return { aborted, parkBlocked, freshMain, poll, closeOrphan, closeOrphans, recordPr };
+  const pushSessionFix = async (what: string, done: CiSessionDone, needsSpec: boolean, push: PushFix): Promise<void> => {
+    const { result, specPath, superseded } = done;
+    kit.note(`${what} result: ${result.outcome}`);
+    if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`);
+    if (result.outcome === "no-op") return await parkBlocked("no-op", `${what}: no-op`);
+    if (needsSpec && specPath === null) return await kit.failed(`${what} session: a done result with no spec file`);
+    let out: PrStepOutput;
+    try {
+      out = await push({ record: kit.record, result, specPath, superseded });
+    } catch (e) {
+      return await kit.failed(`PR step threw: ${message(e)}`);
+    }
+    if (out.record !== undefined) kit.record = out.record;
+    if (out.reason !== undefined) reasons.push(out.reason);
+    kit.note(`PR step (fix): ${out.outcome} (${out.state ?? "unknown"})`);
+    if (out.outcome !== "progress" || out.state !== "claimed") throw kit.end(out.outcome, out.state);
+  };
+
+  return { aborted, parkBlocked, freshMain, poll, closeOrphan, closeOrphans, recordPr, pushSessionFix };
+}
+
+// ------------------------------------------------------------ the review plumbing
+
+export type PassedGateCall = Omit<PassedGateRequest, "signal"> & {
+  readonly passed: PassedGate;
+  /** The step's signal; the call's deadline is added to it. */
+  readonly signal: AbortSignal;
+  /** The call's deadline. */
+  readonly callTimeoutMs: number;
+};
+
+/** One passed-gate call (Story 3.5), under `callTimeoutMs` as well as `signal`; a throw is a `transient` error. Never throws. */
+export async function callPassedGate(p: PassedGateCall): Promise<Result<PassedGateOutcome, WorkspaceErrorKind>> {
+  try {
+    return await p.passed({ headSha: p.headSha, passedSha: p.passedSha, mainSha: p.mainSha, signal: AbortSignal.any([p.signal, AbortSignal.timeout(p.callTimeoutMs)]) });
+  } catch (e) {
+    return err("transient", `passed gate threw: ${message(e)}`);
+  }
+}
+
+export type PassedGateParams = Omit<PassedGateCall, "passedSha"> & {
+  /** The step's abort check, run once the gate returns. */
+  readonly after: () => void | Promise<void>;
+};
+
+/**
+ * The passed gate at `headSha` for the kit's record's `passed_sha` (Story
+ * 3.5), then the step's abort check; a gate error is a failed attempt.
+ */
+export async function passedGate(kit: StepKit, p: PassedGateParams): Promise<PassedGateOutcome> {
+  const gate = await callPassedGate({ ...p, passedSha: kit.record.passed_sha });
+  await p.after();
+  if (!gate.ok) return await kit.failed(`passed gate ${gate.error.kind}: ${gate.error.message}`);
+  return gate.value;
+}
+
+/**
+ * Each of `shas` (`[name, sha]`) a commit in runner.git at `gitDir`, the
+ * missing ones fetched once through `fetch`; `what` starts each error. An
+ * error when a SHA is not a full hex one, the fetch fails, or a fetched SHA
+ * is still not a commit there. Never throws.
+ */
+export async function haveCommits(
+  gitDir: string,
+  fetch: FetchShas,
+  what: string,
+  shas: readonly (readonly [string, string])[],
+  signal: AbortSignal,
+): Promise<Result<void, WorkspaceErrorKind>> {
+  const missing: string[] = [];
+  for (const [name, sha] of shas) {
+    const has = await needCommit(gitDir, sha, `${what}: ${name}`, signal);
+    if (has.ok) continue;
+    if (has.error.kind !== "missing-object") return has;
+    if (!missing.includes(sha)) missing.push(sha);
+  }
+  if (missing.length === 0) return ok(undefined);
+  let fetched: Result<void>;
+  try {
+    fetched = await fetch(missing, signal);
+  } catch (e) {
+    fetched = err("fetch", message(e));
+  }
+  if (!fetched.ok) return err("fetch", `${what}: fetching ${missing.join(", ")}: ${fetched.error.message}`);
+  for (const sha of missing) {
+    const has = await needCommit(gitDir, sha, `${what}: after fetch`, signal);
+    if (!has.ok) return has;
+  }
+  return ok(undefined);
 }
 
 // ------------------------------------------------------------ the unit track

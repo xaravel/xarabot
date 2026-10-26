@@ -1,12 +1,11 @@
 import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { deleteMerged, finishRecurring, markMerged, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
+import { deleteMerged, finishRecurring, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
-import { allowanceRefusal } from "../core/review/allowance.ts";
 import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { planningKindOf, type PlanningKind } from "../core/schemas/ledger.ts";
@@ -25,7 +24,7 @@ import { laneLayout } from "./lane-store.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import { shown } from "./pr-step.ts";
-import { reviewOrPark } from "./review-gate.ts";
+import { coordinatorChecks } from "./review-gate.ts";
 import {
   createSessionRunner,
   describeError,
@@ -85,8 +84,9 @@ import {
  *   Maintainer, with no loopback. A round that passes starts CI and the
  *   checks again on fresh `main`, where the gate passes the head. Then,
  *   before any gate, fresh `main`'s policy must still allow the lane's agent
- *   and a reviewer (`allowanceRefusal`, else a failed attempt); the enqueue
- *   fence records `enqueued_sha`.
+ *   and a reviewer (`allowanceReason`, else a failed attempt); the enqueue
+ *   fence records `enqueued_sha`. Both steps share these checks
+ *   (`coordinatorChecks`).
  * - A unit adopted with its open PR runs no session: an empty
  *   `builder_providers` first gets the lane's vendor in a fence (Epic 2 retro
  *   item 29), then its CI is polled at the record's `head_sha`, and the gate
@@ -237,50 +237,22 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
     };
 
     /** CI at `head`, fresh `main`, the gate, then `merging` and the enqueue (status) or the approval park (graph). */
-    const ciAndGate = async (pr: number, head: string, again = false): Promise<never> => {
-      // 1. CI, with no fix session.
-      const polled = await poll(head, config.ci_max_wait_minutes * MINUTE_MS, snapshot.policy.expected_checks);
-      if (polled !== "passed") return await parkBlocked("verification", `CI failed on ${head}: ${polled.join(", ")}`);
-      note(`CI passed on ${head}`);
-
-      // 2. Fresh main: the Standing Authority re-check, and the PR as the forge shows it.
-      const fresh = await freshMain();
-      if (!fresh.ok) return await failed(`snapshot ${describeError(fresh.error)}`);
-      const { snap, config: repo } = fresh.value;
-      const prState = snap.prs[unit];
-      if (prState?.state === "merged") {
-        await held("markMerged", markMerged({ unit, by: identity, now: forgeNow() }));
-        if (kit.record.state !== "merged") kit.record = { ...kit.record, state: "merged", park: null };
-        reasons.push(`PR #${pr} merged`);
-        throw end("progress", kit.record.state);
-      }
-      if (prState === undefined) return await failed(`PR #${pr} is not known to the forge`);
-      if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
-      if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
-
-      // 2a. The passed gate, then one review round for a head no review passed (Story 3.5): a blocking one parks.
-      const reviewed = await reviewOrPark({
+    const ciAndGate = async (pr: number, head: string): Promise<never> => {
+      // 1-2. CI, fresh main and the PR on it, the passed gate or a review round, and the allowance.
+      const { snap, config: repo } = await coordinatorChecks({
         kit,
-        aborted,
+        ops: { aborted, parkBlocked, freshMain, poll },
         identity,
-        maintainer: repo.repo.config.maintainer,
+        agent: deps.lane.agent,
         passed: deps.passed,
         review: deps.review,
         input: { unit: { unit, subject: unitSubject(unit) }, storyId: null, track: input.track, signal: input.signal, log: input.log },
+        pr,
         head,
-        mainSha: snap.main.sha,
+        ciWaitMs: config.ci_max_wait_minutes * MINUTE_MS,
+        expectedChecks: snapshot.policy.expected_checks,
         callTimeoutMs,
       });
-      if (reviewed) {
-        // The review took a session's time: every check runs again on fresh main, where the gate now passes the head.
-        if (again) return await failed(`the passed gate still finds ${head} unreviewed after its review passed`);
-        note(`review of ${head} passed: CI and the gates again on fresh main`);
-        return await ciAndGate(pr, head, true);
-      }
-
-      // 2b. The allowance (Story 3.5): fresh main's policy must still allow the lane's agent and a reviewer.
-      const refused = allowanceRefusal(repo.repo.policy, deps.lane.agent, kit.record.builder_providers);
-      if (refused !== null) return await failed(`allowance: ${refused}`);
 
       // 3. A graph PR's merge result through the graph-change gate.
       let graph: GraphDelta | null = null;
