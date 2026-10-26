@@ -344,8 +344,8 @@ export type PlanningDue = {
  * bootstrapped whose context is not `valid` (missing, invalid, or `stale`:
  * its source line is missing or differs from its `epics.md` section's hash,
  * retro item 12), which has a manifested Story
- * not `done` and which no `dependency-epic` or `retro-rejected` hold keeps
- * back. Holds on records are not looked at here.
+ * not `done` and which no `dependency-epic`, `retro-rejected` or
+ * `retro-item` hold keeps back. Holds on records are not looked at here.
  */
 export function planningDue(snapshot: Snapshot): PlanningDue {
   if (!snapshot.graph.ok) {

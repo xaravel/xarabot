@@ -10,6 +10,7 @@ export type ReasonCode =
   | "unclaimable"
   | "dependency-epic"
   | "retro-rejected"
+  | "retro-item"
   | "epic-context"
   | "record-state"
   | "depends-on"
