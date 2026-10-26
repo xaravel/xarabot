@@ -49,9 +49,11 @@ import { checkCodexModel, parseCodexUsage } from "./usage.ts";
  *   `gpt-6-luna`. `ultra` is accepted by the CLI but is not on Xarabot's
  *   scale; `none` and `minimal` are not either. Any other model offers none.
  * - Hosts: `chatgpt.com`, `ab.chatgpt.com` and `auth.openai.com` (login and
- *   token refresh), plus `api.openai.com` in API-key mode. `files.openai.com`
- *   and the unresolved `2606:4700:440b::ac40:9034` stay out until the
- *   Maintainer's live run names them.
+ *   token refresh), plus `api.openai.com` in API-key mode. The list is final.
+ *   `2606:4700:440b::ac40:9034` is one of the AAAA records of the four
+ *   `sdmntpr{central,northcentral,southcentral,westcentral}us.oaiusercontent.com`
+ *   hosts, which stay denied: codex passes every live check without them.
+ *   `files.openai.com` stays out because no run reached it.
  *
  * The credential is exactly one mode-600 file under
  * `<config>/xarabot/vendors/codex/`: `auth.json` (a ChatGPT login, copied to
