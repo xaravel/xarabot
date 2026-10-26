@@ -178,3 +178,9 @@ epics:
         blocking: false
         globs: ["src/sandbox/environment.ts", "src/adapters/agent/codex/codex-agent.ts", "test/sandbox/environment.test.ts", "test/adapters/agent/codex/codex-agent.test.ts"]
         status: done
+      - id: "epic-2-retro-item-29-adopting-lane-records-its-vendor"
+        text: "Maintainer decision 2026-10-26 (epics.md Story 3.3; the empty builder_providers deferral of spec-3-3 and spec-3-4): when a lane adopts a unit's open PR and the record's builder_providers is empty (a claim or stale takeover with adoptPr in lane-process.ts, a retro-item, planning or retro unit resumed with its open PR, or a record a runner older than Story 3.3 wrote), it adds its own vendor (addProvider with deps.provider) in a fence before any CI, review-gate or merge step; a non-empty set is never changed; tests for each adopt path (an empty set gets the lane's vendor, a non-empty set is unchanged) and that the review gate then picks the other vendor's reviewer, marked cross-vendor"
+        route: lane
+        blocking: false
+        globs: ["src/lane/lane-process.ts", "src/lane/retro-item-step.ts", "src/lane/planning-step.ts", "src/lane/retro-step.ts", "test/lane/lane-process.test.ts", "test/lane/merge-step.test.ts", "test/lane/retro-item-step.test.ts", "test/lane/planning-step.test.ts", "test/lane/retro-step.test.ts"]
+        status: open
