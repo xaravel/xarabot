@@ -172,3 +172,9 @@ epics:
         blocking: false
         globs: ["src/core/review/**", "test/core/review/**"]
         status: open
+      - id: "epic-2-retro-item-28-codex-sessions-get-a-ca-bundle"
+        text: "Story 3.1's live check (2026-10-26) found every sandboxed codex session exits 1: codex 0.163.0 (rustls) loads its roots from macOS trust settings through com.apple.SecurityServer, which the sandbox profile denies on purpose, so every HTTPS request fails ('workspace routing discovery failed'); the proxy allowed every request (chatgpt.com:443). Give codex sessions a CA bundle instead of opening the keychain service: add SSL_CERT_FILE=/etc/ssl/cert.pem for the codex vendor in src/sandbox/environment.ts (as VENDOR_TMP_ENV does) and set it in buildSessionEnv, keeping MACH_SERVICES unchanged; also drop or replace the -c commit_attribution setting in codex-agent.ts, which codex 0.163.0 ignores ('commit_attribution is ignored'), relying on the runner's sanitizer for the Codex trailer and saying so in a comment; tests for the env entry (codex gets it, claude does not) and the launch argv; the live codex checks are re-run by the Maintainer's session after the runner tag"
+        route: lane
+        blocking: false
+        globs: ["src/sandbox/environment.ts", "src/adapters/agent/codex/codex-agent.ts", "test/sandbox/environment.test.ts", "test/adapters/agent/codex/codex-agent.test.ts"]
+        status: open
