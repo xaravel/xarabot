@@ -1,10 +1,10 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
   "generation": 1,
-  "heartbeat_at": "2026-10-26T11:36:35Z",
+  "heartbeat_at": "2026-10-26T11:40:56Z",
   "digest_posted_at": null,
   "rulings_cursor": null
 }
