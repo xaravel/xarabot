@@ -37,10 +37,13 @@ import {
  *    `claimed`, with no review. A gate error is a failed attempt.
  * 3. Otherwise one review round (the review step). Any ending other than
  *    `progress` `claimed` is passed through as it is.
- * 4. `reviewNext` decides: `cap` parks `blocked` `review-cap` in the
- *    writer's inbox (the record's owner); `pass` ends `progress` `claimed`;
- *    `loopback` counts the loopback (`loopback`, cap `LOOPBACK_CAP`), then
- *    runs a loopback session at the head with the round's findings text.
+ * 4. `reviewNext` decides: `pass` (a round with no blocking pass, at any
+ *    loopback count; the review step set `passed_sha` to the head) ends
+ *    `progress` `claimed`, for the merge step; `cap` (a blocking round
+ *    after `LOOPBACK_CAP` loopbacks) parks `blocked` `review-cap` in the
+ *    writer's inbox (the record's owner); `loopback` counts the loopback
+ *    (`loopback`, cap `LOOPBACK_CAP`), then runs a loopback session at the
+ *    head with the round's findings text.
  * 5. After the loopback session: `blocked` parks with its kind, `no-op`
  *    parks `no-op`; a `done` result (with its spec when `needsSpec`) is
  *    pushed through `pushFix`, and the step ends `progress` `claimed` with
@@ -187,7 +190,7 @@ export function createReviewGateStep(deps: ReviewGateDeps): ReviewGateStep {
       const decision = reviewNext({ loopbacks: kit.record.loopbacks, blocking: round.blocking });
       note(`review of ${round.sha}: ${round.blocking ? "blocking" : "passed"}, ${round.findings.length} finding(s), loopbacks ${kit.record.loopbacks}: ${decision}`);
       if (decision === "cap") {
-        return await parkBlocked("review-cap", `review loopback cap of ${LOOPBACK_CAP} reached: the round after the last loopback ${round.blocking ? "blocked" : "passed"} at ${round.sha}`);
+        return await parkBlocked("review-cap", `review loopback cap of ${LOOPBACK_CAP} reached: the round after the last loopback blocked at ${round.sha}`);
       }
       if (decision === "pass") throw end("progress", kit.record.state);
 

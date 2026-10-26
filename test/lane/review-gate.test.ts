@@ -251,12 +251,23 @@ describe("createReviewGateStep (Story 3.5)", () => {
     expect(h.sessions[0]?.findingsText).toContain("- high, blocking, `src/a.ts`: the log prints ");
   });
 
-  test.each([true, false])("after 2 loopbacks the next round (blocking %p) parks blocked review-cap in the owner's inbox; no session", async (blocking) => {
+  test("after 2 loopbacks a blocking round parks blocked review-cap in the owner's inbox; no session", async () => {
     const h = await harness({ record: { loopbacks: 2 } });
-    const { review } = stubReview(h, [blocking]);
+    const { review } = stubReview(h, [true]);
     const out = await h.run({}, { review });
     expect(out).toMatchObject({ outcome: "progress", state: "parked" });
     expect(await h.record()).toMatchObject({ state: "parked", loopbacks: 2, park: { kind: "blocked", reason: "review-cap", inbox_owner: ALICE.owner } });
+    expect(h.sessions).toHaveLength(0);
+    expect(h.fixes).toHaveLength(0);
+  });
+
+  test("after 2 loopbacks a passing round passes: progress claimed, passed_sha the head, no park, no session", async () => {
+    const h = await harness({ record: { loopbacks: 2 } });
+    const { review } = stubReview(h, [false]);
+    const out = await h.run({}, { review });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(out.pushed).toBeUndefined();
+    expect(await h.record()).toMatchObject({ state: "claimed", loopbacks: 2, passed_sha: h.head, park: null });
     expect(h.sessions).toHaveLength(0);
     expect(h.fixes).toHaveLength(0);
   });

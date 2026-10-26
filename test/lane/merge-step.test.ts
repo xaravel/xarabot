@@ -1288,17 +1288,24 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     expect(swapsOf(e)).toContain("loopback");
   });
 
-  test.each([
-    ["blocking", reviewPass([BLOCKER])],
-    ["passing", reviewPass()],
-  ] as const)("loopback cap: after 2 loopbacks the next round (%s) parks blocked review-cap in the owner's inbox; no enqueue", async (_name, third) => {
-    const e = await laneRun({ reviews: [reviewPass([BLOCKER]), reviewPass([BLOCKER]), third] });
+  test("loopback cap: after 2 loopbacks a blocking round parks blocked review-cap in the owner's inbox; no enqueue", async () => {
+    const e = await laneRun({ reviews: [reviewPass([BLOCKER]), reviewPass([BLOCKER]), reviewPass([BLOCKER])] });
     expect(e.outcome).toBe("progress");
     expect(e.reviewPrompts).toHaveLength(3);
     expect(e.prompts).toHaveLength(3);
     expect(e.record).toMatchObject({ state: "parked", loopbacks: 2, park: { kind: "blocked", reason: "review-cap", inbox_owner: ALICE.owner } });
     expect(e.enqueuedAt).toEqual([]);
     expect(e.events).not.toContain("enqueue");
+  });
+
+  test("loopback cap: after 2 loopbacks a passing round passes: passed_sha the head, then the merge step enqueues it", async () => {
+    const e = await laneRun({ reviews: [reviewPass([BLOCKER]), reviewPass([BLOCKER]), reviewPass()], onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(e.reviewPrompts).toHaveLength(3);
+    expect(e.prompts).toHaveLength(3);
+    expect(e.record).toMatchObject({ state: "merged", loopbacks: 2, park: null });
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.enqueuedAt).toEqual([e.record?.head_sha ?? "none"]);
   });
 
   test("CI fix: CI fails once, the fix pushed: ci_fixes 1, loopbacks 0; the review runs on the new head", async () => {
@@ -1418,7 +1425,7 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
   });
 
-  test("takeover after a blocking round whose fresh review blocks again: loopbacks 2, the taker's loopback session reads the new findings, and the next round, though passing, parks review-cap", async () => {
+  test("takeover after a blocking round whose fresh review blocks again: loopbacks 2, the taker's loopback session reads the new findings, and the next round, passing, passes and is enqueued", async () => {
     const seen: (UnitRecord | undefined)[] = [];
     const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 1, seen)), reviews: [reviewPass([BLOCKER])], onQueueSleep: mergeOnce });
     expect(e.outcome).toBe("progress");
@@ -1427,16 +1434,14 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     expect(e.findings[0]).toBeNull();
     expect(e.findings[1]).toContain("- high, blocking, `src/a.ts`: the loop never ends.");
     expect(e.reviewPrompts).toHaveLength(2);
-    expect(e.enqueuedAt).toEqual([]);
-    expect(e.record).toMatchObject({ state: "parked", owner: ALICE.owner, loopbacks: 2, attempts: 1, park: { kind: "blocked", reason: "review-cap" } });
+    expect(e.record).toMatchObject({ state: "merged", owner: ALICE.owner, loopbacks: 2, attempts: 1, park: null });
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.enqueuedAt).toEqual([e.record?.head_sha ?? "none"]);
   });
 
-  test.each([
-    ["blocking", reviewPass([BLOCKER])],
-    ["passing", reviewPass()],
-  ] as const)("takeover after the second blocking round: the cap carries over, so the fresh review's round (%s) parks review-cap; no enqueue", async (_name, fresh) => {
+  test("takeover after the second blocking round: the cap carries over, so the fresh review's blocking round parks review-cap; no enqueue", async () => {
     const seen: (UnitRecord | undefined)[] = [];
-    const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 2, seen)), reviews: [fresh] });
+    const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 2, seen)), reviews: [reviewPass([BLOCKER])] });
     expect(e.outcome).toBe("progress");
     expect(takenOver(e, seen)).toMatchObject({ loopbacks: 2, reviewed_sha: null, passed_sha: null });
     expect(e.prompts).toHaveLength(1);
@@ -1444,6 +1449,18 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     expect(e.record).toMatchObject({ state: "parked", owner: ALICE.owner, loopbacks: 2, park: { kind: "blocked", reason: "review-cap", inbox_owner: ALICE.owner } });
     expect(e.enqueuedAt).toEqual([]);
     expect(e.events).not.toContain("enqueue");
+  });
+
+  test("takeover after the second blocking round: the fresh review's passing round passes, with no loopback, and is enqueued", async () => {
+    const seen: (UnitRecord | undefined)[] = [];
+    const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 2, seen)), reviews: [reviewPass()], onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(takenOver(e, seen)).toMatchObject({ loopbacks: 2, reviewed_sha: null, passed_sha: null });
+    expect(e.prompts).toHaveLength(1);
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.record).toMatchObject({ state: "merged", owner: ALICE.owner, loopbacks: 2, park: null });
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.enqueuedAt).toEqual([e.record?.head_sha ?? "none"]);
   });
 
   test("a STOP during the loopback session's usage-limit sleep: outcome stop, released with attempts unchanged, no lane stop", async () => {

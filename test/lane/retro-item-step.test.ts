@@ -785,14 +785,24 @@ describe("createRetroItemStep: the review gate (Story 3.5)", () => {
     expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", loopbacks: 1, ci_fixes: 0, head_sha: h.heads[1], passed_sha: h.heads[1], enqueued_sha: h.heads[1] });
   });
 
-  test("the same cap: after 2 loopbacks the next round parks review-cap, whatever its verdict; no enqueue", async () => {
+  test("the same cap: after 2 loopbacks a blocking round parks review-cap; no enqueue", async () => {
     const h = harness({ records: [coord(U, { globs: GLOBS, loopbacks: 2 })], behaviors: [writes(built())] });
-    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD, blocking: () => true });
     const out = await h.run(undefined, { review: stub.review });
     expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
     expect(h.prompts).toHaveLength(1);
     expect(h.fake.control.queue()).toEqual([]);
     expect((await h.ledger()).get(U)).toMatchObject({ park: { kind: "blocked", reason: "review-cap" }, loopbacks: 2 });
+  });
+
+  test("the same cap: after 2 loopbacks a passing round passes, and the head is enqueued", async () => {
+    const h = harness({ records: [coord(U, { globs: GLOBS, loopbacks: 2 })], behaviors: [writes(built())] });
+    const stub = stubReviewStep({ forge: h.fake.forge, identity: COORD });
+    const out = await h.run(undefined, { review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(h.prompts).toHaveLength(1);
+    expect(stub.calls).toHaveLength(1);
+    expect((await h.ledger()).get(U)).toMatchObject({ state: "merging", park: null, loopbacks: 2, passed_sha: h.heads[0], enqueued_sha: h.heads[0] });
   });
 
   test("the allowance before the session: fresh main's policy drops the lane's agent at session time: no sandbox run, a failed attempt naming it", async () => {
