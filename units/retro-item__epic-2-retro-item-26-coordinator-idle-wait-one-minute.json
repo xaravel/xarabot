@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-26-coordinator-idle-wait-one-minute",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -13,7 +13,7 @@
     "test/lane/coordinator-process.test.ts",
     "test/lane/lane-process.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T08:32:44.261Z",
+  "heartbeat_at": "2026-10-26T08:44:25.019Z",
   "pr": 180,
   "pr_owner": "edanisko",
   "base_sha": "402827e508014c51ec9a88078835875232ff196f",
