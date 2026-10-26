@@ -1999,6 +1999,8 @@ So that no diff is reviewed by the vendor that built it unless the repo has only
 **When** it starts
 **Then** it refuses to start if its reviewer adapter is not allowed by the repo's policy, or if the reviewer's credential file under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` is missing or unreadable (AR17, AR18, AR22).
 
+**Maintainer decision (2026-10-26, the empty-set deferral of Stories 3.3 and 3.4):** an empty `builder_providers[]` on a unit with an open PR (an adopted PR with no prior record, or a record from a runner older than Story 3.3) is not read as "no builder". The lane that adopts the PR adds its own vendor to the set before any CI, review or merge step, so the reviewer choice is cross-vendor relative to that lane. A non-empty set is never changed. Routed as Epic 2 retro item 29.
+
 ### Story 3.4: Review sessions
 
 As the Maintainer,
