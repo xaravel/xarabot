@@ -8,6 +8,7 @@ import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroItemPrompt, type PromptSection, type RetroItemPromptMode } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { err, ok } from "../core/result.ts";
+import { addProvider } from "../core/review/reviewer.ts";
 import { FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { HumanLiveStep } from "../core/schemas/human-live-steps.ts";
 import type { UnitRecord } from "../core/schemas/ledger.ts";
@@ -67,7 +68,8 @@ import {
  *   conflict with that `main` commits onto the session's start instead, as a
  *   Story's PR step does, so the CI step's merge of `main` takes the conflict
  *   to a conflict session counted in `ci_fixes`, never an attempt), the lease
- *   (`branchHead` for a new PR, else the record's `head_sha`), a fence and
+ *   (`branchHead` for a new PR, else the record's `head_sha`), a fence that
+ *   adds the lane's vendor to the record's `builder_providers` (AD-16) and
  *   the push; a build opens the PR (closing orphans on the branch when
  *   `openPr` fails), a fix keeps it; then the `record` beat (a new PR it
  *   fails to record is closed, since no record carries it) and the 🤖 status
@@ -249,8 +251,8 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
           if (expected !== null) k.note(`${branch} is at ${expected}: the push leases from it`);
         }
 
-        // 4. Fence, then push with the lease.
-        await k.beat("fence");
+        // 4. Fence, adding the lane's vendor to the builders before the branch moves (AD-16), then push with the lease.
+        await k.beat("fence", { builder_providers: addProvider(k.record.builder_providers, deps.provider) });
         await guard();
         const pushed = await k.call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: expected, sha: head }, o));
         if (!pushed.ok) return await k.failed(`pushBranch ${branch} ${describeError(pushed.error)}`);

@@ -39,7 +39,7 @@ const rule = (fake: FakeForge, ruling: HostRuling, unit = U) =>
 
 describe("applyHostRuling", () => {
   test("release: one ledger commit, released, counters 0, providers kept, park null, generation unchanged, written by the identity", async () => {
-    const parked = rec({ unit: U, state: "parked", generation: 3, park: blocked, attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["claude"], passed_sha: SHA_A });
+    const parked = rec({ unit: U, state: "parked", generation: 3, park: blocked, attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["anthropic"], passed_sha: SHA_A });
     const fake = await seeded([parked]);
     const before = fake.control.ledgerLog().length;
     const r = await rule(fake, "release");
@@ -81,7 +81,7 @@ describe("applyHostRuling", () => {
       attempts: 1,
       loopbacks: 2,
       ci_fixes: 1,
-      builder_providers: ["claude"],
+      builder_providers: ["anthropic"],
     });
     const fake = await seeded([parked], { openPr: true });
     const r = await rule(fake, "rebuild");

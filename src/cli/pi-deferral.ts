@@ -1,6 +1,9 @@
 import { POLICY_PATH } from "../core/config/load-repo-config.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import type { SessionAdapter } from "../core/review/reviewer.ts";
 import type { AdapterName, Policy } from "../core/schemas/policy.ts";
+
+export type { SessionAdapter } from "../core/review/reviewer.ts";
 
 /**
  * The `pi` adapter's deferral (Story 3.2, FR7, AR34): 0.x has no `pi`
@@ -8,9 +11,6 @@ import type { AdapterName, Policy } from "../core/schemas/policy.ts";
  * whose only reviewer would be `pi`, each naming this text.
  */
 export const PI_DEFERRAL = "the `pi` adapter is deferred to v1: stock pi 1.4.0 gives `bmad-build-auto` no subagents";
-
-/** The agents 0.x can compose a session for: every adapter name but `pi`. */
-export type SessionAdapter = Exclude<AdapterName, "pi">;
 
 /** Refuses a lane whose agent is `pi`; otherwise the agent, narrowed to a `SessionAdapter`. */
 export function piAgentRefusal(agent: AdapterName): Result<SessionAdapter, "refused"> {

@@ -6,6 +6,7 @@ import type { CoordinatorKind, CoordinatorUnit } from "../core/next/coordinator.
 import { next } from "../core/next/next.ts";
 import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import type { Provider } from "../core/review/reviewer.ts";
 import type { Lane } from "../core/schemas/host.ts";
 import type { LaneOutcome } from "../core/schemas/journal.ts";
 import { CoordinatorRecordSchema, type CoordinatorRecord, type LaneIdentity, type UnitRecord } from "../core/schemas/ledger.ts";
@@ -124,6 +125,8 @@ export type SessionStepDeps = {
   readonly diffPaths: DiffPaths;
   /** Who writes the ledger records: the coordinator lane. */
   readonly identity: LaneIdentity;
+  /** The lane's session vendor, added to a unit's `builder_providers` at each agent-commit push fence (AD-16). */
+  readonly provider: Provider;
   /** The lane's credentials, redacted from the commit message, the PR text and the comments; default none. */
   readonly secrets?: readonly string[];
   readonly limits?: SessionLimits;

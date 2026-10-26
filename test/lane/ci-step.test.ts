@@ -6,6 +6,7 @@ import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger } from "../../src/core/ledger/codec.ts";
 import type { NextStory } from "../../src/core/next/next.ts";
+import type { Provider } from "../../src/core/review/reviewer.ts";
 import { err, ok, type Result } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
@@ -34,6 +35,7 @@ import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts
 import type { Forge, ForgeCheck, ForgeError, ForgeOperation } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -202,6 +204,10 @@ type WorldOpts = MainOpts & {
   readonly regenerate?: Result<Readonly<Record<string, string>>>;
   readonly record?: Partial<UnitRecord>;
   readonly scratch?: string;
+  /** The lane's session vendor the PR step adds at a fix's push fence; default `anthropic`. */
+  readonly provider?: Provider;
+  /** Each `pushBranch` first reads the record's `builder_providers` into this list. */
+  readonly pushSeen?: (readonly string[] | undefined)[];
 };
 
 const dirs: string[] = [];
@@ -228,7 +234,8 @@ async function world(o: WorldOpts = {}): Promise<World> {
   const record = rec({ unit: UNIT, globs: ["src/s0/**"], pr, pr_owner: "alice", head_sha: head, base_sha: main, ...o.record });
   fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([record]), deletes: [] });
 
-  const spied = scripted(fake, [...(o.checks ?? [[success("test")]])]);
+  const base = scripted(fake, [...(o.checks ?? [[success("test")]])]);
+  const spied = { ...base, forge: o.pushSeen === undefined ? base.forge : watchPushes(base.forge, fake, UNIT, o.pushSeen).forge };
   const c = clock();
   const merger = stubMerger([...(o.merges ?? [{ kind: "up-to-date" }])]);
   const sessions: CiSessionRequest[] = [];
@@ -236,7 +243,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
   const prSteps: PrStepInput[] = [];
   const replies = [...(o.sessions ?? [ok({ result: buildResult(), specPath: `${SPEC_DIR}/spec-1-1-first.md`, superseded: [] })])];
   const logs: string[] = [];
-  const realPrStep = createPrStep({ forge: spied.forge, committer: committer(fake), identity: ALICE, repo: "xaravel/xarabot", sleep: async () => {}, random: () => 0 });
+  const realPrStep = createPrStep({ forge: spied.forge, committer: committer(fake), identity: ALICE, repo: "xaravel/xarabot", provider: o.provider ?? "anthropic", sleep: async () => {}, random: () => 0 });
   const scratch = o.scratch ?? join(tempDir(), "scratch");
 
   const w: World = {
@@ -387,6 +394,31 @@ describe("createCiStep", () => {
     expect(w.asked).toEqual([w.head, after?.head_sha as string]);
     expect(w.calls).not.toContain("updatePr");
     expect(w.merger.requests.map((r) => r.headSha)).toEqual([w.head, after?.head_sha as string]);
+  });
+
+  test("a CI fix on a codex lane, the record anthropic-built: the fix's push fence writes [anthropic, openai] before the branch moves", async () => {
+    const pushSeen: (readonly string[] | undefined)[] = [];
+    const w = await world({
+      provider: "openai",
+      record: { builder_providers: ["anthropic"] },
+      pushSeen,
+      checks: [[failure("lint")], [success("lint")]],
+    });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.prSteps.map((p) => p.kind)).toEqual(["fix"]);
+    expect(pushSeen).toEqual([["anthropic", "openai"]]);
+    expect((await w.ledger())?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
+  test("the runner-only merge of main: its push adds no vendor", async () => {
+    const pushSeen: (readonly string[] | undefined)[] = [];
+    const w = await world({ merges: [{ kind: "merged", head_sha: "9".repeat(40), resolved: [STATUS] }], record: { builder_providers: ["openai"] }, pushSeen });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(w.prSteps).toEqual([]);
+    expect(pushSeen).toEqual([["openai"]]);
+    expect((await w.ledger())?.builder_providers).toEqual(["openai"]);
   });
 
   test("fix cap: ci_fixes 2 and CI fails: parked ci-fix-cap, no session", async () => {
@@ -763,7 +795,7 @@ async function endToEnd(script: Script, o: EndToEndOpts = {}) {
   };
   const spied = scripted(fake, [...script]);
   const commits: CommitRequest[] = [];
-  const prStep = createPrStep({ forge: spied.forge, committer: committer(fake, [...(o.commits ?? [])], commits), identity: ALICE, repo: LANE.repo, sleep: async () => {}, random: () => 0 });
+  const prStep = createPrStep({ forge: spied.forge, committer: committer(fake, [...(o.commits ?? [])], commits), identity: ALICE, repo: LANE.repo, provider: "anthropic", sleep: async () => {}, random: () => 0 });
   const c = clock();
   const merger = stubMerger([...(o.merges ?? [{ kind: "up-to-date" }])]);
   const ciStep = createCiStep({ forge: spied.forge, merger, identity: ALICE, repo: LANE.repo, now: c.now, sleep: o.ciSleep ?? c.sleep, random: () => 0 });

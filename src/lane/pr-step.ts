@@ -2,6 +2,7 @@ import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { writeRules } from "../core/lane/write-check.ts";
 import { park } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
+import { addProvider, type Provider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, redactSecrets, sanitizeAgentText } from "../core/sanitize.ts";
 import { unitPath, UnitRecordSchema, type LaneIdentity } from "../core/schemas/ledger.ts";
 import type { BuildResult } from "../core/schemas/session-result.ts";
@@ -19,12 +20,14 @@ import { message, readsPath, stepKit, storySubject, type PrStep, type PrStepInpu
  * conflict with that `main` commits onto the session's start instead, so the
  * PR opens and the CI step's merge of `main` takes the conflict to a conflict
  * session counted in `ci_fixes`, never an attempt, AR20), a
- * fencing heartbeat, a leased push, a second fence and the PR opened (or the
+ * fencing heartbeat that adds the lane's vendor to the record's
+ * `builder_providers` (AD-16, so a crash after the push never leaves it
+ * out), a leased push, a second fence and the PR opened (or the
  * adopted one updated), the record's `pr` and SHAs, and one 🤖 status
- * comment. The lane's credential and token-shaped strings are redacted from
- * the commit message, the PR text and the comment, each capped at the
- * forge's limits; superseded spec files are dropped from the squash. It
- * never throws.
+ * comment. The lane's and its reviewer's credentials and token-shaped
+ * strings are redacted from the commit message, the PR text and the
+ * comment, each capped at the forge's limits; superseded spec files are
+ * dropped from the squash. It never throws.
  */
 
 export type PrStepDeps = {
@@ -34,6 +37,8 @@ export type PrStepDeps = {
   readonly identity: LaneIdentity;
   /** The repo slug, for the Standing Authority check. */
   readonly repo: string;
+  /** The lane's session vendor, added to `builder_providers` at the push fence (AD-16). */
+  readonly provider: Provider;
   /** Each forge call's (and the commit's) deadline; default 60 000 ms. */
   readonly callTimeoutMs?: number;
   /** The host clock in epoch ms; default `Date.now`. */
@@ -41,9 +46,9 @@ export type PrStepDeps = {
   readonly sleep?: Sleep;
   readonly random?: () => number;
   /**
-   * The lane's credentials (the vendor credential `lane run` reads at start),
-   * redacted from the commit message, the PR title and body and the status
-   * comment; default none.
+   * The lane's credentials (the lane's and its reviewer's vendor credentials
+   * `lane run` reads at start), redacted from the commit message, the PR
+   * title and body and the status comment; default none.
    */
   readonly secrets?: readonly string[];
 };
@@ -232,8 +237,8 @@ export function createPrStep(deps: PrStepDeps): PrStep {
         if (expected !== null) note(`${branch} is at ${expected}: the push leases from it`);
       }
 
-      // 5. Fence, then push with the lease.
-      await beat("fence");
+      // 5. Fence, adding the lane's vendor to the builders before the branch moves (AD-16), then push with the lease.
+      await beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
       await overBudget();
       const pushed = await call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: expected, sha: c.head_sha }, o));
       if (!pushed.ok) return await failed(`pushBranch ${pushed.error.kind}: ${pushed.error.message}`);

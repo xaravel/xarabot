@@ -6,6 +6,7 @@ import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
+import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { planningKindOf, type PlanningKind } from "../core/schemas/ledger.ts";
 import type { PlanningResult } from "../core/schemas/session-result.ts";
@@ -75,12 +76,13 @@ import {
  * - A unit adopted with its open PR runs no session: its CI is polled at the
  *   record's `head_sha`, and the gate follows.
  *
- * Every push, PR change and enqueue is fenced. The session runs outside
- * `kit.run`, so a `Halt` reaches the coordinator process: a STOP during a
- * usage-limit sleep releases the unit and ends the run `stop` through
- * `MarkerStop`. Once `input.signal` aborts (the unit or the coordinator
- * claim lost), the session ends the step `failed` and the process abandons
- * the unit. Anything else never throws.
+ * Every push, PR change and enqueue is fenced; the push's fence adds the
+ * lane's vendor to the record's `builder_providers` (AD-16). The session
+ * runs outside `kit.run`, so a `Halt` reaches the coordinator process: a
+ * STOP during a usage-limit sleep releases the unit and ends the run
+ * `stop` through `MarkerStop`. Once `input.signal` aborts (the unit or the
+ * coordinator claim lost), the session ends the step `failed` and the
+ * process abandons the unit. Anything else never throws.
  */
 
 export type PlanningStepDeps = SessionStepDeps & {
@@ -362,8 +364,8 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       const expected = leased.value;
       if (expected !== null) note(`${branch} is at ${expected}: the push leases from it`);
 
-      // 4. Fence, then push with the lease.
-      await beat("fence");
+      // 4. Fence, adding the lane's vendor to the builders before the branch moves (AD-16), then push with the lease.
+      await beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
       aborted();
       const pushed = await call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: expected, sha: head }, o));
       if (!pushed.ok) return await failed(`pushBranch ${branch} ${describeError(pushed.error)}`);

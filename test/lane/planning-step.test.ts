@@ -30,6 +30,7 @@ import type { WaitEnd, WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
+import { watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -275,6 +276,7 @@ function harness(o: HarnessOpts = {}): Harness {
     },
     graphTrees: unchangedGraph(),
     identity: COORD,
+    provider: "anthropic",
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -485,6 +487,24 @@ describe("createPlanningStep: the prompt and the clone", () => {
 // ------------------------------------------------------------------ commit, push, PR, CI and the gate
 
 describe("createPlanningStep: done", () => {
+  test("the push fence writes the lane's vendor to builder_providers before the branch moves; the record keeps it", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))], diff: [STATUS, CONTEXT_2] });
+    const watched = watchPushes(h.deps().forge, h.fake, "planning:status.1");
+    const out = await h.run(undefined, undefined, { forge: watched.forge });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(watched.seen).toEqual([["anthropic"]]);
+    expect((await h.ledger()).get("planning:status.1")?.builder_providers).toEqual(["anthropic"]);
+  });
+
+  test("a codex coordinator's push onto a record anthropic built: [anthropic, openai]", async () => {
+    const h = harness({ records: [{ ...OWN_STATUS, builder_providers: ["anthropic"] }], contextMissing: true, behaviors: [writes(planningResult("done"))], diff: [STATUS, CONTEXT_2] });
+    const watched = watchPushes(h.deps().forge, h.fake, "planning:status.1");
+    const out = await h.run(undefined, undefined, { forge: watched.forge, provider: "openai" });
+    expect(out.outcome).toBe("progress");
+    expect(watched.seen).toEqual([["anthropic", "openai"]]);
+    expect((await h.ledger()).get("planning:status.1")?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
   test("AC: a status done result changing only status and context files, CI passing, policy gating nothing: merging, enqueued at the head", async () => {
     const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))], diff: [STATUS, CONTEXT_2] });
     const out = await h.run();

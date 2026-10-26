@@ -21,6 +21,7 @@ import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import { FORGE_ERROR_KINDS, isLaneStopKind, type Forge, type ForgeError, type ForgeOperation } from "../../src/ports/forge.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -156,7 +157,7 @@ async function world(
     main,
     logs,
     run: (input = {}, deps = {}) =>
-      createPrStep({ forge: spy.forge, committer, identity: ALICE, repo: "xaravel/xarabot", sleep: async () => {}, random: () => 0, ...deps })({
+      createPrStep({ forge: spy.forge, committer, identity: ALICE, repo: "xaravel/xarabot", provider: "anthropic", sleep: async () => {}, random: () => 0, ...deps })({
         unit: STORY,
         record,
         result: result(),
@@ -936,6 +937,7 @@ async function endToEnd(
     committer: stubCommitter(fake, hooks.commit),
     identity: ALICE,
     repo: LANE.repo,
+    provider: "anthropic",
     sleep: async () => {},
     random: () => 0,
   });
@@ -1074,5 +1076,43 @@ describe("runLaneProcess with createPrStep", () => {
     const pr = (await prs(fake))[0];
     if (pr === undefined) throw new Error("no PR");
     expect(fake.control.comments(pr.number)[0]).toContain("Denied actions:\n- git push\n- bob rm\n");
+  });
+});
+
+// -------------------------------------------------------------- the session vendor (Story 3.3)
+
+describe("createPrStep: the lane's vendor in builder_providers (AD-16)", () => {
+  test("a claude lane's build push: the push fence writes [anthropic] before the branch moves, and the record keeps it", async () => {
+    const w = await world();
+    const watched = watchPushes(w.fake.forge, w.fake, UNIT);
+    const out = await w.run({}, { forge: watched.forge });
+    expect(out.outcome).toBe("progress");
+    expect(watched.seen).toEqual([["anthropic"]]);
+    expect((await w.ledger())?.builder_providers).toEqual(["anthropic"]);
+    expect(out.record?.builder_providers).toEqual(["anthropic"]);
+  });
+
+  test("a codex lane's push onto a record anthropic built: [anthropic, openai], sorted", async () => {
+    const w = await world({ record: { builder_providers: ["anthropic"] } });
+    const watched = watchPushes(w.fake.forge, w.fake, UNIT);
+    const out = await w.run({}, { forge: watched.forge, provider: "openai" });
+    expect(out.outcome).toBe("progress");
+    expect(watched.seen).toEqual([["anthropic", "openai"]]);
+    expect((await w.ledger())?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
+  test("the lane's own vendor already there: the set is unchanged", async () => {
+    const w = await world({ record: { builder_providers: ["anthropic", "openai"] } });
+    const out = await w.run({}, { provider: "openai" });
+    expect(out.outcome).toBe("progress");
+    expect((await w.ledger())?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
+  test("a write-check refusal pushes nothing and adds no vendor", async () => {
+    const w = await world({ commit: REFUSED });
+    const out = await w.run();
+    expect(out).toMatchObject({ outcome: "progress", state: "parked" });
+    expect(w.calls).not.toContain("pushBranch");
+    expect((await w.ledger())?.builder_providers).toEqual([]);
   });
 });
