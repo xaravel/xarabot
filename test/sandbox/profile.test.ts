@@ -47,6 +47,7 @@ describe("renderProfile", () => {
       lineOf(p, "(allow signal (target same-sandbox))"),
       lineOf(p, "(allow sysctl-read)"),
       lineOf(p, "(allow file-read-metadata)"),
+      lineOf(p, "(deny mach-lookup (with no-report))"),
       lineOf(p, "(allow mach-lookup"),
       lineOf(p, '(allow file-read* process-exec (literal "/")', '(subpath "/usr")'),
       lineOf(p, '(literal "/opt/claude/versions/2.1")'),
@@ -103,7 +104,15 @@ describe("renderProfile", () => {
     const line = render().split("\n").find((l) => l.startsWith("(allow mach-lookup")) as string;
     expect(line).toBe(`(allow mach-lookup ${MACH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`);
     expect(line).not.toMatch(/securityd|keychain|SecurityServer/i);
-    expect(render().match(/mach-lookup/g)).toHaveLength(1);
+    expect(render().match(/mach-lookup/g)).toHaveLength(2);
+  });
+
+  test("denies other Mach lookups without a report, just before the allowed ones", () => {
+    const lines = render().split("\n");
+    const deny = lines.indexOf("(deny mach-lookup (with no-report))");
+    expect(deny).toBeGreaterThan(0);
+    expect(lines[deny + 1]).toStartWith("(allow mach-lookup ");
+    expect(lines.filter((l) => l.includes("mach-lookup"))).toHaveLength(2);
   });
 
   test("looks up configd for the system's proxy settings; the keychain services stay absent", () => {
@@ -152,7 +161,7 @@ describe("renderProfile: proxyPort", () => {
     const p = render({ ...INPUT, proxyPort: 51234 });
     expect(p).not.toContain("udp");
     expect(p).not.toContain("mDNSResponder");
-    expect(p.match(/mach-lookup/g)).toHaveLength(1);
+    expect(p.match(/mach-lookup/g)).toHaveLength(2);
   });
 
   test("without a proxy port the profile is unchanged", () => {
