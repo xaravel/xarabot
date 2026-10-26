@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-23-harden-the-lane-lock",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -16,7 +16,7 @@
     "test/lane/processes.test.ts",
     "test/lane/wait.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T07:19:35.823Z",
+  "heartbeat_at": "2026-10-26T07:21:22.193Z",
   "pr": 175,
   "pr_owner": "edanisko",
   "base_sha": "4ab64b6f473da4547f013d94b4df6f70c22e74b1",
@@ -27,7 +27,19 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/lane/heartbeat.ts",
+      "src/lane/lane-lock.ts",
+      "src/lane/processes.ts",
+      "test/lane/heartbeat.test.ts",
+      "test/lane/lane-lock.test.ts",
+      "test/lane/processes.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
