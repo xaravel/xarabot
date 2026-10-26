@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-35-unlisted-mach-lookups-fail-fast",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/profile.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T17:29:44.067Z",
+  "heartbeat_at": "2026-10-26T17:32:32.025Z",
   "pr": 209,
   "pr_owner": "edanisko",
   "base_sha": "ff5cd147bcc3c6d24385055450eb17015ed6720d",
