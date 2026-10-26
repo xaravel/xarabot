@@ -3,6 +3,7 @@ import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
 import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isLaneStopKind, type Forge } from "../ports/forge.ts";
+import { checkHeldLaneLocks, type LaneLockCheck } from "./lane-lock.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, writtenRecord, type Sleep, type SwapLedgerOutcome } from "./ledger-cas.ts";
 
 /**
@@ -11,6 +12,10 @@ import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, writtenRecord, type 
  * `keepAlive` edit, which needs the lane's own `owner/host/lane` and
  * `generation`, so each beat also fences.
  *
+ * - Before each beat it re-reads `lane.lock`: a lock another process took
+ *   over, or one that is gone, aborts its signal with `lost` and writes
+ *   nothing more, so two live holders of a lane never both run on. A lock
+ *   that can't be read is logged, and the beat goes on.
  * - The record moved on by the lane's own steps (parked, released, merged):
  *   the keeper stops quietly, with no abort and no write.
  * - The record lost (another holder, another generation, no record): it
@@ -57,6 +62,8 @@ export type HeartbeatParams = {
   readonly random?: () => number;
   /** The host time of the claim, the first good beat; default `clock()` at start. */
   readonly claimedMs?: number;
+  /** Re-reads the lane lock before each beat; default `checkHeldLaneLocks`, the locks this process holds. */
+  readonly laneLock?: () => LaneLockCheck;
   readonly log: (text: string) => void;
 };
 
@@ -134,6 +141,15 @@ function startKeeper(params: KeeperParams): Heartbeat {
     if (end.kind !== "moved-on") lost.abort(end.kind);
   };
 
+  /** The lane lock's re-read, which never ends the keeper by throwing. */
+  const checkLock = (): LaneLockCheck => {
+    try {
+      return (params.laneLock ?? checkHeldLaneLocks)();
+    } catch (e) {
+      return { kind: "unreadable", message: `lane lock check threw: ${message(e)}` };
+    }
+  };
+
   const trySwap = async (edit: LedgerEdit): Promise<SwapLedgerOutcome> => {
     try {
       return await swapLedger({
@@ -170,6 +186,12 @@ function startKeeper(params: KeeperParams): Heartbeat {
       if (stopping.signal.aborted) return;
       await sleep(delay, stopping.signal);
       if (stopping.signal.aborted) return;
+      const lock = checkLock();
+      if (lock.kind === "lost") {
+        finish({ kind: "lost", message: `${what} lost: ${lock.message}` });
+        return;
+      }
+      if (lock.kind === "unreadable") log(`${what}: the lane lock could not be read: ${lock.message}; beating on`);
       // The host time of this beat's stamp, taken before the swap: a slow swap never moves the baseline later.
       const at = clock();
       const r = await trySwap(params.beat(params.forgeNow()));

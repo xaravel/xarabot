@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ProcessInfo } from "../../src/core/lane/waits.ts";
-import { acquireLaneLock, type AcquireLaneLockParams, type LaneLockAcquired } from "../../src/lane/lane-lock.ts";
-import { createPsProcessTable, type ProcessTable } from "../../src/lane/processes.ts";
+import { acquireLaneLock, checkHeldLaneLocks, type AcquireLaneLockParams, type LaneLockAcquired } from "../../src/lane/lane-lock.ts";
+import { createPsProcessTable, ProcessUnreadable, type ProcessTable } from "../../src/lane/processes.ts";
 import { hostTest } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
+/** Locks taken for this process's own PID: released after each test, so none stays recorded for later keepers. */
+const own: LaneLockAcquired[] = [];
 afterEach(() => {
+  for (const l of own.splice(0)) l.release();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -49,6 +53,15 @@ function acquired(r: ReturnType<typeof acquire>): LaneLockAcquired {
 }
 
 const lockOf = (dir: string) => join(dir, "lane.lock");
+/** A temp or set-aside file's name, as `acquireLaneLock` makes it. */
+const leftover = (kind: "tmp" | "stale", pid: number) => `lane.lock.${kind}-${pid}-${randomUUID()}`;
+/** A table whose `inspect` throws: `ps` failed. */
+const unreadable: ProcessTable = {
+  inspect: () => {
+    throw new ProcessUnreadable("ps failed");
+  },
+  kill: () => false,
+};
 /** Everything in the lane folder but the lock: no temp or set-aside file is left. */
 const leftovers = (dir: string) => readdirSync(dir).filter((f) => f !== "lane.lock");
 
@@ -103,6 +116,14 @@ describe("acquireLaneLock", () => {
     expect(leftovers(dir)).toEqual([]);
   });
 
+  test("a holder the process table can't read: held with its PID, never taken over", () => {
+    const dir = laneDir();
+    seed(dir, OTHER);
+    expect(acquire(dir, { table: unreadable })).toEqual({ ok: true, value: { kind: "held", pid: 4242 } });
+    expect(readFileSync(lockOf(dir), "utf8")).toBe(OTHER);
+    expect(leftovers(dir)).toEqual([]);
+  });
+
   test.each(["", "garbage", "4242\nbun\n", "4242\n/bin/bun\n2026-10-23T09:00:00.000Z\n"])("malformed %j: taken over with no PID and no process check", (text) => {
     const dir = laneDir();
     seed(dir, text);
@@ -143,6 +164,56 @@ describe("acquireLaneLock", () => {
     expect(readFileSync(lockOf(dir), "utf8")).toBe(OWN);
   });
 
+  test("once acquired, the temp and set-aside files of gone makers are removed; a live or unreadable maker's are kept", () => {
+    const dir = laneDir();
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const names = {
+      gone: leftover("tmp", 4242),
+      reused: leftover("stale", 6666),
+      mine: leftover("tmp", 777),
+      live: leftover("stale", 5555),
+      unknown: leftover("tmp", 8888),
+    };
+    for (const name of Object.values(names)) writeFileSync(join(dir, name), OTHER);
+    const others = ["lane.pid", "lane.lock.tmp-notes", "lane.lock.stale-1-x"];
+    for (const name of others) writeFileSync(join(dir, name), "x\n");
+    const live = table({
+      5555: { startMs: now - 60_000, args: BUN_ARGS },
+      // Started after the file last changed: not its maker.
+      6666: { startMs: now + 60_000, args: BUN_ARGS },
+    });
+    const t: ProcessTable = {
+      inspect: (pid) => {
+        if (pid === 8888) throw new ProcessUnreadable("ps failed");
+        return live.inspect(pid);
+      },
+      kill: () => false,
+    };
+    acquired(acquire(dir, { table: t }));
+    expect(leftovers(dir).sort()).toEqual([names.live, names.unknown, ...others].sort());
+    expect(live.inspected.sort()).toEqual([4242, 5555, 6666]);
+  });
+
+  test("a takeover also sweeps: the stale lock and a killed taker's files are gone", () => {
+    const dir = laneDir();
+    seed(dir, OTHER);
+    writeFileSync(join(dir, leftover("stale", 4242)), OTHER);
+    writeFileSync(join(dir, leftover("tmp", 4242)), OTHER);
+    const lock = acquired(acquire(dir));
+    expect(lock.tookOver).toEqual({ pid: 4242, reason: "gone" });
+    expect(leftovers(dir)).toEqual([]);
+  });
+
+  test("a held lock sweeps nothing", () => {
+    const dir = laneDir();
+    seed(dir, OTHER);
+    const name = leftover("tmp", 9999);
+    writeFileSync(join(dir, name), OTHER);
+    expect(acquire(dir, { table: table({ 4242: { startMs: OTHER_START, args: BUN_ARGS } }) })).toEqual({ ok: true, value: { kind: "held", pid: 4242 } });
+    expect(leftovers(dir)).toEqual([name]);
+  });
+
   test("release leaves a lock that is no longer this process's own", () => {
     const dir = laneDir();
     const lock = acquired(acquire(dir));
@@ -175,12 +246,85 @@ describe("acquireLaneLock", () => {
   });
 });
 
+describe("checkHeldLaneLocks", () => {
+  /** A lock taken for this process's own PID, recorded for the re-check. */
+  function mine(dir: string): LaneLockAcquired {
+    const lock = acquired(acquire(dir, { pid: process.pid }));
+    own.push(lock);
+    return lock;
+  }
+
+  test("no lock held: held", () => {
+    expect(checkHeldLaneLocks()).toEqual({ kind: "held" });
+  });
+
+  test("this process's lock, unchanged: held", () => {
+    const dir = laneDir();
+    mine(dir);
+    expect(readFileSync(lockOf(dir), "utf8")).toStartWith(`${process.pid}\nbun\n`);
+    expect(checkHeldLaneLocks()).toEqual({ kind: "held" });
+  });
+
+  test("taken over by another live process: lost, naming its PID and start", () => {
+    const dir = laneDir();
+    mine(dir);
+    writeFileSync(lockOf(dir), OTHER);
+    const r = checkHeldLaneLocks();
+    expect(r.kind).toBe("lost");
+    expect(r.kind === "lost" ? r.message : "").toBe(`${lockOf(dir)} is now pid 4242's (started 2026-10-23T09:00:00.000Z): another process runs this lane`);
+  });
+
+  test("this PID with another start time (a restarted process with the same PID): lost", () => {
+    const dir = laneDir();
+    mine(dir);
+    writeFileSync(lockOf(dir), `${process.pid}\nbun\n2026-10-23T11:00:00.000Z\n`);
+    expect(checkHeldLaneLocks().kind).toBe("lost");
+  });
+
+  test.each([
+    ["gone", (dir: string) => rmSync(lockOf(dir)), "is gone"],
+    ["malformed", (dir: string) => writeFileSync(lockOf(dir), "garbage"), "no longer has this process's text"],
+  ] as const)("%s: lost", (_name, change, words) => {
+    const dir = laneDir();
+    mine(dir);
+    change(dir);
+    const r = checkHeldLaneLocks();
+    expect(r.kind).toBe("lost");
+    expect(r.kind === "lost" ? r.message : "").toContain(words);
+  });
+
+  test("a lock that can't be read: unreadable, not lost", () => {
+    const dir = laneDir();
+    mine(dir);
+    rmSync(lockOf(dir));
+    mkdirSync(lockOf(dir));
+    expect(checkHeldLaneLocks().kind).toBe("unreadable");
+    rmSync(lockOf(dir), { recursive: true });
+  });
+
+  test("released: no longer checked, even once another process holds the lock", () => {
+    const dir = laneDir();
+    const lock = mine(dir);
+    expect(lock.release()).toEqual({ ok: true, value: undefined });
+    writeFileSync(lockOf(dir), OTHER);
+    expect(checkHeldLaneLocks()).toEqual({ kind: "held" });
+  });
+
+  test("a lock taken for another PID is not this process's: not checked", () => {
+    const dir = laneDir();
+    acquired(acquire(dir));
+    writeFileSync(lockOf(dir), OTHER);
+    expect(checkHeldLaneLocks()).toEqual({ kind: "held" });
+  });
+});
+
 describe("acquireLaneLock with the real process table", () => {
   hostTest("this process's own lock (its PID, runtime and start) is live to a second acquire through ps", () => {
     const dir = laneDir();
     const me = { pid: process.pid, command: basename(process.execPath), startedMs: performance.timeOrigin };
     const table = createPsProcessTable();
     const first = acquired(acquireLaneLock({ laneDir: dir, ...me, table }));
+    own.push(first);
     expect(acquireLaneLock({ laneDir: dir, ...me, pid: process.pid + 1, table })).toEqual({ ok: true, value: { kind: "held", pid: process.pid } });
     first.release();
     expect(existsSync(lockOf(dir))).toBe(false);
@@ -191,7 +335,20 @@ describe("acquireLaneLock with the real process table", () => {
     const table = createPsProcessTable();
     seed(dir, `${process.pid}\n${basename(process.execPath)}\n${new Date(performance.timeOrigin - 3_600_000).toISOString()}\n`);
     const lock = acquired(acquireLaneLock({ laneDir: dir, pid: process.pid, command: basename(process.execPath), startedMs: performance.timeOrigin, table }));
+    own.push(lock);
     expect(lock.tookOver).toEqual({ pid: process.pid, reason: "started-later" });
     lock.release();
+  });
+
+  test("this process's own lock is held to a second acquire even when ps fails", () => {
+    const dir = laneDir();
+    const me = { pid: process.pid, command: basename(process.execPath), startedMs: performance.timeOrigin };
+    const first = acquired(acquireLaneLock({ laneDir: dir, ...me, table: createPsProcessTable({ ps: "/usr/bin/false" }) }));
+    own.push(first);
+    expect(acquireLaneLock({ laneDir: dir, ...me, pid: process.pid + 1, table: createPsProcessTable({ ps: "/usr/bin/false" }) })).toEqual({
+      ok: true,
+      value: { kind: "held", pid: process.pid },
+    });
+    expect(readFileSync(lockOf(dir), "utf8")).toStartWith(`${process.pid}\n`);
   });
 });
