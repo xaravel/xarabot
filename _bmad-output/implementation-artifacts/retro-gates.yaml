@@ -253,7 +253,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/cli/lane-run.ts", "test/cli/lane-run.test.ts"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-4-keep-a-pass-across-repeated-main-merges"
         text: "Keep a passed review across repeated clean main merges: the passed gate walks back through a chain of runner-recomputed clean merges with main to passed_sha instead of accepting only a direct parent; tests for two and three queue ejections in a row (C2)"
         route: lane
@@ -303,7 +303,7 @@ epics:
         globs: ["src/core/review/gate.ts", "src/lane/review-gate.ts", "test/core/review/gate.test.ts", "test/lane/review-gate.test.ts"]
         status: open
       - id: "epic-3-retro-item-12-settle-the-codex-host-list-comment"
-        text: "Maintainer decision 2026-10-26 (Epic 3 retro finding A3; docs/maintainer/evidence/epic-3.md § Story 3.1's host list): the codex host list is final. In src/adapters/agent/codex/codex-agent.ts, replace the comment that says files.openai.com and the unresolved 2606:4700:440b::ac40:9034 stay out until the Maintainer's live run names them: name that address as one of the AAAA records of the four sdmntpr{central,northcentral,southcentral,westcentral}us.oaiusercontent.com hosts, which stay denied (codex passes every live check without them), and say files.openai.com stays out because no run reached it; CODEX_API_HOSTS and CODEX_API_KEY_HOST are unchanged; no test change beyond what tsc and oxlint need"
+        text: "Maintainer decision 2026-10-26 (Epic 3 retro finding A3; docs/maintainer/evidence/epic-3.md \u00A7 Story 3.1's host list): the codex host list is final. In src/adapters/agent/codex/codex-agent.ts, replace the comment that says files.openai.com and the unresolved 2606:4700:440b::ac40:9034 stay out until the Maintainer's live run names them: name that address as one of the AAAA records of the four sdmntpr{central,northcentral,southcentral,westcentral}us.oaiusercontent.com hosts, which stay denied (codex passes every live check without them), and say files.openai.com stays out because no run reached it; CODEX_API_HOSTS and CODEX_API_KEY_HOST are unchanged; no test change beyond what tsc and oxlint need"
         route: lane
         blocking: false
         globs: ["src/adapters/agent/codex/codex-agent.ts"]
