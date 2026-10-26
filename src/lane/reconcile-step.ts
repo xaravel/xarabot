@@ -20,7 +20,6 @@ import {
 import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
-import { allowanceRefusal } from "../core/review/allowance.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
@@ -30,9 +29,8 @@ import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
-import type { PassedGate } from "./passed-gate.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
-import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOutput } from "./session.ts";
+import { allowanceReason, callPassedGate, describeError, message, stepKit, stepOps, type FreshMain, type PassedGate, type PrStepOutput } from "./session.ts";
 
 /**
  * The `reconcile` step (FR2, NFR20, AR4, AR10, AR14, AD-9): runner code only,
@@ -60,7 +58,7 @@ import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOu
  * Before the first take the run re-checks the Standing Authority on fresh
  * `main`. Before a take of a unit that is not `reconcile` (Story 3.5), fresh
  * `main`'s policy must still allow the lane's agent and a reviewer
- * (`allowanceRefusal`: refused, no such take this run), and the approved
+ * (`allowanceReason`: refused, no such take this run), and the approved
  * head must pass the passed gate (`passed_sha`, or its clean merge with
  * `main`): an unreviewed head, or a gate error, is not taken and stays
  * `parked`. It then takes the record at `generation` + 1 (`takeApproved`,
@@ -739,19 +737,14 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       /** The allowance, then the passed gate at `t`'s approved head; `true` when `t` may be taken. */
       const reviewed = async (t: ApprovalTarget, f: FreshMain): Promise<boolean> => {
         if (refusedAll) return false;
-        const refused = allowanceRefusal(f.config.repo.policy, deps.agent, t.builder_providers);
+        const refused = allowanceReason(f.config.repo.policy, deps.agent, t.builder_providers);
         if (refused !== null) {
           refusedAll = true;
-          reasons.push(`allowance: ${refused}: no approved PR taken this run`);
-          note(`allowance: ${refused}; no approved PR taken this run`);
+          reasons.push(`${refused}: no approved PR taken this run`);
+          note(`${refused}; no approved PR taken this run`);
           return false;
         }
-        let gate: Awaited<ReturnType<PassedGate>>;
-        try {
-          gate = await deps.passed({ headSha: t.head_sha, passedSha: t.passed_sha, mainSha: f.snap.main.sha, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
-        } catch (e) {
-          gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
-        }
+        const gate = await callPassedGate({ passed: deps.passed, headSha: t.head_sha, passedSha: t.passed_sha, mainSha: f.snap.main.sha, signal: input.signal, callTimeoutMs });
         aborted();
         if (!gate.ok) {
           reasons.push(`${t.unit}: passed gate ${gate.error.kind}: ${gate.error.message}; not taken`);

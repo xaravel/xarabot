@@ -2,7 +2,6 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig } from "../core/config/load-repo-config.ts";
 import { ATTEMPTS_CAP, ejected, heartbeat, markMerged, park, startMerging } from "../core/ledger/edits.ts";
-import { allowanceRefusal } from "../core/review/allowance.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type Forge, type ForgeSnapshot } from "../ports/forge.ts";
@@ -11,14 +10,13 @@ import type { DiffPaths } from "./diff-paths.ts";
 import { gateGraph } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
-import type { PassedGate } from "./passed-gate.ts";
-import { describeError, message, readsPath, stepKit, type StepOutput, type StepUnit } from "./session.ts";
+import { allowanceReason, describeError, message, passedGate, readsPath, stepKit, type PassedGate, type StepOutput, type StepUnit } from "./session.ts";
 
 /**
  * The merge step after CI passes (FR6, FR13, FR22, AR7, AR8, AR20, AR21). It
  * re-checks the config and Standing Authority on fresh `main`, then reads the
  * PR's changed paths. Before any gate (Story 3.5), fresh `main`'s policy
- * must still allow the lane's agent and a reviewer (`allowanceRefusal`),
+ * must still allow the lane's agent and a reviewer (`allowanceReason`),
  * and the head must pass the passed gate (`passed_sha`, or a chain of
  * clean merges with `main` back to it); either failing is a failed attempt,
  * with no park and no enqueue. A PR touching an owner-approval or protected
@@ -326,18 +324,11 @@ export function createMergeStep(deps: MergeStepDeps): MergeStep {
         note(`watching PR #${pr}, already merging at ${head}`);
       } else {
         // The allowance, then the passed gate (Story 3.5): no park and no enqueue for a head no review passed.
-        const refused = allowanceRefusal(policy, deps.agent, kit.record.builder_providers);
-        if (refused !== null) return await failed(`allowance: ${refused}`);
-        let gate: Awaited<ReturnType<PassedGate>>;
-        try {
-          gate = await deps.passed({ headSha: head, passedSha: kit.record.passed_sha, mainSha: main, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
-        } catch (e) {
-          gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
-        }
-        await budgetPassed();
-        if (!gate.ok) return await failed(`passed gate ${gate.error.kind}: ${gate.error.message}`);
-        if (gate.value.kind === "unreviewed") return await failed(`passed gate: unreviewed: ${gate.value.why}`);
-        note(`passed gate: ${head} passed (${gate.value.how})`);
+        const refused = allowanceReason(policy, deps.agent, kit.record.builder_providers);
+        if (refused !== null) return await failed(refused);
+        const gate = await passedGate(kit, { passed: deps.passed, headSha: head, mainSha: main, signal: input.signal, callTimeoutMs, after: budgetPassed });
+        if (gate.kind === "unreviewed") return await failed(`passed gate: unreviewed: ${gate.why}`);
+        note(`passed gate: ${head} passed (${gate.how})`);
         const graph = await graphGate(head, pr, main, snap);
         await gateAndEnqueue(head, pr, main, [...policy.owner_approval_paths, ...policy.effective_protected_paths], graph === null ? null : { delta: graph, maintainer: loaded.value.repo.config.maintainer });
       }

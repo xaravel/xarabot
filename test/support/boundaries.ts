@@ -432,6 +432,21 @@ export async function laneSources(root: string): Promise<Record<string, string>>
   return sourcesUnder(root, LANE_DIR);
 }
 
+// ------------------------------------------------------------ the agent config rule's one home
+
+/** Where the agent config rule is declared: the write check and the review checkout share it (Epic 3 retro, D2). */
+export const AGENT_CONFIG_RULE_HOME = "core/review/agent-config.ts";
+
+const AGENT_CONFIG_RULE = /\b(?:const|let|var)\s+(AGENT_CONFIG_DIRS)\b|\bfunction\s+(isAgentConfigPath)\b/g;
+
+/** The agent config rule names `source` declares (comments ignored): `AGENT_CONFIG_DIRS`, `isAgentConfigPath`. */
+export function agentConfigRules(source: string): string[] {
+  const { code } = strip(source);
+  const found = new Set<string>();
+  for (const m of code.matchAll(AGENT_CONFIG_RULE)) found.add((m[1] ?? m[2]) as string);
+  return [...found].sort();
+}
+
 /** The import cycles under `<root>/<dir>`, as paths relative to `dir`. */
 export async function cyclesUnder(root: string, dir: string): Promise<string[][]> {
   return findCycles(importGraph(dir, await sourcesUnder(root, dir)));
@@ -447,7 +462,8 @@ export async function laneCycles(root: string): Promise<string[][]> {
 /**
  * The session runner's step helpers, declared only in `src/lane/session.ts`:
  * the kit's (Story 2.6a), then the step ops and error texts the CI step and
- * the coordinator steps share (Epic 2 retro, D2).
+ * the coordinator steps share (Epic 2 retro, D2), then the review plumbing
+ * the steps share (Epic 3 retro, D2).
  */
 export const SHARED_HELPERS: readonly string[] = [
   "call",
@@ -465,6 +481,11 @@ export const SHARED_HELPERS: readonly string[] = [
   "recordPr",
   "describeError",
   "message",
+  "pushSessionFix",
+  "allowanceReason",
+  "callPassedGate",
+  "passedGate",
+  "haveCommits",
 ];
 
 /**

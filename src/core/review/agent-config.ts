@@ -1,17 +1,21 @@
 import { AGENT_CONFIG_PATHS } from "../config/protected-paths.ts";
 
 /**
- * Agent config in a review checkout (Story 3.4, AR22): the paths a review
- * checkout takes from `main` instead of the reviewed head, so the change
- * under review can never configure its own reviewer. It is the write check's
- * `agent-config` class (`src/core/lane/write-check.ts`), mirrored here:
- * `AGENT_CONFIG_PATHS`, plus any path whose last segment is an agent config
- * folder name (a file or symlink there), all case-folded, because the
- * checkout lives on a case-insensitive filesystem. Pure.
+ * Agent config (AR22): the one rule for the write check's `agent-config`
+ * class (`src/core/lane/write-check.ts`) and the paths a review checkout
+ * takes from `main` instead of the reviewed head (Story 3.4), so the change
+ * under review can never configure its own reviewer. `AGENT_CONFIG_PATHS`,
+ * plus any path whose last segment is an agent config folder name (a file
+ * or symlink there), all case-folded as APFS folds names, because the clone
+ * and the checkout live on a case-insensitive filesystem. Pure.
  */
 
-/** Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with `s` and `k`. */
-const fold = (s: string): string => s.toUpperCase().toLowerCase();
+/**
+ * Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with
+ * `s` and `k`, and a composed `é` with `e` and a combining accent (NFD,
+ * as APFS compares names).
+ */
+export const fold = (s: string): string => s.normalize("NFD").toUpperCase().toLowerCase();
 
 /** The agent config folder names, folded: a path ending in one is agent config whatever it is. */
 export const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set([".agents", ".claude", ".codex", ".pi"]);

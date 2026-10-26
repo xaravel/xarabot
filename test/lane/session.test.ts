@@ -7,23 +7,29 @@ import { createCodexAgent } from "../../src/adapters/agent/codex/codex-agent.ts"
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
 import { park } from "../../src/core/ledger/edits.ts";
-import { ok } from "../../src/core/result.ts";
+import { err, ok, type Result } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
 import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { runLaneProcess } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore, laneLayout } from "../../src/lane/lane-store.ts";
 import {
+  allowanceReason,
+  callPassedGate,
   createSessionRunner,
   End,
   forgeClock,
   forgeOps,
   Halt,
+  haveCommits,
   newTrack,
+  passedGate,
   sessionAllowance,
   stepKit,
   stepOps,
   ZERO_SHA,
+  type PassedGate,
+  type PassedGateRequest,
   type PromptOutcome,
   type SessionContext,
   type StepKit,
@@ -32,7 +38,10 @@ import {
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck } from "../../src/ports/forge.ts";
 import type { Sandbox, SandboxRun } from "../../src/ports/sandbox.ts";
+import type { BuildResult } from "../../src/core/schemas/session-result.ts";
+import type { FetchShas } from "../../src/lane/workspace.ts";
 import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { cleanup, commit, rg, setup } from "./git-fixture.ts";
 
 const UNIT = "story:1.1";
 const FORGE_NOW = "2026-10-23T10:00:00Z";
@@ -972,5 +981,198 @@ describe("createSessionRunner: a codex session", () => {
     const w = codexWorld([{ end: "completed", result: true }]);
     await w.session();
     expect(w.logs.join("")).not.toContain("--- proxy ---");
+  });
+});
+
+describe("the review plumbing the steps share (Epic 3 retro item 8)", () => {
+  afterEach(cleanup);
+  const HEAD = "a".repeat(40);
+  const MAIN = "b".repeat(40);
+  const PASSED = "c".repeat(40);
+
+  describe("allowanceReason", () => {
+    test("an allowed agent with a reviewer: null", () => {
+      expect(allowanceReason({ unattended_adapters: ["claude", "codex"] }, "claude", ["anthropic"])).toBeNull();
+    });
+    test("an agent the policy no longer allows, or no reviewer: the reason, prefixed allowance", () => {
+      expect(allowanceReason({ unattended_adapters: ["codex"] }, "claude", [])).toBe("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+      expect(allowanceReason({ unattended_adapters: ["pi"] }, "pi", [])).toBe(
+        "allowance: no reviewer: .xarabot/policy.yaml unattended_adapters allows neither claude nor codex",
+      );
+    });
+  });
+
+  describe("callPassedGate", () => {
+    test("passes the request through, under the call deadline as well as the step's signal", async () => {
+      const seen: PassedGateRequest[] = [];
+      const passed: PassedGate = async (r) => {
+        seen.push(r);
+        return ok({ kind: "passed", how: "head" });
+      };
+      const step = new AbortController();
+      expect(await callPassedGate({ passed, headSha: HEAD, passedSha: PASSED, mainSha: MAIN, signal: step.signal, callTimeoutMs: 5000 })).toEqual(ok({ kind: "passed", how: "head" }));
+      expect(seen).toMatchObject([{ headSha: HEAD, passedSha: PASSED, mainSha: MAIN }]);
+      expect(seen[0]?.signal.aborted).toBe(false);
+      step.abort();
+      expect(seen[0]?.signal.aborted).toBe(true);
+    });
+
+    test("the deadline aborts the gate's signal", async () => {
+      const passed: PassedGate = (r) =>
+        new Promise((resolve) => r.signal.addEventListener("abort", () => resolve(err("transient", "aborted")), { once: true }));
+      expect(await callPassedGate({ passed, headSha: HEAD, passedSha: null, mainSha: MAIN, signal: new AbortController().signal, callTimeoutMs: 1 })).toEqual(err("transient", "aborted"));
+    });
+
+    test("a gate that throws is a transient error, never a throw", async () => {
+      const passed: PassedGate = async () => {
+        throw new Error("boom");
+      };
+      expect(await callPassedGate({ passed, headSha: HEAD, passedSha: null, mainSha: MAIN, signal: new AbortController().signal, callTimeoutMs: 5000 })).toEqual(
+        err("transient", "passed gate threw: boom"),
+      );
+    });
+  });
+
+  describe("passedGate", () => {
+    test("the kit's record's passed_sha, then the step's abort check; the outcome returned", async () => {
+      const w = await kitWorld();
+      const k = w.kit();
+      k.record = { ...k.record, passed_sha: PASSED };
+      const seen: (string | null)[] = [];
+      let afters = 0;
+      const passed: PassedGate = async (r) => {
+        seen.push(r.passedSha);
+        return ok({ kind: "unreviewed", why: "moved" });
+      };
+      const gate = await passedGate(k, { passed, headSha: HEAD, mainSha: MAIN, signal: new AbortController().signal, callTimeoutMs: 5000, after: () => void (afters += 1) });
+      expect(gate).toEqual({ kind: "unreviewed", why: "moved" });
+      expect(seen).toEqual([PASSED]);
+      expect(afters).toBe(1);
+    });
+
+    test("a gate error is a failed attempt, after the abort check", async () => {
+      const w = await kitWorld();
+      const order: string[] = [];
+      const passed: PassedGate = async () => {
+        order.push("gate");
+        return err("fetch", "offline");
+      };
+      const out = await ended(() => passedGate(w.kit(), { passed, headSha: HEAD, mainSha: MAIN, signal: new AbortController().signal, callTimeoutMs: 5000, after: () => void order.push("after") }));
+      expect(order).toEqual(["gate", "after"]);
+      expect(out).toMatchObject({ outcome: "failed", reason: "passed gate fetch: offline" });
+    });
+  });
+
+  describe("stepOps.pushSessionFix", () => {
+    const DONE: BuildResult = { kind: "build", outcome: "done", summary: "Fixed it", body: "", verification: ["bun test"], denied_actions: [] };
+    const SPEC = "_bmad-output/implementation-artifacts/spec-1-1-x.md";
+
+    async function fixWorld() {
+      const w = await kitWorld();
+      const k = w.kit();
+      const ops = stepOps({ kit: k, forge: w.fake.forge, identity: ALICE, repo: "xaravel/xarabot", signal: new AbortController().signal, abortReason: "lost", clock: () => w.host, sleep: async () => {} });
+      return { w, k, ops };
+    }
+
+    test("a done fix is pushed with the kit's record; claimed after it returns, the record adopted", async () => {
+      const { w, k, ops } = await fixWorld();
+      const pushed: unknown[] = [];
+      const after = { ...w.record, head_sha: HEAD };
+      await ops.pushSessionFix("CI fix", { result: DONE, specPath: SPEC, superseded: ["old.md"] }, true, async (fix) => {
+        pushed.push(fix);
+        return { outcome: "progress", state: "claimed", record: after, reason: "pushed the fix" };
+      });
+      expect(pushed).toEqual([{ record: w.record, result: DONE, specPath: SPEC, superseded: ["old.md"] }]);
+      expect(k.record).toEqual(after);
+      expect(k.reasons).toEqual(["pushed the fix"]);
+      expect(w.logs).toEqual(["test step: CI fix result: done", "test step: PR step (fix): progress (claimed)"]);
+    });
+
+    test("any other ending of the push ends the step with it", async () => {
+      const { ops } = await fixWorld();
+      const out = await ended(() => ops.pushSessionFix("loopback", { result: DONE, specPath: null, superseded: [] }, false, async () => ({ outcome: "failed", state: null })));
+      expect(out).toMatchObject({ outcome: "failed", state: null });
+    });
+
+    test("blocked and no-op park; a done one with no spec when one is needed, or a push that throws, is a failed attempt", async () => {
+      const never = async (): Promise<never> => {
+        throw new Error("not pushed");
+      };
+      const blocked = await fixWorld();
+      const b = await ended(() => blocked.ops.pushSessionFix("loopback", { result: { ...DONE, outcome: "blocked", blocked: { kind: "intent-gap", text: "unclear" } } as BuildResult, specPath: null, superseded: [] }, true, never));
+      expect(b).toMatchObject({ outcome: "progress", state: "parked", reason: "loopback blocked intent-gap: unclear" });
+      expect(await blocked.w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "intent-gap" } });
+
+      const noop = await fixWorld();
+      const n = await ended(() => noop.ops.pushSessionFix("CI fix", { result: { ...DONE, outcome: "no-op" } as BuildResult, specPath: null, superseded: [] }, true, never));
+      expect(n).toMatchObject({ outcome: "progress", state: "parked", reason: "CI fix: no-op" });
+
+      const noSpec = await fixWorld();
+      const s = await ended(() => noSpec.ops.pushSessionFix("CI fix", { result: DONE, specPath: null, superseded: [] }, true, never));
+      expect(s).toMatchObject({ outcome: "failed", reason: "CI fix session: a done result with no spec file" });
+
+      const threw = await fixWorld();
+      const t = await ended(() => threw.ops.pushSessionFix("CI fix", { result: DONE, specPath: null, superseded: [] }, false, async () => { throw new Error("boom"); }));
+      expect(t).toMatchObject({ outcome: "failed", reason: "PR step threw: boom" });
+    });
+  });
+
+  describe("haveCommits", () => {
+    function recordingFetch(impl: FetchShas): { calls: (readonly string[])[]; fetch: FetchShas } {
+      const calls: (readonly string[])[] = [];
+      return {
+        calls,
+        fetch: async (shas, signal) => {
+          calls.push([...shas]);
+          return impl(shas, signal);
+        },
+      };
+    }
+    const live = () => AbortSignal.timeout(30_000);
+
+    test("no fetch when every SHA is present", async () => {
+      const repo = await setup();
+      const a = await commit(repo.gitDir, { a: "a\n" });
+      const f = recordingFetch(async () => err("fetch", "offline"));
+      expect(await haveCommits(repo.gitDir, f.fetch, "test", [["headSha", a], ["mainSha", a]], live())).toEqual(ok(undefined));
+      expect(f.calls).toEqual([]);
+    });
+
+    test("the missing SHAs fetched once, each named once; still missing after the fetch is an error", async () => {
+      const repo = await setup();
+      const a = await commit(repo.gitDir, { a: "a\n" });
+      const missing = "e".repeat(40);
+      const f = recordingFetch(async (): Promise<Result<void>> => ok(undefined));
+      const r = await haveCommits(repo.gitDir, f.fetch, "test", [["headSha", missing], ["passedSha", a], ["mainSha", missing]], live());
+      expect(f.calls).toEqual([[missing]]);
+      expect(r).toEqual(err("missing-object", `test: after fetch: no commit ${missing} in runner.git`));
+    });
+
+    test("a fetch that fails or throws is a fetch error; a bad SHA is invalid with no fetch", async () => {
+      const repo = await setup();
+      const missing = "e".repeat(40);
+      const failed = await haveCommits(repo.gitDir, async () => err("fetch", "offline"), "test", [["mainSha", missing]], live());
+      expect(failed).toEqual(err("fetch", `test: fetching ${missing}: offline`));
+      const thrown = await haveCommits(repo.gitDir, async () => { throw new Error("boom"); }, "test", [["mainSha", missing]], live());
+      expect(thrown).toEqual(err("fetch", `test: fetching ${missing}: boom`));
+      const f = recordingFetch(async () => ok(undefined));
+      const bad = await haveCommits(repo.gitDir, f.fetch, "test", [["headSha", "nope"]], live());
+      expect(bad.ok ? "ok" : bad.error).toEqual({ kind: "invalid", message: 'test: headSha: "nope" is not a full hex SHA' });
+      expect(f.calls).toEqual([]);
+    });
+
+    test("a fetched SHA is then found", async () => {
+      const repo = await setup();
+      const other = await setup();
+      const main = await commit(other.gitDir, { b: "b\n" });
+      await rg(other.gitDir, ["update-ref", "refs/x/main", main]);
+      const fetch: FetchShas = async () => {
+        const p = Bun.spawnSync(["git", `--git-dir=${repo.gitDir}`, "fetch", "-q", other.gitDir, "refs/x/main:refs/x/main"], {
+          env: { PATH: process.env.PATH ?? "", HOME: repo.gitDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        });
+        return p.exitCode === 0 ? ok(undefined) : err("fetch", p.stderr.toString());
+      };
+      expect(await haveCommits(repo.gitDir, fetch, "test", [["mainSha", main]], live())).toEqual(ok(undefined));
+    });
   });
 });

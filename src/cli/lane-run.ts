@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createClaudeAgent } from "../adapters/agent/claude/claude-agent.ts";
-import { codexCredentialKind, createCodexAgent } from "../adapters/agent/codex/codex-agent.ts";
+import { CODEX_CREDENTIAL_FILES, codexCredentialKind, createCodexAgent } from "../adapters/agent/codex/codex-agent.ts";
 import { APP_FILE, appDir, type CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { loadRepoConfig, POLICY_PATH } from "../core/config/load-repo-config.ts";
@@ -146,7 +146,7 @@ function present(path: string): boolean {
 export function adapterFor(agent: SessionAdapter, env: CredentialEnv): Result<Agent, "refused"> {
   if (agent === "claude") return ok(createClaudeAgent());
   if (agent === "codex") {
-    const dir = credentialPath(env, "codex", "auth.json");
+    const dir = credentialPath(env, "codex", CODEX_CREDENTIAL_FILES["auth-json"]);
     if (!dir.ok) return err("refused", dir.error.message);
     const folder = dirname(dir.value);
     const kind = codexCredentialKind((file) => present(join(folder, file)), folder);

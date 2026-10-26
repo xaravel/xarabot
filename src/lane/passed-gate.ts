@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { err, ok, type Result } from "../core/result.ts";
-import { failed, git, gitRun, needCommit } from "./clone.ts";
-import { message } from "./session.ts";
+import { failed, git, gitRun } from "./clone.ts";
+import { haveCommits, message, type PassedGate, type PassedGateOutcome, type PassedGateRequest } from "./session.ts";
 import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
 
 /**
@@ -18,24 +18,11 @@ import type { FetchShas, WorkspaceErrorKind } from "./workspace.ts";
  * Anything else is `unreviewed`, with the reason. Neither the record nor
  * the commit's author is trusted, and a status-YAML or lockfile rule is
  * never recomputed here: such a merge counts as a change, reviewed again.
+ * The gate's types are `session.ts`'s, which the steps call it through
+ * (`callPassedGate`).
  */
 
-export type PassedGateRequest = {
-  /** The PR's head. */
-  readonly headSha: string;
-  /** The record's `passed_sha`; `null` when no review round passed a head. */
-  readonly passedSha: string | null;
-  /** The fresh `main`. */
-  readonly mainSha: string;
-  readonly signal: AbortSignal;
-};
-
-export type PassedGateOutcome =
-  | { readonly kind: "passed"; readonly how: "head" | "clean-merge" }
-  | { readonly kind: "unreviewed"; readonly why: string };
-
-/** Whether the head passed a review; an error when git cannot tell. Never throws. */
-export type PassedGate = (request: PassedGateRequest) => Promise<Result<PassedGateOutcome, WorkspaceErrorKind>>;
+export type { PassedGate, PassedGateOutcome, PassedGateRequest } from "./session.ts";
 
 export type GitPassedGateParams = {
   readonly gitDir: string;
@@ -64,30 +51,8 @@ export function createGitPassedGate(params: GitPassedGateParams): PassedGate {
     if (headSha === passedSha) return ok({ kind: "passed", how: "head" });
 
     // 1. The three SHAs in runner.git, fetching only what is missing.
-    const missing: string[] = [];
-    for (const [what, sha] of [
-      ["headSha", headSha],
-      ["passedSha", passedSha],
-      ["mainSha", mainSha],
-    ] as const) {
-      const has = await needCommit(gitDir, sha, `passed gate: ${what}`, signal);
-      if (has.ok) continue;
-      if (has.error.kind !== "missing-object") return has;
-      if (!missing.includes(sha)) missing.push(sha);
-    }
-    if (missing.length > 0) {
-      let fetched: Result<void>;
-      try {
-        fetched = await fetch(missing, signal);
-      } catch (e) {
-        fetched = err("fetch", message(e));
-      }
-      if (!fetched.ok) return err("fetch", `passed gate: fetching ${missing.join(", ")}: ${fetched.error.message}`);
-      for (const sha of missing) {
-        const has = await needCommit(gitDir, sha, "passed gate: after fetch", signal);
-        if (!has.ok) return has;
-      }
-    }
+    const have = await haveCommits(gitDir, fetch, "passed gate", [["headSha", headSha], ["passedSha", passedSha], ["mainSha", mainSha]], signal);
+    if (!have.ok) return have;
     const unreviewed = (why: string) => ok({ kind: "unreviewed" as const, why: `the head ${headSha} is not the passed head ${passedSha}: ${why}` });
 
     const isAncestor = async (ancestor: string, of: string): Promise<Result<boolean, WorkspaceErrorKind>> => {
