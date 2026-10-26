@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { err, ok, type Result } from "../../src/core/result.ts";
-import { createGitPassedGate, headPassedGate } from "../../src/lane/passed-gate.ts";
+import { createGitPassedGate, headPassedGate, MAX_MERGES } from "../../src/lane/passed-gate.ts";
 import type { FetchShas } from "../../src/lane/workspace.ts";
-import { cleanup, commit, live, rg, setup, tempDir, value } from "./git-fixture.ts";
+import { cleanup, commit, IDENTITY, live, rg, setup, tempDir, value } from "./git-fixture.ts";
 
 afterEach(cleanup);
 
@@ -125,7 +125,7 @@ describe("createGitPassedGate (Story 3.5)", () => {
     const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
     const a = value(await gate({ headSha: notPassed, passedSha: w.passed, mainSha: w.main, ...live() }));
     expect(a.kind).toBe("unreviewed");
-    if (a.kind === "unreviewed") expect(a.why).toContain("neither of its parents is the passed head");
+    if (a.kind === "unreviewed") expect(a.why).toContain("neither of its parents is or descends from the passed head");
     const b = value(await gate({ headSha: octopus, passedSha: w.passed, mainSha: w.main, ...live() }));
     expect(b.kind).toBe("unreviewed");
     if (b.kind === "unreviewed") expect(b.why).toContain("3 parent(s)");
@@ -165,6 +165,124 @@ describe("createGitPassedGate (Story 3.5)", () => {
     expect(t.ok).toBe(false);
     if (!t.ok) expect(t.error.message).toContain("boom");
   });
+});
+
+/** `main`'s commit for ejection `i` (from 2): the one before it plus its own file, `src/m<i>.ts`. */
+const mainFiles = (i: number): Record<string, string> => {
+  const out = { ...MAIN };
+  for (let k = 2; k <= i; k += 1) out[`src/m${k}.ts`] = `m${k}\n`;
+  return out;
+};
+/** The clean merge of the reviewed head with `main` after ejection `i`. */
+const mergedFiles = (i: number): Record<string, string> => ({ ...mainFiles(i), "src/a.ts": "a reviewed\n" });
+
+type Chain = { readonly mains: readonly string[]; readonly heads: readonly string[] };
+
+/** `n` queue ejections in a row: each moves `main` on and merges it into the PR's last head, cleanly. */
+async function ejections(w: World, n: number): Promise<Chain> {
+  const mains = [w.main];
+  const heads = [await commit(w.gitDir, mergedFiles(1), [w.passed, w.main])];
+  for (let i = 2; i <= n; i += 1) {
+    mains.push(await commit(w.gitDir, mainFiles(i), [mains.at(-1) as string]));
+    heads.push(await commit(w.gitDir, mergedFiles(i), [heads.at(-1) as string, mains.at(-1) as string]));
+  }
+  return { mains, heads };
+}
+
+describe("a chain of clean merges with main (Epic 3 retro item 4)", () => {
+  test("two queue ejections in a row: the second merge, back through the first to passed_sha, is passed clean-merge", async () => {
+    const w = await world();
+    const c = await ejections(w, 2);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    expect(value(await gate({ headSha: c.heads[1] as string, passedSha: w.passed, mainSha: c.mains[1] as string, ...live() }))).toEqual({ kind: "passed", how: "clean-merge" });
+    // A main further on still holds both merged-in commits.
+    const later = await commit(w.gitDir, { ...mainFiles(2), "docs/x.md": "x\n" }, [c.mains[1] as string]);
+    expect(value(await gate({ headSha: c.heads[1] as string, passedSha: w.passed, mainSha: later, ...live() }))).toEqual({ kind: "passed", how: "clean-merge" });
+  });
+
+  test("three queue ejections in a row are passed clean-merge, each head of the chain on its own main", async () => {
+    const w = await world();
+    const c = await ejections(w, 3);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    for (const [i, head] of c.heads.entries()) {
+      expect(value(await gate({ headSha: head, passedSha: w.passed, mainSha: c.mains[i] as string, ...live() }))).toEqual({ kind: "passed", how: "clean-merge" });
+    }
+  });
+
+  test("a chain merge with its parents in either order passes", async () => {
+    const w = await world();
+    const m1 = await commit(w.gitDir, mergedFiles(1), [w.main, w.passed]);
+    const main2 = await commit(w.gitDir, mainFiles(2), [w.main]);
+    const m2 = await commit(w.gitDir, mergedFiles(2), [main2, m1]);
+    const main3 = await commit(w.gitDir, mainFiles(3), [main2]);
+    const m3 = await commit(w.gitDir, mergedFiles(3), [m2, main3]);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    expect(value(await gate({ headSha: m3, passedSha: w.passed, mainSha: main3, ...live() }))).toEqual({ kind: "passed", how: "clean-merge" });
+  });
+
+  test("a change committed between two merges with main is unreviewed, named where the walk stopped", async () => {
+    const w = await world();
+    const m1 = await commit(w.gitDir, mergedFiles(1), [w.passed, w.main]);
+    const change = await commit(w.gitDir, { ...mergedFiles(1), "src/c.ts": "c\n" }, [m1]);
+    const main2 = await commit(w.gitDir, mainFiles(2), [w.main]);
+    const m2 = await commit(w.gitDir, { ...mergedFiles(2), "src/c.ts": "c\n" }, [change, main2]);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    const r = value(await gate({ headSha: m2, passedSha: w.passed, mainSha: main2, ...live() }));
+    expect(r.kind).toBe("unreviewed");
+    if (r.kind === "unreviewed") expect(r.why).toContain(`it has 1 parent(s), not a merge of the passed head (at ${change}, 1 merge(s) back)`);
+  });
+
+  test("a change smuggled into an earlier merge of the chain is unreviewed, though the later merge is clean", async () => {
+    const w = await world();
+    const m1 = await commit(w.gitDir, { ...mergedFiles(1), "src/evil.ts": "x\n" }, [w.passed, w.main]);
+    const main2 = await commit(w.gitDir, mainFiles(2), [w.main]);
+    const m2 = await commit(w.gitDir, { ...mergedFiles(2), "src/evil.ts": "x\n" }, [m1, main2]);
+    const main3 = await commit(w.gitDir, mainFiles(3), [main2]);
+    const m3 = await commit(w.gitDir, { ...mergedFiles(3), "src/evil.ts": "x\n" }, [m2, main3]);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    const r = value(await gate({ headSha: m3, passedSha: w.passed, mainSha: main3, ...live() }));
+    expect(r.kind).toBe("unreviewed");
+    if (r.kind === "unreviewed") expect(r.why).toContain(`its tree differs from the clean merge of ${w.passed} and ${w.main} (at ${m1}, 2 merge(s) back)`);
+  });
+
+  test("an earlier merge of the chain with a commit off main is unreviewed", async () => {
+    const w = await world();
+    const side = await commit(w.gitDir, { ...BASE, "src/b.ts": "b on a side branch\n" }, [w.base]);
+    const m1 = await commit(w.gitDir, { ...PASSED, "src/b.ts": "b on a side branch\n" }, [w.passed, side]);
+    const main2 = await commit(w.gitDir, { ...BASE, "src/m2.ts": "m2\n" }, [w.base]);
+    const m2 = await commit(w.gitDir, { ...PASSED, "src/b.ts": "b on a side branch\n", "src/m2.ts": "m2\n" }, [m1, main2]);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    const r = value(await gate({ headSha: m2, passedSha: w.passed, mainSha: main2, ...live() }));
+    expect(r.kind).toBe("unreviewed");
+    if (r.kind === "unreviewed") expect(r.why).toContain(`its other parent ${side} is not on main ${main2} (at ${m1}, 1 merge(s) back)`);
+  });
+
+  test("a chain of clean merges that never reaches passed_sha is unreviewed", async () => {
+    const w = await world();
+    const other = await commit(w.gitDir, { ...BASE, "src/a.ts": "a unreviewed\n" }, [w.base]);
+    const m1 = await commit(w.gitDir, { ...MAIN, "src/a.ts": "a unreviewed\n" }, [other, w.main]);
+    const main2 = await commit(w.gitDir, mainFiles(2), [w.main]);
+    const m2 = await commit(w.gitDir, { ...mainFiles(2), "src/a.ts": "a unreviewed\n" }, [m1, main2]);
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    const r = value(await gate({ headSha: m2, passedSha: w.passed, mainSha: main2, ...live() }));
+    expect(r.kind).toBe("unreviewed");
+    if (r.kind === "unreviewed") expect(r.why).toContain("neither of its parents is or descends from the passed head");
+  });
+
+  test(`the walk passes ${MAX_MERGES} merges with main and stops after that`, async () => {
+    const w = await world();
+    // Each link merges main in again: clean, and the same tree as the one before.
+    const tree = await rg(w.gitDir, ["rev-parse", `${await commit(w.gitDir, MERGED, [w.passed, w.main])}^{tree}`]);
+    const heads = [w.passed];
+    for (let i = 0; i <= MAX_MERGES; i += 1) {
+      heads.push(await rg(w.gitDir, ["commit-tree", tree, "-p", heads.at(-1) as string, "-p", w.main], { identity: IDENTITY, stdin: "m\n" }));
+    }
+    const gate = createGitPassedGate({ gitDir: w.gitDir, fetch: recordingFetch().fetch });
+    expect(value(await gate({ headSha: heads[MAX_MERGES] as string, passedSha: w.passed, mainSha: w.main, ...live() }))).toEqual({ kind: "passed", how: "clean-merge" });
+    const r = value(await gate({ headSha: heads[MAX_MERGES + 1] as string, passedSha: w.passed, mainSha: w.main, ...live() }));
+    expect(r.kind).toBe("unreviewed");
+    if (r.kind === "unreviewed") expect(r.why).toContain(`more than ${MAX_MERGES} merges with main`);
+  }, 30_000);
 });
 
 describe("headPassedGate", () => {

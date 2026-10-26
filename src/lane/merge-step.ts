@@ -19,11 +19,11 @@ import { describeError, message, readsPath, stepKit, type StepOutput, type StepU
  * re-checks the config and Standing Authority on fresh `main`, then reads the
  * PR's changed paths. Before any gate (Story 3.5), fresh `main`'s policy
  * must still allow the lane's agent and a reviewer (`allowanceRefusal`),
- * and the head must pass the passed gate (`passed_sha`, or its clean merge
- * with `main`); either failing is a failed attempt, with no park and no
- * enqueue. A PR touching an owner-approval or protected path parks
- * `awaiting-approval` for its owner; once the owner approves its current head,
- * the coordinator's `reconcile` queues it (Story 2.6).
+ * and the head must pass the passed gate (`passed_sha`, or a chain of
+ * clean merges with `main` back to it); either failing is a failed attempt,
+ * with no park and no enqueue. A PR touching an owner-approval or protected
+ * path parks `awaiting-approval` for its owner; once the owner approves its
+ * current head, the coordinator's `reconcile` queues it (Story 2.6).
  * Before that gate, the graph-change gate (Story 2.8) recomputes the PR's
  * merge with fresh `main`: a refused merge result parks `blocked`
  * `graph-invalid`; a changed graph parks `awaiting-approval` for the
