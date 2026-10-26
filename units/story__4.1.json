@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.1",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-4-1-retro-item-distance-gates.md",
@@ -15,7 +15,7 @@
     "test/core/next/fixtures.ts",
     "test/core/next/next.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:33:16.065Z",
+  "heartbeat_at": "2026-10-26T18:36:35Z",
   "pr": 214,
   "pr_owner": "edanisko",
   "base_sha": "807b890dc9deba67d6e7172948bfc23a6287b489",
