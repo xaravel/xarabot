@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-36-cache-the-bot-user-id",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "test/cli/lane-run.test.ts",
     "test/lane/lane-store.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T16:55:30.929Z",
+  "heartbeat_at": "2026-10-26T16:58:19.021Z",
   "pr": 206,
   "pr_owner": "edanisko",
   "base_sha": "dffb01cc1ed7e6f13292381104d1fc1303aeff95",
