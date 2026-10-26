@@ -129,7 +129,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/lane/write-check.ts", "src/lane/commit.ts", "src/core/sanitize.ts", "test/core/lane/write-check.test.ts", "test/lane/commit.test.ts", "test/core/sanitize.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-21-reconcile-pr-hygiene"
         text: "Keep reconcile PRs and branches tidy (Story 2.5a deferral, low; Story 2.5 follow-up review F1; Maintainer decision Q4, 2026-10-25): end a reconcile run while any closeBranchPrs call failed, so two reconcile PRs are never open (2.5 F1); add Forge.deleteBranch(branch) (contents: write, in the operation table, with fake and GitHub contract cases) and delete the branches of closed reconcile PRs and disposable planning PRs; a test pins Q4's rule that an approved reconcile PR the runner failed to enqueue is closed and replaced on the next run, never re-enqueued"
         route: lane
