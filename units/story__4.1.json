@@ -1,18 +1,21 @@
 {
   "schema_version": 5,
   "unit": "story:4.1",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "builder-1",
-  "generation": 1,
+  "lane": "coordinator",
+  "generation": 2,
   "globs": [
-    "src/core/graph/**",
-    "src/core/next/**",
-    "test/core/graph/**",
-    "test/core/next/**"
+    "_bmad-output/implementation-artifacts/spec-4-1-retro-item-distance-gates.md",
+    "src/core/next/coordinator.ts",
+    "src/core/next/epic-gates.ts",
+    "src/core/next/reasons.ts",
+    "test/core/next/coordinator.test.ts",
+    "test/core/next/fixtures.ts",
+    "test/core/next/next.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:25:13.176Z",
+  "heartbeat_at": "2026-10-26T18:33:01.002Z",
   "pr": 214,
   "pr_owner": "edanisko",
   "base_sha": "807b890dc9deba67d6e7172948bfc23a6287b489",
@@ -20,26 +23,13 @@
   "reviewed_sha": "47956569a9edcf8194c8de4d986ddc27b9722810",
   "passed_sha": "47956569a9edcf8194c8de4d986ddc27b9722810",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "47956569a9edcf8194c8de4d986ddc27b9722810",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "_bmad-output/implementation-artifacts/spec-4-1-retro-item-distance-gates.md",
-      "src/core/next/coordinator.ts",
-      "src/core/next/epic-gates.ts",
-      "src/core/next/reasons.ts",
-      "test/core/next/coordinator.test.ts",
-      "test/core/next/fixtures.ts",
-      "test/core/next/next.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
