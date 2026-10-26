@@ -12,7 +12,7 @@
     "test/core/next/coordinator.test.ts",
     "test/core/reconcile/plan.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T11:14:48Z",
+  "heartbeat_at": "2026-10-26T11:19:52.296Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "09d95c46f665675d085097799e40c1a436e23333",
