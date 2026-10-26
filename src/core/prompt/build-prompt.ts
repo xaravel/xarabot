@@ -219,12 +219,16 @@ export function buildPrompt(input: BuildPromptInput): Result<string, BuildPrompt
 /** A planning heading: a Story heading in `epics_path` with no manifest. */
 export type PlanningPromptHeading = { readonly id: string; readonly epic: number; readonly line: number };
 
-/** A status planning unit: the Epics whose context file it compiles, each with its output path. */
+/**
+ * A status planning unit: the Epics whose context file it compiles, each
+ * with its output path and the source line it writes below the heading
+ * (retro item 12).
+ */
 export type StatusPlanningPromptUnit = {
   readonly kind: "status";
   readonly id: string;
   readonly epics_path: string;
-  readonly contexts: readonly { readonly epic: number; readonly output_path: string }[];
+  readonly contexts: readonly { readonly epic: number; readonly output_path: string; readonly source_line: string }[];
 };
 
 /** A graph planning unit: the headings it writes manifests for, and where. */
@@ -264,7 +268,13 @@ const PlanningInputSchema = z.strictObject({
       kind: z.literal("status"),
       id: planningId("status"),
       epics_path: SafeText,
-      contexts: z.array(z.strictObject({ epic: z.int().positive(), output_path: SafeText })),
+      contexts: z.array(
+        z.strictObject({
+          epic: z.int().positive(),
+          output_path: SafeText,
+          source_line: z.string().regex(/^<!-- source: sha256:[0-9a-f]{64} -->$/, "must be <!-- source: sha256:<64 lowercase hex digits> -->"),
+        }),
+      ),
     }),
     z.strictObject({
       kind: z.literal("graph"),
@@ -326,7 +336,7 @@ export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<str
         ? "- None: no Epic context file is due."
         : [...unit.contexts]
             .sort((a, b) => a.epic - b.epic)
-            .map((c) => `- Epic ${c.epic}: output path \`${c.output_path}\``)
+            .map((c) => `- Epic ${c.epic}: output path \`${c.output_path}\`, source line \`${c.source_line}\``)
             .join("\n");
   } else {
     const dup = firstDuplicate(unit.headings.map((h) => h.id));

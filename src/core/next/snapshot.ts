@@ -1,4 +1,5 @@
 import { loadRepoConfig, type ConfigStopKind, type RepoSnapshot } from "../config/load-repo-config.ts";
+import { parseEpicsMd } from "../graph/epics-md.ts";
 import { parseLedger, type LedgerParseErrorKind } from "../ledger/codec.ts";
 import { emptyRetroGates } from "../graph/retro-gates.ts";
 import { resolveGraph } from "../graph/resolve-graph.ts";
@@ -103,15 +104,51 @@ export function liveEvidenceGaps(text: string, commands: readonly string[]): Liv
 }
 
 /**
+ * Epic `epic`'s own section of `epics.md` text (retro item 12, C6): from its
+ * `## Epic <N>:` heading up to the next Epic heading, or the end of the text
+ * for the last Epic, byte for byte. `null` when `text` does not parse or has
+ * no such Epic. Pure.
+ */
+export function epicSection(text: string, epic: number): string | null {
+  const parsed = parseEpicsMd("epics.md", text);
+  if (!parsed.ok) return null;
+  const at = parsed.value.epics.findIndex((e) => e.number === epic);
+  if (at === -1) return null;
+  const lines = text.split(/(?<=\n)/);
+  const start = (parsed.value.epics[at] as { line: number }).line - 1;
+  const next = parsed.value.epics[at + 1];
+  return lines.slice(start, next === undefined ? lines.length : next.line - 1).join("");
+}
+
+/**
+ * The source line a status planning unit writes directly below Epic
+ * `epic`'s context heading: `<!-- source: sha256:<hex> -->`, the hex the
+ * SHA-256 of `epicSection(epicsText, epic)`. `null` when there is no
+ * section. Pure.
+ */
+export function epicSourceLine(epicsText: string, epic: number): string | null {
+  const section = epicSection(epicsText, epic);
+  if (section === null) return null;
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(section);
+  return `<!-- source: sha256:${hasher.digest("hex")} -->`;
+}
+
+/**
  * The state of Epic `epic`'s context file from its text (`null` when the
  * file is not in the tree): `missing`, `empty` (blank text), `wrong-heading`
- * (does not start with `# Epic <N> Context:`), or `valid`.
+ * (does not start with `# Epic <N> Context:`), `stale` when `source` is
+ * given and the line directly below the heading is not that source line
+ * (retro item 12), or `valid`.
  */
-export function epicContextState(epic: number, text: string | null): EpicContextState {
+export function epicContextState(epic: number, text: string | null, source?: string): EpicContextState {
   if (text === null) return "missing";
   const body = text.startsWith("﻿") ? text.slice(1) : text;
   if (body.trim() === "") return "empty";
-  return body.startsWith(`# Epic ${epic} Context:`) ? "valid" : "wrong-heading";
+  if (!body.startsWith(`# Epic ${epic} Context:`)) return "wrong-heading";
+  if (source === undefined) return "valid";
+  const below = body.split("\n")[1];
+  return below !== undefined && below.replace(/[ \t\r]+$/, "") === source ? "valid" : "stale";
 }
 
 function readListed(snap: RepoSnapshot, path: string): Result<string | null, "unreadable"> {
@@ -163,11 +200,15 @@ export function assembleSnapshot(input: AssembleInput): Result<Snapshot, Assembl
       if (sha === undefined) return err("invalid-snapshot", `${m.path}: no blob SHA on main for this manifest`);
       manifests.push({ ...m, sha });
     }
+    // The graph resolved, so `epics_path` was read.
+    const epicsText = readListed(repoSnap, config.epics_path);
+    if (!epicsText.ok) return epicsText;
     for (const e of resolved.value.epics) {
       const path = epicContextPath(config.epic_context_path, e.number);
       const text = readListed(repoSnap, path);
       if (!text.ok) return text;
-      epicContext[String(e.number)] = epicContextState(e.number, text.value);
+      const source = epicsText.value === null ? null : epicSourceLine(epicsText.value, e.number);
+      epicContext[String(e.number)] = epicContextState(e.number, text.value, source ?? "");
       const evidencePath = liveEvidencePath(config.live_evidence_glob, e.number, repoSnap.tree);
       liveEvidence[String(e.number)] = evidencePath !== null;
       if (evidencePath !== null) {

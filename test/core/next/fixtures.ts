@@ -1,5 +1,5 @@
 import type { AssembleInput } from "../../../src/core/next/snapshot.ts";
-import { assembleSnapshot } from "../../../src/core/next/snapshot.ts";
+import { assembleSnapshot, epicSourceLine } from "../../../src/core/next/snapshot.ts";
 import { COORDINATOR_PATH as LEDGER_COORDINATOR_PATH, serializeCoordinator } from "../../../src/core/ledger/codec.ts";
 import type { LaneRole, PrState, Snapshot } from "../../../src/core/schemas/snapshot.ts";
 import type { CoordinatorRecord, UnitRecord } from "../../../src/core/schemas/ledger.ts";
@@ -41,7 +41,7 @@ export type World = {
   readonly retro?: Record<number, Verdict>;
   /** Story id → status (sprint key `k-<id>`); an `epic-<N>` key is written as it is. */
   readonly status?: Record<string, string>;
-  /** Epic → context text, `null` to leave it out. Default a valid file for every Epic. */
+  /** Epic → context text, `null` to leave it out. Default a valid file, with its source line, for every Epic. */
   readonly contexts?: Record<number, string | null>;
   readonly records?: readonly UnitRecord[];
   readonly escalations?: readonly string[] | null;
@@ -128,6 +128,11 @@ function sprintStatus(status: Record<string, string>): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** A valid context for Epic `n`: its heading, then the source line of its section of `epicsText`. */
+export function validContext(n: number, epicsText: string): string {
+  return `# Epic ${n} Context: Epic ${n}\n${epicSourceLine(epicsText, n) ?? ""}\n\nGoal.\n`;
+}
+
 /** The raw `assembleSnapshot` input for a world. */
 export function input(w: World): AssembleInput {
   const specs =
@@ -142,7 +147,7 @@ export function input(w: World): AssembleInput {
   };
   if (w.epicsYaml !== undefined) files[".xarabot/epics.yaml"] = w.epicsYaml;
   if (w.retro !== undefined) files[RETRO] = retroGates(w.retro);
-  for (const n of Object.keys(w.epics).map(Number)) files[contextPath(n)] = `# Epic ${n} Context: Epic ${n}\n\nGoal.\n`;
+  for (const n of Object.keys(w.epics).map(Number)) files[contextPath(n)] = validContext(n, files[EPICS_MD] as string);
   for (const [n, text] of Object.entries(w.contexts ?? {})) files[contextPath(Number(n))] = text;
   for (const m of specs) files[manifestPath(m.id)] = manifest(m);
   for (const n of w.evidence ?? []) files[evidencePath(n)] = `# Epic ${n} live evidence\n`;

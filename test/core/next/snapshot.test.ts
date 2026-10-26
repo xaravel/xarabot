@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assembleSnapshot, epicContextState, liveEvidenceGaps, liveEvidencePath } from "../../../src/core/next/snapshot.ts";
+import { assembleSnapshot, epicContextState, epicSection, epicSourceLine, liveEvidenceGaps, liveEvidencePath } from "../../../src/core/next/snapshot.ts";
 import { SnapshotSchema } from "../../../src/core/schemas/snapshot.ts";
 import { tip } from "../ledger/fixtures.ts";
 import {
@@ -36,6 +36,70 @@ describe("epicContextState", () => {
   for (const [text, state] of cases) {
     test(`${JSON.stringify(text)} → ${state}`, () => expect<string>(epicContextState(2, text)).toBe(state));
   }
+});
+
+describe("epicContextState: the source line (retro item 12)", () => {
+  const SOURCE = `<!-- source: sha256:${"a".repeat(64)} -->`;
+  const cases: [string | null, string][] = [
+    [`# Epic 2 Context: Goal\n${SOURCE}\n\nBody.\n`, "valid"],
+    [`# Epic 2 Context: Goal\r\n${SOURCE}\r\n`, "valid"],
+    [`\uFEFF# Epic 2 Context: Goal\n${SOURCE}  \n`, "valid"],
+    [`# Epic 2 Context: Goal\n${SOURCE.replace("aaaa", "bbbb")}\n`, "stale"],
+    ["# Epic 2 Context: Goal\n\nBody.\n", "stale"],
+    ["# Epic 2 Context: Goal", "stale"],
+    [`# Epic 2 Context: Goal\n\n${SOURCE}\n`, "stale"],
+    [`${SOURCE}\n# Epic 2 Context: Goal\n`, "wrong-heading"],
+    [null, "missing"],
+    ["", "empty"],
+  ];
+  for (const [text, state] of cases) {
+    test(`${JSON.stringify(text)} → ${state}`, () => expect<string>(epicContextState(2, text, SOURCE)).toBe(state));
+  }
+});
+
+describe("epicSection and epicSourceLine (retro item 12)", () => {
+  const TEXT = [
+    "# Epics",
+    "",
+    "## Epic 1: One",
+    "",
+    "### Story 1.1: First",
+    "",
+    "## Notes",
+    "",
+    "```",
+    "## Epic 9: in a fence",
+    "```",
+    "## Epic 2: Two",
+    "",
+    "### Story 2.1: Second",
+    "",
+  ].join("\n");
+
+  test("runs from the Epic's heading up to the next Epic heading, keeping other level-2 headings and fenced text", () => {
+    expect(epicSection(TEXT, 1)).toBe("## Epic 1: One\n\n### Story 1.1: First\n\n## Notes\n\n```\n## Epic 9: in a fence\n```\n");
+  });
+  test("the last Epic runs to the end of the file", () => {
+    expect(epicSection(TEXT, 2)).toBe("## Epic 2: Two\n\n### Story 2.1: Second\n");
+  });
+  test("keeps the text byte for byte, CRLF included", () => {
+    expect(epicSection(TEXT.replaceAll("\n", "\r\n"), 2)).toBe("## Epic 2: Two\r\n\r\n### Story 2.1: Second\r\n");
+  });
+  test("no such Epic, or text that does not parse: null", () => {
+    expect(epicSection(TEXT, 3)).toBeNull();
+    expect(epicSection("## Epic 1: A\n## Epic 1: B\n", 1)).toBeNull();
+    expect(epicSourceLine(TEXT, 3)).toBeNull();
+  });
+  test("the source line is the SHA-256 of the section", () => {
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(epicSection(TEXT, 2) as string);
+    expect(epicSourceLine(TEXT, 2)).toBe(`<!-- source: sha256:${hasher.digest("hex")} -->`);
+    expect(epicSourceLine(TEXT, 1)).not.toBe(epicSourceLine(TEXT, 2));
+  });
+  test("a change outside the Epic's section leaves its line as it was", () => {
+    expect(epicSourceLine(TEXT.replace("### Story 1.1: First", "### Story 1.1: First, renamed"), 2)).toBe(epicSourceLine(TEXT, 2));
+    expect(epicSourceLine(TEXT.replace("### Story 2.1: Second", "### Story 2.1: Second, renamed"), 2)).not.toBe(epicSourceLine(TEXT, 2));
+  });
 });
 
 describe("assembleSnapshot: fields", () => {

@@ -28,7 +28,7 @@ import { CONFIG_DEFAULTS } from "../../../src/core/schemas/config.ts";
 import { planningKindOf, UNIT_KINDS, unitKind, type CoordinatorRecord, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { PrState } from "../../../src/core/schemas/snapshot.ts";
 import { ALICE, COORD, tip } from "../ledger/fixtures.ts";
-import { AUTHORITY, CONFIG_PATH, EPICS_MD, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "./fixtures.ts";
+import { AUTHORITY, CONFIG_PATH, contextPath, EPICS_MD, input, NOW, RETRO, STATUS, rec, snapshotOf, storyRec, type World } from "./fixtures.ts";
 
 // NOW is 2026-10-22T10:10:00Z: past the default 08:00 digest slot.
 const TODAY_DIGEST = "2026-10-22T08:00:00Z";
@@ -681,6 +681,64 @@ describe("next(coordinator): planning (Story 2.7)", () => {
     expect(unitBranch("bot-", "reconcile:7")).toBe("bot-reconcile-7");
     const s = snapshotOf(world({ records: [RECENT, planningRec("planning:graph.3", { state: "merged" }), planningRec("planning:status.1", { state: "released" })] }));
     expect([nextPlanningNumber(s, "graph"), nextPlanningNumber(s, "status")]).toEqual([4, 2]);
+  });
+});
+
+describe("planningDue: a stale Epic context (retro item 12)", () => {
+  /** Epics 2 and 3 each with one Story in backlog, both depending on Epic 1 only, every status key present. */
+  const BASE: Partial<World> = {
+    epics: { 1: [], 2: ["1"], 3: ["1"] },
+    epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [1]\n",
+    status: { ...PLANNED, "epic-3": "backlog", "3.1": "backlog" },
+  };
+  const epicsText = (w: Partial<World> = {}) => input(world({ ...BASE, ...w })).files[EPICS_MD] as string;
+  /** `epics.md` with one line added at the end of Epic `n`'s section: the contexts keep the old hash. */
+  const edited = (n: number) => {
+    const text = epicsText();
+    const at = text.indexOf(`### Story ${n}.1:`);
+    return { [EPICS_MD]: `${text.slice(0, at)}A new line for Epic ${n}.\n\n${text.slice(at)}` };
+  };
+  const due = (w: Partial<World>) => planningDue(snapshotOf(world({ ...BASE, ...w }))).status;
+  const states = (w: Partial<World>) => snapshotOf(world({ ...BASE, ...w })).epic_context;
+
+  test("a matching hash: valid, nothing due", () => {
+    expect(states({})).toEqual({ "1": "valid", "2": "valid", "3": "valid" });
+    expect(due({})).toMatchObject({ due: false, contexts: [] });
+  });
+
+  test("a changed section: that Epic's context is stale and due", () => {
+    const d = due({ files: edited(2) });
+    expect(states({ files: edited(2) })["2"]).toBe("stale");
+    expect(d).toMatchObject({ due: true, contexts: [2] });
+    expect(d.why).toBe(`Epic 2 context ${contextPath(2)} is stale`);
+    expect(picked(pickC({ ...BASE, files: edited(2), records: [RECENT] }))).toBe("unit planning:status.1");
+  });
+
+  test("a missing source line: stale and due, though the heading is valid", () => {
+    const d = due({ contexts: { 2: "# Epic 2 Context: Epic 2\n\nGoal.\n" } });
+    expect(d).toMatchObject({ due: true, contexts: [2] });
+    expect(d.why).toBe(`Epic 2 context ${contextPath(2)} is stale`);
+  });
+
+  test("a source line not directly below the heading is missing: stale", () => {
+    const line = /<!-- source: sha256:[0-9a-f]{64} -->/.exec(input(world(BASE)).files[contextPath(2)] as string)?.[0];
+    expect(states({ contexts: { 2: `# Epic 2 Context: Epic 2\n\n${line}\n` } })["2"]).toBe("stale");
+  });
+
+  test("a change to another Epic's section only: only that Epic is stale", () => {
+    expect(states({ files: edited(3) })).toEqual({ "1": "valid", "2": "valid", "3": "stale" });
+    expect(due({ files: edited(3) }).contexts).toEqual([3]);
+  });
+
+  test("an Epic whose Stories are all done: stale, but not due", () => {
+    const status = { ...PLANNED, "2.1": "done", "epic-3": "backlog", "3.1": "backlog" };
+    expect(states({ status, files: edited(2) })["2"]).toBe("stale");
+    expect(due({ status, files: edited(2) })).toMatchObject({ due: false, contexts: [] });
+  });
+
+  test("a stale context holds no Story: a builder still gets the Epic's Story", () => {
+    const o = next(snapshotOf({ ...world({ ...BASE, files: edited(2) }), role: "builder" }), "builder");
+    expect(picked(o)).toBe("story 2.1");
   });
 });
 

@@ -9,7 +9,7 @@ import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/c
 import { applyRuling } from "../../src/core/ledger/edits.ts";
 import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
 import { next } from "../../src/core/next/next.ts";
-import { assembleSnapshot } from "../../src/core/next/snapshot.ts";
+import { assembleSnapshot, epicSourceLine } from "../../src/core/next/snapshot.ts";
 import { planReconcile } from "../../src/core/reconcile/plan.ts";
 import { err, ok, type Result } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
@@ -50,6 +50,8 @@ const minutesBefore = (m: number) => new Date(T0 - m * MIN).toISOString();
 type MainOpts = {
   /** Epic 2's context file is missing: a status unit is due. */
   readonly contextMissing?: boolean;
+  /** Epic 2's context file has its heading but no source line: stale, so a status unit is due (retro item 12). */
+  readonly contextStale?: boolean;
   /** Story 2.2 has a heading but no manifest: a graph unit is due. */
   readonly graph?: boolean;
   /** Extra `policy.yaml` lines. */
@@ -70,7 +72,7 @@ function mainFiles(o: MainOpts = {}): Record<string, string> {
     "stories/1.1.md": '---\nstory_id: "1.1"\nepic: 1\nsprint_key: 1-1-first\ntitle: First\nglobs: ["src/a/**"]\n---\n',
     "stories/2.1.md": '---\nstory_id: "2.1"\nepic: 2\nsprint_key: 2-1-second\ntitle: Second\nglobs: ["src/b/**"]\n---\n',
   };
-  if (o.contextMissing !== true) files[CONTEXT_2] = "# Epic 2 Context: Two\n\nGoal.\n";
+  if (o.contextMissing !== true) files[CONTEXT_2] = `# Epic 2 Context: Two\n${o.contextStale === true ? "" : `${epicSourceLine(files[EPICS] as string, 2)}\n`}\nGoal.\n`;
   return files;
 }
 
@@ -454,9 +456,19 @@ describe("createPlanningStep: the prompt and the clone", () => {
     expect(h.prepares.map((p) => [p.unit, p.branch, p.start])).toEqual([["planning:status.1", "xarabot/planning-status.1", i.snapshot.main_sha]]);
     const p = h.prompts[0] ?? "";
     expect(p).toContain("`bmad-sprint-planning`");
-    expect(p).toContain(`- Epic 2: output path \`${CONTEXT_2}\``);
+    expect(p).toContain(`- Epic 2: output path \`${CONTEXT_2}\`, source line \`${epicSourceLine(mainFiles()[EPICS] as string, 2)}\``);
+    expect(p).toContain("directly below its `# Epic <N> Context:` heading");
     expect(p).toContain("HOUSE RULE: keep it short.");
     expect(p).toContain(join(h.laneDir, "tmp"));
+  });
+
+  test("status: a stale Epic 2 context (no source line) is due; the prompt gives the source line of Epic 2's section on main", async () => {
+    const h = harness({ contextStale: true, behaviors: [writes(planningResult("blocked"))] });
+    await h.run();
+    const p = h.prompts[0] ?? "";
+    const source = epicSourceLine(mainFiles()[EPICS] as string, 2) ?? "";
+    expect(source).toMatch(/^<!-- source: sha256:[0-9a-f]{64} -->$/);
+    expect(p).toContain(`- Epic 2: output path \`${CONTEXT_2}\`, source line \`${source}\``);
   });
 
   test("graph: the prompt names Story 2.2's heading and the manifests folder, and runs no skill", async () => {
