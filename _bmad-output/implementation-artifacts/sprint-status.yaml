@@ -82,7 +82,7 @@ development_status:
 
   epic-3: backlog
   3-1-the-codex-adapter: done
-  3-2-the-pi-adapter: backlog
+  3-2-the-pi-adapter: done
   3-3-session-vendors-and-the-reviewer-choice: backlog
   3-4-review-sessions: backlog
   3-5-the-review-gate-and-loopbacks: backlog
