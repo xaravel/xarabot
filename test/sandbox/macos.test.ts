@@ -296,6 +296,50 @@ describe("network", () => {
   });
 });
 
+/**
+ * A bun script that looks up each Mach service given and prints
+ * `<name> kr=<kern_return_t> ms=<duration>` for each, one per line.
+ */
+function machLookupScript(names: readonly string[]): string {
+  return [
+    'import { dlopen, FFIType, ptr, read } from "bun:ffi";',
+    'const lib = dlopen("/usr/lib/libSystem.B.dylib", { dlsym: { args: [FFIType.i64, FFIType.cstring], returns: FFIType.ptr }, bootstrap_look_up: { args: [FFIType.u32, FFIType.cstring, FFIType.ptr], returns: FFIType.i32 } });',
+    // RTLD_DEFAULT is -2.
+    'const bp = read.u32(lib.symbols.dlsym(-2, Buffer.from("bootstrap_port\\0")));',
+    `for (const name of ${JSON.stringify(names)}) {`,
+    "  const port = new Uint32Array(1);",
+    "  const t = performance.now();",
+    "  const kr = lib.symbols.bootstrap_look_up(bp, Buffer.from(`${name}\\0`), ptr(port));",
+    "  console.log(`${name} kr=${kr} ms=${Math.round(performance.now() - t)}`);",
+    "}",
+  ].join("\n");
+}
+
+describe("mach lookups", () => {
+  sandboxTest(
+    "a lookup of an unlisted service fails at once instead of hanging; a listed one still succeeds",
+    async () => {
+      if (which("bun", LAUNCH_PATH) === null) throw new Error("bun is not on PATH");
+      const ac = new AbortController();
+      const deadline = setTimeout(() => ac.abort(), 5_000);
+      try {
+        const r = (await ran(["bun", "-e", machLookupScript(["com.apple.FSEvents", "com.apple.logd"])], { signal: ac.signal })).run;
+        expect(r.signal).toBeNull();
+        expect(r.exitCode).toBe(0);
+        const [unlisted, listed] = r.stdout.trimEnd().split("\n");
+        const m = /^com\.apple\.FSEvents kr=(\d+) ms=(\d+)$/.exec(unlisted ?? "");
+        expect(m).not.toBeNull();
+        expect(Number(m?.[1])).not.toBe(0);
+        expect(Number(m?.[2])).toBeLessThan(1_000);
+        expect(listed).toMatch(/^com\.apple\.logd kr=0 ms=\d+$/);
+      } finally {
+        clearTimeout(deadline);
+      }
+    },
+    15_000,
+  );
+});
+
 /** This process's listening TCP sockets, from lsof. */
 function listening(): string[] {
   const r = Bun.spawnSync(["/usr/sbin/lsof", "-nP", "-a", "-p", String(process.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"]);

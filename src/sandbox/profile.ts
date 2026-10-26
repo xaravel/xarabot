@@ -117,6 +117,11 @@ export function renderProfile(input: ProfileInput): Result<string> {
     "(allow signal (target same-sandbox))",
     "(allow sysctl-read)",
     "(allow file-read-metadata)",
+    // A denied lookup that is reported never returns on macOS 27: launchd
+    // sends no reply and the caller waits in mach_msg2_trap, as codex did on
+    // com.apple.FSEvents and configd. This changes no permission: denied
+    // lookups fail at once and leave no deny-log entry.
+    "(deny mach-lookup (with no-report))",
     `(allow mach-lookup ${mach})`,
     // 3. System paths.
     `(allow file-read* process-exec ${system})`,
