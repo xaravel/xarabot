@@ -70,8 +70,10 @@ import {
  *   comment, after the graph-change gate (Story 2.8) on its merge with fresh
  *   `main`: a refused merge result parks `blocked` `graph-invalid` and
  *   nothing is enqueued; a changed graph parks for the Maintainer
- *   (`inbox_owner`), the comment carrying the delta, then the gated paths; a
- *   conflicting merge or a `main` that does not resolve is a failed attempt.
+ *   (`inbox_owner`), the comment carrying the delta, then the gated paths,
+ *   posted before the park, which records the delta's hash (`graph_posted`)
+ *   only once that comment succeeded (retro item 30); a conflicting merge
+ *   or a `main` that does not resolve is a failed attempt.
  *   A status PR skips that gate (its diff holds no graph input) and parks
  *   only when policy gates a path, else it is
  *   fenced, written `merging` and enqueued at its head, and is disposable
@@ -323,14 +325,36 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       const gated = kind === "graph" ? [...changed.value] : approvalPaths(changed.value, [...policy.owner_approval_paths, ...policy.effective_protected_paths]);
       if (kind === "graph" || gated.length > 0) {
         const maintainer = repo.repo.config.maintainer;
-        await held(
-          "park",
-          park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value, ...(graph !== null ? { inboxOwner: maintainer } : {}) }),
-        );
-        reasons.push(`awaiting ${graph !== null ? `the Maintainer's approval (the graph changes to ${graph.hash})` : "approval"}: ${gated.map(shown).join(", ")}`);
-        note(`parked awaiting-approval${graph !== null ? ` for the Maintainer ${maintainer}` : ""}: ${gated.map(shown).join(", ")}`);
-        const body = graph !== null ? graphDeltaComment(`Unit ${unit}`, { delta: graph, maintainer, gatedPaths: gated }) : gateComment(`Unit ${unit}`, gated);
-        const commented = await call("comment", (o) => forge.comment(pr, body, o));
+        if (graph !== null) {
+          // The delta comment first, behind a fence; the park records its hash only once it is posted (retro item 30).
+          aborted();
+          await beat("fence");
+          const commented = await call("comment", (o) => forge.comment(pr, graphDeltaComment(`Unit ${unit}`, { delta: graph, maintainer, gatedPaths: gated }), o));
+          if (!commented.ok) {
+            reasons.push(`graph delta comment on PR #${pr} failed: ${describeError(commented.error)}`);
+            note(`graph delta comment failed: ${describeError(commented.error)}`);
+          }
+          await held(
+            "park",
+            park({
+              unit,
+              by: identity,
+              now: forgeNow(),
+              generation,
+              kind: "awaiting-approval",
+              diffPaths: changed.value,
+              inboxOwner: maintainer,
+              ...(commented.ok ? { graphPosted: graph.hash } : {}),
+            }),
+          );
+          reasons.push(`awaiting the Maintainer's approval (the graph changes to ${graph.hash}): ${gated.map(shown).join(", ")}`);
+          note(`parked awaiting-approval for the Maintainer ${maintainer}: ${gated.map(shown).join(", ")}`);
+          throw end("progress", kit.record.state);
+        }
+        await held("park", park({ unit, by: identity, now: forgeNow(), generation, kind: "awaiting-approval", diffPaths: changed.value }));
+        reasons.push(`awaiting approval: ${gated.map(shown).join(", ")}`);
+        note(`parked awaiting-approval: ${gated.map(shown).join(", ")}`);
+        const commented = await call("comment", (o) => forge.comment(pr, gateComment(`Unit ${unit}`, gated), o));
         if (!commented.ok) {
           reasons.push(`approval comment on PR #${pr} failed: ${describeError(commented.error)}`);
           note(`approval comment failed: ${describeError(commented.error)}`);

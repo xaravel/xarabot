@@ -9,6 +9,7 @@ import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/c
 import { applyRuling } from "../../src/core/ledger/edits.ts";
 import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
 import { next } from "../../src/core/next/next.ts";
+import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
 import { assembleSnapshot, epicSourceLine } from "../../src/core/next/snapshot.ts";
 import { planReconcile } from "../../src/core/reconcile/plan.ts";
 import { err, ok, type Result } from "../../src/core/result.ts";
@@ -25,11 +26,12 @@ import { runCoordinatorProcess, type CoordinatorStepInput } from "../../src/lane
 import type { DiffPathsRequest } from "../../src/lane/diff-paths.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createPlanningStep, planningPrText, type PlanningStepDeps } from "../../src/lane/planning-step.ts";
+import { createReconcileStep } from "../../src/lane/reconcile-step.ts";
 import { MarkerStop, newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.ts";
 import type { WaitEnd, WaitParams } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
-import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
+import { GRAPH_STATUS, graphFiles, stubGraphTrees, treeOf, unchangedGraph } from "./graph-stub.ts";
 import { ledgerProviders, watchPushes } from "./push-providers.ts";
 import { headPassedGate } from "../../src/lane/passed-gate.ts";
 import { reviewStub, stubReviewStep } from "./review-stub.ts";
@@ -574,11 +576,21 @@ describe("createPlanningStep: done", () => {
       return { h, g, diff, out: h.run("planning:graph.1", {}, { graphTrees: g.trees }) };
     };
 
+    /** The merge result's graph hash, as the gate computes it. */
+    function hashOf(main: Record<string, string>, merged: Record<string, string>): string {
+      const c = checkGraphChange({ main: treeOf(main), merged: treeOf(merged), ledgerUnits: [] });
+      if (c.kind !== "checked") throw new Error("the graph change does not check");
+      return c.mergedHash;
+    }
+    const HASH = hashOf(MAIN_GRAPH, ADDED);
+
     test("AC: a changed graph parks awaiting-approval for the Maintainer, the comment carrying the delta, then the gated paths; never queued", async () => {
       const { h, g, diff, out } = graphRun({ main: MAIN_GRAPH, merged: ADDED });
       expect([(await out).outcome, (await out).state]).toEqual(["progress", "parked"]);
       const pr = (await prOnBranch(h, "xarabot/planning-graph.1"))?.number as number;
-      expect((await h.ledger()).get("planning:graph.1")).toMatchObject({ state: "parked", park: { kind: "awaiting-approval", inbox_owner: "edanisko", globs_held: diff } });
+      expect((await h.ledger()).get("planning:graph.1")).toMatchObject({ state: "parked", park: { kind: "awaiting-approval", inbox_owner: "edanisko", globs_held: diff, graph_posted: HASH } });
+      // The delta comment comes first, behind a fence; the park records its hash (retro item 30).
+      expect(h.events.slice(-3)).toEqual(["ledgerSwap heartbeat planning:graph.1", "comment", "ledgerSwap park planning:graph.1"]);
       const comments = h.fake.control.comments(pr);
       expect(comments).toHaveLength(1);
       expect(comments[0]).toStartWith("🤖 Unit planning:graph.1: this PR's merge with `main` changes the Epic graph");
@@ -586,6 +598,56 @@ describe("createPlanningStep: done", () => {
       expect((comments[0] as string).indexOf("merge result's graph hash is")).toBeLessThan((comments[0] as string).indexOf("stories/2.2.md"));
       expect(h.fake.control.queue()).toEqual([]);
       expect(g.calls.map((c) => c.headSha)).toEqual([h.head]);
+    });
+
+    test("a failed delta comment still parks for the Maintainer, with none posted", async () => {
+      const diff = [EPICS, "stories/2.2.md"];
+      const h = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("done", "Add the Story 2.2 manifest"))], diff });
+      h.fake.control.injectError("comment", { kind: "transient", message: "flaky" });
+      const out = await h.run("planning:graph.1", {}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: ADDED }).trees });
+      expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+      const record = (await h.ledger()).get("planning:graph.1");
+      expect(out.reason).toContain(`graph delta comment on PR #${record?.pr} failed`);
+      expect(record?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: diff });
+      expect(h.fake.control.comments(record?.pr as number)).toEqual([]);
+      expect(h.fake.control.queue()).toEqual([]);
+    });
+
+    test("reconcile takes the posted park on one later Maintainer approval, with no second comment or re-park", async () => {
+      const answer = { main: MAIN_GRAPH, merged: ADDED };
+      const { h, out } = graphRun(answer);
+      await out;
+      const parked = (await h.ledger()).get("planning:graph.1") as UnitRecord;
+      expect(parked.park?.graph_posted).toBe(HASH);
+      const pr = parked.pr as number;
+      expect(h.fake.control.comments(pr)).toHaveLength(1);
+      h.fake.control.addReview(pr, { author: "edanisko", state: "approved", commit_sha: h.head, submitted_at: new Date(T0 + 5 * MIN).toISOString() });
+      // This lane's next unit: a reconcile run over the parked PR.
+      h.fake.control.writeForeignLedger({ message: "seed reconcile [skip ci]", writes: tip([coord("reconcile:5", { state: "claimed" })]), deletes: [] });
+      const base = await h.input("reconcile:5");
+      const events: string[] = [];
+      const taken = await createReconcileStep({
+        forge: spied(h.fake, events),
+        committer: {
+          commit: async () => {
+            throw new Error("no reconcile commit expected");
+          },
+        },
+        graphTrees: stubGraphTrees(answer).trees,
+        identity: COORD,
+        repo: LANE.repo,
+        agent: "claude",
+        passed: headPassedGate,
+        now: () => T0,
+        sleep: async () => {},
+        random: () => 0,
+      })({ ...base, unit: { ...base.unit, kind: "reconcile", globs: [] }, track: newTrack({ unit: "reconcile:5", startedMs: T0, logName: "reconcile.log", state: "claimed" }) });
+      expect(taken.outcome).toBe("progress");
+      expect(swaps(events)).toContain("takeApproved planning:graph.1");
+      expect(swaps(events)).not.toContain("reparkGraph planning:graph.1");
+      expect((await h.ledger()).get("planning:graph.1")).toMatchObject({ state: "merging", approved_sha: h.head, approved_graph: HASH, enqueued_sha: h.head });
+      expect(h.fake.control.queue()).toEqual([pr]);
+      expect(h.fake.control.comments(pr)).toHaveLength(1);
     });
 
     test("an unchanged graph parks as today, for the writer, with the gate comment", async () => {

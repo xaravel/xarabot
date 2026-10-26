@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
+import { assembleSnapshot } from "../../src/core/next/snapshot.ts";
 import type { NextStory } from "../../src/core/next/next.ts";
 import { err, ok } from "../../src/core/result.ts";
-import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
+import { unitPath, type CoordinatorRecord, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { DiffPaths, DiffPathsRequest } from "../../src/lane/diff-paths.ts";
 import { createMergeStep, gateComment, type MergeStep, type MergeStepDeps, type MergeStepInput, type MergeStepOutput } from "../../src/lane/merge-step.ts";
 import { headPassedGate } from "../../src/lane/passed-gate.ts";
@@ -16,7 +18,9 @@ import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
 import { createCiStep } from "../../src/lane/ci-step.ts";
 import type { Committer } from "../../src/lane/committer.ts";
-import { runLaneProcess } from "../../src/lane/lane-process.ts";
+import { readsPath, runLaneProcess, type PrStepOutput } from "../../src/lane/lane-process.ts";
+import { createReconcileStep } from "../../src/lane/reconcile-step.ts";
+import { newTrack } from "../../src/lane/session.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { MergeOutcome, Merger } from "../../src/lane/merger.ts";
 import { createReviewGateStep } from "../../src/lane/review-gate.ts";
@@ -25,8 +29,8 @@ import { createPrStep } from "../../src/lane/pr-step.ts";
 import type { Workspace } from "../../src/lane/workspace.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
-import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
-import { GRAPH_STATUS, graphFiles, stubGraphTrees, unchangedGraph } from "./graph-stub.ts";
+import { ALICE, BOB, COORD, rec, tip } from "../core/ledger/fixtures.ts";
+import { GRAPH_STATUS, graphFiles, stubGraphTrees, treeOf, unchangedGraph } from "./graph-stub.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -291,12 +295,22 @@ describe("the graph-change gate", () => {
     expect(w.fake.control.comments(w.pr)).toEqual([]);
   });
 
+  /** The merge result's graph hash, as the gate computes it. */
+  function hashOf(main: Record<string, string>, merged: Record<string, string>): string {
+    const c = checkGraphChange({ main: treeOf(main), merged: treeOf(merged), ledgerUnits: [] });
+    if (c.kind !== "checked") throw new Error("the graph change does not check");
+    return c.mergedHash;
+  }
+  const HASH = hashOf(MAIN_GRAPH, ADDED);
+
   test("a changed graph parks awaiting-approval for the Maintainer, one comment carrying the delta then the gated paths, and never enqueues", async () => {
     const w = await world({ ownerPaths: ["src/**"], diff: ["package.json", "src/a.ts"] });
     const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: ADDED }).trees });
     expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
     const after = await w.ledger();
-    expect(after?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["package.json", "src/a.ts"] });
+    expect(after?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["package.json", "src/a.ts"], graph_posted: HASH });
+    // The delta comment comes first, behind a fence; the park records its hash (retro item 30).
+    expect(w.events.slice(-3)).toEqual(["ledgerSwap heartbeat", "comment", "ledgerSwap park"]);
     const comments = w.fake.control.comments(w.pr);
     expect(comments.length).toBe(1);
     expect(comments[0]).toStartWith("🤖 Story 1.1:");
@@ -305,6 +319,34 @@ describe("the graph-change gate", () => {
     expect((comments[0] as string).indexOf("merge result's graph hash is")).toBeLessThan((comments[0] as string).indexOf("src/a.ts"));
     expect(comments[0]).not.toContain("package.json");
     expect(w.events).not.toContain("enqueue");
+  });
+
+  test("a failed delta comment still parks for the Maintainer, with none posted", async () => {
+    const w = await world();
+    w.fake.control.injectError("comment", { kind: "transient", message: "flaky" });
+    const out = await w.run({}, { graphTrees: stubGraphTrees({ main: MAIN_GRAPH, merged: ADDED }).trees });
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    expect(out.reason).toContain(`graph delta comment on PR #${w.pr} failed`);
+    expect((await w.ledger())?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["src/s0/a.ts"] });
+    expect(w.fake.control.comments(w.pr)).toEqual([]);
+    expect(w.events).not.toContain("enqueue");
+  });
+
+  test("reconcile takes the posted park on one later Maintainer approval, with no second comment or re-park", async () => {
+    const w = await world();
+    const answer = { main: MAIN_GRAPH, merged: ADDED };
+    await w.run({}, { graphTrees: stubGraphTrees(answer).trees });
+    expect((await w.ledger())?.park?.graph_posted).toBe(HASH);
+    expect(w.fake.control.comments(w.pr)).toHaveLength(1);
+    w.fake.control.addReview(w.pr, { author: "edanisko", state: "approved", commit_sha: w.head, submitted_at: new Date(T0 + 5 * 60_000).toISOString() });
+    const events: string[] = [];
+    const out = await reconcileOnce(w, events, stubGraphTrees(answer).trees);
+    expect(out.outcome).toBe("progress");
+    expect(events).toContain("ledgerSwap takeApproved");
+    expect(events).not.toContain("ledgerSwap reparkGraph");
+    expect(await w.ledger()).toMatchObject({ state: "merging", approved_sha: w.head, approved_graph: HASH, enqueued_sha: w.head, lane: "coordinator" });
+    expect(w.fake.control.queue()).toEqual([w.pr]);
+    expect(w.fake.control.comments(w.pr)).toHaveLength(1);
   });
 
   test("a changed graph with no gated path still parks for the Maintainer", async () => {
@@ -423,6 +465,58 @@ describe("fresh main", () => {
     expect(moved.events).not.toContain("enqueue");
   });
 });
+
+/**
+ * One `reconcile:5` run of the coordinator lane over `w`'s forge, with the
+ * coordinator claim and the run's own claimed record seeded beside the
+ * Story's; `events` records its forge calls.
+ */
+async function reconcileOnce(w: World, events: string[], graphTrees: MergeStepDeps["graphTrees"]): Promise<PrStepOutput> {
+  const unit = "reconcile:5";
+  const own = rec({ unit, state: "claimed", owner: COORD.owner, host: COORD.host, lane: COORD.lane, globs: [], heartbeat_at: "2026-10-23T10:00:00Z" });
+  const claim: CoordinatorRecord = { schema_version: 2, ...COORD, lane: "coordinator", generation: 1, heartbeat_at: "2026-10-23T10:00:00Z", digest_posted_at: null, rulings_cursor: null };
+  w.fake.control.writeForeignLedger({ message: "seed reconcile [skip ci]", writes: tip([own], { [COORDINATOR_PATH]: serializeCoordinator(claim) }), deletes: [] });
+  const s = value(await w.fake.forge.snapshot({ ...opts(), read: readsPath }));
+  const a = assembleSnapshot({
+    repo: "xaravel/xarabot",
+    now: s.now,
+    tree: [...s.main.tree],
+    files: { ...s.main.files },
+    main_sha: s.main.sha,
+    blob_shas: s.main.blob_shas,
+    ledger_tip: s.ledger.tip,
+    ledger_files: s.ledger.files,
+    prs: s.prs,
+    escalations: null,
+    lane: COORD,
+    role: "coordinator",
+  });
+  if (!a.ok) throw new Error(a.error.message);
+  return createReconcileStep({
+    forge: spied(w.fake, events),
+    committer: {
+      commit: async () => {
+        throw new Error("no reconcile commit expected");
+      },
+    },
+    graphTrees,
+    identity: COORD,
+    repo: "xaravel/xarabot",
+    agent: "claude",
+    passed: headPassedGate,
+    now: w.now,
+    sleep: async () => {},
+    random: () => 0,
+  })({
+    unit: { unit, kind: "reconcile", globs: [], expect_generation: null, take_over: null, pr: null, why: "test" },
+    record: a.value.ledger.units.find((r) => r.unit === unit) as UnitRecord,
+    snapshot: a.value,
+    files: s.main.files,
+    signal: new AbortController().signal,
+    log: (text) => w.logs.push(text),
+    track: newTrack({ unit, startedMs: T0, logName: "reconcile.log", state: "claimed" }),
+  });
+}
 
 function value<T>(r: { ok: true; value: T } | { ok: false; error: { kind: string; message: string } }): T {
   if (!r.ok) throw new Error(`${r.error.kind}: ${r.error.message}`);
