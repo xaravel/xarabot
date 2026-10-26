@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-17-void-a-stale-graph-approval-after-a-retake",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "test/core/reconcile/plan.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T01:41:25.030Z",
+  "heartbeat_at": "2026-10-26T01:44:44.015Z",
   "pr": 153,
   "pr_owner": "edanisko",
   "base_sha": "f706e1a1c2f1d56739c29be54fab34cb7f7577ec",
