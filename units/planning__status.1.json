@@ -1,35 +1,26 @@
 {
   "schema_version": 4,
   "unit": "planning:status.1",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
-    "_bmad-output/implementation-artifacts/epic-*-context.md",
-    "_bmad-output/implementation-artifacts/retro-gates.yaml",
-    "_bmad-output/implementation-artifacts/sprint-status.yaml"
+    "_bmad-output/implementation-artifacts/epic-3-context.md"
   ],
-  "heartbeat_at": "2026-10-26T01:11:10.071Z",
+  "heartbeat_at": "2026-10-26T01:12:38.134Z",
   "pr": 150,
   "pr_owner": "edanisko",
   "base_sha": "f3db31ee215c846f4fdaccc41d90319bc81bb0a1",
   "head_sha": "2f0c5547cfc26f2a3227f6770bd97c498404c58f",
   "reviewed_sha": null,
   "passed_sha": null,
-  "approved_sha": null,
+  "approved_sha": "2f0c5547cfc26f2a3227f6770bd97c498404c58f",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "_bmad-output/implementation-artifacts/epic-3-context.md"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
