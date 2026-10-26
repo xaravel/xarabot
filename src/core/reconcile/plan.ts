@@ -167,13 +167,36 @@ function epicKeys(snapshot: Snapshot, epic: number): string[] {
   return [...new Set(keys)];
 }
 
-/** The status changes, computed from `main`, for the records `merged` as of this run. */
+/**
+ * Whether every Story of graph Epic `epic` is `done` in `status`: the Epic
+ * has at least one Story, no unmanifested heading, and each Story's manifest
+ * key is `done`.
+ */
+function epicStoriesDone(snapshot: Snapshot, epic: number, status: Readonly<Record<string, string>>): boolean {
+  if (!snapshot.graph.ok) return false;
+  const graph = snapshot.graph.value;
+  if (graph.unmanifested.some((u) => u.epic === epic)) return false;
+  const stories = graph.epics.find((e) => e.number === epic)?.stories ?? [];
+  if (stories.length === 0) return false;
+  return stories.every((id) => {
+    const m = snapshot.manifests.find((x) => storyKey(x.story_id) === storyKey(id));
+    return m !== undefined && Object.hasOwn(status, m.sprint_key) && status[m.sprint_key] === "done";
+  });
+}
+
+/**
+ * The status changes, computed from `main`, for the records `merged` as of
+ * this run. An Epic's `epic-<N>` key is set `done` in the edit that sets its
+ * last Story `done` (E6, retro item 16): added `done` when absent, except for
+ * a bootstrapped Epic; never set back from `done`.
+ */
 function statusChanges(effective: Snapshot, unit: string): { readonly changes: StatusChanges; readonly summary: string[] } {
   const status = effective.sprint_status.development_status;
   const has = (key: string) => Object.hasOwn(status, key);
   const set = new Map<string, string>();
   const add = new Map<string, { readonly status: string; readonly epic: number }>();
   const missing = missingStatusEntries(effective);
+  const storyEpics = new Set<number>();
 
   for (const r of effective.ledger.units) {
     if (r.unit === unit || r.state !== "merged") continue;
@@ -184,9 +207,24 @@ function statusChanges(effective: Snapshot, unit: string): { readonly changes: S
       if (m === undefined) continue;
       if (!has(m.sprint_key)) add.set(m.sprint_key, { status: "done", epic: m.epic });
       else if (status[m.sprint_key] !== "done") set.set(m.sprint_key, "done");
+      else continue;
+      storyEpics.add(m.epic);
     } else if (kind === "planning" && isGraphPlanning(r) && !doneOnMain(r, effective)) {
       for (const e of missing) if (!add.has(e.key)) add.set(e.key, { status: "backlog", epic: e.epic });
     }
+  }
+
+  // Each Epic whose last Story this edit sets done.
+  const edited: Record<string, string> = { ...status };
+  for (const [key, s] of set) edited[key] = s;
+  for (const [key, a] of add) edited[key] = a.status;
+  const bootstrapped = new Set(effective.config.bootstrapped_epics);
+  for (const epic of storyEpics) {
+    if (!epicStoriesDone(effective, epic, edited)) continue;
+    const key = epicStatusKey(epic);
+    if (has(key)) {
+      if (status[key] !== "done") set.set(key, "done");
+    } else if (!bootstrapped.has(epic)) add.set(key, { status: "done", epic });
   }
 
   const order = (key: string): number => {

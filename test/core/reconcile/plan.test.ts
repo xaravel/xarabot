@@ -178,16 +178,75 @@ describe("planReconcile: the matrix", () => {
     expect(plan({ records: [storyRec("2.1", { state: "merged", pr: 7 })], files: { [STATUS]: null } }).status.kind).toBe("absent");
   });
 
-  test("a merged Story not yet done: the key set to done; a missing key added as done after its Epic's keys", () => {
+  test("a merged Story not yet done: the key set to done; a missing key added as done after its Epic's keys, with the Epic's absent key", () => {
     const p = plan({ records: [storyRec("2.1", { state: "merged", pr: 7 }), storyRec("2.2", { state: "merged", pr: 8 })], status: { "2.1": "review" } });
-    expect(p.status.kind === "edit" ? p.status.summary : p.status.kind).toEqual(["k-2.1: review -> done", "k-2.2: added as done"]);
-    expect(p.status.kind === "edit" ? p.status.text : "").toContain("  k-2.1: done\n  k-2.2: done\naction_items: []\n");
+    expect(p.status.kind === "edit" ? p.status.summary : p.status.kind).toEqual(["k-2.1: review -> done", "epic-2: added as done", "k-2.2: added as done"]);
+    expect(p.status.kind === "edit" ? p.status.text : "").toContain("  k-2.1: done\n  epic-2: done\n  k-2.2: done\naction_items: []\n");
   });
 
   test("this run's own record is never a target, even when stale", () => {
     const w: World = { epics: { 1: [] }, bootstrapped: [1], role: "coordinator", records: [coord(U, { state: "claimed", heartbeat_at: minutesBefore(45) })] };
     const p = planReconcile(snapshotOf(w), U, input(w).files[STATUS] as string);
     expect(shape(p)).toEqual({ ...EMPTY, supersededMerged: [] });
+  });
+});
+
+describe("planReconcile: an Epic's key done with its last Story (retro item 16)", () => {
+  const summary = (p: ReconcilePlan) => (p.status.kind === "edit" ? p.status.summary : p.status.kind);
+
+  test("the last Story done: the Epic's key set done in the same edit", () => {
+    const p = plan({ records: [storyRec("2.2", { state: "merged", pr: 8 })], status: { "epic-2": "in-progress", "2.1": "done", "2.2": "review" } });
+    expect(summary(p)).toEqual(["k-2.2: review -> done", "epic-2: in-progress -> done"]);
+    expect(statusMap(p)).toEqual({ "epic-1": "backlog", "epic-2": "done", "k-2.1": "done", "k-2.2": "done" });
+  });
+
+  test("both Stories merged in one run, the Epic's key absent: added done", () => {
+    const p = plan({ records: [storyRec("2.1", { state: "merged", pr: 7 }), storyRec("2.2", { state: "merged", pr: 8 })], status: { "2.1": "review", "2.2": "review" } });
+    expect(summary(p)).toEqual(["k-2.1: review -> done", "k-2.2: review -> done", "epic-2: added as done"]);
+  });
+
+  test("a Story not yet done: the Epic's key is left as it is", () => {
+    const p = plan({ records: [storyRec("2.1", { state: "merged", pr: 7 })], status: { "epic-2": "in-progress", "2.1": "review", "2.2": "backlog" } });
+    expect(summary(p)).toEqual(["k-2.1: review -> done"]);
+    expect(statusMap(p)).toMatchObject({ "epic-2": "in-progress", "k-2.2": "backlog" });
+  });
+
+  test("a Story with no status yet counts as not done", () => {
+    const p = plan({ records: [storyRec("2.1", { state: "merged", pr: 7 })], status: { "epic-2": "in-progress", "2.1": "review" } });
+    expect(summary(p)).toEqual(["k-2.1: review -> done"]);
+  });
+
+  test("an Epic already done: not set again", () => {
+    const p = plan({ records: [storyRec("2.2", { state: "merged", pr: 8 })], status: { "epic-2": "done", "2.1": "done", "2.2": "review" } });
+    expect(summary(p)).toEqual(["k-2.2: review -> done"]);
+  });
+
+  test("an Epic done with a Story not yet done: never set back from done", () => {
+    const p = plan({ records: [storyRec("2.1", { state: "merged", pr: 7 })], status: { "epic-2": "done", "2.1": "review", "2.2": "backlog" } });
+    expect(summary(p)).toEqual(["k-2.1: review -> done"]);
+    expect(statusMap(p)).toMatchObject({ "epic-2": "done" });
+  });
+
+  test("every Story already done on main: no edit for the Epic's key alone", () => {
+    const p = plan({ records: [storyRec("2.2", { state: "merged", pr: 8 })], status: { "epic-2": "in-progress", "2.1": "done", "2.2": "done" } });
+    expect(p.status.kind).toBe("none");
+  });
+
+  test("a bootstrapped Epic whose key is absent: its key is not added", () => {
+    const p = plan({ epics: { 1: [], 2: ["1", "2"], 3: ["1"] }, bootstrapped: [1, 3], records: [storyRec("3.1", { state: "merged", pr: 9 })], status: { "3.1": "review" } });
+    expect(summary(p)).toEqual(["k-3.1: review -> done"]);
+    expect(statusMap(p)).not.toHaveProperty("epic-3");
+  });
+
+  test("a bootstrapped Epic whose key is present: set done like any other", () => {
+    const p = plan({ epics: { 1: [], 2: ["1", "2"], 3: ["1"] }, bootstrapped: [1, 3], records: [storyRec("3.1", { state: "merged", pr: 9 })], status: { "epic-3": "in-progress", "3.1": "review" } });
+    expect(summary(p)).toEqual(["k-3.1: review -> done", "epic-3: in-progress -> done"]);
+  });
+
+  test("a graph unit adding the Epic's key as backlog in the same run: added done instead", () => {
+    const graph = coord("planning:graph.1", { state: "merged", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB] });
+    const p = plan({ records: [graph, storyRec("2.2", { state: "merged", pr: 8 })], status: { "2.1": "done", "2.2": "review" } });
+    expect(summary(p)).toEqual(["k-2.2: review -> done", "epic-2: added as done"]);
   });
 });
 
