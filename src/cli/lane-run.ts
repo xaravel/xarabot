@@ -64,11 +64,14 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * claims `coordinator.json` (AD-8); it then runs one `runCoordinatorProcess`.
  * After the lane's own credential, the start checks pick the lane's reviewer
  * for a unit only its own vendor built (`chooseReviewer`, AD-16) and, when
- * that is another adapter, read its credential too (AD-17): a missing or
- * unreadable one refuses the start. The run then composes a reviewer for
- * every adapter of `REVIEWER_ORDER` the policy allows (Story 3.5): the
- * lane's own agent, or the adapter with its credential read; any other one
- * whose adapter or credential fails is left out, with a line on stderr.
+ * that is another adapter, check its CLI as the lane's own agent's is
+ * checked (`checkReviewerCli`: the minimum version and the effort) and read
+ * its credential too (AD-17): a missing or too old CLI, or a missing or
+ * unreadable credential, refuses the start. The run then composes a reviewer
+ * for every adapter of `REVIEWER_ORDER` the policy allows (Story 3.5): the
+ * lane's own agent, or the adapter with its CLI checked and its credential
+ * read; any other one whose adapter, CLI or credential fails is left out,
+ * with a line on stderr.
  * Both roles get the same review step and passed gate: the builder's review
  * gate and merge step, and the coordinator's session steps and `reconcile`.
  * Every refusal or failure after the STOP check, apart from a version
@@ -98,13 +101,16 @@ const ZERO_SHA = "0".repeat(40);
 /** A start check's placeholder prompt: the launch spec is read for its credential file, never run. */
 const PROBE_PROMPT = "start check";
 
+/** An agent CLI's `--version` probe (`cliVersion`). */
+export type CliVersion = (cmd: string, env: CredentialEnv) => Promise<Result<string, "refused">>;
+
 export type LaneRunDeps = {
   readonly env: CredentialEnv;
   /** Default GitHub with the owner's App credentials. */
   readonly connect?: Connect;
   readonly installRunner?: InstallRunner;
   /** The agent CLI's `--version` probe; default `cliVersion`. */
-  readonly cliVersion?: (cmd: string, env: CredentialEnv) => Promise<Result<string, "refused">>;
+  readonly cliVersion?: CliVersion;
   /** Runs the composed builder lane; default `runLaneProcess`. */
   readonly start?: (deps: LaneDeps) => Promise<LaneProcessResult>;
   /** Runs the composed coordinator lane; default `runCoordinatorProcess`. */
@@ -192,18 +198,43 @@ export function readReviewerCredential(reviewer: SessionAdapter, env: Credential
   return text.ok ? ok(text.value) : err("refused", text.error.message);
 }
 
+/**
+ * A reviewer adapter's CLI start check (A5, C3), as the lane's own agent's
+ * is checked: the adapter built for it, the command its probe launch spec
+ * runs at the settings a review runs it with (default model, effort `high`),
+ * that command's `--version`, then the adapter's `startCheck` (the minimum
+ * version and the effort). Any failure refuses.
+ */
+export async function checkReviewerCli(
+  reviewer: SessionAdapter,
+  env: CredentialEnv,
+  resultPath: string,
+  cliVersion: CliVersion,
+): Promise<Result<{ readonly model: string; readonly version: string }, "refused">> {
+  const adapter = adapterFor(reviewer, env);
+  if (!adapter.ok) return adapter;
+  const settings = { effort: "high" } as const;
+  const spec = adapter.value.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, settings, resultPath);
+  if (!spec.ok) return err("refused", spec.error.message);
+  const version = await cliVersion(spec.value.argv[0] ?? "", env);
+  if (!version.ok) return version;
+  return adapter.value.startCheck(settings, version.value);
+}
+
 export type ComposeReviewersParams = {
   /** The policy's `unattended_adapters`. */
   readonly allowed: readonly string[];
   /** The lane's own adapter, and its agent. */
   readonly sessionAgent: SessionAdapter;
   readonly agent: Agent;
-  /** The start check's reviewer, and its credential text (`null` when it is the lane's own agent). */
+  /** The start check's reviewer, and its credential text, read after its CLI check passed (`null` when it is the lane's own agent). */
   readonly choice: SessionAdapter;
   readonly choiceCredential: string | null;
   readonly env: CredentialEnv;
-  /** The lane's result path, for the credential probe's launch spec. */
+  /** The lane's result path, for the probes' launch specs. */
   readonly resultPath: string;
+  /** The reviewer CLIs' `--version` probe. */
+  readonly cliVersion: CliVersion;
   /** Writes a line to stderr. */
   readonly say: (text: string) => void;
 };
@@ -214,12 +245,13 @@ export type ComposedReviewers = { readonly reviewers: Reviewers; readonly creden
 /**
  * Every reviewer of `REVIEWER_ORDER` the policy allows (Story 3.5, AD-16,
  * AD-17): the lane's own agent for its own adapter, else the adapter
- * (`adapterFor`) with its credential read (`readReviewerCredential`; the
- * start check's choice reuses the text it read). The choice's adapter or
+ * (`adapterFor`) with its CLI checked (`checkReviewerCli`) and its
+ * credential read (`readReviewerCredential`; the start check's choice
+ * reuses the check and the text it read). The choice's adapter, CLI or
  * credential failing refuses; any other one failing is left out, with a
  * `say` line.
  */
-export function composeReviewers(p: ComposeReviewersParams): Result<ComposedReviewers, "refused"> {
+export async function composeReviewers(p: ComposeReviewersParams): Promise<Result<ComposedReviewers, "refused">> {
   const reviewers: { -readonly [K in keyof Reviewers]: Reviewers[K] } = {};
   const credentials: string[] = [];
   for (const a of REVIEWER_ORDER) {
@@ -229,7 +261,9 @@ export function composeReviewers(p: ComposeReviewersParams): Result<ComposedRevi
       continue;
     }
     const built = adapterFor(a, p.env);
-    const text = !built.ok ? built : a === p.choice && p.choiceCredential !== null ? ok(p.choiceCredential) : readReviewerCredential(a, p.env, p.resultPath);
+    const reused = a === p.choice ? p.choiceCredential : null;
+    const cli = !built.ok ? built : reused !== null ? ok(null) : await checkReviewerCli(a, p.env, p.resultPath, p.cliVersion);
+    const text = !cli.ok ? cli : reused !== null ? ok(reused) : readReviewerCredential(a, p.env, p.resultPath);
     if (!built.ok || !text.ok) {
       const why = !text.ok ? text.error.message : "";
       if (a === p.choice) return err("refused", `reviewer ${a}: ${why}`);
@@ -447,7 +481,8 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const spec = agent.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, settings, layout.resultPath);
     if (!spec.ok) return failedStart(spec.error.message);
     const command = spec.value.argv[0] ?? "";
-    const version = await (deps.cliVersion ?? defaultCliVersion)(command, deps.env);
+    const cliVersion = deps.cliVersion ?? defaultCliVersion;
+    const version = await cliVersion(command, deps.env);
     if (!version.ok) return failedStart(version.error.message);
     const checked = agent.startCheck(settings, version.value);
     if (!checked.ok) return failedStart(checked.error.message);
@@ -455,10 +490,14 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     if (!credPath.ok) return failedStart(credPath.error.message);
     const credential = readCredential(credPath.value);
     if (!credential.ok) return failedStart(credential.error.message);
-    // The lane's reviewer for a unit only its own vendor built (AD-16), and that reviewer's credential (AD-17).
+    // The lane's reviewer for a unit only its own vendor built (AD-16), its CLI checked as the lane's own (A5), and its credential (AD-17).
     const provider = sessionProvider({ adapter: sessionAgent.value, model: lane.model ?? agent.defaultModel });
     const choice = chooseReviewer([provider], repoConfig.value.repo.policy.unattended_adapters);
     if (choice === null) return failedStart(`no reviewer: ${POLICY_PATH} unattended_adapters allows neither claude nor codex`);
+    if (choice.adapter !== sessionAgent.value) {
+      const reviewerCli = await checkReviewerCli(choice.adapter, deps.env, layout.resultPath, cliVersion);
+      if (!reviewerCli.ok) return failedStart(`reviewer ${choice.adapter}: ${reviewerCli.error.message}`);
+    }
     const reviewerCredential = choice.adapter === sessionAgent.value ? ok(null) : readReviewerCredential(choice.adapter, deps.env, layout.resultPath);
     if (!reviewerCredential.ok) return failedStart(`reviewer ${choice.adapter}: ${reviewerCredential.error.message}`);
     const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);
@@ -511,8 +550,8 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const diffPaths = createGitDiffPaths({ gitDir: runnerGit, fetch });
     const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
 
-    // Every reviewer the policy allows (Story 3.5): the lane's own agent, or the adapter with its credential.
-    const composed = composeReviewers({
+    // Every reviewer the policy allows (Story 3.5): the lane's own agent, or the adapter with its CLI checked and its credential.
+    const composed = await composeReviewers({
       allowed: repoConfig.value.repo.policy.unattended_adapters,
       sessionAgent: sessionAgent.value,
       agent,
@@ -520,6 +559,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       choiceCredential: reviewerCredential.value,
       env: deps.env,
       resultPath: layout.resultPath,
+      cliVersion,
       say,
     });
     if (!composed.ok) return failedStart(composed.error.message);
