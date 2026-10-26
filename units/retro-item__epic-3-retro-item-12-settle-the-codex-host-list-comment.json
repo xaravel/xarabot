@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-12-settle-the-codex-host-list-comment",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -9,7 +9,7 @@
   "globs": [
     "src/adapters/agent/codex/codex-agent.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:43:17.854Z",
+  "heartbeat_at": "2026-10-26T18:46:48.020Z",
   "pr": 216,
   "pr_owner": "edanisko",
   "base_sha": "e7499d0df6410d3774dd389d3667599917999670",
