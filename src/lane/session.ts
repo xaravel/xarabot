@@ -703,6 +703,8 @@ export type UnitTrack = {
   record: UnitRecord | null;
   state: UnitState | null;
   sessions: number;
+  /** Of `sessions`, the review sessions' runs (Epic 3 retro item 5): they run in `<lane>/review`, never the clone. */
+  reviewSessions: number;
   tokens: JournalTokens | null;
   cost: JournalCost | null;
   /** A run reported no cost. */
@@ -714,7 +716,39 @@ export type UnitTrack = {
 
 /** A fresh track for `unit`, with no record, session or cost yet. */
 export function newTrack(p: { readonly unit: string; readonly startedMs: number; readonly logName: string; readonly state: UnitState | null }): UnitTrack {
-  return { ...p, record: null, sessions: 0, tokens: null, cost: null, uncosted: false, reportedModel: null, reason: null };
+  return { ...p, record: null, sessions: 0, reviewSessions: 0, tokens: null, cost: null, uncosted: false, reportedModel: null, reason: null };
+}
+
+/** Adds one usage to the track's sums; `uncosted`: some run in it reported no cost, which makes the cost an estimate. */
+function addUsage(t: UnitTrack, tokens: JournalTokens | null, cost: JournalCost | null, uncosted: boolean): void {
+  if (tokens !== null) {
+    const a = t.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+    t.tokens = {
+      input: a.input + tokens.input,
+      output: a.output + tokens.output,
+      cacheRead: a.cacheRead + tokens.cacheRead,
+      cacheCreation: a.cacheCreation + tokens.cacheCreation,
+    };
+  }
+  if (uncosted) t.uncosted = true;
+  if (cost !== null || t.cost !== null) {
+    t.cost = {
+      usd: (t.cost?.usd ?? 0) + (cost?.usd ?? 0),
+      estimate: (t.cost?.estimate ?? false) || (cost?.estimate ?? false) || t.uncosted,
+    };
+  }
+}
+
+/**
+ * Adds a review pass's runs, tokens and cost, kept on the pass's own track,
+ * to the unit's track, so they reach the unit's journal record (Epic 3 retro
+ * item 5, AR25). The unit's reported model stays the builder's: the
+ * reviewer's model goes in the pass's reason instead.
+ */
+export function addReviewUsage(t: UnitTrack, pass: UnitTrack): void {
+  t.sessions += pass.sessions;
+  t.reviewSessions += pass.sessions;
+  addUsage(t, pass.tokens, pass.cost, pass.uncosted);
 }
 
 /** Appends `reason` to the unit's reason unless it is already there. */
@@ -1126,23 +1160,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     logRun(`run ${n} (${u.kind})`, r);
     credentialRewrite(n, u, r, spec.value);
     const usage = agent.parseUsage(r.stdout, ctx.profile.vendorHome, r.startedAt);
-    if (usage.tokens !== null) {
-      const a = t.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
-      t.tokens = {
-        input: a.input + usage.tokens.input,
-        output: a.output + usage.tokens.output,
-        cacheRead: a.cacheRead + usage.tokens.cacheRead,
-        cacheCreation: a.cacheCreation + usage.tokens.cacheCreation,
-      };
-    }
     // A run that reported no cost makes the sum an estimate.
-    if (usage.cost === null) t.uncosted = true;
-    if (usage.cost !== null || t.cost !== null) {
-      t.cost = {
-        usd: (t.cost?.usd ?? 0) + (usage.cost?.usd ?? 0),
-        estimate: (t.cost?.estimate ?? false) || (usage.cost?.estimate ?? true) || t.uncosted,
-      };
-    }
+    addUsage(t, usage.tokens, usage.cost, usage.cost === null);
     if (usage.model !== null) t.reportedModel = usage.model;
     // A unit the keeper lost or released during the run is abandoned here, before any resume.
     await ctx.checkHeld();
