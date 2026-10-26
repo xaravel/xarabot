@@ -318,6 +318,90 @@ describe("next: retro-item distance gates (FR10, AR13)", () => {
     expect(snap.ledger.units.find((r) => r.unit === "story:2.1")).toEqual(records[0]);
   });
 
+  describe("a takeover finishes in-flight work: a held Epic still yields it", () => {
+    // NOW is 2026-10-22T10:10:00Z; Epic 2 is held by Epic 1's blocking item.
+    const STALE = "2026-10-22T09:40:00Z";
+    const held = (records: World["records"]): World => ({
+      epics: { 1: ["1"], 2: ["1", "2"] },
+      status: { "1.1": "done" },
+      retro: { 1: "accepted-with-open-items" },
+      items: { 1: blocking() },
+      records,
+    });
+    const HOLD = `Epic 2 is held by Epic 1's retro item ${ID} (open, blocking, distance 1)`;
+
+    for (const c of [
+      { state: "claimed" as const, over: {} },
+      { state: "merging" as const, over: { pr: 7 } },
+    ]) {
+      test(`a stale ${c.state} Story is taken over, with the hold still among the reasons`, () => {
+        const o = pick(held([storyRec("2.2", { state: c.state, generation: 5, heartbeat_at: STALE, ...c.over })]));
+        expect(o).toMatchObject({ kind: "unit", story: { story_id: "2.2", take_over: c.state, expect_generation: 5 } });
+        expect(codes(o)).toEqual(["epic:2 retro-item"]);
+        expect(o.kind === "unit" ? o.reasons[0]?.message : "").toBe(HOLD);
+      });
+    }
+
+    test("a fresh Story there is not claimed, and the idle reason still names the hold", () => {
+      const o = pick(held([]));
+      expect(o).toEqual({ kind: "idle", reason: HOLD, reasons: [{ subject: "epic:2", code: "retro-item", message: HOLD }] });
+    });
+
+    test("a fresh claimed or a stale parked record there is not taken over", () => {
+      for (const rec of [storyRec("2.2"), storyRec("2.2", { state: "parked", heartbeat_at: "2020-01-01T00:00:00Z" })]) {
+        const o = pick(held([rec]));
+        expect(idleReason(o)).toBe(HOLD);
+        expect(codes(o)).toEqual(["epic:2 retro-item"]);
+      }
+    });
+
+    test("a coordinator-held stale merging record there is not taken over", () => {
+      const coordinator = { owner: "carol", host: "33333333-3333-4333-8333-333333333333", lane: "coordinator" };
+      const o = pick(held([storyRec("2.2", { state: "merging", pr: 7, ...coordinator, heartbeat_at: "2025-10-22T10:10:00Z" })]));
+      expect(idleReason(o)).toBe(HOLD);
+    });
+
+    test("the takeover still waits on escalations and other records' globs", () => {
+      const escalated = pick({ ...held([storyRec("2.2", { heartbeat_at: STALE })]), escalations: ["2.2"] });
+      expect(chosen(escalated)).toBe("idle");
+      expect(codes(escalated)).toEqual(["epic:2 retro-item", "story:2.2 escalation"]);
+    });
+
+    const others: { name: string; world: (records: NonNullable<World["records"]>) => World; codes: string[] }[] = [
+      {
+        name: "dependency",
+        world: (records) => ({
+          epics: { 1: ["1"], 2: ["1", "2"] },
+          status: { "1.1": "review" },
+          retro: { 1: "accepted" },
+          records: [storyRec("1.1", { state: "merging" }), ...records],
+        }),
+        codes: ["story:1.1 record-state", "epic:2 dependency-epic"],
+      },
+      {
+        name: "retro-rejected",
+        world: (records) => ({ epics: { 1: ["1"], 2: ["1", "2"] }, status: { "1.1": "done" }, retro: { 1: "rejected" }, records }),
+        codes: ["epic:2 retro-rejected"],
+      },
+    ];
+    for (const c of others) {
+      test(`a ${c.name} hold behaves the same: the stale Story is taken over, a fresh one is not claimed`, () => {
+        const o = pick(c.world([storyRec("2.2", { heartbeat_at: STALE })]));
+        expect(o).toMatchObject({ kind: "unit", story: { story_id: "2.2", take_over: "claimed" } });
+        expect(codes(o)).toEqual(c.codes);
+        const idle = pick(c.world([]));
+        expect(chosen(idle)).toBe("idle");
+        expect(codes(idle)).toEqual(c.codes);
+      });
+    }
+
+    test("an unloadable Epic context still bars a takeover", () => {
+      const o = pick({ ...held([storyRec("2.2", { heartbeat_at: STALE })]), contexts: { 2: null } });
+      expect(chosen(o)).toBe("idle");
+      expect(codes(o)).toEqual(["epic:2 retro-item", "epic:2 epic-context"]);
+    });
+  });
+
   test("a held Epic falls through to an unrelated Epic", () => {
     const w: World = {
       epics: { 1: ["1"], 2: ["1"], 3: ["1"] },

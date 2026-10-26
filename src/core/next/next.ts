@@ -69,7 +69,9 @@ function stop(reason: string): { readonly kind: "stop"; readonly reason: string 
  * A builder gets the lowest eligible Epic, then its lowest eligible Story:
  * the Story as a `unit` (a stale `claimed` or builder-held `merging` record
  * as a `take_over`), an Infrastructure Story without a current approval as
- * `park`, `idle` with the reasons nothing is eligible, or `stop`.
+ * `park`, `idle` with the reasons nothing is eligible, or `stop`. An Epic
+ * hold (dependency, retro-rejected, retro-item) bars new claims but not a
+ * takeover; an unloadable Epic context bars both.
  *
  * The coordinator gets a `coordinator` unit in AD-13's order
  * (`nextCoordinator`), `idle`, or `stop`; never a Story.
@@ -139,19 +141,18 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
 
     const holds = holdsOf(n);
     reasons.push(...holds);
-    let held = holds.length > 0;
+    const held = holds.length > 0;
 
     const context = snap.epic_context[String(n)] ?? "missing";
     // A `stale` context still loads: it makes status planning due, but holds no Story.
     if (context !== "valid" && context !== "stale") {
-      held = true;
       reasons.push({
         subject,
         code: "epic-context",
         message: `Epic ${n} context ${epicContextPath(config.epic_context_path, n)} is ${context}`,
       });
+      continue;
     }
-    if (held) continue;
 
     for (const id of [...epic.stories].sort(compareStoryIds)) {
       const m = manifestOf(id);
@@ -161,6 +162,9 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
 
       const rec = records.get(unit);
       const takeOver = takeOverOf(rec, snap.now);
+      // A held Epic takes no new Story, but a takeover finishes in-flight work,
+      // so its stale records are still taken over as usual (Story 4.1's deferral).
+      if (held && takeOver === null) continue;
       if (rec !== undefined && rec.state !== "released" && takeOver === null) {
         reasons.push({ subject: unit, code: "record-state", message: `${unit} is ${rec.state}` });
       } else if (takeOver !== null && m.infrastructure && rec?.approval?.manifest_sha !== m.sha) {
