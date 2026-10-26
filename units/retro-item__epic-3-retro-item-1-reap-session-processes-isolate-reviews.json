@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-1-reap-session-processes-isolate-reviews",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -18,7 +18,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/vendor-home.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T17:49:15.511Z",
+  "heartbeat_at": "2026-10-26T17:51:57.323Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "8169989ff16a03c8466adda6a2a3d5012aa7bd8c",
@@ -30,7 +30,12 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "escalation",
+    "inbox_owner": "edanisko",
+    "globs_held": []
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
