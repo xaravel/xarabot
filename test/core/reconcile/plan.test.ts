@@ -273,7 +273,7 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
     const p = plan({ records: [awaiting()], prs: { "story:2.1": open(7) } });
     expect(shape(p)).toEqual({ ...EMPTY, takeApproved: ["story:2.1"] });
     expect(p.takeApproved).toEqual([
-      { unit: "story:2.1", generation: 1, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
+      { unit: "story:2.1", generation: 1, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], graph_posted: null },
     ]);
   });
 
@@ -285,13 +285,13 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
   test("a reconcile record's first protected-path park (coordinator lane, no enqueued_sha) is a first park: parked_at null", () => {
     const r3 = coord("reconcile:3", { state: "parked", pr: 3, pr_owner: COORD.owner, head_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [STATUS] } });
     const p = plan({ records: [r3], prs: { "reconcile:3": open(3) } });
-    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: null, builder_providers: [], globs: [STATUS], approved_graph: null }]);
+    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: null, builder_providers: [], globs: [STATUS], graph_posted: null }]);
   });
 
   test("a planning step's first park (planning:graph.1, coordinator lane, reviewed: passed_sha but no enqueued_sha): parked_at null", () => {
     const g = coord("planning:graph.1", { state: "parked", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
     const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
-    expect(p.takeApproved).toEqual([{ unit: "planning:graph.1", generation: 1, pr: 4, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: [EPICS_MD], approved_graph: null }]);
+    expect(p.takeApproved).toEqual([{ unit: "planning:graph.1", generation: 1, pr: 4, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: [EPICS_MD], graph_posted: null }]);
   });
 
   test("a coordinator re-park with enqueued_sha set: parked_at is its heartbeat_at", () => {
@@ -304,8 +304,21 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
     const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, enqueued_sha: HEAD });
     const p = plan({ records: [reparked], prs: { "story:2.1": open(7) } });
     expect(p.takeApproved).toEqual([
-      { unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: PARKED_AT, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
+      { unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: PARKED_AT, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], graph_posted: null },
     ]);
+  });
+
+  test("a re-park with a posted graph delta (retro item 24) carries its graph_posted, and its heartbeat_at as the park time", () => {
+    const hash = `sha256:${"e".repeat(64)}`;
+    const reparked = awaiting({
+      owner: COORD.owner,
+      host: COORD.host,
+      lane: COORD.lane,
+      enqueued_sha: HEAD,
+      park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["src/2.1/a.ts"], graph_posted: hash },
+    });
+    const p = plan({ records: [reparked], prs: { "story:2.1": open(7) } });
+    expect(p.takeApproved.map((t) => [t.parked_at, t.graph_posted])).toEqual([[PARKED_AT, hash]]);
   });
 
   test("a coordinator-lane park with passed_sha alone is a first park (Story 3.5): parked_at null", () => {

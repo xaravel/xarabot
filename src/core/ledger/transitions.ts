@@ -22,6 +22,7 @@ export const LEDGER_EDGES: readonly (readonly [LedgerNode, LedgerNode])[] = [
   ["merging", "parked"],
   ["merging", "released"],
   ["parked", "merging"],
+  ["parked", "parked"],
   ["parked", "merged"],
   ["parked", "released"],
   ["merged", "none"],

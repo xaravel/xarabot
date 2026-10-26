@@ -37,8 +37,8 @@ export type ApprovalTarget = {
   /**
    * For a re-park (the record's `lane` is `coordinator` and it has an
    * `enqueued_sha`: the coordinator took it on approval, fenced it at its head
-   * and parked it again), its `heartbeat_at`: an approval must be submitted
-   * after it. `null` for a first park, a builder's or the coordinator's own
+   * and parked it again, or parked it again with a new graph delta), its
+   * `heartbeat_at`: an approval must be submitted after it. `null` for a first park, a builder's or the coordinator's own
    * (a planning or `reconcile` gate park has no `enqueued_sha`), and for a
    * taken record the runner never enqueued, returned to its park
    * (`takeApproved` clears `enqueued_sha`): any standing owner approval of
@@ -52,13 +52,14 @@ export type ApprovalTarget = {
   /** The paths the PR's diff changes (the park's `globs_held`). */
   readonly globs: readonly string[];
   /**
-   * The graph hash the standing approval was taken on: for a taken record
-   * the runner never enqueued, returned to its park (`untake`), the taken
-   * record's `approved_graph`; else the parked record's (a park from
-   * `merging` clears it). A take whose merge result now hashes otherwise
-   * voids the approval.
+   * The graph hash of the delta the runner posted on the PR (the park's
+   * `graph_posted`, retro item 24); `null` when none was posted. A graph
+   * change is taken only at this hash: any other merge result, or none
+   * posted, parks it again with the new delta. For a taken record the
+   * runner never enqueued, returned to its park (`untake`), the taken
+   * record's `approved_graph`, the hash its approval was taken on.
    */
-  readonly approved_graph: string | null;
+  readonly graph_posted: string | null;
 };
 
 /** A coordinator-held `merging` record taken on approval, whose queue is checked. */
@@ -370,7 +371,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       passed_sha: r.passed_sha,
       builder_providers: r.builder_providers,
       globs: r.park.globs_held,
-      approved_graph: r.approved_graph,
+      graph_posted: r.park.graph_posted ?? null,
     });
   }
 

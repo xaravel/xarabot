@@ -21,6 +21,7 @@ const DIAGRAM = new Set([
   "merging>parked",
   "merging>released",
   "parked>merging",
+  "parked>parked",
   "parked>merged",
   "parked>released",
   "merged>none",

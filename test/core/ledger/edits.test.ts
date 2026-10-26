@@ -30,6 +30,7 @@ import {
   releaseDisposable,
   releaseEjected,
   releaseStale,
+  reparkGraph,
   startMerging,
   STALE_AFTER_MS,
   takeApproved,
@@ -52,6 +53,10 @@ function by(who: LaneIdentity, at: string, over: Partial<UnitRecord>): UnitRecor
 const blocked = (reason: Park["reason"], inbox = "alice"): Park => ({ kind: "blocked", reason, inbox_owner: inbox, globs_held: [] });
 const awaiting = (globs_held: string[]): Park => ({ kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held });
 const needs: Park = { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] };
+/** An awaiting-approval park whose graph delta at `hash` was posted (retro item 24). */
+const posted = (globs_held: string[], hash: string = GH, inbox = "alice"): Park => ({ ...awaiting(globs_held), inbox_owner: inbox, graph_posted: hash });
+/** Another graph hash. */
+const GH_2 = `sha256:${"8".repeat(64)}`;
 
 type Expect = UnitRecord | "null" | "deleted" | "stop" | "invalid" | "precondition" | "illegal-transition";
 type Case = readonly [name: string, edit: LedgerEdit, records: readonly UnitRecord[], expected: Expect, editName?: string];
@@ -338,11 +343,49 @@ const CASES: readonly Case[] = [
   [
     "takeApproved with a graph",
     takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }),
-    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7 }), rec({ unit: "story:1.6", state: "parked", globs: ["xarabot:graph"], park: awaiting(["src/b.ts"]) })],
+    [rec({ state: "parked", globs: ["src/**"], park: posted(["src/a.ts"]), pr: 7 }), rec({ unit: "story:1.6", state: "parked", globs: ["xarabot:graph"], park: awaiting(["src/b.ts"]) })],
     by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts", "xarabot:graph"], approved_sha: SHA_D, approved_graph: GH, pr: 7 }),
   ],
-  ["takeApproved with a graph beside a merging graph change", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: awaiting(["src/a.ts"]) }), by(COORD, T0, { unit: "story:1.6", state: "merging", globs: ["src/b.ts", "xarabot:graph"], approved_graph: GH })], "precondition"],
-  ["takeApproved with a graph beside a claimed graph planning unit", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: awaiting(["src/a.ts"]) }), by(COORD, T0, { unit: "planning:graph.2", globs: ["stories/*.md", "xarabot:graph"] })], "precondition"],
+  // retro item 24: the approved graph must be the posted delta's
+  ["takeApproved with a graph and no delta posted", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7 })], "precondition"],
+  ["takeApproved with a graph other than the posted delta's", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: posted(["src/a.ts"], GH_2), pr: 7 })], "precondition"],
+  [
+    "takeApproved with no graph from a park with a posted delta",
+    takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),
+    [rec({ state: "parked", park: posted(["src/a.ts"]), pr: 7 })],
+    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7 }),
+  ],
+  ["takeApproved with a graph beside a merging graph change", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: posted(["src/a.ts"]) }), by(COORD, T0, { unit: "story:1.6", state: "merging", globs: ["src/b.ts", "xarabot:graph"], approved_graph: GH })], "precondition"],
+  ["takeApproved with a graph beside a claimed graph planning unit", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D, approvedGraph: GH }), [rec({ state: "parked", park: posted(["src/a.ts"]) }), by(COORD, T0, { unit: "planning:graph.2", globs: ["stories/*.md", "xarabot:graph"] })], "precondition"],
+  // reparkGraph (retro item 24): parked -> parked with a new posted delta, in the Maintainer's inbox, enqueued_sha at the head
+  [
+    "reparkGraph a builder's park",
+    reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }),
+    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7, pr_owner: "alice", head_sha: SHA_A, passed_sha: SHA_A })],
+    by(COORD, NOW, { state: "parked", globs: ["src/**"], park: posted(["src/a.ts"], GH, "edanisko"), pr: 7, pr_owner: "alice", head_sha: SHA_A, passed_sha: SHA_A, enqueued_sha: SHA_A }),
+  ],
+  [
+    "reparkGraph a park with another posted delta",
+    reparkGraph({ unit: U, by: COORD_2, now: NOW, generation: 3, graphPosted: GH_2, inboxOwner: "edanisko" }),
+    [by(COORD, T0, { state: "parked", generation: 3, park: posted(["src/a.ts"], GH, "edanisko"), pr: 7, head_sha: SHA_A, enqueued_sha: SHA_B })],
+    by(COORD_2, NOW, { state: "parked", generation: 3, park: posted(["src/a.ts"], GH_2, "edanisko"), pr: 7, head_sha: SHA_A, enqueued_sha: SHA_A }),
+  ],
+  ["reparkGraph by a builder", reparkGraph({ unit: U, by: ALICE, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }), [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_A })], "precondition"],
+  ["reparkGraph wrong generation", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 2, graphPosted: GH, inboxOwner: "edanisko" }), [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_A })], "precondition"],
+  ["reparkGraph a blocked park", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }), [rec({ state: "parked", park: blocked("other"), pr: 7, head_sha: SHA_A })], "precondition"],
+  ["reparkGraph a merging record", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }), [rec({ state: "merging", pr: 7, head_sha: SHA_A })], "precondition"],
+  ["reparkGraph with no head", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }), [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7 })], "precondition"],
+  ["reparkGraph with no record", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: GH, inboxOwner: "edanisko" }), [], "precondition"],
+  ["reparkGraph with a bad hash", reparkGraph({ unit: U, by: COORD, now: NOW, generation: 1, graphPosted: "sha256:xyz", inboxOwner: "edanisko" }), [rec({ state: "parked", park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_A })], "invalid"],
+  // park with a posted graph delta (retro item 24)
+  [
+    "park coordinator-held merging awaiting-approval with a posted graph delta",
+    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], inboxOwner: "edanisko", enqueuedSha: SHA_A, graphPosted: GH }),
+    [by(COORD, T0, { state: "merging", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, approved_sha: SHA_A, approved_graph: GH })],
+    by(COORD, NOW, { state: "parked", generation: 2, globs: ["src/a.ts", "xarabot:graph"], pr: 7, enqueued_sha: SHA_A, park: posted(["src/a.ts"], GH, "edanisko") }),
+  ],
+  ["park blocked with a posted graph delta", park({ ...held, kind: "blocked", reason: "other", graphPosted: GH }), [rec()], "invalid"],
+  ["park with a bad graph hash", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"], graphPosted: "sha256:xyz" }), [rec()], "invalid"],
   [
     "takeApproved with no graph beside a merging graph change",
     takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),

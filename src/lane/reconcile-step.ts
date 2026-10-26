@@ -9,6 +9,7 @@ import {
   markMerged,
   park,
   releaseDeadReconcile,
+  reparkGraph,
   releaseDisposable,
   releaseEjected,
   startMerging,
@@ -88,22 +89,28 @@ import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOu
  *
  * The graph-change gate (Story 2.8) runs on each approved PR but a
  * `reconcile` one, before the take, on its merge with fresh `main`. An
- * unchanged graph keeps the owner's rule. A changed one is taken only on the
- * Maintainer's standing approval of the head (an owner who is not the
- * Maintainer never suffices: with only the owner's approval standing, it is
- * taken and parked again for the Maintainer with the delta), holding
- * `xarabot:graph` with `approved_graph` set to the merge result's hash; another record holding an overlapping
- * glob refuses the take, and the PR waits. A refused merge result is taken
- * and parked `blocked` `graph-invalid`; a conflicting merge is taken and
- * parked again (`conflict`); a `main` that does not resolve, or a failed
- * read, skips the take. After the fence, a record with `approved_graph`
- * re-reads fresh `main`: when it moved, the gate runs again, and a refusal
- * parks `blocked` `graph-invalid`, a different hash voids the approval (parked
- * again for the Maintainer, with the new delta), and an equal hash enqueues.
- * A record taken again after the runner never enqueued it keeps its
- * `approved_graph` for the re-take: a merge result that hashes otherwise
- * voids the approval the same way, so a stale approval never queues a
- * delta the Maintainer has not seen.
+ * unchanged graph keeps the owner's rule. A changed one is bound to the
+ * delta the runner posted (retro item 24, AD-11): when the merge result's
+ * hash is not the park's `graph_posted`, or none was posted (a builder's or
+ * a planning step's park), the delta is posted and the record parked again
+ * (`parked → parked`) in the Maintainer's inbox with that hash, stamped with
+ * the forge time of the latest snapshot read before its reviews, so only an
+ * approval submitted after that takes it; whoever's approval stood, it is
+ * not taken. At the posted hash it is taken only on the Maintainer's standing
+ * approval of the head (an owner who is not the Maintainer never suffices),
+ * holding `xarabot:graph` with `approved_graph` set to that hash; another
+ * record holding an overlapping glob refuses the take, and the PR waits. A
+ * refused merge result is taken and parked `blocked` `graph-invalid`; a
+ * conflicting merge is taken and parked again (`conflict`); a `main` that
+ * does not resolve, or a failed read, skips the take. After the fence, a
+ * record with `approved_graph` re-reads fresh `main`: when it moved, the gate
+ * runs again, and a refusal parks `blocked` `graph-invalid`, a different hash
+ * voids the approval (the new delta posted, then parked again for the
+ * Maintainer with it as `graph_posted`), and an equal hash enqueues. A record
+ * taken again after the runner never enqueued it keeps its `approved_graph`
+ * as `graph_posted`: a merge result that hashes otherwise is parked again
+ * with the new delta, so a stale approval never queues a delta the
+ * Maintainer has not seen.
  *
  * Story 2.9: each `retro:<N>` record `merged` as of the run, with a
  * `retro_result` and no `retro` entry for `<N>` on `main`, has its verdict
@@ -207,6 +214,17 @@ const REPARK_TEXT: Readonly<Record<ReparkCause, string>> = {
     "this PR is closed and is parked awaiting approval again.\n\n" +
     "Reopen it, then approve its current head again, or run `xarabot rule rebuild`.\n",
 };
+
+/**
+ * The 🤖 comment on a graph change parked again with a new delta (retro
+ * item 24): `graphDeltaComment`, saying that only an approval after it counts.
+ */
+export function graphRepostComment(unit: string, delta: GraphDelta, maintainer: string, voided: boolean): string {
+  const body = graphDeltaComment(`Unit ${unit}`, { delta, maintainer, ...(voided ? { voided: true } : {}) });
+  const i = body.indexOf("\n");
+  const note = " An approval submitted before this comment does not count.";
+  return capText(i === -1 ? `${body}${note}` : `${body.slice(0, i)}${note}${body.slice(i)}`, FORGE_TEXT_LIMITS.comment);
+}
 
 /** The 🤖 comment on a gated PR parked again for `cause`. */
 export function reparkComment(unit: string, cause: ReparkCause): string {
@@ -348,11 +366,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * A gated record back to `parked` `awaiting-approval`, holding its diff's
      * paths, `approved_sha` cleared, `heartbeat_at` stamped and `lane`
      * `coordinator`. With `enqueuedSha`, `enqueued_sha` is set to it, so only
-     * a review submitted after the park re-takes the PR.
+     * a review submitted after the park re-takes the PR. With `graphPosted`,
+     * the park keeps the hash of the graph delta posted on the PR.
      */
-    const parkAwaiting = (t: GatedTarget, enqueuedSha: string | null, inboxOwner: string | null = null): Promise<boolean> => {
-      // Only the Maintainer's approval re-takes a record holding `xarabot:graph`, so it lands in the Maintainer's inbox.
-      const inbox = inboxOwner ?? (t.globs.includes(GRAPH_PSEUDO_GLOB) ? snapshot.config.maintainer : t.pr_owner);
+    const parkAwaiting = (t: GatedTarget, enqueuedSha: string | null, inboxOwner: string | null = null, graphPosted: string | null = null): Promise<boolean> => {
+      // Only the Maintainer's approval re-takes a graph change, so it lands in the Maintainer's inbox.
+      const graph = graphPosted !== null || t.globs.includes(GRAPH_PSEUDO_GLOB);
+      const inbox = inboxOwner ?? (graph ? snapshot.config.maintainer : t.pr_owner);
       return item(
         `park ${t.unit}`,
         park({
@@ -364,6 +384,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           diffPaths: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
           ...(inbox !== null ? { inboxOwner: inbox } : {}),
           ...(enqueuedSha !== null ? { enqueuedSha } : {}),
+          ...(graphPosted !== null ? { graphPosted } : {}),
         }),
       );
     };
@@ -372,18 +393,38 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * A gated record parked again for a fresh approval (`parkAwaiting`, with
      * `enqueued_sha` set at its approved head when the take left it unset), then
      * a best-effort 🤖 comment on its PR chosen by `cause` (`null`: no comment).
+     * The park keeps `posted`, the hash of the graph delta already on the PR
+     * (default the approved one). With `graph`, its delta comment is posted
+     * first instead, and the park records `graph.hash` only once it is
+     * posted (retro item 24): a failed comment leaves none posted.
      */
-    const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null, over: { readonly inboxOwner: string; readonly body: string } | null = null): Promise<void> => {
+    const repark = async (
+      t: GatedTarget,
+      why: string,
+      cause: ReparkCause | null,
+      graph: { readonly inboxOwner: string; readonly body: string; readonly hash: string } | null = null,
+      posted: string | null = t.approved_graph,
+    ): Promise<void> => {
       const enqueuedSha = t.enqueued_sha === null ? (t.approved_sha ?? t.head_sha) : null;
-      const parked = await parkAwaiting(t, enqueuedSha, over?.inboxOwner ?? null);
+      let graphPosted = posted;
+      if (graph !== null) {
+        aborted();
+        await beat("fence");
+        const commented = await call("comment", (o) => forge.comment(t.pr, graph.body, o));
+        graphPosted = commented.ok ? graph.hash : null;
+        if (!commented.ok) {
+          reasons.push(`${t.unit}: graph delta comment on PR #${t.pr} failed: ${describeError(commented.error)}`);
+          note(`${t.unit}: graph delta comment on PR #${t.pr} failed: ${describeError(commented.error)}`);
+        }
+      }
+      const parked = await parkAwaiting(t, enqueuedSha, graph?.inboxOwner ?? null, graphPosted);
       if (!parked) return;
       reasons.push(`${t.unit}: PR #${t.pr} ${why}: parked awaiting approval again`);
-      const body = over?.body ?? (cause === null ? null : reparkComment(t.unit, cause));
-      if (body === null) return;
-      const posted = await call("comment", (o) => forge.comment(t.pr, body, o));
-      if (!posted.ok) {
-        reasons.push(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
-        note(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(posted.error)}`);
+      if (graph !== null || cause === null) return;
+      const commented = await call("comment", (o) => forge.comment(t.pr, reparkComment(t.unit, cause), o));
+      if (!commented.ok) {
+        reasons.push(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(commented.error)}`);
+        note(`${t.unit}: re-park comment on PR #${t.pr} failed: ${describeError(commented.error)}`);
       }
     };
 
@@ -392,12 +433,13 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * `head` and out of the queue: parked again with `enqueued_sha` unset, so
      * its standing approval still counts, and returned as a candidate for
      * this run's takes, which re-check that approval, fresh `main` and the
-     * graph gate before enqueueing it, its `approved_graph` carried so a
-     * merge result that now hashes otherwise voids the approval. No comment:
-     * the owner has nothing to do.
+     * graph gate before enqueueing it. Its `approved_graph`, the hash of the
+     * delta the approval was given after, is kept as the park's
+     * `graph_posted`, so a merge result that now hashes otherwise is parked
+     * again with the new delta. No comment: the owner has nothing to do.
      */
     const untake = async (t: GatedTarget, head: string): Promise<ApprovalTarget | null> => {
-      if (!(await parkAwaiting(t, null))) return null;
+      if (!(await parkAwaiting(t, null, null, t.approved_graph))) return null;
       reasons.push(`${t.unit}: PR #${t.pr} was never enqueued after its take: parked on its standing approval, to be taken again`);
       if (t.pr_owner === null) return null;
       // The take keeps `passed_sha` and the providers: the record as the round's snapshot shows it holds them.
@@ -412,7 +454,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         passed_sha: held?.passed_sha ?? null,
         builder_providers: held?.builder_providers ?? [],
         globs: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
-        approved_graph: t.approved_graph,
+        graph_posted: t.approved_graph,
       };
     };
 
@@ -524,13 +566,32 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     type AfterTake =
       | { readonly kind: "refuse"; readonly refusals: readonly string[] }
       | { readonly kind: "conflict"; readonly paths: readonly string[] }
-      /**
-       * The graph changes and only the owner approved, or (with `voided`, the
-       * hash the Maintainer's approval was taken on) a re-take's merge result
-       * now hashes otherwise: parked again for the Maintainer, with the delta.
-       */
-      | { readonly kind: "maintainer"; readonly maintainer: string; readonly delta: GraphDelta; readonly hash: string; readonly voided?: string }
       | null;
+
+    /**
+     * Retro item 24 (AD-11): a parked graph change whose merge result hashes
+     * `hash`, not the park's `graph_posted` (or with none posted). The delta
+     * is posted first; once it is, the record is parked again (`parked →
+     * parked`, `reparkGraph`) in the Maintainer's inbox with `graph_posted`
+     * = `hash`, stamped `at`, the forge time read before the reviews were, so
+     * only an approval submitted after that re-takes it. A failed comment
+     * leaves the record as it was, for a later run. `voided`: the
+     * Maintainer's approval stood on another delta.
+     */
+    const repostGraph = async (t: ApprovalTarget, delta: GraphDelta, hash: string, maintainer: string, at: string, voided: boolean): Promise<void> => {
+      aborted();
+      await beat("fence");
+      const posted = await call("comment", (o) => forge.comment(t.pr, graphRepostComment(t.unit, delta, maintainer, voided), o));
+      if (!posted.ok) {
+        reasons.push(`${t.unit}: graph delta comment on PR #${t.pr} ${describeError(posted.error)}; not taken, left parked`);
+        note(`${t.unit}: graph delta comment on PR #${t.pr} failed: ${describeError(posted.error)}; not taken`);
+        return;
+      }
+      const parked = await item(`reparkGraph ${t.unit}`, reparkGraph({ unit: t.unit, by: identity, now: at, generation: t.generation, graphPosted: hash, inboxOwner: maintainer }));
+      if (!parked) return;
+      const was = t.graph_posted === null ? "no delta was posted" : `the posted delta is ${t.graph_posted}`;
+      reasons.push(`${t.unit}: PR #${t.pr} changes the Epic graph to ${hash}, but ${was}: parked again with the new delta for the Maintainer's (${maintainer}) approval`);
+    };
 
     /**
      * The `approved_graph` re-check after the fence: fresh `main` re-read;
@@ -568,6 +629,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           await repark(taken, `merge result's graph is now ${hash}, not the approved ${approved.hash}: the approval is void`, null, {
             inboxOwner: maintainer,
             body: graphDeltaComment(`Unit ${t.unit}`, { delta: g.delta, maintainer, voided: true }),
+            hash,
           });
           return false;
         }
@@ -618,17 +680,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       }
       // Each re-park sets `enqueued_sha`, so it needs an approval submitted after it, as an enqueue conflict's does.
       if (after?.kind === "refuse") return await blockGraph(takenTarget, after.refusals);
-      if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict");
-      if (after?.kind === "maintainer") {
-        const why =
-          after.voided === undefined
-            ? `changes the Epic graph to ${after.hash}: only the Maintainer's (${after.maintainer}) approval counts`
-            : `merge result's graph is now ${after.hash}, not the approved ${after.voided}: the approval is void`;
-        return await repark(takenTarget, why, null, {
-          inboxOwner: after.maintainer,
-          body: graphDeltaComment(`Unit ${t.unit}`, { delta: after.delta, maintainer: after.maintainer, ...(after.voided !== undefined ? { voided: true } : {}) }),
-        });
-      }
+      // The delta already posted stays on the PR, so the park keeps its hash.
+      if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict", null, t.graph_posted);
       if (graph !== null && !(await recheckGraph(t, takenTarget, graph))) return;
       for (let n = 0; ; n += 1) {
         aborted();
@@ -672,7 +725,12 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * another head is skipped. Before a take of a unit that is not
      * `reconcile` (Story 3.5): the allowance on fresh `main`'s policy
      * (refused: no such take this run), then the passed gate at the approved
-     * head (unreviewed, or an error: not taken, left `parked`).
+     * head (unreviewed, or an error: not taken, left `parked`). A graph
+     * change is taken only at the hash of the delta posted on its PR and on
+     * the Maintainer's approval after it (retro item 24): any other hash, or
+     * none posted, re-parks it with the new delta (`repostGraph`), stamped
+     * with the forge time of the latest snapshot read before its reviews
+     * (fresh `main` once read, else the round's).
      */
     const takeApprovedWork = async (targets: readonly ApprovalTarget[], settled: Set<string>): Promise<void> => {
       let fresh: FreshMain | null = null;
@@ -710,6 +768,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       };
       for (const t of targets) {
         aborted();
+        // Q3: a graph re-park is stamped no later than the reviews read, so an approval given after the read still counts.
+        const readAt = fresh?.snap.now ?? snapshot.now;
         const listed = await call("reviews", (o) => forge.reviews(t.pr, o));
         if (!listed.ok) {
           reasons.push(`${t.unit}: reviews PR #${t.pr} ${describeError(listed.error)}; left for a later run`);
@@ -782,16 +842,14 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           case "change": {
             const maintainer = fresh.config.repo.config.maintainer;
             const approval = query(maintainer);
-            if (approval === null) {
-              // Only the owner's approval stands: parked again in the Maintainer's inbox, with the delta.
-              note(`${t.unit}: the graph changes; no standing approval from the Maintainer ${maintainer}${since}; parked again for the Maintainer`);
-              await take(t, approver, settled, null, { kind: "maintainer", maintainer, delta: g.delta, hash: g.mergedHash });
+            if (t.graph_posted !== g.mergedHash) {
+              // Retro item 24: no approval binds a delta the runner has not posted; post this one and wait for a later approval.
+              note(`${t.unit}: the graph changes to ${g.mergedHash}; the posted delta is ${t.graph_posted ?? "none"}; parked again with the new delta`);
+              await repostGraph(t, g.delta, g.mergedHash, maintainer, readAt, approval !== null && t.graph_posted !== null);
               continue;
             }
-            if (t.approved_graph !== null && t.approved_graph !== g.mergedHash) {
-              // A re-take whose merge result moved since the Maintainer approved it: that approval is void.
-              note(`${t.unit}: the merge result's graph is now ${g.mergedHash}, not the approved ${t.approved_graph}; parked again for the Maintainer`);
-              await take(t, approver, settled, null, { kind: "maintainer", maintainer, delta: g.delta, hash: g.mergedHash, voided: t.approved_graph });
+            if (approval === null) {
+              note(`${t.unit}: the graph changes; no standing approval from the Maintainer ${maintainer}${since}; left parked for the Maintainer`);
               continue;
             }
             await take(t, approval.author ?? maintainer, settled, { hash: g.mergedHash, mainSha: snap.main.sha });

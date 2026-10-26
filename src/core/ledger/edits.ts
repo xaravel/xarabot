@@ -562,13 +562,21 @@ export type ParkParams = HeldParams & {
    * re-takes the PR. Absent: `enqueued_sha` is kept.
    */
   readonly enqueuedSha?: string;
+  /**
+   * The graph hash of the delta the runner posted on the PR (retro item 24),
+   * kept as `park.graph_posted`; only for `awaiting-approval`. Absent: none
+   * was posted.
+   */
+  readonly graphPosted?: string;
 };
 
 /**
  * `claimed → parked` and, for an approval-gated ejection, `merging → parked`
  * (`awaiting-approval`; a coordinator-held record may also park `blocked`
  * `graph-invalid`, Story 2.8). A park from `merging` clears `approved_sha`
- * and `approved_graph`, and sets `enqueued_sha` to `enqueuedSha` when given. The record must be held by the writer at
+ * and `approved_graph`, and sets `enqueued_sha` to `enqueuedSha` when given.
+ * With `graphPosted`, the park records the posted graph delta's hash (retro
+ * item 24). The record must be held by the writer at
  * `generation`, except a `merging` record held by a coordinator lane: any
  * coordinator-lane writer may park it at its `generation` (as
  * `releaseDisposable` releases one), so a coordinator that moved hosts
@@ -582,6 +590,8 @@ export function park(p: ParkParams): LedgerEdit {
     if (!inbox.ok) return inbox;
     const enqueued = check("park enqueuedSha", GitSha.nullable(), p.enqueuedSha ?? null);
     if (!enqueued.ok) return enqueued;
+    const posted = check("park graphPosted", GraphHash.nullable(), p.graphPosted ?? null);
+    if (!posted.ok) return posted;
     let held: string[] = [];
     if (p.kind === "awaiting-approval") {
       if (p.diffPaths === undefined) return bad("park: awaiting-approval needs diffPaths");
@@ -594,6 +604,7 @@ export function park(p: ParkParams): LedgerEdit {
       reason: reason.value,
       inbox_owner: inbox.value,
       globs_held: held,
+      ...(posted.value !== null ? { graph_posted: posted.value } : {}),
     });
     if (!parkValue.ok) return parkValue;
     if (reason.value === "unclaimable") return bad("park: unclaimable is not a reason for parking a claimed unit");
@@ -723,6 +734,10 @@ export type TakeApprovedParams = EditBase & {
  * With `approvedGraph`, the record's `globs` are the park's `globs_held` plus
  * `xarabot:graph` and `approved_graph` is set; another record holding a glob
  * that overlaps `xarabot:graph` refuses the take (precondition).
+ * The posted delta binds the approval (retro item 24, AD-11): `approvedGraph`
+ * must equal the park's `graph_posted`, else the take is refused
+ * (precondition) and the record is parked again with the new delta
+ * (`reparkGraph`).
  * `enqueued_sha` is cleared: the taker sets it at the head once the enqueue
  * succeeds (or before it parks the record again), so a taken record with no
  * `enqueued_sha` is one the runner never enqueued, and its approval stands.
@@ -746,6 +761,9 @@ export function takeApproved(p: TakeApprovedParams): LedgerEdit {
     if (parked?.kind !== "awaiting-approval") return pre(`${ctx.unit} is not parked awaiting-approval`);
     let globs = [...parked.globs_held];
     if (graph.value !== null) {
+      if (parked.graph_posted !== graph.value) {
+        return pre(`takeApproved: the approved graph ${graph.value} is not the posted delta's ${parked.graph_posted ?? "(none posted)"}`);
+      }
       for (const [id, other] of ctx.ledger.units) {
         if (id === ctx.unit) continue;
         const held = heldGlobs(other).find((g) => globsOverlap(g, GRAPH_PSEUDO_GLOB));
@@ -765,6 +783,46 @@ export function takeApproved(p: TakeApprovedParams): LedgerEdit {
         park: null,
       }),
     );
+  });
+}
+
+export type ReparkGraphParams = EditBase & {
+  readonly generation: number;
+  /** The graph hash of the delta just posted on the PR. */
+  readonly graphPosted: string;
+  /** Whose inbox the park lands in: the Maintainer, whose approval alone takes a graph change. */
+  readonly inboxOwner: string;
+};
+
+/**
+ * `parked → parked` (retro item 24, AD-11): the coordinator re-parks a
+ * `parked` `awaiting-approval` record at `generation` after posting a new
+ * graph delta on its PR, because the merge result's hash is not the park's
+ * `graph_posted` (or none was posted). The park keeps its `globs_held`, lands
+ * in `inboxOwner`'s inbox and records `graph_posted`; `enqueued_sha` is set
+ * to the record's head, so with the record coordinator-held only an approval
+ * submitted after `heartbeat_at` (`now`: the forge time read before the
+ * reviews were, never a later one) takes it. `generation` is kept.
+ */
+export function reparkGraph(p: ReparkGraphParams): LedgerEdit {
+  return makeEdit("reparkGraph", p, (ctx) => {
+    const posted = check("reparkGraph graphPosted", GraphHash, p.graphPosted);
+    if (!posted.ok) return posted;
+    const inbox = check("reparkGraph inboxOwner", GitHubLogin, p.inboxOwner);
+    if (!inbox.ok) return inbox;
+    const c = requireCoordinator(ctx);
+    if (!c.ok) return c;
+    const rec = requireRecord(ctx);
+    if (!rec.ok) return rec;
+    const s = requireState(rec.value, ["parked"]);
+    if (!s.ok) return s;
+    const g = requireGeneration(rec.value, p.generation);
+    if (!g.ok) return g;
+    const parked = rec.value.park;
+    if (parked?.kind !== "awaiting-approval") return pre(`${ctx.unit} is not parked awaiting-approval`);
+    if (rec.value.head_sha === null) return pre(`${ctx.unit} has no head`);
+    const park: Park = { ...parked, inbox_owner: inbox.value, graph_posted: posted.value };
+    return to("parked", stamp(ctx, rec.value, { park, enqueued_sha: rec.value.head_sha }));
   });
 }
 
