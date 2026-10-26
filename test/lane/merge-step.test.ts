@@ -1343,40 +1343,107 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     expect(e.record).toMatchObject({ state: "merged", attempts: 1 });
   });
 
-  test("takeover: a stale claimed record whose review blocked: the review SHAs cleared, so a new review passes before any enqueue", async () => {
-    let head = "";
-    const e = await laneRun({
-      prepare: async (fake) => {
-        head = fake.control.makeCommit();
-        value(await fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts()));
-        const number = value(await fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts())).number;
-        const stale = rec({
-          unit: UNIT,
-          globs: ["src/s0/**"],
-          owner: BOB.owner,
-          host: BOB.host,
-          lane: BOB.lane,
-          generation: 2,
-          heartbeat_at: "2026-10-23T09:00:00Z",
-          pr: number,
-          pr_owner: BOB.owner,
-          head_sha: head,
-          reviewed_sha: head,
-          passed_sha: null,
-          loopbacks: 1,
-          builder_providers: ["anthropic"],
-        });
-        fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([stale]), deletes: [] });
-      },
-      onQueueSleep: mergeOnce,
+  // A takeover after a blocking round (Epic 3 retro A6, item 9): today the
+  // taker clears the review SHAs and runs a fresh build session and a fresh
+  // review, rather than picking up the loopback; `loopbacks` carries over.
+
+  /**
+   * Seeds Bob's stale `claimed` record for UNIT whose last review round
+   * blocked at the PR's head, after `loopbacks` loopbacks, and records UNIT's
+   * record before every later swap into `seen` (so `seen[i]` is the record
+   * swap `i - 1` wrote). The PR's head.
+   */
+  const seedBlockedClaimed = async (fake: FakeForge, loopbacks: number, seen: (UnitRecord | undefined)[]): Promise<string> => {
+    const head = fake.control.makeCommit();
+    value(await fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts()));
+    const number = value(await fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts())).number;
+    const stale = rec({
+      unit: UNIT,
+      globs: ["src/s0/**"],
+      owner: BOB.owner,
+      host: BOB.host,
+      lane: BOB.lane,
+      generation: 2,
+      heartbeat_at: "2026-10-23T09:00:00Z",
+      pr: number,
+      pr_owner: BOB.owner,
+      head_sha: head,
+      reviewed_sha: head,
+      passed_sha: null,
+      loopbacks,
+      builder_providers: ["anthropic"],
     });
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([stale]), deletes: [] });
+    fake.control.beforeSwap(async () => {
+      const l = parseLedger(value(await fake.forge.snapshot(opts())).ledger.files);
+      if (!l.ok) throw new Error(l.error.message);
+      seen.push(l.value.units.get(UNIT));
+    });
+    return head;
+  };
+  /** The record the run's first `takeOverStale` swap wrote. */
+  const takenOver = (e: LaneRun, seen: readonly (UnitRecord | undefined)[]): UnitRecord | undefined => {
+    const swaps = e.fake.control.ledgerLog().filter((c) => c.message.startsWith("ledger: "));
+    return seen[swaps.findIndex((c) => editName(c.message) === "takeOverStale") + 1];
+  };
+
+  test("takeover after a blocking round: the review SHAs cleared, loopbacks kept, an attempt charged; a fresh build session with no findings, then a fresh review passes before any enqueue", async () => {
+    const seen: (UnitRecord | undefined)[] = [];
+    let blocked = "";
+    const e = await laneRun({ prepare: async (fake) => void (blocked = await seedBlockedClaimed(fake, 1, seen)), onQueueSleep: mergeOnce });
     expect(e.outcome).toBe("progress");
     const swaps = swapsOf(e);
     expect(swaps).toContain("takeOverStale");
-    expect(e.reviewPrompts.length).toBeGreaterThanOrEqual(1);
+    expect(swaps).not.toContain("loopback");
+    expect(takenOver(e, seen)).toMatchObject({
+      state: "claimed",
+      owner: ALICE.owner,
+      generation: 3,
+      attempts: 1,
+      loopbacks: 1,
+      reviewed_sha: null,
+      passed_sha: null,
+      enqueued_sha: null,
+    });
+    // The taker builds afresh: a build prompt, and no findings from Bob's round.
+    expect(e.prompts).toHaveLength(1);
+    expect(e.prompts[0]).not.toContain("Revise Story 1.1");
+    expect(e.findings).toEqual([null]);
+    expect(e.reviewPrompts).toHaveLength(1);
     expect(e.events.indexOf("postReview")).toBeGreaterThan(-1);
     expect(e.events.indexOf("postReview")).toBeLessThan(e.events.indexOf("enqueue"));
     expect(e.record).toMatchObject({ state: "merged", owner: ALICE.owner, generation: 3, loopbacks: 1 });
+    expect(e.record?.head_sha).not.toBe(blocked);
+    expect(e.record?.reviewed_sha).toBe(e.record?.head_sha ?? "none");
+    expect(e.record?.passed_sha).toBe(e.record?.head_sha ?? "none");
+  });
+
+  test("takeover after a blocking round whose fresh review blocks again: loopbacks 2, the taker's loopback session reads the new findings, and the next round, though passing, parks review-cap", async () => {
+    const seen: (UnitRecord | undefined)[] = [];
+    const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 1, seen)), reviews: [reviewPass([BLOCKER])], onQueueSleep: mergeOnce });
+    expect(e.outcome).toBe("progress");
+    expect(e.prompts).toHaveLength(2);
+    expect(e.prompts[1]).toContain("Revise Story 1.1");
+    expect(e.findings[0]).toBeNull();
+    expect(e.findings[1]).toContain("- high, blocking, `src/a.ts`: the loop never ends.");
+    expect(e.reviewPrompts).toHaveLength(2);
+    expect(e.enqueuedAt).toEqual([]);
+    expect(e.record).toMatchObject({ state: "parked", owner: ALICE.owner, loopbacks: 2, attempts: 1, park: { kind: "blocked", reason: "review-cap" } });
+  });
+
+  test.each([
+    ["blocking", reviewPass([BLOCKER])],
+    ["passing", reviewPass()],
+  ] as const)("takeover after the second blocking round: the cap carries over, so the fresh review's round (%s) parks review-cap; no enqueue", async (_name, fresh) => {
+    const seen: (UnitRecord | undefined)[] = [];
+    const e = await laneRun({ prepare: async (fake) => void (await seedBlockedClaimed(fake, 2, seen)), reviews: [fresh] });
+    expect(e.outcome).toBe("progress");
+    expect(takenOver(e, seen)).toMatchObject({ loopbacks: 2, reviewed_sha: null, passed_sha: null });
+    expect(e.prompts).toHaveLength(1);
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.record).toMatchObject({ state: "parked", owner: ALICE.owner, loopbacks: 2, park: { kind: "blocked", reason: "review-cap", inbox_owner: ALICE.owner } });
+    expect(e.enqueuedAt).toEqual([]);
+    expect(e.events).not.toContain("enqueue");
   });
 
   test("a STOP during the loopback session's usage-limit sleep: outcome stop, released with attempts unchanged, no lane stop", async () => {

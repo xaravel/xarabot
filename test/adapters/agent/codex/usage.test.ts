@@ -275,6 +275,24 @@ describe("parseCodexUsage: with the vendor home", () => {
     expect("failure" in u).toBe(false);
   });
 
+  // Pins today's behaviour (Epic 3 retro C4, awaiting a Maintainer decision):
+  // a session refused at the limit before codex writes any rate_limits fails
+  // the attempt, since the message text is never read.
+  test("usage limit: a turn.failed with no rate_limits written is a failure, not a limit", () => {
+    const message = "You've hit your usage limit. Try again at 3:00 PM.";
+    const failed = stdout({ end: "failed", message });
+    const homes = {
+      "no token_count": home({ [PARENT]: lines(meta(PARENT), turnContext("gpt-6.1-sol")) }),
+      "a token_count with no rate_limits": home({ [PARENT]: lines(meta(PARENT), turnContext("gpt-6.1-sol"), tokenCount(null)) }),
+      "no session file": home({}),
+    };
+    for (const [name, h] of Object.entries(homes)) {
+      const u = parseCodexUsage(failed, h);
+      expect({ name, usageLimit: u.usageLimit, failure: u.failure }).toEqual({ name, usageLimit: null, failure: message });
+    }
+    expect(parseCodexUsage(failed, homes["no token_count"]).model).toBe("gpt-6.1-sol");
+  });
+
   test("a completed turn is no limit, even with a full window", () => {
     const h = home({ [PARENT]: lines(meta(PARENT), turnContext("gpt-6.1-sol"), tokenCount(null, { primary: { used_percent: 100, resets_at: RESET_S } })) });
     expect(parseCodexUsage(stdout(), h).usageLimit).toBeNull();

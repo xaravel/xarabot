@@ -26,18 +26,22 @@ cd ~/xarabot-switch && bun install --frozen-lockfile
 
 The nested cases run a real `sandbox-exec` session, so they report skipped
 inside a sandboxed session. The live cases reach PyPI only, never GitHub.
-The host rows below are the counts measured on the Xarabot host on 2026-10-23,
-outside a sandbox, plus the cases Story 2.5c added (to be re-measured on the
-host). The last row runs inside a sandboxed session instead.
+The host rows below are the case counts on `main` on 2026-10-26, outside a
+sandbox. Run 2 of Epic 3's live evidence (`evidence/epic-3.md`) measured 185
+pass, 2 skip for `macos.test.ts` and `proxy.test.ts` together and 334 pass,
+3 skip for `test/sandbox/`. The sandbox cases added since bring the counts to
+the ones below. A later sandbox case raises them again, so a higher pass
+count with `0 fail` and the same skips is fine. The last row runs inside a
+sandboxed session instead.
 
 | Command | Expected result |
 |---|---|
-| `bun test test/sandbox/macos.test.ts` | `100 pass`, `1 skip`, `0 fail`. The skip is the live uv/PyPI case. |
-| `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `101 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
-| `bun test test/sandbox/proxy.test.ts` | `50 pass`, `1 skip`, `0 fail`. The skip is the live `CONNECT pypi.org:443` case. |
-| `XARABOT_LIVE=1 bun test test/sandbox/proxy.test.ts` | `51 pass`, `0 skip`, `0 fail` |
-| `bun test test/sandbox/` | `283 pass`, `3 skip`, `0 fail`. The third skip is the live `bun install` case (Story 2.12). |
-| `XARABOT_LIVE=1 bun test test/sandbox/` | `286 pass`, `0 skip`, `0 fail` |
+| `bun test test/sandbox/macos.test.ts` | `119 pass`, `1 skip`, `0 fail`. The skip is the live uv/PyPI case. |
+| `XARABOT_LIVE=1 bun test test/sandbox/macos.test.ts` | `120 pass`, `0 skip`, `0 fail`. This needs a uv-managed Python on the host: run `uv python install 3.12` once. |
+| `bun test test/sandbox/proxy.test.ts` | `69 pass`, `1 skip`, `0 fail`. The skip is the live `CONNECT pypi.org:443` case. |
+| `XARABOT_LIVE=1 bun test test/sandbox/proxy.test.ts` | `70 pass`, `0 skip`, `0 fail` |
+| `bun test test/sandbox/` | `338 pass`, `3 skip`, `0 fail`. The third skip is the live `bun install` case (Story 2.12). |
+| `XARABOT_LIVE=1 bun test test/sandbox/` | `341 pass`, `0 skip`, `0 fail` |
 | `bun test`, run from the clone inside a real sandboxed lane session (e.g. a Story session's own verification) | `0 fail`. The nested sandbox cases and the host cases (binding a socket, `ps`, signalling another process, resolving `/tmp`) report skipped. |
 
 If a nested case passes inside a sandboxed session, or is skipped on the host
@@ -113,8 +117,8 @@ the scratch `main`.
 Without the three variables, or inside a sandbox (`XARABOT_SANDBOXED=1`), the
 live case reports skipped. With the claims race suite (Story 2.12, below) and
 the cross-vendor suite (Story 3.6, in "Epic 3's live evidence" below),
-`bun test test/e2e/` gives `109 pass`, `9 skip`, `0 fail` on the host, and
-`106 pass`, `12 skip`, `0 fail` inside a sandbox.
+`bun test test/e2e/` gives `122 pass`, `9 skip`, `0 fail` on the host, and
+`119 pass`, `12 skip`, `0 fail` inside a sandbox.
 
 ### `xarabot graph check` on this repo
 
@@ -478,6 +482,7 @@ decision, 2026-10-24).
   2. Then advance after each of these Stories merges: 2.5c (the blocked-Story fixes of 2.5a–2.5c), 2.6 (the coordinator enqueues approved PRs), 2.7 (planning units, which compile Epic 3's context and write its manifests), 2.8 (the graph-change gate) and 2.9 (Epic 2's retro).
   3. Story 2.8 writes ledger records at `schema_version` 3 (the new `approved_graph` field), and a runner without 2.8 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 2.8 together, in one Maintainer PR, and never roll back past it once version-3 records are on the ledger. A runner with 2.8 still reads version 1 and 2 records.
   4. Story 2.9 writes ledger records at `schema_version` 4 (the new `retro_result` field), and a runner without 2.9 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 2.9 together, in one Maintainer PR, and never roll back past it once version-4 records are on the ledger. A runner with 2.9 still reads version 1 to 3 records. Set `live_evidence_glob` in `.xarabot/config.yaml` only once every lane's pin has 2.9: a runner without 2.9 refuses the unknown key and stops on bad config. Until then, the default path applies.
+  5. Story 3.5 writes ledger records at `schema_version` 5 (the new `enqueued_sha` field), and a runner without 3.5 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 3.5 together, as in step 3. A runner with 3.5 reads a record below version 5 that has no `enqueued_sha` with its `passed_sha` moved to `enqueued_sha`, so the record reads as unreviewed. A unit parked `awaiting-approval` before the advance is therefore never taken: `reconcile` leaves it parked whatever you approve (its note says `is unreviewed at <sha>`, `not taken, left parked`), and nothing else tells you. After the advance, release each such unit with `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule release <unit-id>` ("Releasing a parked unit", below): the next claim adopts its open PR, which goes through CI and a review before it is queued. `rule rebuild <unit-id>` closes the PR and starts the unit fresh instead.
 - **The coordinator lane.** Never install it while `runner_version` lacks Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done). A runner with 2.4 alone claims `coordinator.json` and then idles ("no reconcile step (Story 2.5)"). In this order:
   1. Make the `Protect main` change in "`reconcile` PRs and `Protect main`" (below).
   2. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.
@@ -950,7 +955,7 @@ both subscriptions: about ten short sessions in all.
 XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/cross-vendor.test.ts
 ```
 
-**Expected result:** `76 pass`, `0 skip`, `0 fail`, in about 30 to 60
+**Expected result:** `89 pass`, `0 skip`, `0 fail`, in about 30 to 60
 minutes. Each live case runs to the lane's trailing wait, then writes the
 lane's `STOP`, as the canary does. The lane gets 40 minutes, inside the
 test's 50-minute timeout (the rest is for cleanup); past them the case fails
@@ -985,10 +990,14 @@ deleted.
 
 **The skip rule.** Without the three variables, or inside a sandbox
 (`XARABOT_SANDBOXED=1`), the four live cases report skipped, never passed:
-`72 pass`, `4 skip`, `0 fail`. That is not evidence. The four cases are also
+`85 pass`, `4 skip`, `0 fail`. That is not evidence. The four cases are also
 rehearsed against the fake forge in every `bun test`, through the real lane
 process and the real PR, CI, review-gate and merge steps; only the GitHub,
-CLI and sandbox wiring is live-only.
+CLI and sandbox wiring is live-only. Two more rehearsals run there and have no
+live case (Epic 3 retro item 9). In `flagged-spec`, a spec that recommends a
+follow-up review gets a review and then a follow-up review at the merged
+head. In `loopback`, a blocking review's findings reach a loopback session,
+and its fix is pushed and reviewed again before the enqueue.
 
 ### Story 3.1's sandbox cases and the codex live commands
 
