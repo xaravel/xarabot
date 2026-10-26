@@ -57,7 +57,12 @@ export const GraphResultSchema = z.discriminatedUnion("ok", [
   z.strictObject({ ok: z.literal(false), error: z.strictObject({ kind: NonEmpty, message: z.string() }) }),
 ]);
 
-export const EPIC_CONTEXT_STATES = ["valid", "missing", "empty", "wrong-heading"] as const;
+/**
+ * An Epic context file's state. `stale` (retro item 12): the heading is
+ * right, but the source line below it is missing or does not match the
+ * Epic's `epics.md` section; it is computed per snapshot, never stored.
+ */
+export const EPIC_CONTEXT_STATES = ["valid", "missing", "empty", "wrong-heading", "stale"] as const;
 export const EpicContextState = z.enum(EPIC_CONTEXT_STATES);
 
 /** The review states that decide a PR: GitHub's `latestOpinionatedReviews` ones. */

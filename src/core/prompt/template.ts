@@ -173,7 +173,9 @@ Plan the sprint for this repository (\`{{planning_unit}}\`).
 1. Run the stock \`bmad-sprint-planning\` skill headless, asking no questions, for its full sprint-planning flow: its readiness gate, then the tracking file. Never save a findings file. If its readiness gate fails, or the skill halts \`blocked\`, stop there: report its findings in your result, as the Result section says, and change nothing else.
 2. Then, for each Epic below, follow \`.claude/skills/bmad-build-auto/compile-epic-context.md\` with that Epic's number, the epics file \`{{epics_path}}\`, the planning artifacts folder \`{{epics_dir}}\` and the output path given:
 
-{{planning_contexts}}`,
+{{planning_contexts}}
+
+3. In each file you compiled, write the source line given for its Epic, exactly as given, as the file's second line, directly below its \`# Epic <N> Context:\` heading. Keep the heading the first line, and leave no other source line in the file.`,
 
   planning_graph: `# Task
 

@@ -142,7 +142,8 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
     let held = holds.length > 0;
 
     const context = snap.epic_context[String(n)] ?? "missing";
-    if (context !== "valid") {
+    // A `stale` context still loads: it makes status planning due, but holds no Story.
+    if (context !== "valid" && context !== "stale") {
       held = true;
       reasons.push({
         subject,

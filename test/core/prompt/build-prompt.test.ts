@@ -343,13 +343,15 @@ const PLANNING_BANNED: readonly { readonly what: string; readonly pattern: RegEx
   { what: "gh", pattern: /\bgh\b/ },
 ];
 
+const SOURCE_2 = `<!-- source: sha256:${"2".repeat(64)} -->`;
+
 const STATUS_UNIT: StatusPlanningPromptUnit = {
   kind: "status",
   id: "planning:status.3",
   epics_path: "_bmad-output/planning-artifacts/epics.md",
   contexts: [
-    { epic: 4, output_path: "_bmad-output/implementation-artifacts/epic-4-context.md" },
-    { epic: 2, output_path: "_bmad-output/implementation-artifacts/epic-2-context.md" },
+    { epic: 4, output_path: "_bmad-output/implementation-artifacts/epic-4-context.md", source_line: `<!-- source: sha256:${"4".repeat(64)} -->` },
+    { epic: 2, output_path: "_bmad-output/implementation-artifacts/epic-2-context.md", source_line: `<!-- source: sha256:${"2".repeat(64)} -->` },
   ],
 };
 
@@ -389,7 +391,12 @@ describe("planning prompt: status", () => {
     expect(p).toContain("Never save a findings file.");
     expect(p).toContain("follow `.claude/skills/bmad-build-auto/compile-epic-context.md`");
     expect(p).toContain("the epics file `_bmad-output/planning-artifacts/epics.md`, the planning artifacts folder `_bmad-output/planning-artifacts`");
-    expect(p).toContain("- Epic 2: output path `_bmad-output/implementation-artifacts/epic-2-context.md`\n- Epic 4: output path `_bmad-output/implementation-artifacts/epic-4-context.md`");
+    expect(p).toContain(
+      `- Epic 2: output path \`_bmad-output/implementation-artifacts/epic-2-context.md\`, source line \`${SOURCE_2}\`\n- Epic 4: output path \`_bmad-output/implementation-artifacts/epic-4-context.md\`, source line \`<!-- source: sha256:${"4".repeat(64)} -->\``,
+    );
+  });
+  test("writes each Epic's source line directly below its context heading (retro item 12)", () => {
+    expect(p).toContain("write the source line given for its Epic, exactly as given, as the file's second line, directly below its `# Epic <N> Context:` heading");
   });
   test("no due context: says so", () => {
     expect(planning({ unit: { ...STATUS_UNIT, contexts: [] } })).toContain("- None: no Epic context file is due.");
@@ -487,9 +494,11 @@ describe("planning prompt: invalid input and template", () => {
     { name: "a graph unit with no heading", patch: { unit: { ...GRAPH_UNIT, headings: [] } }, field: /unit\.headings/ },
     { name: "a bad heading id", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.x", epic: 3, line: 1 }] } }, field: /unit\.headings\.0\.id/ },
     { name: "a duplicate heading", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.1", epic: 3, line: 1 }, { id: "3.1", epic: 3, line: 2 }] } }, field: /duplicate Story 3\.1/ },
-    { name: "a duplicate context Epic", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md" }, { epic: 2, output_path: "b.md" }] } }, field: /duplicate Epic 2/ },
+    { name: "a duplicate context Epic", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: SOURCE_2 }, { epic: 2, output_path: "b.md", source_line: SOURCE_2 }] } }, field: /duplicate Epic 2/ },
     { name: "a backtick in epics_path", patch: { unit: { ...STATUS_UNIT, epics_path: "a`b.md" } }, field: /unit\.epics_path/ },
-    { name: "a newline in an output path", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a\nb.md" }] } }, field: /unit\.contexts\.0\.output_path/ },
+    { name: "a newline in an output path", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a\nb.md", source_line: SOURCE_2 }] } }, field: /unit\.contexts\.0\.output_path/ },
+    { name: "a source line with no hash", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: "<!-- source: sha256: -->" }] } }, field: /unit\.contexts\.0\.source_line/ },
+    { name: "a source line with a backtick", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: `${SOURCE_2}\`` }] } }, field: /unit\.contexts\.0\.source_line/ },
     { name: "an empty manifests dir", patch: { unit: { ...GRAPH_UNIT, manifests_dir: "" } }, field: /unit\.manifests_dir/ },
     { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
     { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },

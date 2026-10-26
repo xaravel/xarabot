@@ -325,7 +325,9 @@ export type PlanningDue = {
  * no manifest. Status: a missing
  * `development_status` key of an Epic not bootstrapped (unless a `merged`
  * graph planning record is not yet done on `main`), or an Epic not
- * bootstrapped whose context is not `valid`, which has a manifested Story
+ * bootstrapped whose context is not `valid` (missing, invalid, or `stale`:
+ * its source line is missing or differs from its `epics.md` section's hash,
+ * retro item 12), which has a manifested Story
  * not `done` and which no `dependency-epic` or `retro-rejected` hold keeps
  * back. Holds on records are not looked at here.
  */

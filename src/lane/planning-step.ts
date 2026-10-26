@@ -3,7 +3,7 @@ import { pollDelayMs } from "../core/ci/checks.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
 import { deleteMerged, finishRecurring, markMerged, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
-import { epicContextPath } from "../core/next/snapshot.ts";
+import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
@@ -45,7 +45,8 @@ import {
  * no CI-fix session and no loopback.
  *
  * - A status unit (`planning:status.<n>`) runs `bmad-sprint-planning`
- *   headless and compiles the due Epic contexts; a graph unit
+ *   headless and compiles the due Epic contexts, each with its source line
+ *   below the heading (retro item 12); a graph unit
  *   (`planning:graph.<n>`) writes the missing manifests. What is due comes
  *   from `planningDue` on the round's snapshot; nothing due finishes the
  *   unit with no session.
@@ -91,12 +92,27 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
 
-/** The planning prompt's unit for `kind` on `snapshot`, or why there is none. */
-export function planningPromptUnit(unit: string, kind: PlanningKind, snapshot: Snapshot): { readonly ok: true; readonly value: PlanningPromptUnit } | { readonly ok: false; readonly reason: string } {
+/**
+ * The planning prompt's unit for `kind` on `snapshot`, or why there is none.
+ * `files` are `main`'s files the snapshot was built from: each due context's
+ * source line hashes its Epic's section of `epics_path` there (retro item 12).
+ */
+export function planningPromptUnit(
+  unit: string,
+  kind: PlanningKind,
+  snapshot: Snapshot,
+  files: Readonly<Record<string, string>>,
+): { readonly ok: true; readonly value: PlanningPromptUnit } | { readonly ok: false; readonly reason: string } {
   const { config } = snapshot;
   const due = planningDue(snapshot);
   if (kind === "status") {
-    const contexts = due.status.contexts.map((epic) => ({ epic, output_path: epicContextPath(config.epic_context_path, epic) }));
+    const epicsText = Object.hasOwn(files, config.epics_path) ? files[config.epics_path] : undefined;
+    const contexts: { epic: number; output_path: string; source_line: string }[] = [];
+    for (const epic of due.status.contexts) {
+      const source = epicsText === undefined ? null : epicSourceLine(epicsText, epic);
+      if (source === null) return { ok: false, reason: `Epic ${epic} has no section in ${config.epics_path} on main to hash for its context's source line` };
+      contexts.push({ epic, output_path: epicContextPath(config.epic_context_path, epic), source_line: source });
+    }
     return { ok: true, value: { kind: "status", id: unit, epics_path: config.epics_path, contexts } };
   }
   if (config.manifests === undefined) return { ok: false, reason: "graph planning needs manifests.dir in .xarabot/config.yaml" };
@@ -396,7 +412,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
     if (!due.due) return kit.run(() => finish(`nothing-due: ${due.why}`));
     note(`${kind} planning is due: ${due.why}`);
 
-    const promptUnit = planningPromptUnit(unit, kind, snapshot);
+    const promptUnit = planningPromptUnit(unit, kind, snapshot, input.files);
     if (!promptUnit.ok) {
       const why = promptUnit.reason;
       return kit.run(() => failed(why));
