@@ -1337,6 +1337,7 @@ The Maintainer's decisions of 2026-10-24 (readiness R7 and this Story's intent g
 **Given** the coordinator lane
 **When** a round ends `idle`
 **Then** its trailing wait is 10 minutes, matching the due rule (Story 2.4); builders keep 30 minutes.
+**And** (amended by the Maintainer on 2026-10-26) the coordinator's trailing wait after `idle` is 1 minute, so each round picks up the reconcile work an approval makes (Story 2.4's 2026-10-25 amendment) within about a minute; the 10-minute due rule stays as `reconcile`'s backstop. Built by retro item `epic-2-retro-item-26-coordinator-idle-wait-one-minute`.
 
 **Given** Story 2.4's due rule
 **When** `reconcile` work is read from the snapshot

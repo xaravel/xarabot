@@ -160,3 +160,9 @@ epics:
         blocking: false
         globs: ["src/core/next/coordinator.ts", "src/core/reconcile/plan.ts", "src/lane/planning-step.ts", "test/core/next/coordinator.test.ts", "test/core/reconcile/**", "test/lane/planning-step.test.ts"]
         status: open
+      - id: "epic-2-retro-item-26-coordinator-idle-wait-one-minute"
+        text: "Set the coordinator's trailing wait after idle (COORDINATOR_IDLE_WAIT_MS in src/core/lane/waits.ts) to 1 minute (Maintainer decision 2026-10-26, epics.md Story 2.5 amendment), so an idle coordinator's next round picks up the reconcile work a Maintainer approval makes within about a minute instead of up to 10; keep the 10-minute reconcile due rule (RECONCILE_EVERY_MS) as the backstop and the builder waits unchanged; update the constant's comment, its tests and the runbook text in docs/maintainer/self-host.md"
+        route: lane
+        blocking: false
+        globs: ["src/core/lane/waits.ts", "test/core/lane/waits.test.ts", "docs/maintainer/self-host.md"]
+        status: open
