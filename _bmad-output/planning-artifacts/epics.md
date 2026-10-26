@@ -2090,6 +2090,8 @@ The Maintainer's decisions of 2026-10-26 (this Story's intent gap):
 **When** they run against the fake forge
 **Then** head equal to `passed_sha`, head with only a clean `main` merge on top, head with a later agent change, the loopback cap, a CI fix and a conflict resolution that each re-run the review and count toward `ci_fixes`, not `loopbacks`, and a revoked allowance each have a case.
 
+**Maintainer amendment (2026-10-26, Epic 3 retro open question 2, finding A7):** the cap stops a third loopback, never a pass. Once `loopbacks` ≥ 2, a round with no blocking pass sets `passed_sha` and proceeds, as any passing round does. Only a blocking round parks `blocked` (`park.reason: review-cap`), with `park.inbox_owner` set to the unit's owner. This replaces "whatever the review's verdict" above. It is routed as Epic 3 retro item 11.
+
 ### Story 3.6: Cross-vendor verification
 
 As the Maintainer,
@@ -2119,6 +2121,16 @@ So that I can lift the every-path approval rule and the 1-builder limit with evi
 **Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each case above, and the nested sandbox cases of Story 3.1, plus `bun test test/sandbox/` on the host as an evidence row until the macOS CI job runs (2.5c deferral; Epic 1 item 13); the Maintainer runs them on the host, outside the sandbox, with every vendor's credential at once (a lane's vendor home holds only one), before Epic 3's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed
 **And** it lists the switch after this Epic: drop the every-path approval rule from this repo's `policy.yaml`, allow the adapters to be used unattended, confirm lane item 23 (lane-lock hardening) is done, raise `XARABOT_MAX_BUILDERS`, and run the 24-hour acceptance check. Dropping the every-path rule makes status planning PRs ungated and so disposable, which settles spec-2-7's stale gated status PR. The 'Several builder lanes' runbook step waits for the lock's PID to be gone, not for 'no `lane.lock`' or an `outcome` (2.11 F3, F4).
+
+**The Maintainer's decisions on Epic 3's retro (2026-10-26; `epic-3-retro-2026-10-26.md`, machine verdict rejected):**
+- **The go.** Epic 4 may start. The switch after this Epic (above) waits until Epic 3 retro item 1 (reap session processes, isolate review passes; finding C1) has merged in a runner tag, and item 2 (the codex resume re-run after item 35) is recorded in `docs/maintainer/evidence/epic-3.md`. Until the switch, every path still needs the Maintainer's approving review, so a forged review cannot merge a change on its own.
+- **Q1:** C1's threat, a builder's leftover process reaching the reviewer's result file or vendor home, is in scope for 0.x.
+- **Q2:** a passing round after the second loopback proceeds (Story 3.5 amendment above).
+- **Q3:** from Epic 4 on, each Epic's runbook commands are listed under `live_evidence_checks` in `.xarabot/config.yaml`, so a failed live row holds the retro. They are added when that Epic's runbook names them.
+- **Q4:** `retro-gates.yaml` is the authoritative tracker for retro action items, the file the runner reads and routes. The `action_items` that `bmad-retrospective` appends to `sprint-status.yaml` are the skill's copy, and are not reconciled by hand.
+- **Q5:** the macOS CI job (the 2026-10-24 decision, Epic 1 item 13) is still wanted. The Maintainer adds it in a `.github/` PR.
+- **Q6:** PRs #21 and #23–#28 used the admin bypass as intended during the bootstrap.
+- **Item 6:** the follow-up reviews of Stories 3.4 and 3.5 were done by the Maintainer's walkthrough of #157 and #168 on 2026-10-26. It covered the passed gate (with its clean-merge rule), the review checkout, loopbacks and the cap, the v5 ledger and allowances. Run 2 of the live evidence then exercised the composed `lane run` path end to end. No loopback ran live, so it remains covered by the case tables only.
 
 ## Epic 4: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
 

@@ -231,6 +231,10 @@ epics:
       verdict: rejected
       unit: "retro:3"
       recorded_at: "2026-10-26T16:35:32Z"
+      go:
+        by: "edanisko"
+        at: "2026-10-26T16:41:07Z"
+        ruling: "maintainer-pr"
     items:
       - id: "epic-3-retro-item-1-reap-session-processes-isolate-reviews"
         text: "Reap every session's processes and isolate review passes: when a session ends, is aborted or lingers past its result, kill all its descendants (e.g. its own process group), not only the sandbox-exec PID; give each review pass its own temp folder, result path and vendor home, sharing no writable root with builder sessions; tests that a session's grandchild is gone after the run and that the review profile shares no writable root with the builder profile (C1)"
@@ -267,7 +271,7 @@ epics:
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-3-retro-item-7-correct-course-for-epic-3-drift"
         text: "Run bmad-correct-course for Epic 3's drift: reconcile spine, SPEC, agent-adapters.md, app-permissions.md and the 3.1 AC with the as-built code (enqueued_sha, review-findings, schema v5, item 29's vendor rule, codex env and profile changes); decide the cap that parks a passing round, takeover re-reviews, codex usage limits with no rate_limits, a no-output watchdog, lane install checking the lane's own agent, a real bmad-build-auto codex canary and the review prompt's agent-config line; route Epic 3's unrouted deferrals (A4, A6-A10, C4, C6, C7, E3)"
         route: maintainer
@@ -291,4 +295,10 @@ epics:
         route: maintainer
         blocking: false
         globs: []
+        status: open
+      - id: "epic-3-retro-item-11-a-passing-round-after-the-cap-proceeds"
+        text: "Maintainer decision 2026-10-26 (Epic 3 retro open question 2, finding A7; epics.md Story 3.5 amendment): the loopback cap stops a third loopback, never a pass. In reviewNext (src/core/review/gate.ts), once loopbacks >= LOOPBACK_CAP return cap only for a blocking round; a round with no blocking pass returns pass, so the review gate (src/lane/review-gate.ts) sets passed_sha and the unit proceeds to the merge step; update both doc comments ('whatever its verdict' goes); tests: after 2 loopbacks a passing round passes and is enqueued, a blocking one parks blocked review-cap in the owner's inbox"
+        route: lane
+        blocking: false
+        globs: ["src/core/review/gate.ts", "src/lane/review-gate.ts", "test/core/review/gate.test.ts", "test/lane/review-gate.test.ts"]
         status: open
