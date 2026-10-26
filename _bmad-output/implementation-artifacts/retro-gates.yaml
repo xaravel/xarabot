@@ -195,7 +195,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/sandbox/tools.ts", "test/sandbox/tools.test.ts", "test/sandbox/macos.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-32-codex-child-session-ids"
         text: "Epic 3 live run (2026-10-26): codex 0.163.0 writes two session_meta lines in a subagent's session file, its own first and then the parent's, and readCodexSession (src/adapters/agent/codex/usage.ts) keeps the last, so every child takes the parent's id, descendants finds none and a session's usage leaves out its subagents' tokens (codex-live 'subagent tokens' fails: parsed = the parent's turn.completed); read id and parentId from the first session_meta only (or prefer the file name's UUID), so the child keeps its own id and the sessionId lookup never picks a child file for the model and rate limits; tests: a child fixture with two session_meta lines is counted as a descendant, and its tokens are added to the parent's"
         route: lane
