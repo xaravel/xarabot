@@ -307,4 +307,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/adapters/agent/codex/codex-agent.ts"]
-        status: open
+        status: done
