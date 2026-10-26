@@ -2167,6 +2167,8 @@ So that untagged follow-ups are worked alongside later Stories, while a `blockin
 **Then** an untagged open item from E does not gate an Epic one step from E but does gate one two steps away, and a `blocking` item gates every Epic depending on E, directly or through others
 **And** a `rejected` verdict on E gates every Epic depending on E until `go retro:<E>` is recorded, and no longer after it.
 
+**Maintainer decision (2026-10-26, Story 4.1's deferral):** a takeover finishes in-flight work; it is not "the next claim". A held Epic takes no new Stories, but a stale `claimed` Story, or a builder-held `merging` one, in an Epic that becomes held is still taken over as usual. A crashed lane's PR is therefore never stranded behind a hold that came after its claim. This applies to every Epic hold: dependency, retro-rejected, retro-item, and Story 4.4's checkpoint holds ("Epics already in flight finish the Stories they hold"). It is routed as Epic 3 retro item 13.
+
 ### Story 4.2: Owner inboxes and the daily digest
 
 As an owner,

@@ -308,3 +308,9 @@ epics:
         blocking: false
         globs: ["src/adapters/agent/codex/codex-agent.ts"]
         status: done
+      - id: "epic-3-retro-item-13-a-takeover-finishes-in-flight-work"
+        text: "Maintainer decision 2026-10-26 (Story 4.1's deferral; epics.md Story 4.1): a takeover finishes in-flight work and is not 'the next claim'. In next (src/core/next/next.ts, the `if (held) continue` before takeOverOf, about line 140), let a held Epic still yield the takeover of a stale claimed Story or a builder-held merging one, while it still yields no new claim; every Epic hold (dependency, retro-rejected, retro-item, and later checkpoint) behaves the same; tests in test/core/next/next.test.ts: a stale claimed Story and a stale merging one in a retro-item-held Epic are taken over, a fresh Story there is not claimed, and the idle reason still names the hold"
+        route: lane
+        blocking: false
+        globs: ["src/core/next/next.ts", "test/core/next/next.test.ts"]
+        status: open
