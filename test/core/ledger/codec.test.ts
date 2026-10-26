@@ -196,6 +196,42 @@ describe("parseLedger", () => {
     }
   });
 
+  describe("park.graph_posted (retro item 24)", () => {
+    const hash = `sha256:${"e".repeat(64)}`;
+    const awaiting = { kind: "awaiting-approval" as const, reason: null, inbox_owner: "edanisko", globs_held: ["src/b.ts", "src/a.ts"] };
+    const parkOf = (text: string) => (JSON.parse(text) as { park: Record<string, unknown> }).park;
+
+    test("round-trips after globs_held, byte for byte", () => {
+      const text = serializeUnitRecord(rec({ state: "parked", park: { ...awaiting, graph_posted: hash } }));
+      expect(Object.keys(parkOf(text))).toEqual(["kind", "reason", "inbox_owner", "globs_held", "graph_posted"]);
+      const r = parseLedger({ "units/story__1.5.json": text });
+      if (!r.ok) throw new Error(r.error.message);
+      const got = r.value.units.get("story:1.5");
+      expect(got?.park?.graph_posted).toBe(hash);
+      expect(serializeUnitRecord(got as never)).toBe(text);
+    });
+
+    test("a park with none posted has no graph_posted key, and a schema_version 5 park without it reads as none posted", () => {
+      const text = serializeUnitRecord(rec({ state: "parked", park: awaiting }));
+      expect(Object.keys(parkOf(text))).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
+      const r = parseLedger({ "units/story__1.5.json": text });
+      if (!r.ok) throw new Error(r.error.message);
+      expect(r.value.units.get("story:1.5")?.park?.graph_posted).toBeUndefined();
+    });
+
+    test("a bad hash, or one on a park that is not awaiting approval, is invalid", () => {
+      for (const park of [
+        { ...awaiting, graph_posted: "e".repeat(64) },
+        { ...awaiting, graph_posted: null },
+        { kind: "blocked" as const, reason: "other" as const, inbox_owner: "alice", globs_held: [], graph_posted: hash },
+      ]) {
+        const raw = JSON.parse(serializeUnitRecord(rec({ state: "parked", park: awaiting }))) as Record<string, unknown>;
+        const r = parseLedger({ "units/story__1.5.json": JSON.stringify({ ...raw, park }) });
+        expect(r.ok === false && r.error.kind).toBe("invalid");
+      }
+    });
+  });
+
   test("a tip mixing schema_version 2 and 5 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(2), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(2) });
     if (!r.ok) throw new Error(r.error.message);

@@ -124,8 +124,10 @@ function text(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/** A park in key order; `graph_posted` is written only when set. */
 function orderedPark(p: Park): Park {
-  return { kind: p.kind, reason: p.reason, inbox_owner: p.inbox_owner, globs_held: sortedSet(p.globs_held) };
+  const ordered: Park = { kind: p.kind, reason: p.reason, inbox_owner: p.inbox_owner, globs_held: sortedSet(p.globs_held) };
+  return p.graph_posted === undefined ? ordered : { ...ordered, graph_posted: p.graph_posted };
 }
 
 /** A unit record as ledger file text: fixed key order, sorted sets, 2-space indent, trailing newline. */

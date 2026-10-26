@@ -12,7 +12,7 @@ import { RETRO_ITEM_ID_PATTERN, RetroRecordResultSchema } from "./retro-gates.ts
 /**
  * The ledger's own `schema_version` (Story 2.7; 3 since Story 2.8 added
  * `approved_graph`, 4 since Story 2.9 added `retro_result`, 5 since Story 3.5
- * added `enqueued_sha`): every record
+ * added `enqueued_sha`, which retro item 24's `park.graph_posted` shares): every record
  * written carries it; the reader accepts each of `LEDGER_SCHEMA_VERSIONS`.
  * The other versioned files keep `SCHEMA_VERSION` (1).
  */
@@ -153,10 +153,20 @@ export const ParkSchema = z
     reason: ParkReason.nullable(),
     inbox_owner: GitHubLogin,
     globs_held: z.array(NormalizedGlob),
+    /**
+     * The graph hash of the delta the runner last posted on the PR (retro
+     * item 24, AD-11): a graph change is taken only at this hash, on an
+     * approval submitted after it was posted. Absent when none was posted.
+     */
+    graph_posted: GraphHash.optional(),
   })
   .refine((p) => (p.kind === "blocked") === (p.reason !== null), {
     message: "reason is required when kind is blocked and must be null otherwise",
     path: ["reason"],
+  })
+  .refine((p) => p.kind === "awaiting-approval" || p.graph_posted === undefined, {
+    message: "graph_posted is only for an awaiting-approval park",
+    path: ["graph_posted"],
   });
 
 export const ApprovalSchema = z.strictObject({
@@ -187,8 +197,8 @@ export const UnitRecordSchema = z
     passed_sha: GitSha.nullable(),
     /**
      * The head the runner enqueued the PR at, or fenced before re-parking a
-     * taken record (Story 3.5); a v1 to v4 record reads with the mapping in
-     * `codec.ts`.
+     * taken record (Story 3.5), or at a re-park with a new graph delta (retro
+     * item 24); a v1 to v4 record reads with the mapping in `codec.ts`.
      */
     enqueued_sha: GitSha.nullable().default(null),
     approved_sha: GitSha.nullable(),

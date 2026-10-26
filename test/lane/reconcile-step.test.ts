@@ -1576,56 +1576,224 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     const CHANGE = { main: MAIN_GRAPH, merged: ADDED } as const;
     const byMaintainer = (h: string) => [review(h, 5, { author: "edanisko" })];
 
-    /** A parked world whose take runs `answer` through a stub port. */
-    async function gated(reviews: (head: string) => readonly ForgeReview[], answer: StubAnswer | ((r: { headSha: string; mainSha: string }, i: number) => StubAnswer), extra: readonly UnitRecord[] = []) {
+    /** This run's own record claimed again, so the next run holds its fence. */
+    const reclaim = (f: Fake): void => {
+      f.fake.control.writeForeignLedger({ message: "reclaim [skip ci]", writes: tip([OWN]), deletes: [] });
+    };
+
+    /** The merge result's graph hash, as the gate computes it. */
+    function hashOf(main: Record<string, string>, merged: Record<string, string>): string {
+      const c = checkGraphChange({ main: treeOf(main), merged: treeOf(merged), ledgerUnits: [] });
+      if (c.kind !== "checked") throw new Error("the graph change does not check");
+      return c.mergedHash;
+    }
+    const HASH = hashOf(MAIN_GRAPH, ADDED);
+    const OTHER_HASH = hashOf(MAIN_GRAPH, ADDED_MORE);
+
+    /** story:1.1 parked again by the coordinator at PARKED_AT after posting the graph delta at `hash` (retro item 24). */
+    const postedRec = (pr: { number: number; head: string }, hash: string, over: Partial<UnitRecord> = {}): UnitRecord =>
+      parkedRec(pr, {
+        owner: COORD.owner,
+        host: COORD.host,
+        lane: COORD.lane,
+        enqueued_sha: pr.head,
+        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF, graph_posted: hash },
+        ...over,
+      });
+
+    /**
+     * A parked world whose take runs `answer` through a stub port: a builder's
+     * park with no graph delta posted, or with `posted`, a coordinator re-park
+     * whose posted delta hashes `posted`.
+     */
+    async function gated(
+      reviews: (head: string) => readonly ForgeReview[],
+      answer: StubAnswer | ((r: { headSha: string; mainSha: string }, i: number) => StubAnswer),
+      extra: readonly UnitRecord[] = [],
+      posted: string | null = null,
+    ) {
       let pr = { number: 0, head: "" };
       const f = await setup({}, async (fake) => {
         pr = await prOn(fake, "story/1.1");
         for (const r of reviews(pr.head)) fake.control.addReview(pr.number, r);
-        return [parkedRec(pr), ...extra];
+        return [posted === null ? parkedRec(pr) : postedRec(pr, posted), ...extra];
       });
       const g = stubGraphTrees(answer);
       return { f, pr, g, run: () => f.run({ graphTrees: g.trees }) };
     }
 
     test("AC: an approved graph-changing PR is taken merging with xarabot:graph in globs and approved_graph the merge result's hash, and enqueued at its head", async () => {
-      const w = await gated(byMaintainer, CHANGE);
+      const w = await gated(byMaintainer, CHANGE, [], HASH);
       const out = await w.run();
       expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
       const r = (await w.f.ledger()).get(S);
-      expect(r).toMatchObject({ state: "merging", generation: 2, approved_sha: w.pr.head, passed_sha: w.pr.head, lane: "coordinator" });
+      expect(r).toMatchObject({ state: "merging", generation: 2, approved_sha: w.pr.head, passed_sha: w.pr.head, lane: "coordinator", approved_graph: HASH });
       expect(r?.globs).toEqual([...DIFF, "xarabot:graph"].sort());
-      const expected = checkGraphChange({ main: treeOf(MAIN_GRAPH), merged: treeOf(ADDED), ledgerUnits: [] });
-      expect(expected.kind === "checked" && r?.approved_graph === expected.mergedHash).toBe(true);
       expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
       expect(w.g.calls.map((c) => c.headSha)).toEqual([w.pr.head]);
       expect(out.reason).toContain("approved by edanisko");
     });
 
+    /** story:1.1 as `repostGraph` leaves it: parked again in the Maintainer's inbox with the delta at `hash` posted, stamped `at`. */
+    async function expectReposted(f: Fake, pr: { number: number; head: string }, hash: string, at: string, generation = 1): Promise<void> {
+      const r = (await f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation, lane: "coordinator", owner: COORD.owner, passed_sha: pr.head, enqueued_sha: pr.head, approved_sha: null, approved_graph: null });
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF, graph_posted: hash });
+      expect(r?.heartbeat_at).toBe(at);
+    }
+
     test("AC: a graph-changing PR approved only by its owner, who is not the Maintainer, is not queued: parked again for the Maintainer with the delta", async () => {
       const w = await gated((h) => [review(h, 5)], CHANGE);
       const out = await w.run();
       expect(w.f.fake.control.queue()).toEqual([]);
-      expect((await w.f.ledger()).get(S)).toMatchObject({
-        state: "parked",
-        generation: 2,
-        lane: "coordinator",
-        passed_sha: w.pr.head,
-        enqueued_sha: w.pr.head,
-        approved_sha: null,
-        approved_graph: null,
-        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF },
-      });
-      expect(out.reason).toContain("only the Maintainer's (edanisko) approval counts");
+      expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
+      await expectReposted(w.f, w.pr, HASH, FORGE_NOW);
+      expect(out.reason).toContain(`changes the Epic graph to ${HASH}, but no delta was posted`);
       const comments = w.f.fake.control.comments(w.pr.number);
       expect(comments).toHaveLength(1);
       expect(comments[0]).toContain("- Stories added: Epic 2: +2.2");
       expect(comments[0]).toContain("(`edanisko`)");
-      // The fenced enqueued_sha makes the next take need an approval after the re-park: the owner's old one never re-takes it.
-      w.f.events.length = 0;
+      expect(comments[0]).toContain("An approval submitted before this comment does not count.");
+      // The re-park needs an approval after it: the owner's old one never re-takes it.
+      reclaim(w.f);
       await w.run();
+      expect(w.f.logs.join("\n")).toContain("no standing approval");
       expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
       expect(await stateOf(w.f, S)).toBe("parked");
+    });
+
+    test("at the posted hash, only the owner's approval: left parked for the Maintainer, with no new comment or park", async () => {
+      const w = await gated((h) => [review(h, 5)], CHANGE, [], HASH);
+      const before = (await w.f.ledger()).get(S);
+      await w.run();
+      expect(swaps(w.f.events).filter((e) => e.endsWith(S))).toEqual([]);
+      expect((await w.f.ledger()).get(S)).toEqual(before);
+      expect(w.f.fake.control.comments(w.pr.number)).toEqual([]);
+      expect(w.f.logs.join("\n")).toContain("left parked for the Maintainer");
+    });
+
+    describe("the approval is bound to the posted delta (retro item 24)", () => {
+      test("an approval submitted before the delta was posted does not take it", async () => {
+        const w = await gated((h) => [review(h, 25, { author: "edanisko" })], CHANGE, [], HASH);
+        const before = (await w.f.ledger()).get(S);
+        await w.run();
+        expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
+        expect((await w.f.ledger()).get(S)).toEqual(before);
+        expect(w.f.fake.control.queue()).toEqual([]);
+        expect(w.f.fake.control.comments(w.pr.number)).toEqual([]);
+      });
+
+      test("an approval submitted after the delta was posted takes it at the posted hash", async () => {
+        const w = await gated((h) => [review(h, 25, { author: "edanisko", state: "changes_requested" }), review(h, 5, { author: "edanisko" })], CHANGE, [], HASH);
+        await w.run();
+        expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", approved_graph: HASH, enqueued_sha: w.pr.head });
+        expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+      });
+
+      test("no delta posted (a builder's park): the Maintainer's approval does not take it; the delta is posted, the record parked again, and a later approval takes it", async () => {
+        const w = await gated(byMaintainer, CHANGE);
+        const out = await w.run();
+        expect(swaps(w.f.events)).toEqual(expect.arrayContaining(["reparkGraph story:1.1"]));
+        expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
+        expect(w.f.events.indexOf("comment")).toBeLessThan(w.f.events.indexOf("ledgerSwap reparkGraph story:1.1"));
+        await expectReposted(w.f, w.pr, HASH, FORGE_NOW);
+        expect(w.f.fake.control.queue()).toEqual([]);
+        expect(out.reason).toContain("no delta was posted");
+        const comments = w.f.fake.control.comments(w.pr.number);
+        expect(comments).toHaveLength(1);
+        expect(comments[0]).not.toContain("no longer counts");
+        // The approval given before the delta never takes it.
+        reclaim(w.f);
+        await w.run();
+        expect(await stateOf(w.f, S)).toBe("parked");
+        expect(w.f.fake.control.comments(w.pr.number)).toHaveLength(1);
+        // One given after it does.
+        w.f.fake.control.setNow(new Date(T0 + 10 * MIN).toISOString());
+        w.f.fake.control.addReview(w.pr.number, { author: "edanisko", state: "approved", commit_sha: w.pr.head, submitted_at: new Date(T0 + 5 * MIN).toISOString() });
+        reclaim(w.f);
+        await w.run();
+        expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", approved_graph: HASH });
+        expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+      });
+
+      test("the hash changed between the park and the take: not taken, the new delta posted and parked again at its hash; the old approval is void", async () => {
+        const w = await gated(byMaintainer, CHANGE, [], OTHER_HASH);
+        const out = await w.run();
+        expect(swaps(w.f.events)).not.toContain("takeApproved story:1.1");
+        await expectReposted(w.f, w.pr, HASH, FORGE_NOW);
+        expect(out.reason).toContain(`but the posted delta is ${OTHER_HASH}`);
+        const [comment] = w.f.fake.control.comments(w.pr.number);
+        expect(comment).toContain("no longer counts");
+        expect(comment).toContain(HASH);
+        reclaim(w.f);
+        await w.run();
+        expect(await stateOf(w.f, S)).toBe("parked");
+        expect(w.f.fake.control.comments(w.pr.number)).toHaveLength(1);
+      });
+
+      test("an approval in the gap between the review read and the re-park counts: the re-park is stamped with the snapshot time before the read", async () => {
+        const w = await gated(byMaintainer, CHANGE);
+        const base = spied(w.f.fake, w.f.events);
+        const gap = new Date(T0 + 1 * MIN).toISOString();
+        let read = false;
+        const forge: Forge = {
+          ...base,
+          reviews: async (pr, o) => {
+            const r = await base.reviews(pr, o);
+            if (!read) {
+              read = true;
+              // After the read: the forge's clock moves on, and the Maintainer approves before the re-park lands.
+              w.f.fake.control.setNow(new Date(T0 + 2 * MIN).toISOString());
+              w.f.fake.control.addReview(w.pr.number, { author: "edanisko", state: "approved", commit_sha: w.pr.head, submitted_at: gap });
+            }
+            return r;
+          },
+        };
+        await w.f.run({ forge, graphTrees: w.g.trees });
+        await expectReposted(w.f, w.pr, HASH, FORGE_NOW);
+        expect(Date.parse(FORGE_NOW)).toBeLessThan(Date.parse(gap));
+        // The gap approval, after the stamp, takes it on the next run.
+        reclaim(w.f);
+        await w.run();
+        expect((await w.f.ledger()).get(S)).toMatchObject({ state: "merging", approved_graph: HASH, approved_sha: w.pr.head });
+        expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
+      });
+
+      test("a later target's re-park is stamped with fresh main's time, read before its reviews", async () => {
+        const w = await gated(byMaintainer, CHANGE, [], HASH);
+        const extra = await prOn(w.f.fake, "story/1.2");
+        w.f.fake.control.addReview(extra.number, review(extra.head, 5, { author: "edanisko" }));
+        const other = parkedRec(extra, { unit: "story:1.2", globs: ["src/b/**"], park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["src/b/z.ts"] } });
+        w.f.fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([other]), deletes: [] });
+        const fresh = new Date(T0 + 3 * MIN).toISOString();
+        const base = spied(w.f.fake, w.f.events);
+        const forge: Forge = {
+          ...base,
+          snapshot: async (o) => {
+            // Fresh main, read after story:1.1's reviews: the forge's clock has moved on.
+            if (o.read !== undefined) w.f.fake.control.setNow(fresh);
+            return base.snapshot(o);
+          },
+        };
+        await w.f.run({ forge, graphTrees: w.g.trees });
+        // story:1.1 is taken at its posted hash; story:1.2, with none posted, is parked again, stamped no later than its reviews read.
+        expect((await w.f.ledger()).get(S)?.state).toBe("merging");
+        const r = (await w.f.ledger()).get("story:1.2");
+        expect(r?.state).toBe("parked");
+        expect(r?.park?.graph_posted).toBe(HASH);
+        expect(r?.heartbeat_at).toBe(fresh);
+      });
+
+      test("a failed delta comment leaves the record as it was: not parked again, not taken", async () => {
+        const w = await gated(byMaintainer, CHANGE);
+        const before = (await w.f.ledger()).get(S);
+        w.f.fake.control.injectError("comment", { kind: "transient", message: "502" });
+        const out = await w.run();
+        expect((await w.f.ledger()).get(S)).toEqual(before);
+        expect(swaps(w.f.events)).not.toContain("reparkGraph story:1.1");
+        expect(out.reason).toContain("graph delta comment on PR");
+        expect(out.reason).toContain("not taken, left parked");
+      });
     });
 
     test("an unchanged graph keeps the owner rule: the Maintainer's approval alone does not take it", async () => {
@@ -1648,7 +1816,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
 
     test("a second graph PR: with another record holding xarabot:graph the take is refused and the PR stays parked", async () => {
       const holder = coord("story:1.2", { state: "merging", generation: 2, globs: ["xarabot:graph", "src/b/**"], approved_graph: `sha256:${"b".repeat(64)}` });
-      const w = await gated(byMaintainer, CHANGE, [holder]);
+      const w = await gated(byMaintainer, CHANGE, [holder], HASH);
       const out = await w.run();
       expect(await stateOf(w.f, S)).toBe("parked");
       expect(w.f.fake.control.queue()).toEqual([]);
@@ -1709,33 +1877,73 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       expect(out.reason).toContain("listPrsByBranch story/2.1");
     });
 
-    test("main moved at enqueue, a different hash: the approval is void, parked again for the Maintainer with the new delta", async () => {
+    test("main moved at enqueue, a different hash: the approval is void, the new delta posted, then parked again for the Maintainer at its hash", async () => {
       let f!: Fake;
-      const w = await gated(byMaintainer, (_r, i) => {
-        if (i === 0) {
-          f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
-          return CHANGE;
-        }
-        return { main: MAIN_GRAPH, merged: ADDED_MORE };
-      });
+      const w = await gated(
+        byMaintainer,
+        (_r, i) => {
+          if (i === 0) {
+            f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+            return CHANGE;
+          }
+          return { main: MAIN_GRAPH, merged: ADDED_MORE };
+        },
+        [],
+        HASH,
+      );
       f = w.f;
       await w.run();
       expect(w.g.calls).toHaveLength(2);
       expect(w.g.calls[1]?.mainSha).not.toBe(w.g.calls[0]?.mainSha);
       const r = (await w.f.ledger()).get(S);
-      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, approved_graph: null, passed_sha: w.pr.head, park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF } });
+      expect(r).toMatchObject({ state: "parked", generation: 2, approved_sha: null, approved_graph: null, passed_sha: w.pr.head, enqueued_sha: w.pr.head });
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF, graph_posted: OTHER_HASH });
+      expect(w.f.events.lastIndexOf("comment")).toBeLessThan(w.f.events.indexOf("ledgerSwap park story:1.1"));
       expect(w.f.fake.control.queue()).toEqual([]);
       const [comment] = w.f.fake.control.comments(w.pr.number);
       expect(comment).toContain("no longer counts");
       expect(comment).toContain("+2.3");
+      // The voided approval never takes it again at the new hash.
+      reclaim(w.f);
+      await w.run();
+      expect(w.f.logs.join("\n")).toContain("no standing approval");
+      expect(await stateOf(w.f, S)).toBe("parked");
+    });
+
+    test("main moved at enqueue, a different hash, the delta comment failing: parked again with no delta posted", async () => {
+      let f!: Fake;
+      const w = await gated(
+        byMaintainer,
+        (_r, i) => {
+          if (i === 0) {
+            f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+            return CHANGE;
+          }
+          return { main: MAIN_GRAPH, merged: ADDED_MORE };
+        },
+        [],
+        HASH,
+      );
+      f = w.f;
+      w.f.fake.control.injectError("comment", { kind: "transient", message: "502" });
+      const out = await w.run();
+      const r = (await w.f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", approved_graph: null, enqueued_sha: w.pr.head });
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF });
+      expect(out.reason).toContain("graph delta comment on PR");
     });
 
     test("main moved at enqueue, an equal hash: enqueued", async () => {
       let f!: Fake;
-      const w = await gated(byMaintainer, (_r, i) => {
-        if (i === 0) f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
-        return CHANGE;
-      });
+      const w = await gated(
+        byMaintainer,
+        (_r, i) => {
+          if (i === 0) f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+          return CHANGE;
+        },
+        [],
+        HASH,
+      );
       f = w.f;
       await w.run();
       expect(w.g.calls).toHaveLength(2);
@@ -1746,13 +1954,18 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     test("main moved at enqueue, now refused: the coordinator-held merging record parks blocked graph-invalid", async () => {
       let f!: Fake;
       const used = { ...MAIN_GRAPH, [GRAPH_STATUS]: "development_status:\n  2-1-s: done\n" };
-      const w = await gated(byMaintainer, (_r, i) => {
-        if (i === 0) {
-          f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
-          return CHANGE;
-        }
-        return { main: used, merged: { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string } };
-      });
+      const w = await gated(
+        byMaintainer,
+        (_r, i) => {
+          if (i === 0) {
+            f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+            return CHANGE;
+          }
+          return { main: used, merged: { ...graphFiles({ 1: ["1.1"], 2: [] }), [GRAPH_STATUS]: used[GRAPH_STATUS] as string } };
+        },
+        [],
+        HASH,
+      );
       f = w.f;
       await w.run();
       expect((await w.f.ledger()).get(S)).toMatchObject({ state: "parked", approved_graph: null, park: { kind: "blocked", reason: "graph-invalid" } });
@@ -1762,11 +1975,16 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     /** A world whose `main` moves during the first gate call; the second call returns `second`. */
     async function movedWorld(second: StubAnswer) {
       let f!: Fake;
-      const w = await gated(byMaintainer, (_r, i) => {
-        if (i > 0) return second;
-        f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
-        return CHANGE;
-      });
+      const w = await gated(
+        byMaintainer,
+        (_r, i) => {
+          if (i > 0) return second;
+          f.fake.control.setMain({ ...mainFiles(), "README.md": "moved\n" });
+          return CHANGE;
+        },
+        [],
+        HASH,
+      );
       f = w.f;
       return w;
     }
@@ -1790,7 +2008,7 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
     });
 
     test("the snapshot after the fence fails: left merging, not enqueued, no second gate run", async () => {
-      const w = await gated(byMaintainer, CHANGE);
+      const w = await gated(byMaintainer, CHANGE, [], HASH);
       const base = spied(w.f.fake, w.f.events);
       let reads = 0;
       const forge: Forge = {
@@ -1816,7 +2034,8 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       await f.run();
       const r = (await f.ledger()).get(S);
       expect(r).toMatchObject({ state: "parked", approved_sha: null, approved_graph: null });
-      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF });
+      // The delta its approval was given after stays posted: a later Maintainer approval takes it at that hash.
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF, graph_posted: `sha256:${"b".repeat(64)}` });
       expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(S, "not-queued")]);
     });
 
@@ -1870,30 +2089,25 @@ describe("createReconcileStep: approved PRs are taken and queued (Story 2.6)", (
       const out = await f.run({ graphTrees: g.trees });
       expect(g.calls).toHaveLength(1);
       expect(f.fake.control.queue()).toEqual([]);
-      expect((await f.ledger()).get(S)).toMatchObject({
-        state: "parked",
-        generation: 3,
-        lane: "coordinator",
-        approved_sha: null,
-        approved_graph: null,
-        passed_sha: pr.head,
-        enqueued_sha: pr.head,
-        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF },
-      });
-      expect(out.reason).toContain(`not the approved ${stale}: the approval is void`);
+      expect(swaps(f.events)).not.toContain("takeApproved story:1.1");
+      const r = (await f.ledger()).get(S);
+      expect(r).toMatchObject({ state: "parked", generation: 2, lane: "coordinator", approved_sha: null, approved_graph: null, passed_sha: pr.head, enqueued_sha: pr.head, heartbeat_at: FORGE_NOW });
+      expect(r?.park).toEqual({ kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: DIFF, graph_posted: HASH });
+      expect(out.reason).toContain(`but the posted delta is ${stale}`);
       const comments = f.fake.control.comments(pr.number);
       expect(comments).toHaveLength(1);
       expect(comments[0]).toContain("no longer counts");
       expect(comments[0]).toContain("+2.2");
-      // The fenced enqueued_sha makes the next take need a Maintainer approval after the re-park: the voided one never re-takes it.
-      f.events.length = 0;
+      // The re-park makes the next take need a Maintainer approval after it: the voided one never re-takes it.
+      reclaim(f);
       await f.run({ graphTrees: g.trees });
       expect(swaps(f.events)).not.toContain("takeApproved story:1.1");
+      expect(f.logs.join("\n")).toContain("no standing approval");
       expect(await stateOf(f, S)).toBe("parked");
     });
 
     test("main unmoved at enqueue: no second gate run", async () => {
-      const w = await gated(byMaintainer, CHANGE);
+      const w = await gated(byMaintainer, CHANGE, [], HASH);
       await w.run();
       expect(w.g.calls).toHaveLength(1);
       expect(w.f.fake.control.queue()).toEqual([w.pr.number]);
