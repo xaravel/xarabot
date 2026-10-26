@@ -10,7 +10,7 @@
     "src/core/next/next.ts",
     "test/core/next/next.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T21:09:39Z",
+  "heartbeat_at": "2026-10-26T21:13:16.539Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "008d2753064b7a2adbd3d4c3a89dce6c940d5214",
@@ -21,7 +21,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
