@@ -43,7 +43,7 @@ function mainFiles(o: { readonly authority?: "ok" | "missing" | "expired" } = {}
       "proxy_hosts: [files.pythonhosted.org]",
       "",
     ].join("\n"),
-    ".xarabot/policy.yaml": "schema_version: 1\n",
+    ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [claude]\n",
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
     "_bmad-output/planning-artifacts/epics.md": "# Epics\n\n## Epic 1: One\n\n### Story 1.1: Story 1.1\n\nBody.\n",
     "_bmad-output/implementation-artifacts/epic-1-context.md": "# Epic 1 Context: One\n\nGoal.\n",
@@ -838,7 +838,7 @@ describe("createPrStep", () => {
 
   test("an unknown schema_version found by the fence alerts ledger-schema-version and stops", async () => {
     const w = await world();
-    const v2 = JSON.stringify({ ...w.record, schema_version: 5 });
+    const v2 = JSON.stringify({ ...w.record, schema_version: 6 });
     w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.1.json": v2 }, deletes: [] });
     const out = await w.run();
     expect(out.outcome).toBe("stop");

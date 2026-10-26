@@ -19,7 +19,7 @@ export const SHA_D = "d".repeat(40);
 /** A claimed `story:1.5` held by ALICE at generation 1, with overrides. */
 export function rec(over: Partial<UnitRecord> = {}): UnitRecord {
   return {
-    schema_version: 4,
+    schema_version: 5,
     unit: "story:1.5",
     state: "claimed",
     owner: ALICE.owner,
@@ -34,6 +34,7 @@ export function rec(over: Partial<UnitRecord> = {}): UnitRecord {
     head_sha: null,
     reviewed_sha: null,
     passed_sha: null,
+    enqueued_sha: null,
     approved_sha: null,
     approved_graph: null,
     retro_result: null,

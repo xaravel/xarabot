@@ -470,6 +470,39 @@ describe("createReviewStep: the follow-up pass", () => {
 
 // ------------------------------------------------------------------ failures
 
+describe("createReviewStep: the allowance before each pass (Story 3.5)", () => {
+  /** The fake forge whose `main` turns to a policy allowing only `adapters` just before the second snapshot: the session's allowance check, after the set-up's. */
+  const dropsAtSession = (h: Harness, adapters: readonly string[]): Forge => {
+    let snapshots = 0;
+    return {
+      ...h.fake.forge,
+      snapshot: (o) => {
+        snapshots += 1;
+        if (snapshots === 2) h.fake.control.setMain(mainFiles(adapters));
+        return h.fake.forge.snapshot(o);
+      },
+    };
+  };
+
+  test("fresh main's policy drops the lane's agent at session time: no sandbox run, a failed attempt naming the allowance", async () => {
+    const h = await harness({ behaviors: [reviewResult()] });
+    const out = await h.run({}, { forge: dropsAtSession(h, ["codex"]) });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)");
+    expect(h.prompts).toEqual([]);
+    expect(await reviewsOf(h)).toEqual([]);
+    expect(await h.record()).toMatchObject({ state: "released", attempts: 1, passed_sha: null });
+  });
+
+  test("a policy that keeps the lane's agent but drops the chosen reviewer (codex): no sandbox run, a failed attempt naming the reviewer", async () => {
+    const h = await harness({ behaviors: [reviewResult()] });
+    const out = await h.run({}, { forge: dropsAtSession(h, ["claude"]) });
+    expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+    expect(out.reason).toContain("allowance: agent codex is not in .xarabot/policy.yaml unattended_adapters (allowed: claude)");
+    expect(h.prompts).toEqual([]);
+  });
+});
+
 describe("createReviewStep: failures", () => {
   test.each([
     ["no spec", {}],

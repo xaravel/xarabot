@@ -10,6 +10,7 @@ import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroPrompt, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { checkRetroDiff, checkRetroResult, retroDocGlob, type RetroTree } from "../core/retro/validate.ts";
+import { allowanceRefusal } from "../core/review/allowance.ts";
 import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { describeIssues } from "../core/schemas/common.ts";
@@ -28,6 +29,7 @@ import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import { shown } from "./pr-step.ts";
 import { reparkComment } from "./reconcile-step.ts";
+import { reviewOrPark } from "./review-gate.ts";
 import {
   createSessionRunner,
   describeError,
@@ -36,8 +38,10 @@ import {
   LIMIT_STOP_REASON,
   MarkerStop,
   message,
+  sessionAllowance,
   stepKit,
   stepOps,
+  unitSubject,
   type PromptOutcome,
   type PrStepOutput,
   type SessionContext,
@@ -74,6 +78,14 @@ import type { TreeFiles } from "./tree-files.ts";
  *   with the diff's paths and a 🤖 comment: a retro is one-shot and never
  *   disposable. Its diff holds no graph input, so it skips the graph-change
  *   gate.
+ * - After CI and the PR checks on fresh `main` (Story 3.5): the passed gate
+ *   at the head; a head no review passed gets one review round (the normal
+ *   pass), and a blocking round parks `blocked` `review-findings` for the
+ *   Maintainer, with no loopback. A round that passes starts CI and the
+ *   checks again on fresh `main`, where the gate passes the head. Then,
+ *   before any gate, fresh `main`'s policy must still allow the lane's agent
+ *   and a reviewer (`allowanceRefusal`, else a failed attempt); the enqueue
+ *   fence records `enqueued_sha`.
  * - A unit adopted with its open PR runs no session. The ledger keeps a
  *   `retro_result` only at the PR and head it was validated at, so with one
  *   its CI is polled at the record's `head_sha` and the gate follows. When
@@ -204,7 +216,7 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
     };
 
     /** CI at `head`, fresh `main`, the gate, then `merging` and the enqueue, or the approval park. */
-    const ciAndGate = async (pr: number, head: string): Promise<never> => {
+    const ciAndGate = async (pr: number, head: string, again = false): Promise<never> => {
       // 1. CI, with no fix session.
       const polled = await poll(head, config.ci_max_wait_minutes * MINUTE_MS, snapshot.policy.expected_checks);
       if (polled !== "passed") return await parkBlocked("verification", `CI failed on ${head}: ${polled.join(", ")}`);
@@ -225,6 +237,30 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
       if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
 
+      // 2a. The passed gate, then one review round for a head no review passed (Story 3.5): a blocking one parks.
+      const reviewed = await reviewOrPark({
+        kit,
+        aborted,
+        identity,
+        maintainer: repo.repo.config.maintainer,
+        passed: deps.passed,
+        review: deps.review,
+        input: { unit: { unit, subject: unitSubject(unit) }, storyId: null, track: input.track, signal: input.signal, log: input.log },
+        head,
+        mainSha: snap.main.sha,
+        callTimeoutMs,
+      });
+      if (reviewed) {
+        // The review took a session's time: every check runs again on fresh main, where the gate now passes the head.
+        if (again) return await failed(`the passed gate still finds ${head} unreviewed after its review passed`);
+        note(`review of ${head} passed: CI and the gates again on fresh main`);
+        return await ciAndGate(pr, head, true);
+      }
+
+      // 2b. The allowance (Story 3.5): fresh main's policy must still allow the lane's agent and a reviewer.
+      const refused = allowanceRefusal(repo.repo.policy, deps.lane.agent, kit.record.builder_providers);
+      if (refused !== null) return await failed(`allowance: ${refused}`);
+
       // 3. The approval gate: only when policy gates a path. No graph-change gate: the diff holds no graph input.
       let changed: Awaited<ReturnType<DiffPaths>>;
       try {
@@ -241,7 +277,7 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       }
 
       // 4. Fence, merging, enqueue at the head; the queue is not watched.
-      await beat("fence", { passed_sha: head });
+      await beat("fence", { enqueued_sha: head });
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
       note(`merging at ${head}`);
       for (let n = 0; ; n += 1) {
@@ -382,6 +418,17 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       return await ciAndGate(pr, head);
     };
 
+    /** `kit.run` for a body that may throw a `Halt` (from the review round): it reaches the process. */
+    const runKit = async (body: () => Promise<PrStepOutput>): Promise<PrStepOutput> => {
+      try {
+        return await body();
+      } catch (e) {
+        if (e instanceof End) return e.out;
+        if (e instanceof Halt) throw e;
+        return kit.run(() => failed(`unexpected error: ${message(e)}`));
+      }
+    };
+
     // ------------------------------------------------------------ the unit
 
     // A unit adopted with its open PR runs no session: with its result, CI at the record's head, then the gate.
@@ -393,7 +440,7 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       // The record as the snapshot shows it, before this claim: its result at another head of the same PR was validated there, not here.
       const before = snapshot.ledger.units.find((r) => r.unit === unit);
       const moved = before?.retro_result != null && before.pr === adopted && before.head_sha !== null && before.head_sha !== adoptedHead ? before : null;
-      return kit.run(() =>
+      return runKit(() =>
         adoptedHead === null
           ? failed(`PR #${adopted} has no head_sha on the record`)
           : moved !== null
@@ -474,6 +521,8 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
         input.track.state = r.kind === "ok" ? kit.record.state : null;
         limitStopped = true;
       },
+      // Before each fresh session: fresh main's policy must still allow the lane's agent and a reviewer (Story 3.5).
+      allowed: sessionAllowance({ forge, repo: deps.lane.repo, agent: deps.lane.agent, builderProviders: () => kit.record.builder_providers, callTimeoutMs }),
     };
     const runner = createSessionRunner({
       agent: deps.agent,
@@ -535,6 +584,6 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
     }
     const result = ran.result;
     note(`result: ${result.verdict}, ${result.items.length} item(s)`);
-    return kit.run(() => publish(result));
+    return runKit(() => publish(result));
   };
 }

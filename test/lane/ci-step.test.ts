@@ -67,7 +67,7 @@ function mainFiles(o: MainOpts = {}): Record<string, string> {
   ];
   if (o.lockfileCommand !== undefined) config.push(`lockfile_command: ${JSON.stringify(o.lockfileCommand)}`);
   if (o.budgetHours !== undefined) config.push(`unit_budget_hours: ${o.budgetHours}`);
-  const policy = ["schema_version: 1"];
+  const policy = ["schema_version: 1", "unattended_adapters: [claude]"];
   if (o.expected !== undefined) policy.push(`expected_checks: ${JSON.stringify(o.expected)}`);
   const files: Record<string, string> = {
     ".xarabot/config.yaml": `${config.join("\n")}\n`,

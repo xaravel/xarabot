@@ -267,40 +267,51 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
     });
   /** A Story the coordinator took on approval and queued. */
   const gated = (over: Partial<UnitRecord> = {}): UnitRecord =>
-    coord("story:2.1", { state: "merging", generation: 2, globs: ["src/2.1/a.ts"], pr: 7, pr_owner: "alice", head_sha: HEAD, passed_sha: HEAD, approved_sha: HEAD, ...over });
+    coord("story:2.1", { state: "merging", generation: 2, globs: ["src/2.1/a.ts"], pr: 7, pr_owner: "alice", head_sha: HEAD, passed_sha: HEAD, enqueued_sha: HEAD, approved_sha: HEAD, ...over });
 
   test("a builder-parked awaiting-approval record whose PR is open at its head is a take candidate, with no park time and its diff paths", () => {
     const p = plan({ records: [awaiting()], prs: { "story:2.1": open(7) } });
     expect(shape(p)).toEqual({ ...EMPTY, takeApproved: ["story:2.1"] });
     expect(p.takeApproved).toEqual([
-      { unit: "story:2.1", generation: 1, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: null, globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
+      { unit: "story:2.1", generation: 1, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
     ]);
   });
 
-  test("a reconcile record's first protected-path park (coordinator lane, no passed_sha) is a first park: parked_at null", () => {
+  test("a take candidate carries its passed_sha and builder_providers, for the passed gate and the allowance (Story 3.5)", () => {
+    const p = plan({ records: [awaiting({ passed_sha: null, builder_providers: ["anthropic"] })], prs: { "story:2.1": open(7) } });
+    expect(p.takeApproved.map((t) => [t.passed_sha, t.builder_providers])).toEqual([[null, ["anthropic"]]]);
+  });
+
+  test("a reconcile record's first protected-path park (coordinator lane, no enqueued_sha) is a first park: parked_at null", () => {
     const r3 = coord("reconcile:3", { state: "parked", pr: 3, pr_owner: COORD.owner, head_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [STATUS] } });
     const p = plan({ records: [r3], prs: { "reconcile:3": open(3) } });
-    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, globs: [STATUS], approved_graph: null }]);
+    expect(p.takeApproved).toEqual([{ unit: "reconcile:3", generation: 1, pr: 3, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: null, builder_providers: [], globs: [STATUS], approved_graph: null }]);
   });
 
-  test("a planning step's first park (planning:graph.1, coordinator lane, no passed_sha): parked_at null", () => {
-    const g = coord("planning:graph.1", { state: "parked", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: null, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
+  test("a planning step's first park (planning:graph.1, coordinator lane, reviewed: passed_sha but no enqueued_sha): parked_at null", () => {
+    const g = coord("planning:graph.1", { state: "parked", globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
     const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
-    expect(p.takeApproved).toEqual([{ unit: "planning:graph.1", generation: 1, pr: 4, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, globs: [EPICS_MD], approved_graph: null }]);
+    expect(p.takeApproved).toEqual([{ unit: "planning:graph.1", generation: 1, pr: 4, pr_owner: COORD.owner, head_sha: HEAD, parked_at: null, passed_sha: HEAD, builder_providers: [], globs: [EPICS_MD], approved_graph: null }]);
   });
 
-  test("a coordinator re-park with passed_sha set: parked_at is its heartbeat_at", () => {
-    const g = coord("planning:graph.1", { state: "parked", generation: 2, globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
+  test("a coordinator re-park with enqueued_sha set: parked_at is its heartbeat_at", () => {
+    const g = coord("planning:graph.1", { state: "parked", generation: 2, globs: [EPICS_MD, GRAPH_PSEUDO_GLOB], pr: 4, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, enqueued_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: COORD.owner, globs_held: [EPICS_MD] } });
     const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
     expect(p.takeApproved.map((t) => t.parked_at)).toEqual([PARKED_AT]);
   });
 
   test("a coordinator-lane re-park is a take candidate whose park time is its heartbeat_at", () => {
-    const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2 });
+    const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, enqueued_sha: HEAD });
     const p = plan({ records: [reparked], prs: { "story:2.1": open(7) } });
     expect(p.takeApproved).toEqual([
-      { unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: PARKED_AT, globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
+      { unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, parked_at: PARKED_AT, passed_sha: HEAD, builder_providers: [], globs: ["docs/x.md", "src/2.1/a.ts"], approved_graph: null },
     ]);
+  });
+
+  test("a coordinator-lane park with passed_sha alone is a first park (Story 3.5): parked_at null", () => {
+    const reviewedOnly = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD, enqueued_sha: null });
+    const p = plan({ records: [reviewedOnly], prs: { "story:2.1": open(7) } });
+    expect(p.takeApproved.map((t) => t.parked_at)).toEqual([null]);
   });
 
   test("a parked reconcile record awaiting approval is a candidate of any kind; its open PR still stops a new one", () => {
@@ -337,17 +348,17 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
   test("a coordinator-held merging Story is checked as gated, with its approved head and diff paths", () => {
     const p = plan({ records: [gated()], prs: { "story:2.1": open(7) } });
     expect(shape(p)).toEqual({ ...EMPTY, checkGated: ["story:2.1"] });
-    expect(p.checkGated).toEqual([{ unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, approved_sha: HEAD, approved_graph: null, passed_sha: HEAD, globs: ["src/2.1/a.ts"] }]);
+    expect(p.checkGated).toEqual([{ unit: "story:2.1", generation: 2, pr: 7, pr_owner: "alice", head_sha: HEAD, approved_sha: HEAD, approved_graph: null, enqueued_sha: HEAD, globs: ["src/2.1/a.ts"] }]);
   });
 
-  test("a taken record the runner never enqueued carries its null passed_sha to the gated check", () => {
-    const p = plan({ records: [gated({ passed_sha: null })], prs: { "story:2.1": open(7) } });
-    expect(p.checkGated.map((t) => [t.unit, t.passed_sha])).toEqual([["story:2.1", null]]);
+  test("a taken record the runner never enqueued carries its null enqueued_sha to the gated check, whatever its passed_sha", () => {
+    const p = plan({ records: [gated({ enqueued_sha: null, passed_sha: HEAD })], prs: { "story:2.1": open(7) } });
+    expect(p.checkGated.map((t) => [t.unit, t.enqueued_sha])).toEqual([["story:2.1", null]]);
   });
 
   test("a taken graph change carries its approved_graph to the gated check, for a re-take to compare", () => {
     const hash = `sha256:${"c".repeat(64)}`;
-    const p = plan({ records: [gated({ passed_sha: null, globs: ["src/2.1/a.ts", "xarabot:graph"], approved_graph: hash })], prs: { "story:2.1": open(7) } });
+    const p = plan({ records: [gated({ enqueued_sha: null, globs: ["src/2.1/a.ts", "xarabot:graph"], approved_graph: hash })], prs: { "story:2.1": open(7) } });
     expect(p.checkGated.map((t) => [t.unit, t.approved_graph])).toEqual([["story:2.1", hash]]);
   });
 

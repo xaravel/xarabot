@@ -19,6 +19,7 @@ import {
 import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
+import { allowanceRefusal } from "../core/review/allowance.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
@@ -28,6 +29,7 @@ import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
+import type { PassedGate } from "./passed-gate.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
 import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOutput } from "./session.ts";
 
@@ -51,23 +53,29 @@ import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOu
  * once its owner's approval of that head stands (`standingApproval` over
  * `Forge.reviews`). A builder's first park counts any owner approval, even
  * one given while CI still ran, and so does the coordinator's own first park
- * (a planning or `reconcile` gate park, with no `passed_sha`); only a re-park
- * of a record the coordinator took (its `lane` is `coordinator` and it has a
- * `passed_sha`) needs a review submitted after the park.
+ * (a planning or `reconcile` gate park, with no `enqueued_sha`); only a re-park
+ * of a record the coordinator took (its `lane` is `coordinator` and it has an
+ * `enqueued_sha`) needs a review submitted after the park.
  * Before the first take the run re-checks the Standing Authority on fresh
- * `main`; it then takes the record at `generation` + 1 (`takeApproved`,
- * `approved_sha` = head, `passed_sha` cleared), fences it, enqueues the PR at
- * that head and records the enqueue (`passed_sha` = head). Later runs check
+ * `main`. Before a take of a unit that is not `reconcile` (Story 3.5), fresh
+ * `main`'s policy must still allow the lane's agent and a reviewer
+ * (`allowanceRefusal`: refused, no such take this run), and the approved
+ * head must pass the passed gate (`passed_sha`, or its clean merge with
+ * `main`): an unreviewed head, or a gate error, is not taken and stays
+ * `parked`. It then takes the record at `generation` + 1 (`takeApproved`,
+ * `approved_sha` = head, `enqueued_sha` cleared, `passed_sha` kept), fences
+ * it, enqueues the PR at that head and records the enqueue (`enqueued_sha` =
+ * head). Later runs check
  * the queue of these coordinator-held `merging` records, whichever
  * coordinator lane took them: merged is `merged`, queued at `approved_sha` is
  * left; one open at `approved_sha` and out of the queue that the runner never
- * enqueued (no `passed_sha`: a failed enqueue, fence or read after the take,
- * or a run that died) is parked again with `passed_sha` still unset and taken
+ * enqueued (no `enqueued_sha`: a failed enqueue, fence or read after the take,
+ * or a run that died) is parked again with `enqueued_sha` still unset and taken
  * again in the same run on its standing approval, so the runner's own
  * failure never costs a review; anything else (an ejection, a moved head, a
  * closed PR; dequeued after a fenced `dequeue` when queued at another head)
  * parks it `awaiting-approval` again with `approved_sha` cleared and
- * `passed_sha` set, so only a fresh approval re-takes it. A conflicting
+ * `enqueued_sha` set, so only a fresh approval re-takes it. A conflicting
  * enqueue parks it again in the same run, or for a disposable `reconcile` PR
  * closes the PR and releases the record.
  *
@@ -116,8 +124,9 @@ import { describeError, message, stepKit, stepOps, type FreshMain, type PrStepOu
  * branch, opens the PR, polls its checks, re-checks the Standing Authority on
  * fresh `main`, keeps the protected-path gate (the PR is exempt from
  * `owner_approval_paths` only), and enqueues it itself: the step ends
- * `merging` and never watches the queue. Every push, PR change and enqueue is
- * fenced. It never throws; a lost unit ends `failed` with state `null`.
+ * `merging` and never watches the queue; it gets no review and no passed
+ * gate, and its enqueue fence records `enqueued_sha`. Every push, PR change
+ * and enqueue is fenced. It never throws; a lost unit ends `failed` with state `null`.
  */
 
 export type ReconcileStepDeps = {
@@ -129,6 +138,10 @@ export type ReconcileStepDeps = {
   readonly identity: LaneIdentity;
   /** The repo slug, for the Standing Authority check. */
   readonly repo: string;
+  /** The lane's agent, which fresh `main`'s policy must still allow before a take (Story 3.5). */
+  readonly agent: string;
+  /** Whether an approved head is one a review passed (Story 3.5). */
+  readonly passed: PassedGate;
   /** Each forge call's (and the commit's) deadline; default 60 000 ms. */
   readonly callTimeoutMs?: number;
   /** The host clock in epoch ms; default `Date.now`. */
@@ -334,10 +347,10 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     /**
      * A gated record back to `parked` `awaiting-approval`, holding its diff's
      * paths, `approved_sha` cleared, `heartbeat_at` stamped and `lane`
-     * `coordinator`. With `passedSha`, `passed_sha` is set to it, so only a
-     * review submitted after the park re-takes the PR.
+     * `coordinator`. With `enqueuedSha`, `enqueued_sha` is set to it, so only
+     * a review submitted after the park re-takes the PR.
      */
-    const parkAwaiting = (t: GatedTarget, passedSha: string | null, inboxOwner: string | null = null): Promise<boolean> => {
+    const parkAwaiting = (t: GatedTarget, enqueuedSha: string | null, inboxOwner: string | null = null): Promise<boolean> => {
       // Only the Maintainer's approval re-takes a record holding `xarabot:graph`, so it lands in the Maintainer's inbox.
       const inbox = inboxOwner ?? (t.globs.includes(GRAPH_PSEUDO_GLOB) ? snapshot.config.maintainer : t.pr_owner);
       return item(
@@ -350,19 +363,19 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           kind: "awaiting-approval",
           diffPaths: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
           ...(inbox !== null ? { inboxOwner: inbox } : {}),
-          ...(passedSha !== null ? { passedSha } : {}),
+          ...(enqueuedSha !== null ? { enqueuedSha } : {}),
         }),
       );
     };
 
     /**
      * A gated record parked again for a fresh approval (`parkAwaiting`, with
-     * `passed_sha` set at its approved head when the take left it unset), then
+     * `enqueued_sha` set at its approved head when the take left it unset), then
      * a best-effort 🤖 comment on its PR chosen by `cause` (`null`: no comment).
      */
     const repark = async (t: GatedTarget, why: string, cause: ReparkCause | null, over: { readonly inboxOwner: string; readonly body: string } | null = null): Promise<void> => {
-      const passedSha = t.passed_sha === null ? (t.approved_sha ?? t.head_sha) : null;
-      const parked = await parkAwaiting(t, passedSha, over?.inboxOwner ?? null);
+      const enqueuedSha = t.enqueued_sha === null ? (t.approved_sha ?? t.head_sha) : null;
+      const parked = await parkAwaiting(t, enqueuedSha, over?.inboxOwner ?? null);
       if (!parked) return;
       reasons.push(`${t.unit}: PR #${t.pr} ${why}: parked awaiting approval again`);
       const body = over?.body ?? (cause === null ? null : reparkComment(t.unit, cause));
@@ -376,7 +389,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
 
     /**
      * A taken record the runner never enqueued, open at its approved head
-     * `head` and out of the queue: parked again with `passed_sha` unset, so
+     * `head` and out of the queue: parked again with `enqueued_sha` unset, so
      * its standing approval still counts, and returned as a candidate for
      * this run's takes, which re-check that approval, fresh `main` and the
      * graph gate before enqueueing it, its `approved_graph` carried so a
@@ -387,6 +400,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       if (!(await parkAwaiting(t, null))) return null;
       reasons.push(`${t.unit}: PR #${t.pr} was never enqueued after its take: parked on its standing approval, to be taken again`);
       if (t.pr_owner === null) return null;
+      // The take keeps `passed_sha` and the providers: the record as the round's snapshot shows it holds them.
+      const held = snapshot.ledger.units.find((r) => r.unit === t.unit);
       return {
         unit: t.unit,
         generation: t.generation,
@@ -394,6 +409,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         pr_owner: t.pr_owner,
         head_sha: head,
         parked_at: null,
+        passed_sha: held?.passed_sha ?? null,
+        builder_providers: held?.builder_providers ?? [],
         globs: t.globs.filter((g) => g !== GRAPH_PSEUDO_GLOB),
         approved_graph: t.approved_graph,
       };
@@ -434,7 +451,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       if (s.head_sha !== at) await repark(t, `head moved to ${s.head_sha}`, "head-moved");
       else if (s.state === "closed") await repark(t, "is closed", "closed");
       // Taken on an approval but never enqueued: the runner's own failure, so the approval stands.
-      else if (t.approved_sha !== null && t.passed_sha === null) return await untake(t, s.head_sha);
+      else if (t.approved_sha !== null && t.enqueued_sha === null) return await untake(t, s.head_sha);
       else await repark(t, "is not in the merge queue", "not-queued");
       return null;
     };
@@ -561,9 +578,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * Takes one approved PR: `takeApproved` at its head (with `approvedGraph`
      * for a graph change), a fence on the taken record, the `approved_graph`
      * re-check, then the enqueue, each retry fenced again, and once it is
-     * queued the enqueue recorded (`passed_sha` = head). A conflict parks it
+     * queued the enqueue recorded (`enqueued_sha` = head). A conflict parks it
      * again (a `reconcile` PR is closed and released instead); any other
-     * failure leaves it `merging` with no `passed_sha`, for the next run's
+     * failure leaves it `merging` with no `enqueued_sha`, for the next run's
      * queue check to take it again on its standing approval. With `after`,
      * the taken record is parked at once instead.
      */
@@ -590,7 +607,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         head_sha: head,
         approved_sha: head,
         approved_graph: graph?.hash ?? null,
-        passed_sha: null,
+        enqueued_sha: null,
         globs: graph !== null ? [...new Set([...t.globs, GRAPH_PSEUDO_GLOB])] : t.globs,
       };
       const fence = (set?: HeartbeatSet): Promise<boolean> =>
@@ -599,7 +616,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         note(`${t.unit}: the fence on the taken record was refused; PR #${pr} not enqueued, left for the queue check`);
         return;
       }
-      // Each re-park sets `passed_sha`, so it needs an approval submitted after it, as an enqueue conflict's does.
+      // Each re-park sets `enqueued_sha`, so it needs an approval submitted after it, as an enqueue conflict's does.
       if (after?.kind === "refuse") return await blockGraph(takenTarget, after.refusals);
       if (after?.kind === "conflict") return await repark(takenTarget, `conflicts with main: ${after.paths.join(", ")}`, "conflict");
       if (after?.kind === "maintainer") {
@@ -621,7 +638,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           reasons.push(`${t.unit}: PR #${pr} approved by ${approver}, enqueued at ${head}`);
           note(`${t.unit}: enqueued PR #${pr} at ${head}`);
           // Recorded, a later ejection parks it for a fresh approval; unrecorded, an ejection is taken again once on the same one.
-          if (!(await fence({ passed_sha: head }))) note(`${t.unit}: the enqueue of PR #${pr} at ${head} is not recorded on the taken record`);
+          if (!(await fence({ enqueued_sha: head }))) note(`${t.unit}: the enqueue of PR #${pr} at ${head} is not recorded on the taken record`);
           return;
         }
         if (r.error.kind === "conflict") {
@@ -652,10 +669,45 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
      * the first take, fresh `main`'s Standing Authority is re-checked (invalid:
      * the step ends `stop`, the record left `parked`); a failed snapshot skips
      * every take this run. A PR the fresh snapshot shows closed, merged or at
-     * another head is skipped.
+     * another head is skipped. Before a take of a unit that is not
+     * `reconcile` (Story 3.5): the allowance on fresh `main`'s policy
+     * (refused: no such take this run), then the passed gate at the approved
+     * head (unreviewed, or an error: not taken, left `parked`).
      */
     const takeApprovedWork = async (targets: readonly ApprovalTarget[], settled: Set<string>): Promise<void> => {
       let fresh: FreshMain | null = null;
+      /** Set once the allowance refused a take: no take of a unit that is not `reconcile` this run. */
+      let refusedAll = false;
+      /** The allowance, then the passed gate at `t`'s approved head; `true` when `t` may be taken. */
+      const reviewed = async (t: ApprovalTarget, f: FreshMain): Promise<boolean> => {
+        if (refusedAll) return false;
+        const refused = allowanceRefusal(f.config.repo.policy, deps.agent, t.builder_providers);
+        if (refused !== null) {
+          refusedAll = true;
+          reasons.push(`allowance: ${refused}: no approved PR taken this run`);
+          note(`allowance: ${refused}; no approved PR taken this run`);
+          return false;
+        }
+        let gate: Awaited<ReturnType<PassedGate>>;
+        try {
+          gate = await deps.passed({ headSha: t.head_sha, passedSha: t.passed_sha, mainSha: f.snap.main.sha, signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]) });
+        } catch (e) {
+          gate = { ok: false, error: { kind: "transient", message: `passed gate threw: ${message(e)}` } };
+        }
+        aborted();
+        if (!gate.ok) {
+          reasons.push(`${t.unit}: passed gate ${gate.error.kind}: ${gate.error.message}; not taken`);
+          note(`${t.unit}: passed gate failed: ${gate.error.kind}: ${gate.error.message}; not taken`);
+          return false;
+        }
+        if (gate.value.kind === "unreviewed") {
+          reasons.push(`${t.unit}: PR #${t.pr} is unreviewed at ${t.head_sha} (${gate.value.why}); not taken, left parked`);
+          note(`${t.unit}: passed gate: unreviewed: ${gate.value.why}; not taken`);
+          return false;
+        }
+        note(`${t.unit}: passed gate: ${t.head_sha} passed (${gate.value.how})`);
+        return true;
+      };
       for (const t of targets) {
         aborted();
         const listed = await call("reviews", (o) => forge.reviews(t.pr, o));
@@ -700,6 +752,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           await take(t, ownerApproval.author ?? t.pr_owner, settled);
           continue;
         }
+
+        // Story 3.5: the allowance, then the passed gate, before any take of a unit that is not reconcile.
+        if (!(await reviewed(t, fresh))) continue;
 
         const g = await runGate(t, snap);
         aborted();
@@ -880,8 +935,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         throw end("progress", kit.record.state);
       }
 
-      // 6. Fence, merging, enqueue; the queue is not watched.
-      await beat("fence", { passed_sha: head });
+      // 6. Fence, merging, enqueue; the queue is not watched. A reconcile PR gets no review and no passed gate.
+      await beat("fence", { enqueued_sha: head });
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
       note(`merging at ${head}`);
       for (let n = 0; ; n += 1) {

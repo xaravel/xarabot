@@ -274,7 +274,7 @@ describe("startHeartbeat", () => {
 
   test("an edit stop (an unknown schema_version on the tip) ends the keeper with stop ledger-schema-version, never a throw", async () => {
     const w = world();
-    const v2 = serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 4', '"schema_version": 5');
+    const v2 = serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 5', '"schema_version": 6');
     w.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__9.9.json": v2 }, deletes: [] });
     await settle(w);
     expect(w.keeper.end()).toMatchObject({ kind: "stop", condition: "ledger-schema-version" });
@@ -389,7 +389,7 @@ describe("startHeartbeat", () => {
 
 describe("startCoordinatorHeartbeat", () => {
   const claimRec = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
-    schema_version: 4,
+    schema_version: 5,
     owner: COORD.owner,
     host: COORD.host,
     lane: "coordinator",

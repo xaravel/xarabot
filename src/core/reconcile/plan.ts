@@ -35,16 +35,20 @@ export type ApprovalTarget = {
   /** The record's head, which the snapshot shows the PR still at. */
   readonly head_sha: string;
   /**
-   * For a re-park (the record's `lane` is `coordinator` and it has a
-   * `passed_sha`: the coordinator took it on approval, fenced it at its head
+   * For a re-park (the record's `lane` is `coordinator` and it has an
+   * `enqueued_sha`: the coordinator took it on approval, fenced it at its head
    * and parked it again), its `heartbeat_at`: an approval must be submitted
    * after it. `null` for a first park, a builder's or the coordinator's own
-   * (a planning or `reconcile` gate park has no `passed_sha`), and for a
+   * (a planning or `reconcile` gate park has no `enqueued_sha`), and for a
    * taken record the runner never enqueued, returned to its park
-   * (`takeApproved` clears `passed_sha`): any standing owner approval of
+   * (`takeApproved` clears `enqueued_sha`): any standing owner approval of
    * the head counts.
    */
   readonly parked_at: string | null;
+  /** The head a review round passed (Story 3.5): a take needs the passed gate at `head_sha`. */
+  readonly passed_sha: string | null;
+  /** The providers that built the PR, whom its reviewer must differ from (AD-16). */
+  readonly builder_providers: readonly string[];
   /** The paths the PR's diff changes (the park's `globs_held`). */
   readonly globs: readonly string[];
   /**
@@ -71,7 +75,7 @@ export type GatedTarget = {
    * The head the coordinator enqueued it at, or fenced before parking it
    * again; `null` while the runner has not enqueued it since the take.
    */
-  readonly passed_sha: string | null;
+  readonly enqueued_sha: string | null;
   /** The paths the PR's diff changes, kept since the first park. */
   readonly globs: readonly string[];
 };
@@ -109,7 +113,7 @@ export type ReconcilePlan = {
    * 3. Coordinator-held `merging` records that are not disposable or
    * ungated retros, whose PR has not merged: their queue is checked, and a
    * PR out of it parks again; one the runner never enqueued (no
-   * `passed_sha`) is taken again on its standing approval.
+   * `enqueued_sha`) is taken again on its standing approval.
    */
   readonly checkGated: readonly GatedTarget[];
   /**
@@ -344,7 +348,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       head_sha: r.head_sha,
       approved_sha: r.approved_sha,
       approved_graph: r.approved_graph,
-      passed_sha: r.passed_sha,
+      enqueued_sha: r.enqueued_sha,
       globs: r.globs,
     });
   }
@@ -362,7 +366,9 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       pr: r.pr,
       pr_owner: r.pr_owner,
       head_sha: r.head_sha,
-      parked_at: r.lane === "coordinator" && r.passed_sha !== null ? r.heartbeat_at : null,
+      parked_at: r.lane === "coordinator" && r.enqueued_sha !== null ? r.heartbeat_at : null,
+      passed_sha: r.passed_sha,
+      builder_providers: r.builder_providers,
       globs: r.park.globs_held,
       approved_graph: r.approved_graph,
     });

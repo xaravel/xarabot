@@ -97,7 +97,7 @@ const CASES: readonly Case[] = [
     [
       by(BOB, T0, {
         state: "released", generation: 2, attempts: 1, loopbacks: 1, ci_fixes: 2, pr: 7, pr_owner: "bob", head_sha: SHA_A, base_sha: SHA_B,
-        reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], approval: { by: "carol", manifest_sha: SHA_A },
+        reviewed_sha: SHA_A, passed_sha: SHA_A, enqueued_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], approval: { by: "carol", manifest_sha: SHA_A },
       }),
     ],
     by(ALICE, NOW, {
@@ -128,6 +128,8 @@ const CASES: readonly Case[] = [
     by(ALICE, NOW, { pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_B, reviewed_sha: SHA_A, passed_sha: SHA_C, builder_providers: ["anthropic", "openai"] }),
   ],
   ["heartbeat merging", heartbeat(held), [rec({ state: "merging", pr: 7, passed_sha: SHA_A })], by(ALICE, NOW, { state: "merging", pr: 7, passed_sha: SHA_A })],
+  ["heartbeat sets enqueued_sha", heartbeat({ ...held, set: { enqueued_sha: SHA_A } }), [rec({ pr: 7, passed_sha: SHA_A })], by(ALICE, NOW, { pr: 7, passed_sha: SHA_A, enqueued_sha: SHA_A })],
+  ["heartbeat with a bad enqueued_sha", heartbeat({ ...held, set: { enqueued_sha: "nope" } }), [rec({ pr: 7 })], "invalid"],
   ["heartbeat by another holder", heartbeat({ ...held, by: BOB }), [rec()], "precondition"],
   ["heartbeat from another host", heartbeat({ ...held, by: { ...ALICE, host: BOB.host } }), [rec()], "precondition"],
   ["heartbeat at the wrong generation", heartbeat({ ...held, generation: 2 }), [rec()], "precondition"],
@@ -180,7 +182,7 @@ const CASES: readonly Case[] = [
   [
     "takeOverStale claimed adopting the open PR",
     takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, adoptPr: { pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
-    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], loopbacks: 1 })],
+    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A, enqueued_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], loopbacks: 1 })],
     by(BOB, LATE, { generation: 2, attempts: 1, pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B, builder_providers: ["anthropic"], loopbacks: 1 }),
   ],
   [
@@ -226,6 +228,14 @@ const CASES: readonly Case[] = [
   // startMerging
   ["startMerging", startMerging(held), [rec({ pr: 7, passed_sha: SHA_A })], by(ALICE, NOW, { state: "merging", pr: 7, passed_sha: SHA_A })],
   ["startMerging without passed_sha", startMerging(held), [rec({ pr: 7 })], "precondition"],
+  ["startMerging without passed_sha but enqueued_sha", startMerging(held), [rec({ pr: 7, enqueued_sha: SHA_A })], "precondition"],
+  [
+    "startMerging a reconcile unit with no passed_sha: a reconcile PR gets no review",
+    startMerging({ ...held, unit: "reconcile:3", by: COORD }),
+    [by(COORD, T0, { unit: "reconcile:3", pr: 7, globs: [] })],
+    by(COORD, NOW, { unit: "reconcile:3", state: "merging", pr: 7, globs: [] }),
+    "startMerging reconcile:3",
+  ],
   ["startMerging without a PR", startMerging(held), [rec({ passed_sha: SHA_A })], "precondition"],
   // park
   ["park claimed awaiting-approval", park({ ...held, kind: "awaiting-approval", diffPaths: ["./src/b.ts", "src/a.ts"] }), [rec({ approved_sha: SHA_A })], by(ALICE, NOW, { state: "parked", approved_sha: SHA_A, park: awaiting(["src/a.ts", "src/b.ts"]) })],
@@ -239,19 +249,19 @@ const CASES: readonly Case[] = [
   ["park merging awaiting-approval", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }), [rec({ state: "merging", approved_sha: SHA_A })], by(ALICE, NOW, { state: "parked", park: awaiting(["src/a.ts"]) })],
   ["park merging blocked", park({ ...held, kind: "blocked", reason: "other" }), [rec({ state: "merging" })], "precondition"],
   [
-    "park merging awaiting-approval with passedSha: passed_sha set, so only a later approval re-takes it",
-    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: SHA_A }),
-    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A })],
-    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, passed_sha: SHA_A, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
+    "park merging awaiting-approval with enqueuedSha: enqueued_sha set, passed_sha kept, so only a later approval re-takes it",
+    park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], enqueuedSha: SHA_A }),
+    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A, passed_sha: SHA_B })],
+    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, passed_sha: SHA_B, enqueued_sha: SHA_A, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
   ],
   [
-    "park merging awaiting-approval with no passedSha keeps passed_sha",
+    "park merging awaiting-approval with no enqueuedSha keeps enqueued_sha",
     park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"] }),
-    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A, passed_sha: SHA_B })],
-    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, passed_sha: SHA_B, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
+    [by(COORD, T0, { state: "merging", generation: 2, pr: 7, approved_sha: SHA_A, enqueued_sha: SHA_B })],
+    by(COORD, NOW, { state: "parked", generation: 2, pr: 7, enqueued_sha: SHA_B, park: { ...awaiting(["src/a.ts"]), inbox_owner: "carol" } }),
   ],
-  ["park claimed with passedSha", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: SHA_A }), [rec()], "invalid"],
-  ["park merging with a bad passedSha", park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], passedSha: "nope" }), [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })], "invalid"],
+  ["park claimed with enqueuedSha", park({ ...held, kind: "awaiting-approval", diffPaths: ["src/a.ts"], enqueuedSha: SHA_A }), [rec()], "invalid"],
+  ["park merging with a bad enqueuedSha", park({ ...held, by: COORD, generation: 2, kind: "awaiting-approval", diffPaths: ["src/a.ts"], enqueuedSha: "nope" }), [by(COORD, T0, { state: "merging", generation: 2, pr: 7 })], "invalid"],
   ["park by another holder", park({ ...held, by: BOB, kind: "needs-approval" }), [rec()], "precondition"],
   // park: any coordinator lane moves a coordinator-held merging record on at its generation (AD-6)
   [
@@ -314,10 +324,10 @@ const CASES: readonly Case[] = [
     by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7 }),
   ],
   [
-    "takeApproved clears passed_sha: only the taker's recorded enqueue sets it again",
+    "takeApproved clears enqueued_sha (only the taker's recorded enqueue sets it again) and keeps passed_sha",
     takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }),
-    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_D, passed_sha: SHA_D })],
-    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7, head_sha: SHA_D }),
+    [rec({ state: "parked", globs: ["src/**"], park: awaiting(["src/a.ts"]), pr: 7, head_sha: SHA_D, passed_sha: SHA_D, enqueued_sha: SHA_D })],
+    by(COORD, NOW, { state: "merging", generation: 2, globs: ["src/a.ts"], approved_sha: SHA_D, pr: 7, head_sha: SHA_D, passed_sha: SHA_D }),
   ],
   ["takeApproved by a builder", takeApproved({ ...base, generation: 1, approvedSha: SHA_D }), [rec({ state: "parked", park: awaiting([]) })], "precondition"],
   ["takeApproved needs-approval", takeApproved({ unit: U, by: COORD, now: NOW, generation: 1, approvedSha: SHA_D }), [rec({ state: "parked", park: needs })], "precondition"],
@@ -388,7 +398,7 @@ const CASES: readonly Case[] = [
   [
     "applyRuling rebuild",
     applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "rebuild" }),
-    [rec({ state: "parked", park: blocked("review-cap"), attempts: 1, loopbacks: 2, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], pr: 7 })],
+    [rec({ state: "parked", park: blocked("review-cap"), attempts: 1, loopbacks: 2, reviewed_sha: SHA_A, passed_sha: SHA_A, enqueued_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], pr: 7 })],
     by(COORD, NOW, { state: "released", pr: 7 }),
   ],
   [
@@ -516,11 +526,11 @@ describe("ledger edits", () => {
     expect(STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
-  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 4', '"schema_version": 5') };
-  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 4', '"schema_version": 0') };
+  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 5', '"schema_version": 6') };
+  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 5', '"schema_version": 0') };
   const everyEdit: readonly [string, LedgerEdit][] = CASES.map(([name, edit]) => [name, edit]);
   for (const [name, edit] of everyEdit) {
-    test(`${name}: a schema_version 5 or 0 record on the tip stops`, () => {
+    test(`${name}: a schema_version 6 or 0 record on the tip stops`, () => {
       for (const files of [v2, v0]) {
         const r = edit({ ...tip([rec()]), ...files });
         expect(r.ok).toBe(false);
@@ -551,7 +561,7 @@ describe("ledger edits", () => {
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 4,
+    schema_version: 5,
     owner: who.owner,
     host: who.host,
     lane: "coordinator",
@@ -607,8 +617,8 @@ describe("claimCoordinator", () => {
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 
-  test("a schema_version 5 coordinator.json stops", () => {
-    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 4', '"schema_version": 5');
+  test("a schema_version 6 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 5', '"schema_version": 6');
     const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
     expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
@@ -771,24 +781,33 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     expect(r.ok && r.value).toEqual({ message: `ledger: deleteReleasedRecurring ${u} [skip ci]`, writes: {}, deletes: [path(u)] });
   });
 
-  test("every record an edit writes carries schema_version 4, whatever the tip held", () => {
+  test("every record an edit writes carries schema_version 5, whatever the tip held", () => {
     const v1 = rec({ schema_version: 1, state: "claimed" });
     const r = heartbeat({ unit: U, by: ALICE, now: NOW, generation: 1 })(tip([v1]));
     if (!r.ok || r.value === null) throw new Error("expected a write");
-    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(4);
+    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(5);
     const c = claim({ unit: "story:7.1", by: ALICE, now: NOW, globs: ["src/7/**"], expectGeneration: null })(tip([v1]));
     if (!c.ok || c.value === null) throw new Error("expected a write");
-    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(4);
+    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(5);
   });
 
-  test("coordinator.json writes carry schema_version 4: a claim over a v1 record, and the keeper's beat", () => {
+  test("an edit over a raw v4 record (no enqueued_sha key, passed_sha set) writes v5 with enqueued_sha the old passed_sha and passed_sha null", () => {
+    const raw = JSON.parse(serializeUnitRecord(rec({ pr: 7, head_sha: SHA_A, passed_sha: SHA_A }))) as Record<string, unknown>;
+    raw["schema_version"] = 4;
+    delete raw["enqueued_sha"];
+    const r = heartbeat(held)({ [PATH]: JSON.stringify(raw) });
+    if (!r.ok || r.value === null) throw new Error("expected a write");
+    expect(JSON.parse(r.value.writes[PATH] as string)).toMatchObject({ schema_version: 5, passed_sha: null, enqueued_sha: SHA_A, head_sha: SHA_A });
+  });
+
+  test("coordinator.json writes carry schema_version 5: a claim over a v1 record, and the keeper's beat", () => {
     const v1 = serializeCoordinator(coordRec(COORD, T0, { schema_version: 1 }));
     const claimed = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v1 });
     if (!claimed.ok || claimed.value === null) throw new Error("expected a write");
-    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(4);
+    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(5);
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
-    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(4);
+    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(5);
   });
 });
 
@@ -853,7 +872,7 @@ describe("retro_result (Story 2.9)", () => {
 
   test("a heartbeat records retro_result with the PR fields", () => {
     const r = heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { pr: 9, retro_result: RESULT } })(tip([retro({ retro_result: null, pr: null })]));
-    expect(written(r)).toMatchObject({ pr: 9, retro_result: RESULT, schema_version: 4 });
+    expect(written(r)).toMatchObject({ pr: 9, retro_result: RESULT, schema_version: 5 });
   });
 
   test("a heartbeat with an invalid retro_result is invalid", () => {

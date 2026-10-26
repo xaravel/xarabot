@@ -257,15 +257,18 @@ export type ReconcileDue = {
  * PR's snapshot `reviews` (Maintainer decision 2026-10-25, retro item 13).
  * The record must be one `reconcile` would try to take (`pr`, `pr_owner`
  * and `head_sha` set), and, as there, a coordinator re-park (`lane`
- * `coordinator` with a `passed_sha`) counts only an approval submitted after
- * its `heartbeat_at`.
+ * `coordinator` with an `enqueued_sha`) counts only an approval submitted after
+ * its `heartbeat_at`. As there, a record other than a `reconcile:<n>` needs
+ * a `passed_sha` (Story 3.5): an unreviewed one is never taken, so its
+ * approval is no work.
  */
 export function maintainerApproved(record: UnitRecord, snapshot: Snapshot): boolean {
   if (record.state !== "parked" || record.park?.kind !== "awaiting-approval") return false;
   if (record.pr === null || record.pr_owner === null || record.head_sha === null) return false;
+  if (record.passed_sha === null && unitKind(record.unit) !== "reconcile") return false;
   const pr = snapshot.prs[record.unit];
   if (pr?.state !== "open" || pr.head_sha !== record.head_sha) return false;
-  const parkedAt = record.lane === "coordinator" && record.passed_sha !== null ? record.heartbeat_at : null;
+  const parkedAt = record.lane === "coordinator" && record.enqueued_sha !== null ? record.heartbeat_at : null;
   return standingApproval(pr.reviews ?? [], { owner: snapshot.config.maintainer, head: record.head_sha, parkedAt }) !== null;
 }
 

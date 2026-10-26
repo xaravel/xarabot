@@ -171,6 +171,7 @@ describe("next(coordinator): reconcile on the Maintainer's approval (retro item 
       pr: 7,
       pr_owner: "alice",
       head_sha: HEAD,
+      passed_sha: HEAD,
       heartbeat_at: PARKED_AT,
       park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["docs/x.md"] },
       ...over,
@@ -218,13 +219,29 @@ describe("next(coordinator): reconcile on the Maintainer's approval (retro item 
     expect(dueFor(awaiting({ pr_owner: null }), approved).due).toBe(false);
   });
 
-  test("a coordinator re-park counts only an approval submitted after it", () => {
-    const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD });
+  test("a coordinator re-park (an enqueued_sha) counts only an approval submitted after it", () => {
+    const reparked = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD, enqueued_sha: HEAD });
     expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(false);
     expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 30)])).due).toBe(false);
     expect(dueFor(reparked, openWith([review(MAINTAINER, HEAD, 20)])).due).toBe(true);
-    // A taken record returned to its park (no `passed_sha`) counts any standing approval, as reconcile does.
-    expect(dueFor(awaiting({ lane: COORD.lane, passed_sha: null }), openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
+    // A taken record returned to its park (no `enqueued_sha`) counts any standing approval, as reconcile does.
+    expect(dueFor(awaiting({ lane: COORD.lane, enqueued_sha: null }), openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
+  });
+
+  test("an approved but unreviewed record (passed_sha null, as every mapped pre-v5 park) is no work: not due on its approval (Story 3.5)", () => {
+    const r = dueFor(awaiting({ passed_sha: null }), openWith([review(MAINTAINER, HEAD, 5)]));
+    expect([r.due, r.why]).toEqual([false, `reconcile:4 ran at ${RECENT.heartbeat_at}, under 10 min ago, and the snapshot shows no reconcile work`]);
+  });
+
+  test("a reconcile PR needs no passed_sha: its approval is still work", () => {
+    const r3 = coord("reconcile:3", { state: "parked", pr: 7, pr_owner: "alice", head_sha: HEAD, heartbeat_at: PARKED_AT, park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["docs/x.md"] } });
+    const s = snapshotOf(world({ records: [RECENT, r3], prs: { "reconcile:3": openWith([review(MAINTAINER, HEAD, 5)]) } }));
+    expect(maintainerApproved(s.ledger.units.find((u) => u.unit === "reconcile:3") as UnitRecord, s)).toBe(true);
+  });
+
+  test("a coordinator park with passed_sha alone is not a re-park (Story 3.5): any standing approval counts", () => {
+    const reviewedOnly = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD, enqueued_sha: null });
+    expect(dueFor(reviewedOnly, openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
   });
 
   test("maintainerApproved reads the record and its PR", () => {

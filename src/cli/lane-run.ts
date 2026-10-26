@@ -9,7 +9,7 @@ import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { chooseReviewer, sessionProvider } from "../core/review/reviewer.ts";
+import { chooseReviewer, REVIEWER_ORDER, sessionProvider } from "../core/review/reviewer.ts";
 import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
@@ -26,6 +26,10 @@ import { createGitMerger } from "../lane/merger.ts";
 import { createPlanningStep } from "../lane/planning-step.ts";
 import { createRetroItemStep } from "../lane/retro-item-step.ts";
 import { createRetroStep } from "../lane/retro-step.ts";
+import { createGitPassedGate } from "../lane/passed-gate.ts";
+import { createGitReviewCheckout } from "../lane/review-checkout.ts";
+import { createReviewGateStep } from "../lane/review-gate.ts";
+import { createReviewStep, type Reviewers } from "../lane/review-step.ts";
 import { createGitTreeFiles } from "../lane/tree-files.ts";
 import { createPrStep } from "../lane/pr-step.ts";
 import { createPsProcessTable, type ProcessTable } from "../lane/processes.ts";
@@ -60,7 +64,12 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * After the lane's own credential, the start checks pick the lane's reviewer
  * for a unit only its own vendor built (`chooseReviewer`, AD-16) and, when
  * that is another adapter, read its credential too (AD-17): a missing or
- * unreadable one refuses the start.
+ * unreadable one refuses the start. The run then composes a reviewer for
+ * every adapter of `REVIEWER_ORDER` the policy allows (Story 3.5): the
+ * lane's own agent, or the adapter with its credential read; any other one
+ * whose adapter or credential fails is left out, with a line on stderr.
+ * Both roles get the same review step and passed gate: the builder's review
+ * gate and merge step, and the coordinator's session steps and `reconcile`.
  * Every refusal or failure after the STOP check, apart from a version
  * switch, a held lock and the role and lane-name check (a static `host.yaml`
  * error), is a failed start (an I/O error on the lock included), and so is
@@ -68,8 +77,8 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * marker, exit 1): three in a row write the lane's `STOP` and post an alert.
  * The count is reset only after a run that ends without a lane stop, so a
  * start check that heals between lane stops does not reset it. The PR step
- * redacts the vendor credentials read at start (the lane's and its
- * reviewer's) from the text it sends to the forge, and so do the
+ * redacts the vendor credentials read at start (the lane's and every
+ * composed reviewer's) from the text it sends to the forge, and so do the
  * coordinator's planning, retro and retro-item steps (Stories 2.7, 2.9 and
  * 2.10). Each of those steps gets the lane's session vendor, which it adds
  * to a unit's `builder_providers` before pushing an agent-made commit.
@@ -177,6 +186,56 @@ export function readReviewerCredential(reviewer: SessionAdapter, env: Credential
   if (!path.ok) return err("refused", path.error.message);
   const text = readCredential(path.value);
   return text.ok ? ok(text.value) : err("refused", text.error.message);
+}
+
+export type ComposeReviewersParams = {
+  /** The policy's `unattended_adapters`. */
+  readonly allowed: readonly string[];
+  /** The lane's own adapter, and its agent. */
+  readonly sessionAgent: SessionAdapter;
+  readonly agent: Agent;
+  /** The start check's reviewer, and its credential text (`null` when it is the lane's own agent). */
+  readonly choice: SessionAdapter;
+  readonly choiceCredential: string | null;
+  readonly env: CredentialEnv;
+  /** The lane's result path, for the credential probe's launch spec. */
+  readonly resultPath: string;
+  /** Writes a line to stderr. */
+  readonly say: (text: string) => void;
+};
+
+/** The composed reviewers, and every credential text read for them. */
+export type ComposedReviewers = { readonly reviewers: Reviewers; readonly credentials: readonly string[] };
+
+/**
+ * Every reviewer of `REVIEWER_ORDER` the policy allows (Story 3.5, AD-16,
+ * AD-17): the lane's own agent for its own adapter, else the adapter
+ * (`adapterFor`) with its credential read (`readReviewerCredential`; the
+ * start check's choice reuses the text it read). The choice's adapter or
+ * credential failing refuses; any other one failing is left out, with a
+ * `say` line.
+ */
+export function composeReviewers(p: ComposeReviewersParams): Result<ComposedReviewers, "refused"> {
+  const reviewers: { -readonly [K in keyof Reviewers]: Reviewers[K] } = {};
+  const credentials: string[] = [];
+  for (const a of REVIEWER_ORDER) {
+    if (!p.allowed.includes(a)) continue;
+    if (a === p.sessionAgent) {
+      reviewers[a] = p.agent;
+      continue;
+    }
+    const built = adapterFor(a, p.env);
+    const text = !built.ok ? built : a === p.choice && p.choiceCredential !== null ? ok(p.choiceCredential) : readReviewerCredential(a, p.env, p.resultPath);
+    if (!built.ok || !text.ok) {
+      const why = !text.ok ? text.error.message : "";
+      if (a === p.choice) return err("refused", `reviewer ${a}: ${why}`);
+      p.say(`reviewer ${a} left out: ${why}`);
+      continue;
+    }
+    reviewers[a] = built.value;
+    credentials.push(text.value);
+  }
+  return ok({ reviewers, credentials });
 }
 
 function readText(path: string): string | null {
@@ -423,11 +482,47 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const merger = createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch });
     const diffPaths = createGitDiffPaths({ gitDir: runnerGit, fetch });
     const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
-    const secrets = [...credentialSecrets(credential.value), ...(reviewerCredential.value === null ? [] : credentialSecrets(reviewerCredential.value))];
+
+    // Every reviewer the policy allows (Story 3.5): the lane's own agent, or the adapter with its credential.
+    const composed = composeReviewers({
+      allowed: repoConfig.value.repo.policy.unattended_adapters,
+      sessionAgent: sessionAgent.value,
+      agent,
+      choice: choice.adapter,
+      choiceCredential: reviewerCredential.value,
+      env: deps.env,
+      resultPath: layout.resultPath,
+      say,
+    });
+    if (!composed.ok) return failedStart(composed.error.message);
+    const { reviewers } = composed.value;
+    const secrets = [...credentialSecrets(credential.value), ...composed.value.credentials.flatMap((t) => credentialSecrets(t))];
+    // One review step and one passed gate for both roles.
+    const passed = createGitPassedGate({ gitDir: runnerGit, fetch });
+    const review = createReviewStep({
+      forge,
+      sandbox,
+      store,
+      waiter,
+      laneDir,
+      lane,
+      identity,
+      reviewers,
+      checkout: createGitReviewCheckout({ gitDir: runnerGit, laneDir, fetch }),
+      secrets,
+    });
     if (claimed !== null) {
       // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
-      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, provider, secrets };
-      const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
+      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, provider, secrets, review, passed };
+      const reconcile = createReconcileStep({
+        forge,
+        committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }),
+        graphTrees,
+        identity,
+        repo: lane.repo,
+        agent: lane.agent,
+        passed,
+      });
       const planning = createPlanningStep({ ...session, graphTrees });
       const retro = createRetroStep({ ...session, treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }) });
       const retroItem = createRetroItemStep({ ...session, merger, graphTrees });
@@ -453,7 +548,8 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       workspace,
       prStep: createPrStep({ forge, committer, identity, repo: lane.repo, provider, secrets }),
       ciStep: createCiStep({ forge, merger, identity, repo: lane.repo }),
-      mergeStep: createMergeStep({ forge, diffPaths, graphTrees, identity, repo: lane.repo }),
+      reviewGate: createReviewGateStep({ forge, identity, repo: lane.repo, review, passed, secrets }),
+      mergeStep: createMergeStep({ forge, diffPaths, graphTrees, identity, repo: lane.repo, agent: lane.agent, passed }),
       laneDir,
       identity,
       lane,

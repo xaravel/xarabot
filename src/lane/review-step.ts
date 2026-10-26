@@ -27,6 +27,7 @@ import {
   message,
   newTrack,
   readRegular,
+  sessionAllowance,
   stepKit,
   stepOps,
   type PromptOutcome,
@@ -47,6 +48,9 @@ import type { Waiter } from "./wait.ts";
  * - Fresh `main` first: the PR must be open at the record's head, else a
  *   failed attempt with no session. A policy that allows neither reviewer,
  *   or a reviewer the caller did not compose, ends the step `stop`.
+ * - Before each pass's session, fresh `main`'s policy must still allow the
+ *   lane's agent, a reviewer and the chosen reviewer (`sessionAllowance`,
+ *   Story 3.5), else a failed attempt with no session.
  * - A reviewer of the lane's own adapter runs with the lane's model and
  *   effort; any other with its adapter's default model and effort `high`.
  *   Each pass is its own session, through its own `SessionRunner`, in
@@ -257,6 +261,15 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
         input.track.state = r.kind === "ok" ? kit.record.state : null;
         limitStopped = true;
       },
+      // Before each pass's session (Story 3.5): fresh main's policy must still allow the lane's agent, a reviewer, and this reviewer.
+      allowed: sessionAllowance({
+        forge,
+        repo: deps.lane.repo,
+        agent: deps.lane.agent,
+        builderProviders: () => kit.record.builder_providers,
+        also: () => [choice.adapter],
+        callTimeoutMs,
+      }),
     };
     const runner = createSessionRunner({
       agent,

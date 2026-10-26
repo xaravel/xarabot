@@ -6,6 +6,7 @@ import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
+import { allowanceRefusal } from "../core/review/allowance.ts";
 import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { planningKindOf, type PlanningKind } from "../core/schemas/ledger.ts";
@@ -24,6 +25,7 @@ import { laneLayout } from "./lane-store.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import { shown } from "./pr-step.ts";
+import { reviewOrPark } from "./review-gate.ts";
 import {
   createSessionRunner,
   describeError,
@@ -32,8 +34,10 @@ import {
   LIMIT_STOP_REASON,
   MarkerStop,
   message,
+  sessionAllowance,
   stepKit,
   stepOps,
+  unitSubject,
   type PromptOutcome,
   type PrStepOutput,
   type SessionContext,
@@ -73,6 +77,14 @@ import {
  *   fenced, written `merging` and enqueued at its head, and is disposable
  *   like `reconcile`'s (a conflicting enqueue closes it and releases the
  *   record).
+ * - After CI and the PR checks on fresh `main` (Story 3.5): the passed gate
+ *   at the head; a head no review passed gets one review round (the normal
+ *   pass), and a blocking round parks `blocked` `review-findings` for the
+ *   Maintainer, with no loopback. A round that passes starts CI and the
+ *   checks again on fresh `main`, where the gate passes the head. Then,
+ *   before any gate, fresh `main`'s policy must still allow the lane's agent
+ *   and a reviewer (`allowanceRefusal`, else a failed attempt); the enqueue
+ *   fence records `enqueued_sha`.
  * - A unit adopted with its open PR runs no session: its CI is polled at the
  *   record's `head_sha`, and the gate follows.
  *
@@ -221,7 +233,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
     };
 
     /** CI at `head`, fresh `main`, the gate, then `merging` and the enqueue (status) or the approval park (graph). */
-    const ciAndGate = async (pr: number, head: string): Promise<never> => {
+    const ciAndGate = async (pr: number, head: string, again = false): Promise<never> => {
       // 1. CI, with no fix session.
       const polled = await poll(head, config.ci_max_wait_minutes * MINUTE_MS, snapshot.policy.expected_checks);
       if (polled !== "passed") return await parkBlocked("verification", `CI failed on ${head}: ${polled.join(", ")}`);
@@ -241,6 +253,30 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       if (prState === undefined) return await failed(`PR #${pr} is not known to the forge`);
       if (prState.state === "closed") return await failed(`PR #${pr} is closed`);
       if (prState.head_sha !== head) return await failed(`PR #${pr} head is ${prState.head_sha}, not ${head}`);
+
+      // 2a. The passed gate, then one review round for a head no review passed (Story 3.5): a blocking one parks.
+      const reviewed = await reviewOrPark({
+        kit,
+        aborted,
+        identity,
+        maintainer: repo.repo.config.maintainer,
+        passed: deps.passed,
+        review: deps.review,
+        input: { unit: { unit, subject: unitSubject(unit) }, storyId: null, track: input.track, signal: input.signal, log: input.log },
+        head,
+        mainSha: snap.main.sha,
+        callTimeoutMs,
+      });
+      if (reviewed) {
+        // The review took a session's time: every check runs again on fresh main, where the gate now passes the head.
+        if (again) return await failed(`the passed gate still finds ${head} unreviewed after its review passed`);
+        note(`review of ${head} passed: CI and the gates again on fresh main`);
+        return await ciAndGate(pr, head, true);
+      }
+
+      // 2b. The allowance (Story 3.5): fresh main's policy must still allow the lane's agent and a reviewer.
+      const refused = allowanceRefusal(repo.repo.policy, deps.lane.agent, kit.record.builder_providers);
+      if (refused !== null) return await failed(`allowance: ${refused}`);
 
       // 3. A graph PR's merge result through the graph-change gate.
       let graph: GraphDelta | null = null;
@@ -301,7 +337,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
 
       // 5. Fence, merging, enqueue at the head; the queue is not watched.
-      await beat("fence", { passed_sha: head });
+      await beat("fence", { enqueued_sha: head });
       await held("startMerging", startMerging({ unit, by: identity, now: forgeNow(), generation }));
       note(`merging at ${head}`);
       for (let n = 0; ; n += 1) {
@@ -400,6 +436,17 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
     };
 
+    /** `kit.run` for a body that may throw a `Halt` (from the review round): it reaches the process. */
+    const runKit = async (body: () => Promise<PrStepOutput>): Promise<PrStepOutput> => {
+      try {
+        return await body();
+      } catch (e) {
+        if (e instanceof End) return e.out;
+        if (e instanceof Halt) throw e;
+        return kit.run(() => failed(`unexpected error: ${message(e)}`));
+      }
+    };
+
     // ------------------------------------------------------------ the unit
 
     // A unit adopted with its open PR runs no session: CI at the record's head, then the gate.
@@ -407,7 +454,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
     const adoptedHead = input.record.head_sha;
     if (adopted !== null) {
       note(`resuming PR #${adopted} at ${adoptedHead ?? "no head"}: no session`);
-      return kit.run(() => (adoptedHead === null ? failed(`PR #${adopted} has no head_sha on the record`) : ciAndGate(adopted, adoptedHead)));
+      return runKit(() => (adoptedHead === null ? failed(`PR #${adopted} has no head_sha on the record`) : ciAndGate(adopted, adoptedHead)));
     }
 
     const due = planningDue(snapshot)[kind];
@@ -447,6 +494,8 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
         input.track.state = r.kind === "ok" ? kit.record.state : null;
         limitStopped = true;
       },
+      // Before each fresh session: fresh main's policy must still allow the lane's agent and a reviewer (Story 3.5).
+      allowed: sessionAllowance({ forge, repo: deps.lane.repo, agent: deps.lane.agent, builderProviders: () => kit.record.builder_providers, callTimeoutMs }),
     };
     const runner = createSessionRunner({
       agent: deps.agent,
@@ -500,6 +549,6 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       return kit.run(() => failed(why));
     }
     const result = ran.result;
-    return kit.run(() => afterSession(result));
+    return runKit(() => afterSession(result));
   };
 }

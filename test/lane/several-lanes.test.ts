@@ -59,7 +59,7 @@ function mainFiles(): Record<string, string> {
   }
   const files: Record<string, string> = {
     ".xarabot/config.yaml": ["schema_version: 1", 'runner_version: "0.1.0"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "manifests:", "  dir: stories", ""].join("\n"),
-    ".xarabot/policy.yaml": "schema_version: 1\n",
+    ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [claude]\n",
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
     "_bmad-output/planning-artifacts/epics.md": `${epics.join("\n")}\n`,
     [`${SPEC_DIR}/epic-1-context.md`]: "# Epic 1 Context: One\n\nGoal.\n",
@@ -207,7 +207,7 @@ describe("two builder lanes and a coordinator on one host", () => {
     const root = mkdtempSync(join(tmpdir(), "xarabot-several-"));
     dirs.push(root);
     const claim: CoordinatorRecord = {
-      schema_version: 4,
+      schema_version: 5,
       owner: COORD.owner,
       host: COORD.host,
       lane: "coordinator",

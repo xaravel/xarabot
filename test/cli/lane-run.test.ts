@@ -5,7 +5,7 @@ import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/f
 import { ok } from "../../src/core/result.ts";
 import { redactSecrets } from "../../src/core/sanitize.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
-import { credentialSecrets, laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
+import { composeReviewers, credentialSecrets, laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
 import { PI_DEFERRAL } from "../../src/cli/pi-deferral.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
@@ -19,6 +19,10 @@ import * as prStep from "../../src/lane/pr-step.ts";
 import * as reconcileStep from "../../src/lane/reconcile-step.ts";
 import * as retroItemStep from "../../src/lane/retro-item-step.ts";
 import * as retroStep from "../../src/lane/retro-step.ts";
+import * as mergeStep from "../../src/lane/merge-step.ts";
+import * as reviewGate from "../../src/lane/review-gate.ts";
+import * as reviewStep from "../../src/lane/review-step.ts";
+import type { Agent } from "../../src/ports/agent.ts";
 import type { CoordinatorStep } from "../../src/lane/coordinator-process.ts";
 import { hostTest } from "../support/sandbox.ts";
 import {
@@ -51,12 +55,42 @@ const built = {
   retro: [] as { deps: retroStep.RetroStepDeps; step: CoordinatorStep }[],
   retroItem: [] as { deps: retroItemStep.RetroItemStepDeps; step: CoordinatorStep }[],
   pr: [] as { deps: prStep.PrStepDeps; step: ReturnType<typeof prStep.createPrStep> }[],
+  review: [] as { deps: reviewStep.ReviewStepDeps; step: reviewStep.ReviewStep }[],
+  reviewGate: [] as { deps: reviewGate.ReviewGateDeps; step: reviewGate.ReviewGateStep }[],
+  merge: [] as { deps: mergeStep.MergeStepDeps; step: mergeStep.MergeStep }[],
 };
 const realReconcile = reconcileStep.createReconcileStep;
 const realPlanning = planningStep.createPlanningStep;
 const realRetro = retroStep.createRetroStep;
 const realRetroItem = retroItemStep.createRetroItemStep;
 const realPr = prStep.createPrStep;
+const realReview = reviewStep.createReviewStep;
+const realReviewGate = reviewGate.createReviewGateStep;
+const realMerge = mergeStep.createMergeStep;
+mock.module("../../src/lane/review-step.ts", () => ({
+  ...reviewStep,
+  createReviewStep: (deps: reviewStep.ReviewStepDeps) => {
+    const step = realReview(deps);
+    built.review.push({ deps, step });
+    return step;
+  },
+}));
+mock.module("../../src/lane/review-gate.ts", () => ({
+  ...reviewGate,
+  createReviewGateStep: (deps: reviewGate.ReviewGateDeps) => {
+    const step = realReviewGate(deps);
+    built.reviewGate.push({ deps, step });
+    return step;
+  },
+}));
+mock.module("../../src/lane/merge-step.ts", () => ({
+  ...mergeStep,
+  createMergeStep: (deps: mergeStep.MergeStepDeps) => {
+    const step = realMerge(deps);
+    built.merge.push({ deps, step });
+    return step;
+  },
+}));
 mock.module("../../src/lane/pr-step.ts", () => ({
   ...prStep,
   createPrStep: (deps: prStep.PrStepDeps) => {
@@ -760,6 +794,103 @@ describe("xarabot lane run: the reviewer and the session vendor (Story 3.3)", ()
       expect(s?.provider).toBe("openai");
       expect(s?.secrets).toEqual([...credentialSecrets(CODEX_AUTH), CLAUDE_CREDENTIAL]);
     }
+  });
+});
+
+describe("xarabot lane run: the reviewers and the review gate (Story 3.5)", () => {
+  const BOTH = { unattended: ["claude", "codex"] } as const;
+  const reset = () => {
+    for (const list of Object.values(built)) list.length = 0;
+  };
+
+  test("reviewers composed: policy [claude, codex], a claude lane, the codex credential present: both reviewers, codex's secrets redacted", async () => {
+    reset();
+    const r = await laneRunWith({ main: BOTH, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const d = r.starts[0] as LaneDeps;
+    expect(built.review).toHaveLength(1);
+    const review = (built.review[0] as (typeof built.review)[number]).deps;
+    expect(Object.keys(review.reviewers)).toEqual(["claude", "codex"]);
+    expect(review.reviewers.claude).toBe(d.agent);
+    expect(review.reviewers.codex?.vendor).toBe("codex");
+    expect(review.secrets).toContain(CODEX_REFRESH);
+    expect(redactSecrets(`leaked ${CODEX_REFRESH}`, review.secrets)).toBe("leaked [REDACTED]");
+    // One review step and one passed gate: the builder's review gate and merge step share them.
+    const gate = (built.reviewGate[0] as (typeof built.reviewGate)[number]).deps;
+    expect(gate.review).toBe((built.review[0] as (typeof built.review)[number]).step);
+    // The gate's findings file is redacted with every composed credential, the reviewer's too.
+    expect(gate.secrets).toContain(CODEX_REFRESH);
+    expect(gate.secrets).toContain("sk-ant-oat-fake\n");
+    expect(d.reviewGate).toBe((built.reviewGate[0] as (typeof built.reviewGate)[number]).step);
+    const merge = (built.merge[0] as (typeof built.merge)[number]).deps;
+    expect(merge.agent).toBe("claude");
+    expect(merge.passed).toBe(gate.passed);
+    expect(d.mergeStep).toBe((built.merge[0] as (typeof built.merge)[number]).step);
+  });
+
+  test("policy [claude]: only the lane's own agent reviews", async () => {
+    reset();
+    const r = await laneRunWith({ main: { unattended: ["claude"] } });
+    expect(r.code).toBe(0);
+    const review = (built.review[0] as (typeof built.review)[number]).deps;
+    expect(Object.keys(review.reviewers)).toEqual(["claude"]);
+    expect(review.reviewers.claude).toBe((r.starts[0] as LaneDeps).agent);
+  });
+
+  test("a coordinator: its session steps get the one review step and passed gate, and reconcile the agent and the gate", async () => {
+    reset();
+    const r = await laneRunWith({ host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] }), main: BOTH, codex: ["auth.json"] }, [REPO, "coordinator"]);
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const review = built.review[0] as (typeof built.review)[number];
+    expect(Object.keys(review.deps.reviewers)).toEqual(["claude", "codex"]);
+    const reconcile = (built.reconcile[0] as (typeof built.reconcile)[number]).deps;
+    expect(reconcile.agent).toBe("claude");
+    for (const s of [built.planning[0]?.deps, built.retro[0]?.deps, built.retroItem[0]?.deps]) {
+      expect(s?.review).toBe(review.step);
+      expect(s?.passed).toBe(reconcile.passed);
+      expect(s?.secrets).toContain(CODEX_REFRESH);
+    }
+  });
+});
+
+describe("composeReviewers (Story 3.5)", () => {
+  const AGENT = { vendor: "claude", defaultModel: "claude-opus-5-5" } as Agent;
+
+  test("a failing reviewer that is not the start check's choice is left out, with a line; the others are composed", () => {
+    const w = world(dirs);
+    const said: string[] = [];
+    // No codex credential on this host: codex is not the choice here, so it is left out.
+    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: (t) => said.push(t) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.value.reviewers)).toEqual(["claude"]);
+    expect(r.value.credentials).toEqual([]);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toStartWith("reviewer codex left out: codex: credential missing: neither auth.json nor api-key");
+  });
+
+  test("the start check's choice failing refuses", () => {
+    const w = world(dirs);
+    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "codex", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toContain("reviewer codex: codex: credential missing");
+  });
+
+  test("another lane's adapter with its credential read joins, its text kept for the secrets", () => {
+    const w = world(dirs);
+    writeCodexCredential(w, "auth.json");
+    const r = composeReviewers({ allowed: ["claude", "codex"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude", "codex"]);
+    expect(r.ok && r.value.credentials).toEqual([CODEX_AUTH]);
+  });
+
+  test("an adapter the policy does not allow is never composed; pi is never a reviewer", () => {
+    const w = world(dirs);
+    writeCodexCredential(w, "auth.json");
+    const r = composeReviewers({ allowed: ["claude", "pi"], sessionAgent: "claude", agent: AGENT, choice: "claude", choiceCredential: null, env: w.env, resultPath: "/r/result.json", say: () => {} });
+    expect(r.ok && Object.keys(r.value.reviewers)).toEqual(["claude"]);
   });
 });
 

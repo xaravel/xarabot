@@ -28,6 +28,7 @@ import { createMergeStep } from "./merge-step.ts";
 import type { Merger } from "./merger.ts";
 import { shown, statusComment } from "./pr-step.ts";
 import { createRegenerate } from "./regenerate.ts";
+import { createReviewGateStep, type LoopbackSession } from "./review-gate.ts";
 import {
   CI_FIX_LOG,
   createSessionRunner,
@@ -37,6 +38,8 @@ import {
   LIMIT_STOP_REASON,
   MarkerStop,
   message,
+  REVIEW_FINDINGS,
+  sessionAllowance,
   stepKit,
   stepOps,
   unitSubject,
@@ -76,6 +79,13 @@ import {
  *   comment.
  * - CI is the CI step's (`createCiStep`): fix and conflict sessions in
  *   `ci-fix` mode up to `CI_FIX_CAP`, lockfile regeneration, no spec file.
+ * - Then the review gate (Story 3.5, `createReviewGateStep`, no Story id
+ *   and no spec): a head no review passed gets a review round; a blocking
+ *   one a `loopback` session (`retro_item_loopback`, the findings in
+ *   `tmp/review-findings.md`) up to `LOOPBACK_CAP`, its fix pushed as a CI
+ *   fix is and taken through CI again.
+ * - Before each session, fresh `main`'s policy must still allow the lane's
+ *   agent and a reviewer (`sessionAllowance`), else a failed attempt.
  * - The merge step runs with `watch: false`: the graph-change gate, then the
  *   approval gate (parks `awaiting-approval`), else the fence, `merging` and
  *   the enqueue at the head; the step then ends `progress` `merging`, the
@@ -86,6 +96,9 @@ import {
  * Like the retro step, the sessions run outside `kit.run`, so a `Halt`
  * reaches the coordinator process; anything else never throws.
  */
+
+/** A session's mode, with the text its prompt's file holds: the CI log, or the review findings. */
+type SessionMode = { readonly mode: "build" } | { readonly mode: "ci-fix"; readonly text: string } | { readonly mode: "loopback"; readonly text: string };
 
 export type RetroItemStepDeps = SessionStepDeps & {
   /** Merges `main` into the PR in the CI step. */
@@ -145,7 +158,8 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
   const settings: AgentSettings = { effort: deps.lane.effort, ...(deps.lane.model !== undefined ? { model: deps.lane.model } : {}) };
   const timing = { now: clock, callTimeoutMs, sleep, ...(deps.random !== undefined ? { random: deps.random } : {}) };
   const ciStep = createCiStep({ forge, merger: deps.merger, identity, repo: deps.lane.repo, ...timing });
-  const mergeStep = createMergeStep({ forge, diffPaths: deps.diffPaths, graphTrees: deps.graphTrees, identity, repo: deps.lane.repo, ...timing });
+  const mergeStep = createMergeStep({ forge, diffPaths: deps.diffPaths, graphTrees: deps.graphTrees, identity, repo: deps.lane.repo, agent: deps.lane.agent, passed: deps.passed, ...timing });
+  const reviewGate = createReviewGateStep({ forge, identity, repo: deps.lane.repo, review: deps.review, passed: deps.passed, secrets, ...timing });
 
   return async (input: CoordinatorStepInput): Promise<PrStepOutput> => {
     const unit = input.unit.unit;
@@ -319,6 +333,8 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
         input.track.state = r.kind === "ok" ? kit.record.state : null;
         limitStopped = true;
       },
+      // Before each fresh session: fresh main's policy must still allow the lane's agent and a reviewer (Story 3.5).
+      allowed: sessionAllowance({ forge, repo: deps.lane.repo, agent: deps.lane.agent, builderProviders: () => kit.record.builder_providers, callTimeoutMs }),
     };
     const runner = createSessionRunner({
       agent: deps.agent,
@@ -353,18 +369,22 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
     /** The human-live step ids the last prompt offered: a `human-live-step` result must name one. */
     let promptedStepIds: readonly string[] = [];
 
-    /** The prompt, after `prepare`: with `ciLog` in `ci-fix` mode, its log written to `tmp/ci-fix-log.md`. */
-    const prompt = (ciLog: string | null): PromptOutcome => {
+    /**
+     * The prompt, after `prepare`: in `ci-fix` mode its log written to
+     * `tmp/ci-fix-log.md`; in `loopback` mode the review findings written to
+     * `tmp/review-findings.md`.
+     */
+    const prompt = (session: SessionMode): PromptOutcome => {
       promptedStepIds = [];
       let mode: RetroItemPromptMode = { mode: "build" };
-      if (ciLog !== null) {
-        const logPath = join(layout.tmp, CI_FIX_LOG);
+      if (session.mode !== "build") {
+        const path = join(layout.tmp, session.mode === "ci-fix" ? CI_FIX_LOG : REVIEW_FINDINGS);
         try {
-          writeFileSync(logPath, ciLog);
+          writeFileSync(path, session.text);
         } catch (e) {
-          return { ok: false, reason: `ci-fix log: cannot write ${logPath}: ${message(e)}` };
+          return { ok: false, reason: `${session.mode === "ci-fix" ? "ci-fix log" : "review findings"}: cannot write ${path}: ${message(e)}` };
         }
-        mode = { mode: "ci-fix", log_path: logPath };
+        mode = session.mode === "ci-fix" ? { mode: "ci-fix", log_path: path } : { mode: "loopback", findings_path: path };
       }
       const repo = loadRepoConfig({ repo: deps.lane.repo, now: snapshot.now, tree: Object.keys(input.files), files: { ...input.files } });
       if (!repo.ok) return { ok: false, reason: `config: ${repo.error.message}` };
@@ -385,9 +405,9 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
 
     type Ran = { readonly ok: true; readonly result: BuildResult } | { readonly ok: false; readonly reason: string };
 
-    /** One `build` session at `at`; with `ciLog` in `ci-fix` mode. A `human-live-step` result must name an offered step. */
-    const sessionAt = async (at: string, ciLog: string | null): Promise<Ran> => {
-      const ran = await runner.session(ctx, { at, kind: "build", prompt: () => prompt(ciLog) });
+    /** One `build` session at `at`, in `mode`. A `human-live-step` result must name an offered step. */
+    const sessionAt = async (at: string, mode: SessionMode): Promise<Ran> => {
+      const ran = await runner.session(ctx, { at, kind: "build", prompt: () => prompt(mode) });
       if (!ran.ok) return ran;
       const result = ran.result;
       note(`result: ${result.outcome}`);
@@ -400,10 +420,16 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
     const ciSession: CiSession = async ({ start, logText }) => {
       let ran: Ran;
       try {
-        ran = await sessionAt(start, logText);
+        ran = await sessionAt(start, { mode: "ci-fix", text: logText });
       } catch (e) {
         return err("session", e instanceof End ? (e.out.reason ?? "the session ended early") : `session threw: ${message(e)}`);
       }
+      if (!ran.ok) return err("session", ran.reason);
+      return ok({ result: ran.result, specPath: null, superseded: [] });
+    };
+    /** The review gate's loopback sessions: `loopback` mode, no spec file. A `Halt` reaches the gate's caller. */
+    const loopbackSession: LoopbackSession = async ({ start, findingsText }) => {
+      const ran = await sessionAt(start, { mode: "loopback", text: findingsText });
       if (!ran.ok) return err("session", ran.reason);
       return ok({ result: ran.result, specPath: null, superseded: [] });
     };
@@ -420,7 +446,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
       if (budget.aborted && !input.signal.aborted && out.outcome !== "stop" && out.state === "claimed") await failed(overBudget());
     };
 
-    /** CI on the PR, then the merge step, until neither has more to do. */
+    /** CI on the PR, the review gate, then the merge step, until none has more to do. */
     const ciAndMerge = async (): Promise<PrStepOutput> => {
       for (;;) {
         const withPr = kit.record;
@@ -442,6 +468,17 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
         }
         await settle(ci, "CI step");
         if (ci.outcome !== "progress" || ci.state !== "claimed") throw end(ci.outcome, ci.state);
+        const gated = await reviewGate({ unit: stepUnit, storyId: null, record: kit.record, track: input.track, signal, log: input.log, needsSpec: false, session: loopbackSession, pushFix });
+        if (limitStopped) {
+          note(`stop: ${LIMIT_STOP_REASON}`);
+          throw new MarkerStop("stop", LIMIT_STOP_REASON);
+        }
+        await settle(gated, "review gate");
+        if (gated.outcome !== "progress" || gated.state !== "claimed") throw end(gated.outcome, gated.state);
+        if (gated.pushed === true) {
+          note("loopback fix pushed: CI again on the new head");
+          continue;
+        }
         const merged = await mergeStep({ unit: stepUnit, record: kit.record, signal, log: input.log, watch: false });
         await settle(merged, "merge step");
         // With no queue watch, the merge step never reports an ejection; were it to, CI runs again.
@@ -472,7 +509,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
     // The session runs outside `kit.run`: a `Halt` reaches the process.
     let ran: Ran;
     try {
-      ran = await sessionAt(snapshot.main_sha, null);
+      ran = await sessionAt(snapshot.main_sha, { mode: "build" });
     } catch (e) {
       if (e instanceof End) return e.out;
       if (e instanceof Halt) throw e;
