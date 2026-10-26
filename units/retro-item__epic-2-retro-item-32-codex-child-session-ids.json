@@ -1,35 +1,27 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-32-codex-child-session-ids",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/adapters/agent/codex/usage.ts",
     "test/adapters/agent/codex/usage.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T10:54:36.182Z",
+  "heartbeat_at": "2026-10-26T10:56:09.201Z",
   "pr": 192,
   "pr_owner": "edanisko",
   "base_sha": "a7f9225b12114fff898779a447d443ce2f9209c0",
   "head_sha": "dc3dfe0caace17064733cee3a55d650a440cd6d5",
   "reviewed_sha": null,
   "passed_sha": null,
-  "approved_sha": null,
+  "approved_sha": "dc3dfe0caace17064733cee3a55d650a440cd6d5",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/adapters/agent/codex/usage.ts",
-      "test/adapters/agent/codex/usage.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
