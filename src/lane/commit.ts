@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { isBotIdentity, type BotIdentity } from "../core/bot-identity.ts";
 import { checkWrite, epicContextMatch, type CoordinatorWriteRules, type WriteChange, type WriteRefusal, type WriteRules } from "../core/lane/write-check.ts";
 import { err, ok } from "../core/result.ts";
-import { sanitizeAgentText } from "../core/sanitize.ts";
+import { holdsCredential, sanitizeAgentText } from "../core/sanitize.ts";
 import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, snapshotTree, type CloneResult } from "./clone.ts";
 
 /**
@@ -13,8 +13,10 @@ import { failed, git, gitRun, headRef, needCommit, readMarker, RUNNER_IDENTITY, 
  * files and to superseded spec files are reverted to `baseSha`'s version
  * (an added one removed); then the write check (FR18, AR31), a
  * builder's or the coordinator's, runs on what is left, before any temp
- * commit; a refusal writes nothing. Under coordinator rules the check
- * judges the clone session's own unit, from its marker. `merge-tree`
+ * commit; a refusal writes nothing. It refuses, under either role, every
+ * added or changed blob that holds one of `secrets` or a token-shaped
+ * string (`credential`, Epic 2 retro item 20). Under coordinator rules the
+ * check judges the clone session's own unit, from its marker. `merge-tree`
  * applies the change onto `ontoSha`. A conflict is returned, never resolved,
  * with the session's start, onto which the same change always applies.
  */
@@ -29,7 +31,7 @@ export type CommitParams = {
   readonly bot: BotIdentity;
   /** The agent's commit message; sanitized before use. */
   readonly message: string;
-  /** Credentials the message's sanitizing redacts; default none. */
+  /** Credentials the message's sanitizing redacts and the write check refuses in a committed blob; default none. */
   readonly secrets?: readonly string[];
   /** The write check's rules, from the same fresh `main`: a builder's or the coordinator's. */
   readonly rules: WriteRules | CoordinatorWriteRules;
@@ -112,42 +114,44 @@ async function sideText(gitDir: string, mode: string, sha: string, signal: Abort
 }
 
 /**
- * The write check's input: each changed path and its new mode, with an
- * added or changed symlink's target (Epic 2 retro item 18), the own
- * manifest's texts when it is a regular file on both sides and, under
- * coordinator rules, `retro_gates_path`'s and `sprint_status_path`'s texts
- * (`null` on a side where it is absent; Story 2.9, AR31).
+ * The write check's input: each changed path and its new mode, with whether
+ * an added or changed blob holds a credential (`secrets` or a token-shaped
+ * string; Epic 2 retro item 20), an added or changed symlink's target (Epic
+ * 2 retro item 18), the own manifest's texts when it is a regular file on
+ * both sides and, under coordinator rules, `retro_gates_path`'s and
+ * `sprint_status_path`'s texts (`null` on a side where it is absent; Story
+ * 2.9, AR31).
  */
-async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWriteRules, changes: readonly RawChange[], signal: AbortSignal): Promise<CloneResult<WriteChange[]>> {
+async function writeChanges(
+  gitDir: string,
+  rules: WriteRules | CoordinatorWriteRules,
+  changes: readonly RawChange[],
+  secrets: readonly string[],
+  signal: AbortSignal,
+): Promise<CloneResult<WriteChange[]>> {
   const out: WriteChange[] = [];
-  const texts = async (c: RawChange): Promise<CloneResult<{ before: string | null; after: string | null }>> => {
-    const before = await sideText(gitDir, c.oldMode, c.oldSha, signal);
-    if (!before.ok) return before;
+  for (const c of changes) {
+    // Every new side is read once: a deleted path has none, and a gitlink was refused before.
     const after = await sideText(gitDir, c.newMode, c.newSha, signal);
     if (!after.ok) return after;
-    return ok({ before: before.value, after: after.value });
-  };
-  for (const c of changes) {
+    const credential = after.value !== null && holdsCredential(after.value, secrets) ? { credential: true } : {};
+    const before = () => sideText(gitDir, c.oldMode, c.oldSha, signal);
     if (rules.role === "coordinator" && fold(c.path) === fold(rules.retroGatesPath)) {
-      const t = await texts(c);
-      if (!t.ok) return t;
-      out.push({ path: c.path, mode: c.newMode, retroGates: t.value });
+      const b = await before();
+      if (!b.ok) return b;
+      out.push({ path: c.path, mode: c.newMode, retroGates: { before: b.value, after: after.value }, ...credential });
     } else if (rules.role === "coordinator" && fold(c.path) === fold(rules.sprintStatusPath)) {
-      const t = await texts(c);
-      if (!t.ok) return t;
-      out.push({ path: c.path, mode: c.newMode, sprintStatus: t.value });
+      const b = await before();
+      if (!b.ok) return b;
+      out.push({ path: c.path, mode: c.newMode, sprintStatus: { before: b.value, after: after.value }, ...credential });
     } else if (rules.role === "builder" && c.path === rules.storyFile && c.oldMode === REGULAR && c.newMode === REGULAR) {
-      const before = await git(gitDir, ["cat-file", "blob", c.oldSha], { signal });
-      if (!before.ok) return before;
-      const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
-      if (!after.ok) return after;
-      out.push({ path: c.path, mode: c.newMode, storyFile: { before: before.value, after: after.value } });
+      const b = await before();
+      if (!b.ok) return b;
+      out.push({ path: c.path, mode: c.newMode, storyFile: { before: b.value ?? "", after: after.value ?? "" }, ...credential });
     } else if (c.newMode === SYMLINK) {
-      const target = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
-      if (!target.ok) return target;
-      out.push({ path: c.path, mode: c.newMode, linkTarget: target.value });
+      out.push({ path: c.path, mode: c.newMode, linkTarget: after.value ?? "", ...credential });
     } else {
-      out.push({ path: c.path, mode: c.newMode });
+      out.push({ path: c.path, mode: c.newMode, ...credential });
     }
   }
   return ok(out);
@@ -207,7 +211,7 @@ export async function commitSession(params: CommitParams): Promise<CloneResult<C
     if (!again.ok) return again;
     own = again.value;
   }
-  const changes = await writeChanges(gitDir, rules, own, signal);
+  const changes = await writeChanges(gitDir, rules, own, params.secrets ?? [], signal);
   if (!changes.ok) return changes;
   // A coordinator session may change only its own unit's keys of the sprint status.
   const refusals = checkWrite(rules.role === "coordinator" ? { ...rules, unit } : rules, changes.value);

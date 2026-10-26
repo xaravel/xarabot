@@ -12,8 +12,9 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
  * case-folded, because the clone lives on a case-insensitive filesystem;
  * the exceptions compare exact paths, so folding only ever widens a
  * refusal. A symlink the change adds or changes is refused on its target
- * too (`symlink`, Epic 2 retro item 18), under either role. A coordinator
- * session's change has its own rules
+ * too (`symlink`, Epic 2 retro item 18), and a blob it adds or changes on
+ * a credential it holds (`credential`, Epic 2 retro item 20), under either
+ * role. A coordinator session's change has its own rules
  * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds,
  * matched exactly, so a case variant of one is refused; a retro item's
  * (Story 2.10) adds every builder refusal, with no exception; and in
@@ -26,12 +27,15 @@ export const WRITE_CLASSES = ["coordinator-file", "live-evidence", "xarabot", "m
 export type WriteClass = (typeof WRITE_CLASSES)[number];
 
 /**
- * The content classes (AD-30), checked under either role after the path
- * classes, with no exception: `symlink` is an added or changed symlink
- * whose target leaves the clone or resolves into a refused class
- * (`symlinkTarget`).
+ * The content classes (AD-30), in reporting order, checked under either
+ * role after the path classes, with no exception: `symlink` is an added or
+ * changed symlink whose target leaves the clone or resolves into a refused
+ * class (`symlinkTarget`); `credential` is an added or changed blob that
+ * holds the lane's vendor credential or a token-shaped string
+ * (`WriteChange.credential`; Maintainer decision 2026-10-25, Epic 2 retro
+ * C3). A refusal names the path only, never what matched.
  */
-export const CONTENT_WRITE_CLASSES = ["symlink"] as const;
+export const CONTENT_WRITE_CLASSES = ["symlink", "credential"] as const;
 export type ContentWriteClass = (typeof CONTENT_WRITE_CLASSES)[number];
 
 /** The classes an approved Infrastructure Story may write. */
@@ -80,7 +84,10 @@ export type WriteRules = RefusedPaths & {
    * never holds a change to one.
    */
   readonly superseded: readonly string[];
-  /** The unit's own manifest: its frontmatter `status:` line is excepted, exact path. */
+  /**
+   * The unit's own manifest: its frontmatter `status:` line is excepted,
+   * exact path, when it sets a BMAD Story status (`STORY_STATUSES`).
+   */
   readonly storyFile: string;
   /** An approved Infrastructure Story: its Protected Paths are excepted. */
   readonly infrastructureApproved: boolean;
@@ -126,6 +133,13 @@ export type WriteChange = {
    * text. Missing for such a change is `symlink`.
    */
   readonly linkTarget?: string;
+  /**
+   * True when the new side is a blob (a file, or a symlink's target) that
+   * holds the lane's vendor credential or a token-shaped string
+   * (`holdsCredential`): `credential`. The committer sets it for every
+   * added or changed blob; a deleted path has no new side to hold one.
+   */
+  readonly credential?: boolean;
   readonly storyFile?: { readonly before: string; readonly after: string };
   /**
    * Under coordinator rules, for a change to `retro_gates_path`: its text
@@ -168,7 +182,8 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * retro item, Story 2.10), a path no coordinator class refuses is then
  * classified as a builder's would be, with no exception (`WRITE_CLASSES`).
  * A path left is then `symlink` when it adds or changes a symlink whose
- * target leaves the clone or is a path these classes refuse.
+ * target leaves the clone or is a path these classes refuse, and else
+ * `credential` when its new blob holds a credential.
  */
 export const COORDINATOR_WRITE_CLASSES = [
   "xarabot",
@@ -259,6 +274,13 @@ export function epicContextMatch(pattern: string, path: string): boolean {
   return new RegExp(`^${source}$`).test(fold(path));
 }
 
+/**
+ * The BMAD Story status values, as `bmad-sprint-planning` defines them: the
+ * only values the own manifest's `status:` line may be set to (Epic 2 retro
+ * item 20).
+ */
+export const STORY_STATUSES: ReadonlySet<string> = new Set(["backlog", "ready-for-dev", "in-progress", "review", "done"]);
+
 type StatusSplit = {
   /** The text's lines with the frontmatter `status:` line removed. */
   readonly rest: readonly string[];
@@ -295,7 +317,9 @@ function withoutStatusKey(fm: Record<string, unknown>): Record<string, unknown> 
  * no `\r` but a trailing one), and with those lines removed both texts are
  * identical. Both frontmatters must also parse as YAML mappings that are
  * equal without their `status` key, and `after`'s `status`, if any, must be
- * a string.
+ * a BMAD Story status (`STORY_STATUSES`). Only a bare `status:` key counts:
+ * a quoted `"status":` or `'status':` line is any other line, so a change to
+ * it is refused.
  */
 export function statusLineOnly(before: string, after: string): boolean {
   const b = splitStatus(before);
@@ -303,7 +327,10 @@ export function statusLineOnly(before: string, after: string): boolean {
   if (b === null || a === null) return false;
   if (b.rest.join("\n") !== a.rest.join("\n")) return false;
   if (b.frontmatter === null || a.frontmatter === null) return false;
-  if (Object.hasOwn(a.frontmatter, "status") && typeof a.frontmatter["status"] !== "string") return false;
+  if (Object.hasOwn(a.frontmatter, "status")) {
+    const status = a.frontmatter["status"];
+    if (typeof status !== "string" || !STORY_STATUSES.has(status)) return false;
+  }
   return Bun.deepEquals(withoutStatusKey(b.frontmatter), withoutStatusKey(a.frontmatter), true);
 }
 
@@ -562,6 +589,7 @@ function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly W
     const builder = rules.refused === null ? null : classify(rules.refused, path);
     if (builder !== null) out.push({ path, class: builder });
     else if (symlinkRefused(change, targetRefused)) out.push({ path, class: "symlink" });
+    else if (change.credential === true) out.push({ path, class: "credential" });
   }
   return out.sort(byPath);
 }
@@ -580,6 +608,7 @@ function checkBuilderWrite(rules: WriteRules, changes: readonly WriteChange[]): 
       (rules.infrastructureApproved && INFRASTRUCTURE_CLASSES.has(cls));
     if (!excepted) out.push({ path, class: cls });
     else if (symlinkRefused(change, targetRefused)) out.push({ path, class: "symlink" });
+    else if (change.credential === true) out.push({ path, class: "credential" });
   }
   return out.sort(byPath);
 }
