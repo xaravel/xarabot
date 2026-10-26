@@ -166,3 +166,9 @@ epics:
         blocking: false
         globs: ["src/core/lane/waits.ts", "test/core/lane/waits.test.ts", "docs/maintainer/self-host.md"]
         status: open
+      - id: "epic-2-retro-item-27-read-legacy-builder-provider-names"
+        text: "Story 3.3 changed builder_providers[] values from vendor names (claude, codex) to providers (anthropic, openai), per AR17. Records written by runner-11 and earlier still hold \"claude\" or \"codex\", which chooseReviewer reads as unknown vendors, so a unit Claude built would get claude as a cross-vendor reviewer. Map the legacy names on read (claude -> anthropic, codex -> openai) wherever builder_providers is consumed, before the review gate (Stories 3.4 and 3.5) uses chooseReviewer; never rewrite stored records; tests for a legacy claude set, a legacy codex set, a mixed set and an unknown name"
+        route: lane
+        blocking: false
+        globs: ["src/core/review/**", "test/core/review/**"]
+        status: open
