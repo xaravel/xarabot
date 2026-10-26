@@ -30,6 +30,17 @@ export type ManifestSpec = {
 
 export type Verdict = "accepted" | "accepted-with-open-items" | "rejected" | "rejected-go";
 
+/** A retro item of an Epic: `epic-<N>-retro-item-<seq>-x`, always with no globs, routed to a lane unless `route` says otherwise. */
+export type ItemSpec = {
+  readonly seq: number;
+  readonly blocking: boolean;
+  readonly status: "open" | "in-progress" | "waiting" | "deferred" | "done";
+  readonly route?: "lane" | "maintainer";
+};
+
+/** The id the fixtures give item `seq` of Epic `n`. */
+export const itemId = (n: number, seq: number) => `epic-${n}-retro-item-${seq}-x`;
+
 export type World = {
   /** Epic number → Story numbers with headings in `epics.md`. */
   readonly epics: Record<number, readonly string[]>;
@@ -39,6 +50,8 @@ export type World = {
   readonly epicsYaml?: string;
   /** Epic → retro verdict; default none. */
   readonly retro?: Record<number, Verdict>;
+  /** Epic → its retro items in `retro-gates.yaml`, alongside any verdict; default none. */
+  readonly items?: Record<number, readonly ItemSpec[]>;
   /** Story id → status (sprint key `k-<id>`); an `epic-<N>` key is written as it is. */
   readonly status?: Record<string, string>;
   /** Epic → context text, `null` to leave it out. Default a valid file, with its source line, for every Epic. */
@@ -111,12 +124,31 @@ function config(w: World): string {
   return `${lines.join("\n")}\n`;
 }
 
-function retroGates(retro: Record<number, Verdict>): string {
+function retroGates(retro: Record<number, Verdict>, items: Record<number, readonly ItemSpec[]>): string {
   const lines = ["schema_version: 1", "epics:"];
-  for (const [n, v] of Object.entries(retro)) {
-    const verdict = v === "rejected-go" ? "rejected" : v;
-    lines.push(`  "${n}":`, "    retro:", `      verdict: ${verdict}`, `      unit: "retro:${n}"`, "      recorded_at: 2026-10-20T00:00:00Z");
-    if (v === "rejected-go") lines.push("      go:", "        by: edanisko", "        at: 2026-10-21T00:00:00Z", "        ruling: maintainer-pr");
+  const keys = [...new Set([...Object.keys(retro), ...Object.keys(items)])].sort((a, b) => Number(a) - Number(b));
+  for (const n of keys) {
+    lines.push(`  "${n}":`);
+    const v = retro[Number(n)];
+    if (v !== undefined) {
+      const verdict = v === "rejected-go" ? "rejected" : v;
+      lines.push("    retro:", `      verdict: ${verdict}`, `      unit: "retro:${n}"`, "      recorded_at: 2026-10-20T00:00:00Z");
+      if (v === "rejected-go") lines.push("      go:", "        by: edanisko", "        at: 2026-10-21T00:00:00Z", "        ruling: maintainer-pr");
+    }
+    const its = items[Number(n)];
+    if (its !== undefined) {
+      lines.push(its.length === 0 ? "    items: []" : "    items:");
+      for (const it of its) {
+        lines.push(
+          `      - id: ${itemId(Number(n), it.seq)}`,
+          "        text: Do the thing.",
+          `        route: ${it.route ?? "lane"}`,
+          `        blocking: ${it.blocking}`,
+          "        globs: []",
+          `        status: ${it.status}`,
+        );
+      }
+    }
   }
   return `${lines.join("\n")}\n`;
 }
@@ -146,7 +178,7 @@ export function input(w: World): AssembleInput {
     [STATUS]: sprintStatus(w.status ?? {}),
   };
   if (w.epicsYaml !== undefined) files[".xarabot/epics.yaml"] = w.epicsYaml;
-  if (w.retro !== undefined) files[RETRO] = retroGates(w.retro);
+  if (w.retro !== undefined || w.items !== undefined) files[RETRO] = retroGates(w.retro ?? {}, w.items ?? {});
   for (const n of Object.keys(w.epics).map(Number)) files[contextPath(n)] = validContext(n, files[EPICS_MD] as string);
   for (const [n, text] of Object.entries(w.contexts ?? {})) files[contextPath(Number(n))] = text;
   for (const m of specs) files[manifestPath(m.id)] = manifest(m);

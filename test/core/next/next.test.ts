@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { next, type NextOutcome } from "../../../src/core/next/next.ts";
 import type { Snapshot } from "../../../src/core/schemas/snapshot.ts";
-import { contextPath, manifestPath, shaOf, snapshotOf, storyRec, type World } from "./fixtures.ts";
+import { contextPath, itemId, type ItemSpec, manifestPath, shaOf, snapshotOf, storyRec, type Verdict, type World } from "./fixtures.ts";
 
 const pick = (w: World) => next(snapshotOf(w), "builder");
 
@@ -182,6 +182,154 @@ describe("next: rejected retro", () => {
       expect(codes(o)).toEqual([]);
     });
   }
+});
+
+describe("next: retro-item distance gates (FR10, AR13)", () => {
+  // Chain 1 → 2 → 3 → 4 (each depends on the previous); Epics 1-3 done with retros recorded, so only 4.1 is left.
+  const chain = (items: readonly ItemSpec[], verdict: Verdict = "accepted-with-open-items", over: Partial<World> = {}): World => ({
+    epics: { 1: ["1"], 2: ["1"], 3: ["1"], 4: ["1"] },
+    status: { "1.1": "done", "2.1": "done", "3.1": "done" },
+    retro: { 1: verdict, 2: "accepted", 3: "accepted" },
+    items: { 1: items },
+    ...over,
+  });
+  const ID = `retro-item:${itemId(1, 1)}`;
+  const untagged = (status: ItemSpec["status"] = "open"): ItemSpec[] => [{ seq: 1, blocking: false, status }];
+  const blocking = (status: ItemSpec["status"] = "open"): ItemSpec[] => [{ seq: 1, blocking: true, status }];
+
+  const cases: { name: string; world: World; expect: string; codes: string[] }[] = [
+    { name: "an untagged open item holds Epics 3 and 4 (d ≥ 2), not Epic 2 (d = 1)", world: chain(untagged()), expect: "idle", codes: ["epic:3 retro-item", "epic:4 retro-item"] },
+    { name: "a blocking open item holds Epics 2, 3 and 4", world: chain(blocking()), expect: "idle", codes: ["epic:2 retro-item", "epic:3 retro-item", "epic:4 retro-item"] },
+    ...(["done", "deferred"] as const).flatMap((st) => [
+      { name: `an untagged ${st} item holds nothing`, world: chain(untagged(st)), expect: "unit 4.1", codes: [] },
+      { name: `a blocking ${st} item holds nothing`, world: chain(blocking(st)), expect: "unit 4.1", codes: [] },
+    ]),
+    ...(["waiting", "in-progress"] as const).flatMap((st) => [
+      { name: `an untagged ${st} item holds d ≥ 2 as open does`, world: chain(untagged(st)), expect: "idle", codes: ["epic:3 retro-item", "epic:4 retro-item"] },
+      { name: `a blocking ${st} item holds d ≥ 1 as open does`, world: chain(blocking(st)), expect: "idle", codes: ["epic:2 retro-item", "epic:3 retro-item", "epic:4 retro-item"] },
+    ]),
+    {
+      name: "a maintainer-routed item gates as a lane-routed one does",
+      world: chain([{ seq: 1, blocking: false, status: "open", route: "maintainer" }]),
+      expect: "idle",
+      codes: ["epic:3 retro-item", "epic:4 retro-item"],
+    },
+    { name: "rejected with no go holds every Epic at d ≥ 1", world: chain([], "rejected"), expect: "idle", codes: ["epic:2 retro-rejected", "epic:3 retro-rejected", "epic:4 retro-rejected"] },
+    { name: "rejected with go holds nothing by its verdict", world: chain([], "rejected-go"), expect: "unit 4.1", codes: [] },
+    { name: "rejected with go: an untagged open item still holds d ≥ 2", world: chain(untagged(), "rejected-go"), expect: "idle", codes: ["epic:3 retro-item", "epic:4 retro-item"] },
+    {
+      name: "rejected with go: a blocking open item still holds d ≥ 1",
+      world: chain(blocking(), "rejected-go"),
+      expect: "idle",
+      codes: ["epic:2 retro-item", "epic:3 retro-item", "epic:4 retro-item"],
+    },
+    {
+      name: "rejected with no go and an untagged item: both hold, each by its own rule",
+      world: chain(untagged(), "rejected"),
+      expect: "idle",
+      codes: ["epic:2 retro-rejected", "epic:3 retro-rejected", "epic:3 retro-item", "epic:4 retro-rejected", "epic:4 retro-item"],
+    },
+    { name: "an accepted verdict holds nothing by itself; its items still gate", world: chain(untagged(), "accepted"), expect: "idle", codes: ["epic:3 retro-item", "epic:4 retro-item"] },
+    {
+      name: "one reason per holding item",
+      world: chain([{ seq: 1, blocking: true, status: "open" }, { seq: 2, blocking: false, status: "waiting" }, { seq: 3, blocking: false, status: "done" }]),
+      expect: "idle",
+      codes: ["epic:2 retro-item", "epic:3 retro-item", "epic:3 retro-item", "epic:4 retro-item", "epic:4 retro-item"],
+    },
+    {
+      name: "the item's own Epic (d = 0) is never held by it",
+      world: chain(blocking(), "accepted-with-open-items", { status: {} }),
+      expect: "unit 1.1",
+      codes: ["epic:2 dependency-epic", "epic:2 retro-item", "epic:3 dependency-epic", "epic:3 retro-item", "epic:4 dependency-epic", "epic:4 retro-item"],
+    },
+    {
+      name: "a bootstrapped Epic's items gate its dependents",
+      world: chain(blocking(), "accepted-with-open-items", { bootstrapped: [1] }),
+      expect: "idle",
+      codes: ["epic:2 retro-item", "epic:3 retro-item", "epic:4 retro-item"],
+    },
+    {
+      name: "diamond: D (3) depends on E (1) and on F (2), F on E; an untagged item on E does not hold D, only its dependent 4",
+      world: chain(untagged(), "accepted-with-open-items", { epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [1, 2]\n" }),
+      expect: "idle",
+      codes: ["epic:4 retro-item"],
+    },
+    {
+      name: "diamond: with Epic 4 left out, D (3) is picked",
+      world: chain(untagged(), "accepted-with-open-items", {
+        epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [1, 2]\n  4:\n    depends_on: []\n",
+        status: { "1.1": "done", "2.1": "done", "4.1": "done" },
+        retro: { 1: "accepted-with-open-items", 2: "accepted" },
+      }),
+      expect: "unit 3.1",
+      codes: [],
+    },
+    {
+      name: "an unrelated Epic (4 depends on nothing) is never held",
+      world: chain(blocking(), "rejected", { epicsYaml: "version: 1\nepics:\n  4:\n    depends_on: []\n" }),
+      expect: "unit 4.1",
+      codes: ["epic:2 retro-rejected", "epic:2 retro-item", "epic:3 retro-rejected", "epic:3 retro-item"],
+    },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      const o = pick(c.world);
+      expect(chosen(o)).toBe(c.expect);
+      expect(codes(o)).toEqual(c.codes);
+    });
+  }
+
+  test("the idle reason names an untagged item, its Epic and its distance", () => {
+    const o = pick(chain(untagged()));
+    expect(idleReason(o)).toBe(
+      `Epic 3 is held by Epic 1's retro item ${ID} (open, untagged, distance 2); Epic 4 is held by Epic 1's retro item ${ID} (open, untagged, distance 3)`,
+    );
+  });
+
+  test("the idle reason names a blocking item", () => {
+    const o = pick(chain(blocking("waiting")));
+    expect(idleReason(o)).toContain(`Epic 2 is held by Epic 1's retro item ${ID} (waiting, blocking, distance 1)`);
+    expect(o.kind === "idle" ? o.reasons.filter((r) => r.code === "retro-item").map((r) => r.subject) : []).toEqual(["epic:2", "epic:3", "epic:4"]);
+  });
+
+  test("items on two source Epics: each source adds its own reasons for the Epics it holds", () => {
+    const o = pick(chain(untagged(), "accepted-with-open-items", { items: { 1: untagged(), 2: untagged() } }));
+    expect(chosen(o)).toBe("idle");
+    expect(codes(o)).toEqual(["epic:3 retro-item", "epic:4 retro-item", "epic:4 retro-item"]);
+    expect(o.kind === "idle" ? o.reasons.map((r) => r.message) : []).toEqual([
+      `Epic 3 is held by Epic 1's retro item ${ID} (open, untagged, distance 2)`,
+      `Epic 4 is held by Epic 1's retro item ${ID} (open, untagged, distance 3)`,
+      `Epic 4 is held by Epic 2's retro item retro-item:${itemId(2, 1)} (open, untagged, distance 2)`,
+    ]);
+  });
+
+  test("the idle reason names a rejected retro", () => {
+    const o = pick(chain([], "rejected"));
+    expect(idleReason(o)).toContain("Epic 4 is held by Epic 1's rejected retro (retro:1), which has no go");
+  });
+
+  test("a claimed Story in a newly held Epic keeps its record and no other Story of that Epic is picked", () => {
+    const records = [storyRec("2.1", { state: "claimed", generation: 3 })];
+    const w: World = { epics: { 1: ["1"], 2: ["1", "2"] }, status: { "1.1": "done" }, retro: { 1: "accepted-with-open-items" }, items: { 1: blocking() }, records };
+    const snap = snapshotOf(w);
+    const o = next(snap, "builder");
+    expect(chosen(o)).toBe("idle");
+    expect(codes(o)).toEqual(["epic:2 retro-item"]);
+    expect(snap.ledger.units.find((r) => r.unit === "story:2.1")).toEqual(records[0]);
+  });
+
+  test("a held Epic falls through to an unrelated Epic", () => {
+    const w: World = {
+      epics: { 1: ["1"], 2: ["1"], 3: ["1"] },
+      status: { "1.1": "done" },
+      retro: { 1: "accepted-with-open-items" },
+      items: { 1: blocking() },
+      epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: []\n",
+    };
+    const o = pick(w);
+    expect(chosen(o)).toBe("unit 3.1");
+    expect(codes(o)).toEqual(["epic:2 retro-item"]);
+  });
 });
 
 describe("next: record states", () => {

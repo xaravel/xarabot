@@ -599,6 +599,16 @@ describe("next(coordinator): planning (Story 2.7)", () => {
       { epics: { 1: [], 2: ["1"], 3: ["1"] }, contexts: { 3: null }, retro: { 2: "rejected" }, status: { "epic-2": "done", "2.1": "done", "epic-3": "backlog", "3.1": "backlog" } },
       "idle",
     ],
+    [
+      "a context of an Epic an open blocking retro item holds: not due",
+      { epics: { 1: [], 2: ["1"], 3: ["1"] }, contexts: { 3: null }, retro: { 2: "accepted-with-open-items" }, items: { 2: [{ seq: 1, blocking: true, status: "open" }] }, status: { "epic-2": "done", "2.1": "done", "epic-3": "backlog", "3.1": "backlog" } },
+      "idle",
+    ],
+    [
+      "a context of an Epic one step from an open untagged retro item: due",
+      { epics: { 1: [], 2: ["1"], 3: ["1"] }, contexts: { 3: null }, retro: { 2: "accepted-with-open-items" }, items: { 2: [{ seq: 1, blocking: false, status: "open" }] }, status: { "epic-2": "done", "2.1": "done", "epic-3": "backlog", "3.1": "backlog" } },
+      "unit planning:status.1",
+    ],
     ["graph before status when both are due", { ...GRAPH_DUE, contexts: { 2: null } }, "unit planning:graph.1"],
     ["a graph park holds graph only: status is still due", { ...GRAPH_DUE, contexts: { 2: null }, records: [planningRec("planning:graph.1", { state: "parked", park: { kind: "awaiting-approval", reason: null, inbox_owner: "carol", globs_held: [EPICS_MD] } })] }, "unit planning:status.1"],
     ["a merging status record holds status", { ...CONTEXT_DUE, records: [planningRec("planning:status.1", { state: "merging", passed_sha: HEAD })] }, "idle"],
