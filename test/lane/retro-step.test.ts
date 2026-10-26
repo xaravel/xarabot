@@ -26,6 +26,7 @@ import type { TreeFilesRequest, TreeFilesValue } from "../../src/lane/tree-files
 import type { WaitEnd } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace, WorkspaceErrorKind } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
+import { watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -286,6 +287,7 @@ function harness(o: HarnessOpts = {}): Harness {
       return ok(pick(r.sha === head ? headFiles : main, r.read));
     },
     identity: COORD,
+    provider: "anthropic",
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -460,6 +462,24 @@ describe("createRetroStep: the prefetch and the prompt", () => {
 // ------------------------------------------------------------------ the result
 
 describe("createRetroStep: a valid result", () => {
+  test("the push fence writes the lane's vendor to builder_providers before the branch moves; the record keeps it", async () => {
+    const h = harness({ behaviors: [writes(retroResult())] });
+    const watched = watchPushes(h.deps().forge, h.fake, U);
+    const out = await h.run(undefined, { forge: watched.forge });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(watched.seen).toEqual([["anthropic"]]);
+    expect((await h.ledger()).get(U)?.builder_providers).toEqual(["anthropic"]);
+  });
+
+  test("a codex coordinator's push onto a record anthropic built: [anthropic, openai]", async () => {
+    const h = harness({ records: [{ ...OWN, builder_providers: ["anthropic"] }], behaviors: [writes(retroResult())] });
+    const watched = watchPushes(h.deps().forge, h.fake, U);
+    const out = await h.run(undefined, { forge: watched.forge, provider: "openai" });
+    expect(out.outcome).toBe("progress");
+    expect(watched.seen).toEqual([["anthropic", "openai"]]);
+    expect((await h.ledger()).get(U)?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
   test("AC: 2 appended items, the doc accepted-with-open-items: the PR opened, the record's retro_result set, merging and enqueued", async () => {
     const h = harness({ behaviors: [writes(retroResult())] });
     const out = await h.run();

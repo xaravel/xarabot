@@ -159,7 +159,7 @@ function builderLane(fake: FakeForge, root: string, identity: LaneIdentity, sess
       return ok({ kind: "committed", base_sha: r.ontoSha, head_sha: fake.control.makeCommit() });
     },
   };
-  const prStep = createPrStep({ forge: fake.forge, committer, identity, repo: BUILDER.repo, sleep: async () => {}, random: () => 0 });
+  const prStep = createPrStep({ forge: fake.forge, committer, identity, repo: BUILDER.repo, provider: "anthropic", sleep: async () => {}, random: () => 0 });
   let tick = 0;
   const once = (): Promise<LaneProcessResult> =>
     runLaneProcess({

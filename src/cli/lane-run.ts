@@ -4,11 +4,12 @@ import { createClaudeAgent } from "../adapters/agent/claude/claude-agent.ts";
 import { codexCredentialKind, createCodexAgent } from "../adapters/agent/codex/codex-agent.ts";
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
-import { loadRepoConfig } from "../core/config/load-repo-config.ts";
+import { loadRepoConfig, POLICY_PATH } from "../core/config/load-repo-config.ts";
 import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import { chooseReviewer, sessionProvider } from "../core/review/reviewer.ts";
 import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
@@ -56,6 +57,10 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * only then does it compose the real adapters and run one `runLaneProcess`.
  * A coordinator lane skips the builder limit, and its last start check
  * claims `coordinator.json` (AD-8); it then runs one `runCoordinatorProcess`.
+ * After the lane's own credential, the start checks pick the lane's reviewer
+ * for a unit only its own vendor built (`chooseReviewer`, AD-16) and, when
+ * that is another adapter, read its credential too (AD-17): a missing or
+ * unreadable one refuses the start.
  * Every refusal or failure after the STOP check, apart from a version
  * switch, a held lock and the role and lane-name check (a static `host.yaml`
  * error), is a failed start (an I/O error on the lock included), and so is
@@ -63,9 +68,11 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * marker, exit 1): three in a row write the lane's `STOP` and post an alert.
  * The count is reset only after a run that ends without a lane stop, so a
  * start check that heals between lane stops does not reset it. The PR step
- * redacts the vendor credential read at start from the text it sends to the
- * forge, and so do the coordinator's planning, retro and retro-item steps
- * (Stories 2.7, 2.9 and 2.10).
+ * redacts the vendor credentials read at start (the lane's and its
+ * reviewer's) from the text it sends to the forge, and so do the
+ * coordinator's planning, retro and retro-item steps (Stories 2.7, 2.9 and
+ * 2.10). Each of those steps gets the lane's session vendor, which it adds
+ * to a unit's `builder_providers` before pushing an agent-made commit.
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -154,6 +161,22 @@ export function credentialSecrets(text: string): string[] {
   };
   walk(parsed);
   return out;
+}
+
+/**
+ * A reviewer adapter's credential text (AD-17): the adapter built for it,
+ * the credential file its probe launch spec names (default model, effort
+ * `high`), then that file read. Any failure refuses.
+ */
+export function readReviewerCredential(reviewer: SessionAdapter, env: CredentialEnv, resultPath: string): Result<string, "refused"> {
+  const adapter = adapterFor(reviewer, env);
+  if (!adapter.ok) return adapter;
+  const spec = adapter.value.launchSpec({ kind: "fresh", prompt: PROBE_PROMPT }, { effort: "high" }, resultPath);
+  if (!spec.ok) return err("refused", spec.error.message);
+  const path = credentialPath(env, spec.value.vendor, spec.value.credential.file);
+  if (!path.ok) return err("refused", path.error.message);
+  const text = readCredential(path.value);
+  return text.ok ? ok(text.value) : err("refused", text.error.message);
 }
 
 function readText(path: string): string | null {
@@ -356,6 +379,12 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     if (!credPath.ok) return failedStart(credPath.error.message);
     const credential = readCredential(credPath.value);
     if (!credential.ok) return failedStart(credential.error.message);
+    // The lane's reviewer for a unit only its own vendor built (AD-16), and that reviewer's credential (AD-17).
+    const provider = sessionProvider({ adapter: sessionAgent.value, model: lane.model ?? agent.defaultModel });
+    const choice = chooseReviewer([provider], repoConfig.value.repo.policy.unattended_adapters);
+    if (choice === null) return failedStart(`no reviewer: ${POLICY_PATH} unattended_adapters allows neither claude nor codex`);
+    const reviewerCredential = choice.adapter === sessionAgent.value ? ok(null) : readReviewerCredential(choice.adapter, deps.env, layout.resultPath);
+    if (!reviewerCredential.ok) return failedStart(`reviewer ${choice.adapter}: ${reviewerCredential.error.message}`);
     const limit = builderLimit(deps.env["XARABOT_MAX_BUILDERS"]);
     if (!limit.ok) return failedStart(limit.error.message);
     const coordinator = lane.role === "coordinator";
@@ -394,10 +423,10 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     const merger = createGitMerger({ gitDir: runnerGit, bot: bot.value, fetch });
     const diffPaths = createGitDiffPaths({ gitDir: runnerGit, fetch });
     const graphTrees = createGitGraphTrees({ gitDir: runnerGit, fetch });
-    const secrets = credentialSecrets(credential.value);
+    const secrets = [...credentialSecrets(credential.value), ...(reviewerCredential.value === null ? [] : credentialSecrets(reviewerCredential.value))];
     if (claimed !== null) {
       // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
-      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, secrets };
+      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, provider, secrets };
       const reconcile = createReconcileStep({ forge, committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }), graphTrees, identity, repo: lane.repo });
       const planning = createPlanningStep({ ...session, graphTrees });
       const retro = createRetroStep({ ...session, treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }) });
@@ -422,7 +451,7 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       sandbox,
       store,
       workspace,
-      prStep: createPrStep({ forge, committer, identity, repo: lane.repo, secrets }),
+      prStep: createPrStep({ forge, committer, identity, repo: lane.repo, provider, secrets }),
       ciStep: createCiStep({ forge, merger, identity, repo: lane.repo }),
       mergeStep: createMergeStep({ forge, diffPaths, graphTrees, identity, repo: lane.repo }),
       laneDir,

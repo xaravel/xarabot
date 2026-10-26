@@ -97,11 +97,11 @@ const CASES: readonly Case[] = [
     [
       by(BOB, T0, {
         state: "released", generation: 2, attempts: 1, loopbacks: 1, ci_fixes: 2, pr: 7, pr_owner: "bob", head_sha: SHA_A, base_sha: SHA_B,
-        reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["claude"], approval: { by: "carol", manifest_sha: SHA_A },
+        reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], approval: { by: "carol", manifest_sha: SHA_A },
       }),
     ],
     by(ALICE, NOW, {
-      generation: 3, attempts: 1, loopbacks: 1, ci_fixes: 2, builder_providers: ["claude"], approval: { by: "carol", manifest_sha: SHA_A },
+      generation: 3, attempts: 1, loopbacks: 1, ci_fixes: 2, builder_providers: ["anthropic"], approval: { by: "carol", manifest_sha: SHA_A },
     }),
   ],
   ["claim released, manifest_sha not approved", claim({ ...base, globs: ["src/x/**"], expectGeneration: 1, manifestSha: SHA_B }), [rec({ state: "released", approval: { by: "carol", manifest_sha: SHA_A } })], "precondition"],
@@ -123,9 +123,9 @@ const CASES: readonly Case[] = [
   // heartbeat
   [
     "heartbeat claimed",
-    heartbeat({ ...held, set: { pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_B, reviewed_sha: SHA_A, passed_sha: SHA_C, builder_providers: ["codex", "claude"] } }),
+    heartbeat({ ...held, set: { pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_B, reviewed_sha: SHA_A, passed_sha: SHA_C, builder_providers: ["openai", "anthropic"] } }),
     [rec()],
-    by(ALICE, NOW, { pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_B, reviewed_sha: SHA_A, passed_sha: SHA_C, builder_providers: ["claude", "codex"] }),
+    by(ALICE, NOW, { pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_B, reviewed_sha: SHA_A, passed_sha: SHA_C, builder_providers: ["anthropic", "openai"] }),
   ],
   ["heartbeat merging", heartbeat(held), [rec({ state: "merging", pr: 7, passed_sha: SHA_A })], by(ALICE, NOW, { state: "merging", pr: 7, passed_sha: SHA_A })],
   ["heartbeat by another holder", heartbeat({ ...held, by: BOB }), [rec()], "precondition"],
@@ -180,8 +180,8 @@ const CASES: readonly Case[] = [
   [
     "takeOverStale claimed adopting the open PR",
     takeOverStale({ unit: U, by: BOB, now: LATE, generation: 1, adoptPr: { pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B } }),
-    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["claude"], loopbacks: 1 })],
-    by(BOB, LATE, { generation: 2, attempts: 1, pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B, builder_providers: ["claude"], loopbacks: 1 }),
+    [rec({ pr: 7, pr_owner: "alice", head_sha: SHA_A, base_sha: SHA_A, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], loopbacks: 1 })],
+    by(BOB, LATE, { generation: 2, attempts: 1, pr: 9, pr_owner: "bob", head_sha: SHA_D, base_sha: SHA_B, builder_providers: ["anthropic"], loopbacks: 1 }),
   ],
   [
     "takeOverStale claimed with no open PR starts from main",
@@ -382,13 +382,13 @@ const CASES: readonly Case[] = [
   [
     "applyRuling release",
     applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "release" }),
-    [rec({ state: "parked", park: blocked("attempts-cap"), attempts: 3, loopbacks: 2, ci_fixes: 1, passed_sha: SHA_A, builder_providers: ["claude"] })],
-    by(COORD, NOW, { state: "released", passed_sha: SHA_A, builder_providers: ["claude"] }),
+    [rec({ state: "parked", park: blocked("attempts-cap"), attempts: 3, loopbacks: 2, ci_fixes: 1, passed_sha: SHA_A, builder_providers: ["anthropic"] })],
+    by(COORD, NOW, { state: "released", passed_sha: SHA_A, builder_providers: ["anthropic"] }),
   ],
   [
     "applyRuling rebuild",
     applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "rebuild" }),
-    [rec({ state: "parked", park: blocked("review-cap"), attempts: 1, loopbacks: 2, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["claude"], pr: 7 })],
+    [rec({ state: "parked", park: blocked("review-cap"), attempts: 1, loopbacks: 2, reviewed_sha: SHA_A, passed_sha: SHA_A, approved_sha: SHA_A, builder_providers: ["anthropic"], pr: 7 })],
     by(COORD, NOW, { state: "released", pr: 7 }),
   ],
   [
@@ -402,8 +402,8 @@ const CASES: readonly Case[] = [
   [
     "applyRuling by a builder",
     applyRuling({ unit: U, by: BOB, now: NOW, generation: 1, ruling: "release" }),
-    [rec({ state: "parked", park: blocked("other"), attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["claude"] })],
-    by(BOB, NOW, { state: "released", builder_providers: ["claude"] }),
+    [rec({ state: "parked", park: blocked("other"), attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["anthropic"] })],
+    by(BOB, NOW, { state: "released", builder_providers: ["anthropic"] }),
   ],
   ...(
     [
@@ -426,7 +426,7 @@ const CASES: readonly Case[] = [
           reviewed_sha: SHA_A,
           passed_sha: SHA_B,
           approved_sha: SHA_D,
-          builder_providers: ["claude"],
+          builder_providers: ["anthropic"],
           pr: 7,
         }),
       ],

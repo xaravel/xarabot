@@ -199,12 +199,12 @@ describe("xarabot rule: the repo and the writer", () => {
 
 describe("xarabot rule: the matrix", () => {
   test("release: a parked blocked record is released, counters 0, providers kept", async () => {
-    const parked = rec({ unit: U, state: "parked", park: blocked, attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["claude"], generation: 2 });
+    const parked = rec({ unit: U, state: "parked", park: blocked, attempts: 2, loopbacks: 1, ci_fixes: 1, builder_providers: ["anthropic"], generation: 2 });
     const r = await ruleWith(["release", U], { records: [parked] });
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
     expect(r.out).toEqual([`released ${U} (blocked attempts-cap)`]);
-    expect(await r.record()).toMatchObject({ state: "released", park: null, attempts: 0, loopbacks: 0, ci_fixes: 0, builder_providers: ["claude"], generation: 2 });
+    expect(await r.record()).toMatchObject({ state: "released", park: null, attempts: 0, loopbacks: 0, ci_fixes: 0, builder_providers: ["anthropic"], generation: 2 });
     expect(r.fake.control.ledgerLog().map((c) => c.message).slice(-1)).toEqual([`ledger: applyRuling ${U} [skip ci]`]);
   });
 
@@ -216,7 +216,7 @@ describe("xarabot rule: the matrix", () => {
       pr: 7,
       reviewed_sha: "a".repeat(40),
       passed_sha: "b".repeat(40),
-      builder_providers: ["claude"],
+      builder_providers: ["anthropic"],
       attempts: 1,
       loopbacks: 1,
     });

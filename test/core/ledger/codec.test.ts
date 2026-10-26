@@ -17,7 +17,7 @@ describe("serializeUnitRecord", () => {
   test("fixed key order, 2-space indent, trailing newline, sorted de-duplicated sets", () => {
     const r = rec({
       globs: ["src/b/**", "src/a/**", "src/b/**"],
-      builder_providers: ["codex", "claude", "codex"],
+      builder_providers: ["openai", "anthropic", "openai"],
       state: "parked",
       park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["z.ts", "a.ts", "a.ts"] },
     });
@@ -33,7 +33,7 @@ describe("serializeUnitRecord", () => {
       "approved_graph", "retro_result", "builder_providers", "park", "attempts", "loopbacks", "ci_fixes", "approval",
     ]);
     expect(parsed.globs).toEqual(["src/a/**", "src/b/**"]);
-    expect(parsed.builder_providers).toEqual(["claude", "codex"]);
+    expect(parsed.builder_providers).toEqual(["anthropic", "openai"]);
     expect(Object.keys(parsed.park)).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
     expect(parsed.park.globs_held).toEqual(["a.ts", "z.ts"]);
     expect(text).toContain('\n  "schema_version": 4,\n');
@@ -63,7 +63,7 @@ describe("parseLedger", () => {
 
   test("canonical text round-trips byte for byte", () => {
     const unitText = serializeUnitRecord(
-      rec({ state: "parked", park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["a.ts", "b.ts"] }, builder_providers: ["claude"] }),
+      rec({ state: "parked", park: { kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: ["a.ts", "b.ts"] }, builder_providers: ["anthropic"] }),
     );
     const coordText = serializeCoordinator(COORDINATOR);
     const r = parseLedger({ "units/story__1.5.json": unitText, [COORDINATOR_PATH]: coordText });

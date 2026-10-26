@@ -15,6 +15,7 @@ import type { ProcessInfo } from "../../src/core/lane/waits.ts";
 import type { ProcessTable } from "../../src/lane/processes.ts";
 import { forgeErr, type Forge } from "../../src/ports/forge.ts";
 import * as planningStep from "../../src/lane/planning-step.ts";
+import * as prStep from "../../src/lane/pr-step.ts";
 import * as reconcileStep from "../../src/lane/reconcile-step.ts";
 import * as retroItemStep from "../../src/lane/retro-item-step.ts";
 import * as retroStep from "../../src/lane/retro-step.ts";
@@ -39,21 +40,31 @@ const dirs: string[] = [];
 afterEach(() => cleanup(dirs));
 
 /**
- * Each coordinator step factory `lane run` calls, with the deps it was given
- * and the step it returned. The factories are wrapped in place: each wrapper
- * records the call and returns the real factory's step, so every other test
- * runs the real steps.
+ * Each coordinator step factory `lane run` calls, and the builder's PR step
+ * factory, with the deps it was given and the step it returned. The
+ * factories are wrapped in place: each wrapper records the call and returns
+ * the real factory's step, so every other test runs the real steps.
  */
 const built = {
   reconcile: [] as { deps: reconcileStep.ReconcileStepDeps; step: CoordinatorStep }[],
   planning: [] as { deps: planningStep.PlanningStepDeps; step: CoordinatorStep }[],
   retro: [] as { deps: retroStep.RetroStepDeps; step: CoordinatorStep }[],
   retroItem: [] as { deps: retroItemStep.RetroItemStepDeps; step: CoordinatorStep }[],
+  pr: [] as { deps: prStep.PrStepDeps; step: ReturnType<typeof prStep.createPrStep> }[],
 };
 const realReconcile = reconcileStep.createReconcileStep;
 const realPlanning = planningStep.createPlanningStep;
 const realRetro = retroStep.createRetroStep;
 const realRetroItem = retroItemStep.createRetroItemStep;
+const realPr = prStep.createPrStep;
+mock.module("../../src/lane/pr-step.ts", () => ({
+  ...prStep,
+  createPrStep: (deps: prStep.PrStepDeps) => {
+    const step = realPr(deps);
+    built.pr.push({ deps, step });
+    return step;
+  },
+}));
 mock.module("../../src/lane/reconcile-step.ts", () => ({
   ...reconcileStep,
   createReconcileStep: (deps: reconcileStep.ReconcileStepDeps) => {
@@ -592,8 +603,8 @@ describe("xarabot lane run: a codex lane", () => {
     expect(spec.ok && spec.value.argv[0]).toBe("codex");
   });
 
-  test("a policy allowing claude and codex: the codex lane starts", async () => {
-    const r = await laneRunWith({ ...CODEX, main: { unattended: ["claude", "codex"] }, codex: ["auth.json"] });
+  test("a policy allowing claude and codex: the codex lane starts, with its reviewer claude's credential", async () => {
+    const r = await laneRunWith({ ...CODEX, main: { unattended: ["claude", "codex"] }, credential: true, codex: ["auth.json"] });
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
     expect(r.starts).toHaveLength(1);
@@ -654,6 +665,101 @@ describe("credentialSecrets", () => {
       '{"a":"short","b":{"c":["0123456789abcdef"]},"n":12345678901234567890}',
       "0123456789abcdef",
     ]);
+  });
+});
+
+describe("xarabot lane run: the reviewer and the session vendor (Story 3.3)", () => {
+  const CLAUDE_CREDENTIAL = "sk-ant-oat-fake\n";
+  const CODEX_LANE = { host: hostYaml({ lanes: [{ agent: "codex" }] }), credential: false, version: "codex-cli 0.163.0" } as const;
+  const BOTH = { unattended: ["claude", "codex"] } as const;
+  /** The deps of the one PR step this run built. */
+  const prDeps = (): prStep.PrStepDeps => {
+    expect(built.pr).toHaveLength(1);
+    return (built.pr[0] as (typeof built.pr)[number]).deps;
+  };
+
+  test("a claude lane, policy [claude, codex], no codex credential: refused naming the reviewer codex, failed-starts + 1", async () => {
+    built.pr.length = 0;
+    const r = await laneRunWith({ main: BOTH });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("start refused: reviewer codex: codex: credential missing: neither auth.json nor api-key");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.starts).toEqual([]);
+    expect(built.pr).toEqual([]);
+  });
+
+  test("a codex lane, policy [claude, codex], no claude credential: refused naming the reviewer claude, failed-starts + 1", async () => {
+    const r = await laneRunWith({ ...CODEX_LANE, main: BOTH, codex: ["auth.json"] });
+    expect(r.code).toBe(1);
+    const said = r.err.join("\n");
+    expect(said).toContain("start refused: reviewer claude: credential ");
+    expect(said).toContain("vendors/claude/oauth-token: missing");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.starts).toEqual([]);
+  });
+
+  test("an unreadable reviewer credential (mode 644) is a failed start too", async () => {
+    const r = await laneRunWith({ main: BOTH, codex: ["auth.json"] }, [REPO, "builder-1"], undefined, undefined, (w) =>
+      chmodSync(join(w.xdg, "xarabot", "vendors", "codex", "auth.json"), 0o644),
+    );
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("start refused: reviewer codex: credential ");
+    expect(r.err.join("\n")).toContain("auth.json: mode 644, must be 600");
+    expect(r.failedStarts()).toBe("1\n");
+  });
+
+  test("a claude lane, policy [claude]: starts with its own credential only, vendor anthropic", async () => {
+    built.pr.length = 0;
+    const r = await laneRunWith({ main: { unattended: ["claude"] } });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.starts).toHaveLength(1);
+    expect(prDeps().provider).toBe("anthropic");
+    expect(prDeps().secrets).toEqual([CLAUDE_CREDENTIAL]);
+  });
+
+  test("a codex lane, policy [codex]: starts with its own credential only, vendor openai", async () => {
+    built.pr.length = 0;
+    const r = await laneRunWith({ ...CODEX_LANE, main: { unattended: ["codex"] }, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(prDeps().provider).toBe("openai");
+    expect(prDeps().secrets).toEqual(credentialSecrets(CODEX_AUTH));
+    expect(prDeps().secrets).not.toContain(CLAUDE_CREDENTIAL);
+  });
+
+  test("a claude lane, policy [claude, codex], both credentials: starts, both credentials in secrets", async () => {
+    built.pr.length = 0;
+    const r = await laneRunWith({ main: BOTH, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(prDeps().provider).toBe("anthropic");
+    expect(prDeps().secrets).toEqual([CLAUDE_CREDENTIAL, ...credentialSecrets(CODEX_AUTH)]);
+    expect(redactSecrets(`leaked ${CODEX_REFRESH}`, prDeps().secrets)).toBe("leaked [REDACTED]");
+  });
+
+  test("a codex lane, policy [claude, codex], both credentials: starts, both credentials in secrets", async () => {
+    built.pr.length = 0;
+    const r = await laneRunWith({ ...CODEX_LANE, main: BOTH, credential: true, codex: ["api-key"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(prDeps().provider).toBe("openai");
+    expect(prDeps().secrets).toEqual(["sk-proj-fake-codex-key\n", CLAUDE_CREDENTIAL]);
+  });
+
+  test("a codex coordinator, policy [claude, codex], both credentials: its session steps get vendor openai and both credentials", async () => {
+    for (const list of Object.values(built)) list.length = 0;
+    const r = await laneRunWith(
+      { ...CODEX_LANE, host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator", agent: "codex" }] }), main: BOTH, credential: true, codex: ["auth.json"] },
+      [REPO, "coordinator"],
+    );
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    for (const s of [built.planning[0]?.deps, built.retro[0]?.deps, built.retroItem[0]?.deps]) {
+      expect(s?.provider).toBe("openai");
+      expect(s?.secrets).toEqual([...credentialSecrets(CODEX_AUTH), CLAUDE_CREDENTIAL]);
+    }
   });
 });
 
@@ -735,6 +841,8 @@ describe("xarabot lane run: a coordinator lane", () => {
       expect(s.laneDir).toBe(r.laneDir);
       expect(s.lane).toBe(d.lane);
       expect(s.identity).toEqual(IDENTITY);
+      // The lane's session vendor, added to builder_providers at each agent-commit push fence.
+      expect(s.provider).toBe("anthropic");
       // The vendor credential read at start, redacted from every text a step sends to the forge.
       expect(s.secrets).toEqual([CREDENTIAL]);
       expect(redactSecrets(`token ${CREDENTIAL.trim()} here`, s.secrets)).toBe("token [REDACTED] here");

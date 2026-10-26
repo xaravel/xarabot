@@ -10,6 +10,7 @@ import { unitBranch } from "../core/next/coordinator.ts";
 import { buildRetroPrompt, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { checkRetroDiff, checkRetroResult, retroDocGlob, type RetroTree } from "../core/retro/validate.ts";
+import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { describeIssues } from "../core/schemas/common.ts";
 import { EpicPrsSchema, type EpicPr, type EpicPrs } from "../core/schemas/epic-prs.ts";
@@ -81,9 +82,10 @@ import type { TreeFiles } from "./tree-files.ts";
  *   moved head onto fresh `main`, and recorded with that head before CI and
  *   the gate; a mismatch, or no result to check, is a failed attempt.
  *
- * Every push, PR change and enqueue is fenced. Like the planning step, the
- * session runs outside `kit.run`, so a `Halt` reaches the coordinator
- * process; anything else never throws.
+ * Every push, PR change and enqueue is fenced; the push's fence adds the
+ * lane's vendor to the record's `builder_providers` (AD-16). Like the
+ * planning step, the session runs outside `kit.run`, so a `Halt` reaches
+ * the coordinator process; anything else never throws.
  */
 
 export type RetroStepDeps = SessionStepDeps & {
@@ -357,8 +359,8 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       const expected = leased.value;
       if (expected !== null) note(`${branch} is at ${expected}: the push leases from it`);
 
-      // 6. Fence, then push with the lease.
-      await beat("fence");
+      // 6. Fence, adding the lane's vendor to the builders before the branch moves (AD-16), then push with the lease.
+      await beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
       aborted();
       const pushed = await call("pushBranch", (o) => forge.pushBranch({ branch, expected_sha: expected, sha: head }, o));
       if (!pushed.ok) return await failed(`pushBranch ${branch} ${describeError(pushed.error)}`);

@@ -451,7 +451,7 @@ async function replayOn(forge: Forge, repo: string, p: ReplayParams, commitSha: 
     commit: async (r) => ok({ kind: "committed", base_sha: r.ontoSha, head_sha: commitSha }),
   };
   const notes: string[] = [];
-  const step = createPrStep({ forge, committer, identity: p.identity, repo });
+  const step = createPrStep({ forge, committer, identity: p.identity, repo, provider: "anthropic" });
   const out = await step({
     unit: story,
     record: p.record,

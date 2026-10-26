@@ -829,7 +829,7 @@ async function laneRun(o: { readonly prepare?: (fake: FakeForge) => Promise<void
   const sleep = async (ms: number) => {
     t += ms;
   };
-  const prStep = createPrStep({ forge, committer, identity: ALICE, repo: LANE.repo, sleep: async () => {}, random: () => 0 });
+  const prStep = createPrStep({ forge, committer, identity: ALICE, repo: LANE.repo, provider: "anthropic", sleep: async () => {}, random: () => 0 });
   const ciStep = createCiStep({ forge, merger, identity: ALICE, repo: LANE.repo, now, sleep, random: () => 0 });
   const mergeStep = createMergeStep({
     forge,

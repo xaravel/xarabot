@@ -77,7 +77,7 @@ describe("UnitRecordSchema", () => {
       reviewed_sha: SHA_A,
       passed_sha: SHA_A,
       approved_sha: SHA_A,
-      builder_providers: ["claude"],
+      builder_providers: ["anthropic"],
       park: { kind: "blocked", reason: "verification", inbox_owner: "alice", globs_held: [] },
       attempts: 2,
       loopbacks: 1,

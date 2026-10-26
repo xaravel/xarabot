@@ -26,6 +26,7 @@ import type { WaitEnd } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { unchangedGraph } from "./graph-stub.ts";
+import { watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -285,6 +286,7 @@ function harness(o: HarnessOpts = {}): Harness {
     },
     graphTrees: unchangedGraph(),
     identity: COORD,
+    provider: "anthropic",
     secrets: ["sekrit-credential"],
     now: () => t,
     sleep: async (ms) => {
@@ -692,6 +694,28 @@ describe("createRetroItemStep: other results", () => {
 });
 
 describe("createRetroItemStep: CI", () => {
+  test("the build push and the CI fix's push each fence the lane's vendor into builder_providers before the branch moves", async () => {
+    const h = harness({ checks: [FAIL, PASS], behaviors: [writes(built()), writes(built({ summary: "Fix the lint" }))] });
+    const watched = watchPushes(h.deps().forge, h.fake, U);
+    const out = await h.run(undefined, { forge: watched.forge });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(watched.seen).toEqual([["anthropic"], ["anthropic"]]);
+    expect((await h.ledger()).get(U)).toMatchObject({ ci_fixes: 1, builder_providers: ["anthropic"] });
+  });
+
+  test("a codex coordinator's CI fix onto a record anthropic built: [anthropic, openai] at the fix's push", async () => {
+    const h = harness({
+      records: [{ ...OWN, builder_providers: ["anthropic"] }],
+      checks: [FAIL, PASS],
+      behaviors: [writes(built()), writes(built({ summary: "Fix the lint" }))],
+    });
+    const watched = watchPushes(h.deps().forge, h.fake, U);
+    const out = await h.run(undefined, { forge: watched.forge, provider: "openai" });
+    expect(out.outcome).toBe("progress");
+    expect(watched.seen).toEqual([["anthropic", "openai"], ["anthropic", "openai"]]);
+    expect((await h.ledger()).get(U)?.builder_providers).toEqual(["anthropic", "openai"]);
+  });
+
   test("CI fails: one CI-fix session in ci-fix mode, the fix pushed to the same PR, ci_fixes 1", async () => {
     const h = harness({ checks: [FAIL, PASS], behaviors: [writes(built()), writes(built({ summary: "Fix the lint" }))] });
     const out = await h.run();
