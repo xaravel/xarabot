@@ -289,7 +289,7 @@ epics:
         route: lane
         blocking: false
         globs: ["test/lane/merge-step.test.ts", "test/lane/review-gate.test.ts", "test/adapters/agent/codex/usage.test.ts", "test/e2e/cross-vendor.test.ts", "test/e2e/cross-vendor-harness.ts", "docs/maintainer/self-host.md"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-10-trackers-macos-ci-and-evidence-gates"
         text: "Tracker, CI and gate housekeeping: decide which file is authoritative for retro action items and bring sprint-status.yaml's 25 earlier items in line; build or decide against the macOS CI job (Epic 1 item 13); add live_evidence_checks to .xarabot/config.yaml so a failed live row holds the next retro (E2, E4, E5)"
         route: maintainer
