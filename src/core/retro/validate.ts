@@ -4,7 +4,7 @@ import { globsOverlap, literalPrefix, normalizeGlob } from "../manifests/globs.t
 import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
 import { parseYaml } from "../schemas/common.ts";
 import type { Config } from "../schemas/config.ts";
-import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
+import { RETRO_ITEM_ID_PATTERN, RETRO_ITEM_SLUG_MAX, retroItemIdRepeats, retroItemSlugIssue } from "../schemas/retro-gates.ts";
 import type { RetroResult } from "../schemas/session-result.ts";
 
 /**
@@ -68,17 +68,22 @@ export function refusedItemGlobs(globs: readonly string[], config: RefusedConfig
 
 /**
  * The pre-commit checks of a `retro` result for Epic `epic`: every item id
- * is `epic-<epic>-…` and appears once, and every glob normalizes and is not
- * refused (`refusedItemGlobs`).
+ * is `epic-<epic>-…`, passes `retroItemSlugIssue`, has a slug of at most
+ * `RETRO_ITEM_SLUG_MAX` code points and repeats no earlier one
+ * (`retroItemIdRepeats`), and every glob normalizes and is not refused
+ * (`refusedItemGlobs`).
  */
 export function checkRetroResult(epic: number, result: Pick<RetroResult, "items">, config: RefusedConfig, policy: RefusedPolicy): string[] {
   const failures: string[] = [];
-  const seen = new Set<string>();
-  for (const item of result.items) {
+  const repeats = new Map(retroItemIdRepeats(result.items.map((item) => item.id)).map((r) => [r.index, r.message]));
+  for (const [i, item] of result.items.entries()) {
     const m = RETRO_ITEM_ID_PATTERN.exec(item.id);
     if (m === null || Number(m[1]) !== epic) failures.push(`item ${item.id}: its id must start with "epic-${epic}-"`);
-    if (seen.has(item.id)) failures.push(`item ${item.id}: its id repeats`);
-    seen.add(item.id);
+    const slug = retroItemSlugIssue(item.id);
+    if (slug !== null) failures.push(`item ${item.id}: ${slug}`);
+    if (m !== null && [...(m[3] as string)].length > RETRO_ITEM_SLUG_MAX) failures.push(`item ${item.id}: its slug must be at most ${RETRO_ITEM_SLUG_MAX} code points`);
+    const repeat = repeats.get(i);
+    if (repeat !== undefined) failures.push(`item ${item.id}: its id ${repeat}`);
     const normalized: string[] = [];
     for (const g of item.globs) {
       const n = normalizeGlob(g);

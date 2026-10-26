@@ -33,6 +33,12 @@ function file(ruling = '"4512345"', replace?: [string, string]): string {
   return text;
 }
 
+/** The fixture with Epic 2's item id set to `first` and a second item `second` after it. */
+function twoItems(first: string, second: string): string {
+  const added = `        status: open\n      - id: "${second}"\n        text: Again\n        route: lane\n        blocking: false\n        globs: []\n        status: done\n`;
+  return file(undefined, ["epic-2-retro-item-1-fix-polling", `"${first}"`]).replace("        status: open\n", added);
+}
+
 describe("parseRetroGates", () => {
   test.each([['"4512345"', "4512345"], ["maintainer-pr", "maintainer-pr"]])("rejected retro's go with ruling %s", (ruling, expected) => {
     const r = parseRetroGates(P, file(ruling));
@@ -43,8 +49,14 @@ describe("parseRetroGates", () => {
     expect(r.value.epics["3"]?.checkpoint?.go.ruling).toBe("maintainer-pr");
   });
 
-  test.each(["epic-2-retro-item-3-add-a-retro_result-test", "epic-2-retro-item-4-réviser-l-écran-日本"])("an item id the stock slug makes: %s", (id) => {
+  test.each(["epic-2-retro-item-3-add-a-retro_result-test", "epic-2-retro-item-4-réviser-l-écran-日本", `epic-2-retro-item-5-${"\u{20000}".repeat(40)}`])("an item id the stock slug makes: %s", (id) => {
     const r = parseRetroGates(P, file(undefined, ["epic-2-retro-item-1-fix-polling", `"${id}"`]));
+    expect(r.ok && r.value.epics["2"]?.items?.[0]?.id).toBe(id);
+  });
+
+  test("an item id written by hand before the 40-code-point slug cap is still read", () => {
+    const id = "epic-2-retro-item-2-bind-the-retro-result-to-its-validated-head";
+    const r = parseRetroGates(P, file(undefined, ["epic-2-retro-item-1-fix-polling", id]));
     expect(r.ok && r.value.epics["2"]?.items?.[0]?.id).toBe(id);
   });
 
@@ -73,6 +85,11 @@ describe("parseRetroGates", () => {
       file(undefined, ["        status: open\n", "        status: open\n      - id: epic-2-retro-item-1-fix-polling\n        text: Again\n        route: lane\n        blocking: false\n        globs: []\n        status: done\n"]),
       'repeats item id "epic-2-retro-item-1-fix-polling"',
     ],
+    ["an uppercase slug", file(undefined, ["epic-2-retro-item-1-fix-polling", "epic-2-retro-item-1-Fix-polling"]), "its slug must be lowercase"],
+    ["the Kelvin sign", file(undefined, ["epic-2-retro-item-1-fix-polling", "epic-2-retro-item-1-\u212Aelvin"]), "its slug must be lowercase"],
+    ["a combining mark in the slug", file(undefined, ["epic-2-retro-item-1-fix-polling", '"epic-2-retro-item-1-e\u0301cran"']), "epic-<N>-retro-item"],
+    ["a repeated (epic, seq) pair", twoItems("epic-2-retro-item-1-fix-polling", "epic-2-retro-item-1-fix-ci"), 'repeats the epic and seq of item id "epic-2-retro-item-1-fix-polling"'],
+    ["an id whose NFC-folded form repeats", twoItems("epic-2-retro-item-1-\uD55C", "epic-2-retro-item-1-\u1112\u1161\u11AB"), 'folds (NFC, case) to the same name as item id "epic-2-retro-item-1-\uD55C"'],
     ["wrong version", "schema_version: 2\nepics: {}\n", "unsupported schema_version"],
   ];
   test.each(bad)("%s is refused", (_name, text, fragment) => {
