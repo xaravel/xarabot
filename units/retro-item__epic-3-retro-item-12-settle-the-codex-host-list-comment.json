@@ -9,11 +9,11 @@
   "globs": [
     "src/adapters/agent/codex/codex-agent.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:38:17.322Z",
-  "pr": null,
-  "pr_owner": null,
+  "heartbeat_at": "2026-10-26T18:38:25.537Z",
+  "pr": 216,
+  "pr_owner": "edanisko",
   "base_sha": "e7499d0df6410d3774dd389d3667599917999670",
-  "head_sha": null,
+  "head_sha": "469eccb4d98efe753be6353feb5d7b8bacf023f0",
   "reviewed_sha": null,
   "passed_sha": null,
   "enqueued_sha": null,
