@@ -1,12 +1,14 @@
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { err, ok, type Result } from "../core/result.ts";
+import { isVendor, type Vendor } from "../ports/sandbox.ts";
 import type { LaunchingEnv } from "./environment.ts";
 
 /**
  * Finds the real files a session runs: the agent CLI plus `bun`, `uv` and
- * `git`, and the directories git and uv need. Only the agent CLI is required;
- * a missing `bun`, `uv`, `git` or uv Python directory is left out.
+ * `git`, and the directories the agent, git and uv need. Only the agent CLI is
+ * required; a missing `bun`, `uv`, `git`, uv Python directory or native
+ * package folder is left out.
  */
 
 /** The helper tools a session gets besides the agent CLI. */
@@ -16,6 +18,16 @@ export const HELPER_TOOLS: readonly string[] = ["bun", "uv", "git"];
 const XCRUN_GIT_SHIM = "/usr/bin/git";
 const XCRUN = "/usr/bin/xcrun";
 const PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * The file that marks a vendor's native package folder, relative to it. codex
+ * runs its shell and file tools through `bin/codex-code-mode-host`, a sibling
+ * of its CLI `vendor/<target>/bin/codex` (beside `codex-path/rg` and
+ * `codex-resources`), so the session must read and run that whole folder;
+ * with only the CLI file allowed, every tool call fails with `EPERM`. Named
+ * here per vendor, never by the launch spec.
+ */
+export const VENDOR_NATIVE_MARKER: Readonly<Partial<Record<Vendor, string>>> = { codex: join("bin", "codex-code-mode-host") };
 
 export type Tool = {
   /** The name the session calls it by (its symlink in `<tempDir>/bin`). */
@@ -28,7 +40,7 @@ export type ResolvedTools = {
   readonly agent: Tool;
   /** The helpers found, in `HELPER_TOOLS` order, without the agent's own name. */
   readonly helpers: readonly Tool[];
-  /** Real directories to read: git's exec-path and `share/git-core`, the uv Python directory. */
+  /** Real directories to read: the agent's native package folder, git's exec-path and `share/git-core`, the uv Python directory. */
   readonly dirs: readonly string[];
   /** The real uv Python directory, when it exists; the session's `HOME` links it at uv's default path. */
   readonly uvPython: string | null;
@@ -128,6 +140,19 @@ export function uvPythonDir(launching: LaunchingEnv): string | null {
   return null;
 }
 
+/**
+ * The real `vendor/<target>` folder of the agent CLI at the real path
+ * `agentPath`, when `agentCommand` names a vendor in `VENDOR_NATIVE_MARKER`
+ * and that folder holds its marker; otherwise `null`.
+ */
+export function nativePackageDir(agentCommand: string, agentPath: string): string | null {
+  const marker = isVendor(agentCommand) ? VENDOR_NATIVE_MARKER[agentCommand] : undefined;
+  if (marker === undefined) return null;
+  const dir = real(resolve(dirname(agentPath), ".."));
+  if (dir === null || basename(dirname(dir)) !== "vendor") return null;
+  return isExecutableFile(join(dir, marker)) ? dir : null;
+}
+
 export async function resolveTools(launching: LaunchingEnv, agentCommand: string): Promise<Result<ResolvedTools, "refused">> {
   const pathVar = launching["PATH"];
   const agentPath = which(agentCommand, pathVar);
@@ -136,6 +161,8 @@ export async function resolveTools(launching: LaunchingEnv, agentCommand: string
 
   const helpers: Tool[] = [];
   const dirs: string[] = [];
+  const native = nativePackageDir(agentCommand, agentPath);
+  if (native !== null) dirs.push(native);
   for (const name of HELPER_TOOLS) {
     if (name === agentCommand) continue;
     const found = which(name, pathVar);

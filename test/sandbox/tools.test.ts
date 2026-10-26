@@ -24,6 +24,23 @@ function executable(path: string): string {
   return path;
 }
 
+/**
+ * A native package laid out like codex's, `<pkg>/vendor/aarch64-apple-darwin`
+ * with `bin/<cli>` and, unless `host` is false, `bin/codex-code-mode-host`;
+ * `<d>/path/<cli>` links to the CLI. Returns the target folder and the PATH.
+ */
+function nativePackage(d: string, cli: string, opts: { host?: boolean; vendorDir?: string } = {}): { target: string; path: string } {
+  const target = join(d, "pkg", opts.vendorDir ?? "vendor", "aarch64-apple-darwin");
+  mkdirSync(join(target, "bin"), { recursive: true });
+  mkdirSync(join(target, "codex-path"));
+  executable(join(target, "codex-path", "rg"));
+  executable(join(target, "bin", cli));
+  if (opts.host !== false) executable(join(target, "bin", "codex-code-mode-host"));
+  mkdirSync(join(d, "path"));
+  symlinkSync(join(target, "bin", cli), join(d, "path", cli));
+  return { target, path: join(d, "path") };
+}
+
 describe("uvPythonDir", () => {
   test.each<[string, Record<string, string | undefined>, string | null]>([
     ["UV_PYTHON_INSTALL_DIR wins", { UV_PYTHON_INSTALL_DIR: "/u", XDG_DATA_HOME: "/d", HOME: "/h" }, "/u"],
@@ -79,6 +96,39 @@ describe("resolveTools", () => {
   test("refuses a missing agent CLI", async () => {
     const r = await resolveTools({ PATH: "/nonexistent", HOME: "/h" }, "xarabot-no-cli");
     expect(r.ok).toBe(false);
+  });
+
+  test("codex gets its native package folder in dirs", async () => {
+    const d = tempDir();
+    const { target, path } = nativePackage(d, "codex");
+    const r = await resolveTools({ PATH: path, HOME: d }, "codex");
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.agent.path).toBe(join(target, "bin", "codex"));
+    expect(r.value.dirs).toEqual([target]);
+  });
+
+  test("claude does not get the folder its CLI sits in, even beside a code-mode host", async () => {
+    const d = tempDir();
+    const { path } = nativePackage(d, "claude");
+    const r = await resolveTools({ PATH: path, HOME: d }, "claude");
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.dirs).toEqual([]);
+  });
+
+  test("a codex without the code-mode host adds nothing", async () => {
+    const d = tempDir();
+    const { path } = nativePackage(d, "codex", { host: false });
+    const r = await resolveTools({ PATH: path, HOME: d }, "codex");
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.dirs).toEqual([]);
+  });
+
+  test("a codex whose folder is not under vendor/ adds nothing", async () => {
+    const d = tempDir();
+    const { path } = nativePackage(d, "codex", { vendorDir: "lib" });
+    const r = await resolveTools({ PATH: path, HOME: d }, "codex");
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.dirs).toEqual([]);
   });
 
   test.skipIf(which("git", process.env.PATH) === null)("puts git's real --exec-path in dirs", async () => {

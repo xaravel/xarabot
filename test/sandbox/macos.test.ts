@@ -130,6 +130,32 @@ async function refusedWith(argv: readonly string[], opts: Parameters<typeof run>
   expect(spawned).toEqual([]);
 }
 
+/**
+ * A fake agent CLI `cli` laid out like codex's native package outside every
+ * readable root, `<home>/native/<cli>/vendor/aarch64-apple-darwin` with
+ * `bin/<cli>`, `bin/codex-code-mode-host` and `codex-path/rg`. The CLI runs the
+ * host and reads `rg`, as codex does for a tool call. Returns the launching
+ * environment with the CLI first on `PATH`.
+ */
+function nativeCli(cli: string): Record<string, string> {
+  const target = join(home, "native", cli, "vendor", "aarch64-apple-darwin");
+  const host = join(target, "bin", "codex-code-mode-host");
+  const rg = join(target, "codex-path", "rg");
+  rmSync(join(home, "native", cli), { recursive: true, force: true });
+  mkdirSync(join(target, "bin"), { recursive: true });
+  mkdirSync(dirname(rg));
+  writeFileSync(host, "#!/bin/sh\necho host ran\n");
+  writeFileSync(rg, "rg\n");
+  writeFileSync(join(target, "bin", cli), `#!/bin/sh\n"${host}"; echo rc=$?; cat "${rg}" 2>/dev/null || echo no-rg\n`);
+  chmodSync(host, 0o755);
+  chmodSync(join(target, "bin", cli), 0o755);
+  const path = join(home, "native", `${cli}-path`);
+  rmSync(path, { recursive: true, force: true });
+  mkdirSync(path);
+  symlinkSync(join(target, "bin", cli), join(path, cli));
+  return { ...launching, PATH: `${path}:${LAUNCH_PATH}` };
+}
+
 /** A sandbox test that also needs `tool` on the launching PATH; reported skipped otherwise. */
 function toolTest(tool: string): typeof test {
   return test.skipIf(!canSandbox || which(tool, LAUNCH_PATH) === null) as typeof test;
@@ -236,6 +262,11 @@ describe("exec", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^\d+\.\d+\.\d+/);
     rmSync(inside);
+  });
+
+  sandboxTest("a claude CLI cannot run or read the files beside it, even a code-mode host", async () => {
+    const r = (await ran(["claude"], { sandbox: { launchingEnv: nativeCli("claude") } })).run;
+    expect(r.stdout).toBe("rc=126\nno-rg\n");
   });
 
   sandboxTest("another terminal is neither readable nor writable", async () => {
@@ -950,6 +981,12 @@ describe("a codex spec", () => {
 
   sandboxTest("a credential variable named CODEX_HOME refuses: it names the vendor home", async () => {
     await refusedWith(["true"], { spec: { ...KEY_SPEC, credential: { file: "api-key", env: "CODEX_HOME" } } }, "names both the vendor home and the credential");
+  });
+
+  sandboxTest("codex runs its code-mode host and reads its native package folder", async () => {
+    const r = (await ran(["codex"], { spec: KEY_SPEC, sandbox: { launchingEnv: nativeCli("codex") } })).run;
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("host ran\nrc=0\nrg\n");
   });
 
   sandboxTest("a codex spec allowing a GitHub host refuses, spawning nothing", async () => {
