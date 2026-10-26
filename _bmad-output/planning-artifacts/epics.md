@@ -2064,6 +2064,22 @@ So that every merged diff is one another vendor reviewed, and disagreements stop
 **When** they are enqueued
 **Then** the same gate applies, except `reconcile` PRs, which carry only runner-written content.
 
+The Maintainer's decisions of 2026-10-26 (this Story's intent gap):
+
+**Given** a unit whose reviewer is another vendor's adapter
+**When** the review step needs that reviewer
+**Then** `lane run` (`src/cli/lane-run.ts`) composes every allowed reviewer agent and passes them to the review step, so cross-vendor review works from this Story on (Story 3.4's deferral).
+
+**Given** a blocking review on a coordinator PR
+**When** the unit is a retro item
+**Then** it gets a loopback like a Story's: a `retro-item` loopback prompt mode in `src/core/prompt/**`, counted in `loopbacks` with the same cap
+**And** when the unit is a planning or retro PR, the review's blocking findings park it `blocked` with a named park reason, for the Maintainer, with no loopback.
+
+**Given** the review binds `passed_sha` to the reviewed diff
+**When** `reconcile` or the coordinator needs to know whether the runner enqueued a PR, or whether a park is a re-park
+**Then** a separate ledger field records the runner's enqueue (`passed_sha` keeps only its review meaning), with `src/core/next/coordinator.ts` and `reconcile` reading the new field
+**And** the ledger `schema_version` goes up by one (riding the same bump as retro item 24's posted-delta hash if it has not yet shipped, otherwise the next one), every lane's runner pin advancing together.
+
 **Given** a lane
 **When** it is about to launch any session or enqueue
 **Then** it re-checks the adapter and reviewer allowances from freshly fetched `main`, and refuses if either is no longer allowed.
