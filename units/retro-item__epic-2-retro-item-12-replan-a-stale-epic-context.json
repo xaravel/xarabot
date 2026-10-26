@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-12-replan-a-stale-epic-context",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -16,7 +16,7 @@
     "test/core/schemas/**",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T00:09:55.105Z",
+  "heartbeat_at": "2026-10-26T00:11:40.169Z",
   "pr": 141,
   "pr_owner": "edanisko",
   "base_sha": "f6eb3187019bd13b8dc72fda8f3e131c91212026",
@@ -27,7 +27,25 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/next/coordinator.ts",
+      "src/core/next/next.ts",
+      "src/core/next/snapshot.ts",
+      "src/core/prompt/build-prompt.ts",
+      "src/core/prompt/template.ts",
+      "src/core/schemas/snapshot.ts",
+      "src/lane/planning-step.ts",
+      "test/core/next/coordinator.test.ts",
+      "test/core/next/fixtures.ts",
+      "test/core/next/snapshot.test.ts",
+      "test/core/prompt/build-prompt.test.ts",
+      "test/lane/planning-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
