@@ -16,6 +16,7 @@ import type { LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts"
 import { createCiStep } from "../../src/lane/ci-step.ts";
 import type { Committer } from "../../src/lane/committer.ts";
 import { CI_FIX_LOG, readsPath, runLaneProcess } from "../../src/lane/lane-process.ts";
+import { REVIEW_FINDINGS } from "../../src/lane/session.ts";
 import { createFsLaneStore, laneLayout } from "../../src/lane/lane-store.ts";
 import { createMergeStep } from "../../src/lane/merge-step.ts";
 import type { Merger } from "../../src/lane/merger.ts";
@@ -28,7 +29,7 @@ import type { Forge, GitSha } from "../../src/ports/forge.ts";
 import type { Sandbox } from "../../src/ports/sandbox.ts";
 import { rec, tip } from "../core/ledger/fixtures.ts";
 import { unchangedGraph } from "../lane/graph-stub.ts";
-import { reviewStub } from "../lane/review-stub.ts";
+import { reviewPass, reviewStub, type Finding } from "../lane/review-stub.ts";
 import { canSandbox } from "../support/sandbox.ts";
 import { liveGithubEnabled } from "../support/live-github.ts";
 import {
@@ -53,6 +54,7 @@ import {
   XV_CASE_TIMEOUT_MS,
   XV_CASES,
   XV_LANE,
+  XV_REHEARSALS,
   XV_UNIT,
   xvKey,
   xvOverlay,
@@ -87,6 +89,8 @@ const T0 = Date.parse(FAKE_NOW);
 const GOLDEN_KEY = "1-6-xv-claude-0a1b2c3d";
 const opts = () => ({ signal: AbortSignal.timeout(5000) });
 const CASES: readonly XvCase[] = Object.values(XV_CASES);
+/** The live cases and the rehearsal-only ones (Epic 3 retro item 9). */
+const REHEARSED: readonly XvCase[] = [...CASES, ...Object.values(XV_REHEARSALS)];
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -174,14 +178,14 @@ const H1 = "1".repeat(40);
 const H2 = "2".repeat(40);
 const H3 = "3".repeat(40);
 
-function body(o: { sha: string; adapter?: SessionAdapter; cross?: boolean; blocking?: boolean; subject?: string }): string {
+function body(o: { sha: string; adapter?: SessionAdapter; cross?: boolean; blocking?: boolean; subject?: string; followup?: boolean }): string {
   return reviewComment({
     subject: o.subject ?? "Story 1.6",
     sha: o.sha,
     crossVendor: o.cross ?? true,
     adapter: o.adapter ?? "codex",
     model: "gpt-6.1-sol",
-    pass: "normal",
+    pass: o.followup === true ? "followup" : "normal",
     result: {
       verdict: o.blocking === true ? "changes-requested" : "pass",
       findings: o.blocking === true ? [{ severity: "high", blocking: true, file: "verify/x.md", text: "wrong." }] : [],
@@ -236,7 +240,7 @@ describe("reviewHead", () => {
 
 /** A good observed run of `c`: what the rehearsals and the live cases must show. */
 function goodRun(c: XvCase): XvObserved {
-  const head = c.laterChange ? H2 : H1;
+  const head = c.laterChange || c.loopback === true ? H2 : H1;
   const record = rec({
     unit: XV_UNIT,
     state: "merged",
@@ -249,9 +253,18 @@ function goodRun(c: XvCase): XvObserved {
     builder_providers: [c.provider],
     attempts: c.laterChange ? 1 : 0,
     ci_fixes: c.laterChange ? 1 : 0,
+    loopbacks: c.loopback === true ? 1 : 0,
   });
-  const r = (sha: string): XvEvent => review(sha, { adapter: c.reviewer, cross: c.crossVendor });
-  const events = c.laterChange ? [push(H1), r(H1), enqueue(H1, true), push(H2), r(H2), enqueue(H2)] : [push(H1), r(H1), enqueue(H1)];
+  // A flagged spec's round is a review, then a follow-up review.
+  const r = (sha: string, blocking = false): XvEvent[] => [
+    review(sha, { adapter: c.reviewer, cross: c.crossVendor, blocking }),
+    ...(c.flagged === true ? [review(sha, { adapter: c.reviewer, cross: c.crossVendor, followup: true })] : []),
+  ];
+  const events = c.laterChange
+    ? [push(H1), ...r(H1), enqueue(H1, true), push(H2), ...r(H2), enqueue(H2)]
+    : c.loopback === true
+      ? [push(H1), ...r(H1, true), push(H2), ...r(H2), enqueue(H2)]
+      : [push(H1), ...r(H1), enqueue(H1)];
   return {
     code: 0,
     outcome: "progress\n",
@@ -267,12 +280,15 @@ function withRecord(o: XvObserved, over: Partial<UnitRecord>): XvObserved {
 }
 
 describe("caseProblems", () => {
-  test.each(CASES.map((c) => [c.name, c] as const))("%s: a good run has no problem", (_name, c) => {
+  test.each(REHEARSED.map((c) => [c.name, c] as const))("%s: a good run has no problem", (_name, c) => {
     expect(caseProblems(c, goodRun(c))).toEqual([]);
   });
 
   const claude = XV_CASES.claude;
   const later = XV_CASES["later-change"];
+  const flagged = XV_REHEARSALS["flagged-spec"];
+  const loopback = XV_REHEARSALS.loopback;
+  const followup = (sha: string, blocking = false): XvEvent => review(sha, { followup: true, blocking });
   test.each([
     ["a non-zero exit", claude, (o: XvObserved) => ({ ...o, code: 1 }), "laneRun exited 1"],
     ["an outcome other than progress", claude, (o: XvObserved) => ({ ...o, outcome: "failed\n" }), "the outcome is"],
@@ -308,6 +324,15 @@ describe("caseProblems", () => {
     ["case 3 with no CI fix", later, (o: XvObserved) => withRecord(o, { ci_fixes: 0 }), "ci_fixes is 0"],
     ["case 3 with no attempt", later, (o: XvObserved) => withRecord(o, { attempts: 0 }), "attempts is 0"],
     ["case 3 with no push of the merged head after the hold", later, (o: XvObserved) => ({ ...o, events: [push(H2), review(H1), enqueue(H1, true), review(H2), enqueue(H2)] }), "no push of the merged head"],
+    ["a follow-up review in a case with no flagged spec", claude, (o: XvObserved) => ({ ...o, events: [push(H1), review(H1), followup(H1), enqueue(H1)] }), "a follow-up review in a case with no flagged spec"],
+    ["a flagged spec with no follow-up review", flagged, (o: XvObserved) => ({ ...o, events: [push(H1), review(H1), enqueue(H1)] }), `review #1 of ${H1} has no follow-up review after it`],
+    ["a flagged spec whose follow-up came first", flagged, (o: XvObserved) => ({ ...o, events: [push(H1), followup(H1), review(H1), enqueue(H1)] }), "no passing review, then a passing follow-up review"],
+    ["a flagged spec whose normal review blocked", flagged, (o: XvObserved) => ({ ...o, events: [push(H1), review(H1, { blocking: true }), followup(H1), enqueue(H1)] }), "no passing review, then a passing follow-up review"],
+    ["a flagged spec whose follow-up blocked", flagged, (o: XvObserved) => ({ ...o, events: [push(H1), review(H1), followup(H1, true), enqueue(H1)] }), "review gate:"],
+    ["a loopback with no blocking review", loopback, (o: XvObserved) => ({ ...o, events: [push(H1), review(H1), push(H2), review(H2), enqueue(H2)] }), "no blocking review was posted at an earlier head"],
+    ["a loopback with loopbacks 0", loopback, (o: XvObserved) => withRecord(o, { loopbacks: 0 }), "loopbacks is 0"],
+    ["a loopback whose fix was pushed before the blocking review", loopback, (o: XvObserved) => ({ ...o, events: [push(H1), push(H2), review(H1, { blocking: true }), review(H2), enqueue(H2)] }), "no push of the merged head"],
+    ["a loopback with no passing review after the fix's push", loopback, (o: XvObserved) => ({ ...o, events: [push(H1), review(H2), review(H1, { blocking: true }), push(H2), enqueue(H2)] }), "no passing review at the merged head"],
   ] as const)("%s", (_name, c, mutate, fragment) => {
     const problems = caseProblems(c, mutate(goodRun(c)));
     expect(problems.join("\n")).toContain(fragment);
@@ -460,6 +485,8 @@ type Rehearsal = {
   readonly prompts: readonly string[];
   /** For each builder session, whether its temp folder held a CI log asking for the verified line. */
   readonly asked: readonly boolean[];
+  /** For each builder session, the review findings its temp folder held, or `null`. */
+  readonly findings: readonly (string | null)[];
   /** Each review pass's prompt, in order. */
   readonly reviewPrompts: readonly string[];
   /** The lane's clone after the run. */
@@ -472,7 +499,9 @@ type Rehearsal = {
  * (case 3) the injector; a stub builder of the case's adapter whose sandbox
  * writes what the stand-in skill writes (and, in a CI fix, the line its log
  * asks for); `reviewStub` as the reviewer; a fake clock; and the fake queue
- * merging the enqueued head at the merge step's sleep.
+ * merging the enqueued head at the merge step's sleep. A flagged case's
+ * spec recommends a follow-up review; a loopback case's first review blocks
+ * on the verify file.
  */
 async function rehearse(c: XvCase): Promise<Rehearsal> {
   const root = tempDir(`xarabot-xv-rehearsal-${c.name}-`);
@@ -485,13 +514,19 @@ async function rehearse(c: XvCase): Promise<Rehearsal> {
   const forge = observe(c.laterChange ? injectLaterChange(overlaid, key, laterChangeState()) : overlaid, events);
   const lane: Lane = { repo: REPO, role: "builder", owner: LOGIN, agent: c.agent, effort: "low" };
   const skill = xvSkillFiles(key);
+  const specPath = xvSpecPath(...(XV_STORY.id.split(".") as [string, string]));
+  if (c.flagged === true) skill[specPath] = (skill[specPath] as string).replace("followup_review_recommended: false", "followup_review_recommended: true");
+  const blocker: Finding = { severity: "high", blocking: true, file: xvVerifyPath(key), text: "the verify line names no reviewer." };
 
   const prompts: string[] = [];
   const asked: boolean[] = [];
+  const findings: (string | null)[] = [];
   const sandbox: Sandbox = {
     async run(spec, profile) {
       const prompt = spec.stdin ?? "";
       prompts.push(prompt);
+      const found = join(profile.tempDir, REVIEW_FINDINGS);
+      findings.push(existsSync(found) ? readFileSync(found, "utf8") : null);
       // The clone is the head's in a fix (the workspace stub starts it empty): the skill's files, plus the line a CI log asks for.
       const files: Record<string, string> = { ...skill };
       const log = join(profile.tempDir, CI_FIX_LOG);
@@ -518,7 +553,8 @@ async function rehearse(c: XvCase): Promise<Rehearsal> {
   const sleep = async (ms: number) => {
     t += ms;
   };
-  const stub = reviewStub({ forge, laneDir, hostStop, lane, identity: IDENTITY, results: [], files: () => skill, now });
+  const results = c.loopback === true ? [reviewPass([blocker])] : [];
+  const stub = reviewStub({ forge, laneDir, hostStop, lane, identity: IDENTITY, results, files: () => skill, now });
   const r = await runLaneProcess({
     forge,
     agent: stubAgent(c.agent),
@@ -557,7 +593,7 @@ async function rehearse(c: XvCase): Promise<Rehearsal> {
   const snap = must(await fake.forge.snapshot(opts()), "snapshot");
   const observed: XvObserved = { code: r.laneStop === undefined ? 0 : 1, outcome: read(layout.outcome), ledger: snap.ledger.files, events, journal: read(layout.journal) };
   const record = observed.ledger["units/story__1.6.json"] === undefined ? null : (JSON.parse(observed.ledger["units/story__1.6.json"]) as UnitRecord);
-  return { key, fake, observed, record, prompts, asked, reviewPrompts: stub.prompts, clone: layout.clone };
+  return { key, fake, observed, record, prompts, asked, findings, reviewPrompts: stub.prompts, clone: layout.clone };
 }
 
 describe("rehearsals on the fake forge", () => {
@@ -581,6 +617,53 @@ describe("rehearsals on the fake forge", () => {
       expect(run.asked).toEqual([false]);
       expect(run.reviewPrompts.length).toBe(1);
     }
+    expect(run.findings.every((f) => f === null)).toBe(true);
+  });
+
+  // Paths no live case runs (Epic 3 retro E1, item 9): the follow-up pass, and a loopback reading the review findings.
+
+  test("flagged-spec: a spec recommending a follow-up review gets a review, then a follow-up review, both at the merged head", async () => {
+    const c = XV_REHEARSALS["flagged-spec"];
+    const run = await rehearse(c);
+    expect(caseProblems(c, run.observed)).toEqual([]);
+    expect(cloneProblems(run.key, readIn(run.clone))).toEqual([]);
+    const record = run.record as UnitRecord;
+    const head = record.head_sha as string;
+    const heads = run.fake.control.reviewBodies(record.pr as number).map((b) => reviewHead(b));
+    expect(heads.map((h) => [h?.vendor, h?.pass, h?.adapter, h?.sha])).toEqual([
+      ["cross-vendor", "review", c.reviewer, head],
+      ["cross-vendor", "follow-up review", c.reviewer, head],
+    ]);
+    expect(run.reviewPrompts.length).toBe(2);
+    expect(run.reviewPrompts[0]).not.toContain("# Follow-up review");
+    expect(run.reviewPrompts[1]).toContain("# Follow-up review");
+    expect(run.prompts.length).toBe(1);
+    expect(record).toMatchObject({ loopbacks: 0, reviewed_sha: head, passed_sha: head });
+  });
+
+  test("loopback: a blocking review hands its findings to a loopback session; its fix is pushed, reviewed again and merged at the fixed head", async () => {
+    const c = XV_REHEARSALS.loopback;
+    const run = await rehearse(c);
+    expect(caseProblems(c, run.observed)).toEqual([]);
+    expect(cloneProblems(run.key, readIn(run.clone))).toEqual([]);
+    const record = run.record as UnitRecord;
+    expect(record).toMatchObject({ loopbacks: 1, ci_fixes: 0, attempts: 0 });
+    expect(run.prompts.length).toBe(2);
+    expect(run.prompts[0]).toContain(`Build Story ${XV_STORY.id} (\`${run.key}\`)`);
+    expect(run.prompts[1]).toContain(`Revise Story ${XV_STORY.id}`);
+    expect(run.prompts[1]).toContain(REVIEW_FINDINGS);
+    expect(run.findings[0]).toBeNull();
+    const pushes = run.observed.events.filter((e) => e.kind === "push").map((e) => (e.kind === "push" ? e.sha : ""));
+    expect(pushes).toHaveLength(2);
+    expect(run.findings[1]).toStartWith(`# Review findings for Story ${XV_STORY.id} at ${pushes[0] ?? "none"}\n`);
+    expect(run.findings[1]).toContain(`- high, blocking, \`${xvVerifyPath(run.key)}\`: the verify line names no reviewer.`);
+    expect(run.reviewPrompts.length).toBe(2);
+    const heads = run.fake.control.reviewBodies(record.pr as number);
+    expect(heads.map((b) => [reviewHead(b)?.sha, reviewPassed(b)])).toEqual([
+      [pushes[0], false],
+      [record.head_sha as string, true],
+    ]);
+    expect(record.head_sha).toBe(pushes[1] ?? "none");
   });
 });
 

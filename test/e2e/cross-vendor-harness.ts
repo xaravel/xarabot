@@ -51,9 +51,11 @@ const POLICY_PATH = ".xarabot/policy.yaml";
 // ------------------------------------------------------------ the cases
 
 export type XvCaseName = "claude" | "codex" | "later-change" | "single-vendor";
+/** The rehearsal-only cases (`XV_REHEARSALS`). */
+export type XvRehearsalName = "flagged-spec" | "loopback";
 
 export type XvCase = {
-  readonly name: XvCaseName;
+  readonly name: XvCaseName | XvRehearsalName;
   /** The lane's agent: the builder. */
   readonly agent: SessionAdapter;
   /** The builder's vendor, which `builder_providers` must name. */
@@ -65,6 +67,10 @@ export type XvCase = {
   readonly crossVendor: boolean;
   /** Case 3: the first enqueue is held and a later agent change follows. */
   readonly laterChange: boolean;
+  /** The Story's spec flags a follow-up review, so each round posts a review, then a follow-up review. */
+  readonly flagged?: boolean;
+  /** The first round blocks, and a loopback session's fix is pushed and reviewed before the enqueue. */
+  readonly loopback?: boolean;
 };
 
 export const XV_CASES: Readonly<Record<XvCaseName, XvCase>> = {
@@ -74,8 +80,18 @@ export const XV_CASES: Readonly<Record<XvCaseName, XvCase>> = {
   "single-vendor": { name: "single-vendor", agent: "claude", provider: "anthropic", adapters: ["claude"], reviewer: "claude", crossVendor: false, laterChange: false },
 };
 
+/**
+ * Cases rehearsed on the fake forge only (Epic 3 retro item 9): the
+ * stand-in skill's spec is unflagged, and a live reviewer's verdict can't be
+ * steered to block, so no live case runs them.
+ */
+export const XV_REHEARSALS: Readonly<Record<XvRehearsalName, XvCase>> = {
+  "flagged-spec": { ...XV_CASES.claude, name: "flagged-spec", flagged: true },
+  loopback: { ...XV_CASES.claude, name: "loopback", loopback: true },
+};
+
 /** A fresh sprint key for case `name`: `1-6-xv-<case>-<8 hex>`. */
-export function xvKey(name: XvCaseName): string {
+export function xvKey(name: XvCase["name"]): string {
   return `${XV_STORY.id.replace(".", "-")}-xv-${name}-${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
@@ -314,7 +330,11 @@ export function xvRecord(ledger: Readonly<Record<string, string>>): UnitRecord |
  * also needs one held enqueue at a head H1 other than the merged head,
  * `ci_fixes` and `attempts` of at least 1, and after the hold a push of the
  * merged head, then a passing review at it, then its forwarded enqueue; any
- * other case, no held enqueue.
+ * other case, no held enqueue. A flagged case needs a follow-up review after
+ * each review at its SHA, and a passing review then a passing follow-up
+ * review at the merged head; any other, no follow-up review. A loopback case
+ * needs `loopbacks` of at least 1 and a blocking review at an earlier head,
+ * then a push of the merged head, then a passing review at it.
  */
 export function caseProblems(c: XvCase, o: XvObserved): string[] {
   const problems: string[] = [];
@@ -357,6 +377,34 @@ export function caseProblems(c: XvCase, o: XvObserved): string[] {
   const passedAt = (sha: GitSha | null, after = -1): number =>
     o.events.findIndex((e, i) => i > after && e.kind === "review" && e.commit_sha === sha && reviewPassed(e.body));
   if (head !== null && passedAt(head) === -1) problems.push(`no passing review was posted at the merged head ${head}`);
+
+  // The follow-up passes.
+  const posted = o.events.flatMap((e, i) => (e.kind === "review" ? [{ i, sha: e.commit_sha, pass: reviewHead(e.body)?.pass ?? null, passed: reviewPassed(e.body) }] : []));
+  if (c.flagged === true) {
+    for (const p of posted) {
+      if (p.pass === "review" && !posted.some((q) => q.i > p.i && q.sha === p.sha && q.pass === "follow-up review")) problems.push(`flagged spec: review #${p.i} of ${p.sha} has no follow-up review after it`);
+    }
+    const last = (pass: ReviewHead["pass"]) => posted.filter((p) => p.sha === head && p.pass === pass).at(-1);
+    const normal = last("review");
+    const followup = last("follow-up review");
+    if (head !== null && (normal?.passed !== true || followup?.passed !== true || followup.i < normal.i)) {
+      problems.push(`flagged spec: no passing review, then a passing follow-up review, at the merged head ${head}`);
+    }
+  } else {
+    for (const p of posted) if (p.pass === "follow-up review") problems.push(`review #${p.i}: a follow-up review in a case with no flagged spec`);
+  }
+
+  // The loopback.
+  if (c.loopback === true) {
+    if (record !== null && record.loopbacks < 1) problems.push(`loopback: loopbacks is ${record.loopbacks}, not at least 1`);
+    const blocked = posted.find((p) => !p.passed && p.sha !== head);
+    if (blocked === undefined) problems.push("loopback: no blocking review was posted at an earlier head");
+    else {
+      const pushAt = o.events.findIndex((e, i) => i > blocked.i && e.kind === "push" && e.sha === head);
+      if (pushAt === -1) problems.push(`loopback: no push of the merged head ${head ?? "null"} after the blocking review #${blocked.i}`);
+      else if (passedAt(head, pushAt) === -1) problems.push(`loopback: no passing review at the merged head ${head ?? "null"} after its push`);
+    }
+  }
 
   // The gate and the enqueues.
   for (const v of checkReviewGate(o.events)) problems.push(`review gate: ${v}`);

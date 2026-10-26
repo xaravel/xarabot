@@ -261,6 +261,26 @@ describe("createReviewGateStep (Story 3.5)", () => {
     expect(h.fixes).toHaveLength(0);
   });
 
+  // The record a takeover after a blocking round leaves (Epic 3 retro A6): the blocked head, its review SHAs cleared, loopbacks kept.
+  test.each([false, true])("after a takeover of a blocked round, the head is reviewed afresh before any loopback (blocking %p); loopbacks count on from the kept value", async (blocking) => {
+    const h = await harness({ record: { generation: 3, attempts: 1, loopbacks: 1, reviewed_sha: null, passed_sha: null } });
+    const { review, calls } = stubReview(h, [blocking]);
+    const out = await h.run({}, { review });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.record.head_sha).toBe(h.head);
+    if (blocking) {
+      expect(out).toMatchObject({ outcome: "progress", state: "claimed", pushed: true });
+      expect(await h.record()).toMatchObject({ loopbacks: 2, passed_sha: null });
+      expect(h.sessions).toHaveLength(1);
+      expect(h.sessions[0]?.start).toBe(h.head);
+    } else {
+      expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+      expect(out.pushed).toBeUndefined();
+      expect(await h.record()).toMatchObject({ loopbacks: 1, passed_sha: h.head });
+      expect(h.sessions).toHaveLength(0);
+    }
+  });
+
   test.each([
     ["blocked", { ...DONE, outcome: "blocked", blocked: { kind: "intent-gap", text: "unclear" } } as BuildResult, "intent-gap"],
     ["no-op", { ...DONE, outcome: "no-op" } as BuildResult, "no-op"],
