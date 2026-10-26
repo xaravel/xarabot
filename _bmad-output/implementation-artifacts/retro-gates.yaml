@@ -219,7 +219,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/cli/lane-run.ts", "src/adapters/forge/github/bot-user.ts", "src/lane/lane-store.ts", "test/cli/lane-run.test.ts", "test/adapters/forge/github/bot-user.test.ts", "test/lane/lane-store.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-35-unlisted-mach-lookups-fail-fast"
         text: "Maintainer decision 2026-10-26, option A (Epic 3 live run 2, docs/maintainer/evidence/epic-3.md): on the Xarabot host (macOS 27.0.1), a mach-lookup the Seatbelt profile denies and reports never returns (launchd sends no reply, so the caller waits in mach_msg2_trap), which hung codex's resume at exit on com.apple.FSEvents (its notify-rs file watcher) and earlier its startup on configd; with (with no-report) the same denial returns in 18-38 ms. In src/sandbox/profile.ts, add \"(deny mach-lookup (with no-report))\" just before the `(allow mach-lookup ${mach})` rule, with a comment giving that reason and saying it changes no permission, only that denied lookups fail at once and leave no deny-log entry; MACH_SERVICES is unchanged; update test/sandbox/profile.test.ts (the rule order, and the mach-lookup count the tests assert) and add a sandboxed case in test/sandbox/macos.test.ts that a lookup of an unlisted service (com.apple.FSEvents) returns an error within a short deadline instead of hanging; the Maintainer's session re-runs the codex live checks after it merges"
         route: lane
