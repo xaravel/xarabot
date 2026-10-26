@@ -1217,7 +1217,7 @@ describe("runLaneProcess waits and limits", () => {
 
   test.each([
     ["progress", { behaviors: [finishes("done")] }, [MIN]],
-    ["idle", { done: ["1.1", "1.2", "1.3"] }, [30 * MIN]],
+    ["idle", { done: ["1.1", "1.2", "1.3"] }, [MIN]],
     ["failed", {}, [15 * MIN]],
     ["stop", { noAuthority: true }, []],
   ] as const)("trailing wait after %s", async (outcome, opts, ms) => {

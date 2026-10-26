@@ -203,7 +203,7 @@ describe("runCoordinatorProcess", () => {
     const journal = h.journal();
     expect(journal).toHaveLength(1);
     expect(journal[0]).toMatchObject({ type: "span", span: "idle", reason: "no reconcile step (Story 2.5)" });
-    expect(h.waits.map((w) => w.ms)).toEqual([10 * MIN]);
+    expect(h.waits.map((w) => w.ms)).toEqual([MIN]);
     const l = await h.ledger();
     expect(l.units.size).toBe(0);
     expect(h.commits("ledger: claim ")).toBe(0);

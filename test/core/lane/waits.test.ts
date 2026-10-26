@@ -8,7 +8,7 @@ const NOW = Date.parse("2026-10-23T10:00:00.000Z");
 describe("trailingWaitMs", () => {
   test.each([
     ["progress", MIN],
-    ["idle", 30 * MIN],
+    ["idle", MIN],
     ["failed", 15 * MIN],
     ["stop", null],
   ] as const)("%s → %p", (outcome, ms) => {
@@ -19,7 +19,7 @@ describe("trailingWaitMs", () => {
 describe("coordinatorTrailingWaitMs", () => {
   test.each([
     ["progress", MIN],
-    ["idle", 10 * MIN],
+    ["idle", MIN],
     ["failed", 15 * MIN],
     ["stop", null],
   ] as const)("%s → %p", (outcome, ms) => {
