@@ -8,10 +8,14 @@ import type { LaneOutcome } from "../schemas/journal.ts";
 export const MINUTE_MS = 60 * 1000;
 export const HOUR_MS = 60 * MINUTE_MS;
 
-/** The trailing wait after each outcome; `stop` has none. */
+/**
+ * The trailing wait after each outcome; `stop` has none. After `idle`, 1 min
+ * (the Maintainer's 2026-10-26 decision), so an idle builder claims the next
+ * Story within about a minute of the one it waits on merging.
+ */
 export const TRAILING_WAIT_MS: Readonly<Record<LaneOutcome, number | null>> = {
   progress: MINUTE_MS,
-  idle: 30 * MINUTE_MS,
+  idle: MINUTE_MS,
   failed: 15 * MINUTE_MS,
   stop: null,
 };
@@ -35,8 +39,13 @@ export function trailingWaitMs(outcome: LaneOutcome): number | null {
   return TRAILING_WAIT_MS[outcome];
 }
 
-/** The coordinator's wait after `idle`: 10 min, matching the `reconcile` due rule. */
-export const COORDINATOR_IDLE_WAIT_MS = 10 * MINUTE_MS;
+/**
+ * The coordinator's wait after `idle`: 1 min (the Maintainer's 2026-10-26
+ * decision), so the next round picks up the `reconcile` work an approval makes
+ * within about a minute; the 10-min `reconcile` due rule (`RECONCILE_EVERY_MS`)
+ * stays as the backstop.
+ */
+export const COORDINATOR_IDLE_WAIT_MS = MINUTE_MS;
 
 /** The coordinator's trailing wait: `COORDINATOR_IDLE_WAIT_MS` after `idle`, the builder's after any other outcome. */
 export function coordinatorTrailingWaitMs(outcome: LaneOutcome): number | null {
