@@ -213,4 +213,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/sandbox/profile.ts", "test/sandbox/profile.test.ts", "test/sandbox/macos.test.ts"]
-        status: open
+        status: done
