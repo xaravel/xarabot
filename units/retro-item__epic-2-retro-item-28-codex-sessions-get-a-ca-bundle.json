@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-28-codex-sessions-get-a-ca-bundle",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "test/adapters/agent/codex/codex-agent.test.ts",
     "test/sandbox/environment.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T03:31:58.060Z",
+  "heartbeat_at": "2026-10-26T03:32:29.168Z",
   "pr": 162,
   "pr_owner": "edanisko",
   "base_sha": "93f2d7df39e9690085833445a21a725ff5286961",
@@ -23,7 +23,17 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/adapters/agent/codex/codex-agent.ts",
+      "src/sandbox/environment.ts",
+      "test/adapters/agent/codex/codex-agent.test.ts",
+      "test/sandbox/environment.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
