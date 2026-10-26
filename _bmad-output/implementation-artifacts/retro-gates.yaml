@@ -117,7 +117,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/lane/write-check.ts", "src/lane/commit.ts", "test/core/lane/write-check.test.ts", "test/lane/commit.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-19-harden-retro-item-ids"
         text: "Story 2.9 follow-up review F1-F3: RETRO_ITEM_ID_PATTERN accepts ids that collide on the lane host's case-insensitive APFS (case and NFC/NFD twins, the Kelvin sign) and so share one ref or file, ids of any length (ENAMETOOLONG on refs and log files), and invisible or leading combining marks the stock slug never emits. Refuse a slug that is not equal to its lowercase form, a repeated (epic, seq) pair, and ids whose NFC-folded form repeats, in both RetroGatesSchema and checkRetroResult; cap the slug at 40 code points (the stock maxlen); drop \\p{M} from the slug class and fix the comment that says the slug emits marks; tests for each"
         route: lane
