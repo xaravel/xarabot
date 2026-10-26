@@ -1,0 +1,32 @@
+{
+  "schema_version": 4,
+  "unit": "retro-item:epic-2-retro-item-19-harden-retro-item-ids",
+  "state": "claimed",
+  "owner": "edanisko",
+  "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
+  "lane": "coordinator",
+  "generation": 1,
+  "globs": [
+    "src/core/retro/validate.ts",
+    "src/core/schemas/retro-gates.ts",
+    "test/core/graph/retro-gates.test.ts",
+    "test/core/retro/**",
+    "test/core/schemas/**"
+  ],
+  "heartbeat_at": "2026-10-26T03:51:20Z",
+  "pr": null,
+  "pr_owner": null,
+  "base_sha": "fc7c2aa4e40c2c392b9392a7eddc5f9d7bc44b1d",
+  "head_sha": null,
+  "reviewed_sha": null,
+  "passed_sha": null,
+  "approved_sha": null,
+  "approved_graph": null,
+  "retro_result": null,
+  "builder_providers": [],
+  "park": null,
+  "attempts": 0,
+  "loopbacks": 0,
+  "ci_fixes": 0,
+  "approval": null
+}
