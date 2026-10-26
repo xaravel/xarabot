@@ -91,7 +91,9 @@ import {
  *   the enqueue at the head; the step then ends `progress` `merging`, the
  *   coordinator process stops the unit's keeper (AD-6) and `reconcile` checks
  *   the queue (Story 2.6).
- * - A unit adopted with its open PR runs no session: CI, then the merge step.
+ * - A unit adopted with its open PR runs no session: an empty
+ *   `builder_providers` first gets the lane's vendor in a fence (Epic 2 retro
+ *   item 29), then CI, the review gate and the merge step.
  *
  * Like the retro step, the sessions run outside `kit.run`, so a `Halt`
  * reaches the coordinator process; anything else never throws.
@@ -305,6 +307,19 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
       });
     };
 
+    /**
+     * An adopted PR's builders (AD-16, Epic 2 retro item 29): an empty
+     * `builder_providers` (an adopted PR with no prior record, or a record a
+     * runner older than Story 3.3 wrote) gets the lane's vendor in a fence,
+     * so the review gate's reviewer is cross-vendor relative to this lane; a
+     * non-empty set is left as it is.
+     */
+    const adoptVendor = async (): Promise<void> => {
+      if (kit.record.builder_providers.length > 0) return;
+      note(`PR #${kit.record.pr ?? "none"} adopted with no builder_providers: adding ${deps.provider}`);
+      await kit.beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
+    };
+
     // ------------------------------------------------------------ sessions
 
     /** Set when a STOP ended a usage-limit sleep and the unit was released. */
@@ -499,11 +514,15 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
 
     // ------------------------------------------------------------ the unit
 
-    // A unit adopted with its open PR runs no session: CI, then the merge step.
+    // A unit adopted with its open PR runs no session: its vendor if the set is empty, CI, then the merge step.
     const adopted = input.record.pr;
     if (adopted !== null) {
       note(`resuming PR #${adopted} at ${input.record.head_sha ?? "no head"}: no session`);
-      return runKit(() => (input.record.head_sha === null ? failed(`PR #${adopted} has no head_sha on the record`) : ciAndMerge()));
+      return runKit(async () => {
+        if (input.record.head_sha === null) return await failed(`PR #${adopted} has no head_sha on the record`);
+        await adoptVendor();
+        return await ciAndMerge();
+      });
     }
 
     // The session runs outside `kit.run`: a `Halt` reaches the process.

@@ -2028,11 +2028,28 @@ describe("runLaneProcess stale takeover", () => {
       h.fake.control.mergeQueueHead();
     });
     expect((await h.run({ forge, mergeStep })).outcome).toBe("progress");
-    expect(during).toMatchObject({ state: "merging", ...held, generation: 4, attempts: 1, pr: open.number, head_sha: open.head, passed_sha: open.head, enqueued_sha: open.head });
+    expect(during).toMatchObject({
+      state: "merging",
+      ...held,
+      generation: 4,
+      attempts: 1,
+      pr: open.number,
+      head_sha: open.head,
+      passed_sha: open.head,
+      enqueued_sha: open.head,
+      builder_providers: ["anthropic"],
+    });
     expect(h.runs).toHaveLength(0);
     expect(h.prepares).toHaveLength(0);
     expect(calls.enqueue).toBe(0);
-    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+    // The adopted PR's empty builder_providers gets the lane's vendor in a fence before the merge step (retro item 29).
+    expect(messages(h.fake)).toEqual([
+      "root",
+      "foreign [skip ci]",
+      "ledger: takeOverStale story:1.1 [skip ci]",
+      "ledger: heartbeat story:1.1 [skip ci]",
+      "ledger: markMerged story:1.1 [skip ci]",
+    ]);
     expect((await h.ledger()).get("story:1.1")?.state).toBe("merged");
     expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "progress", state: "merged", generation: 4, sessions: 0 });
   });
@@ -2065,9 +2082,9 @@ describe("runLaneProcess stale takeover", () => {
     expect(r.outcome).toBe("failed");
     const takeover = h.fake.control.ledgerLog().findIndex((c) => c.message === "ledger: takeOverStale story:1.1 [skip ci]");
     expect(takeover).toBeGreaterThan(0);
-    // The takeover wrote the queue's head; the guard then fenced, dequeued and released it.
+    // The takeover wrote the queue's head and the vendor fence its builder; the guard then fenced, dequeued and released it.
     const edits = messages(h.fake).slice(takeover).map((m) => /^ledger: (\S+)/.exec(m)?.[1] ?? m);
-    expect(edits).toEqual(["takeOverStale", "heartbeat", "failAttempt"]);
+    expect(edits).toEqual(["takeOverStale", "heartbeat", "heartbeat", "failAttempt"]);
     expect(h.fake.control.queue()).toEqual([]);
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "released", ...held, generation: 4, attempts: 2, head_sha: open.head, enqueued_sha: old });
     const j = h.unitRecord();
@@ -2112,7 +2129,7 @@ describe("runLaneProcess stale takeover", () => {
     expect(calls.dequeue).toBe(1);
     expect(calls.enqueue).toBe(1);
     const edits = messages(h.fake).map((m) => /^ledger: (\S+)/.exec(m)?.[1] ?? m);
-    expect(edits).toEqual(["root", "foreign [skip ci]", "takeOverStale", "heartbeat", "ejected", "heartbeat", "startMerging", "markMerged"]);
+    expect(edits).toEqual(["root", "foreign [skip ci]", "takeOverStale", "heartbeat", "heartbeat", "ejected", "heartbeat", "startMerging", "markMerged"]);
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "merged", attempts: 2 });
     expect(h.runs).toHaveLength(0);
   });
@@ -2187,6 +2204,83 @@ describe("runLaneProcess stale takeover", () => {
     expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]"]);
     expect(h.runs).toHaveLength(0);
     expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "stop" });
+  });
+
+  // ---------------------------------------------- an adopted PR's builders (AD-16, Epic 2 retro item 29)
+
+  /** A behavior that reads the record's `builder_providers` as the session starts, then finishes `done`. */
+  const providersAtSession = (h: () => Harness, seen: (readonly string[] | undefined)[]): Behavior => async (ctx) => {
+    seen.push((await h().ledger()).get("story:1.1")?.builder_providers);
+    return finishes("done")(ctx);
+  };
+
+  test("retro item 29: a claim adopting an open PR with no record fences the lane's vendor into builder_providers before the session", async () => {
+    const seen: (readonly string[] | undefined)[] = [];
+    const h: Harness = harness({ behaviors: [providersAtSession(() => h, seen)] });
+    const open = await pr(h.fake, "1.1", "open");
+    expect((await h.run()).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "ledger: claim story:1.1 [skip ci]", "ledger: heartbeat story:1.1 [skip ci]"]);
+    expect(seen).toEqual([["anthropic"]]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", pr: open.number, builder_providers: ["anthropic"] });
+  });
+
+  test("retro item 29: a claim with no open PR adds no vendor: builder_providers stays empty until a push", async () => {
+    const seen: (readonly string[] | undefined)[] = [];
+    const h: Harness = harness({ behaviors: [providersAtSession(() => h, seen)] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "ledger: claim story:1.1 [skip ci]"]);
+    expect(seen).toEqual([[]]);
+  });
+
+  test("retro item 29: a stale claimed takeover adopting an open PR with an empty set (a pre-3.3 record) gets the lane's vendor before the session", async () => {
+    const seen: (readonly string[] | undefined)[] = [];
+    const h: Harness = harness({ behaviors: [providersAtSession(() => h, seen)] });
+    const open = await pr(h.fake, "1.1", "open");
+    foreignRecords(h.fake, [bobs({ pr: open.number, pr_owner: "bob", head_sha: open.head, builder_providers: [] })]);
+    expect((await h.run()).outcome).toBe("progress");
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]", "ledger: heartbeat story:1.1 [skip ci]"]);
+    expect(seen).toEqual([["anthropic"]]);
+    expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "claimed", ...held, generation: 4, builder_providers: ["anthropic"] });
+  });
+
+  test.each([[["openai"]], [["codex"]], [["anthropic", "openai"]]] as const)(
+    "retro item 29: a stale claimed takeover adopting an open PR built by %j: the set is never changed, no vendor fence",
+    async (built) => {
+      const seen: (readonly string[] | undefined)[] = [];
+      const h: Harness = harness({ behaviors: [providersAtSession(() => h, seen)] });
+      const open = await pr(h.fake, "1.1", "open");
+      foreignRecords(h.fake, [bobs({ pr: open.number, pr_owner: "bob", head_sha: open.head, builder_providers: [...built] })]);
+      expect((await h.run()).outcome).toBe("progress");
+      expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]"]);
+      expect(seen).toEqual([[...built]]);
+      expect((await h.ledger()).get("story:1.1")?.builder_providers).toEqual([...built]);
+    },
+  );
+
+  test("retro item 29: a stale merging takeover whose set is non-empty keeps it, with no vendor fence before the merge step", async () => {
+    const h = harness();
+    const open = await pr(h.fake, "1.1", "open");
+    expect((await h.fake.forge.enqueue(open.number, open.head, callOpts())).ok).toBe(true);
+    const main = await mainSha(h.fake);
+    foreignRecords(h.fake, [
+      bobs({ state: "merging", pr: open.number, pr_owner: "bob", head_sha: open.head, passed_sha: open.head, enqueued_sha: open.head, base_sha: main, attempts: 1, builder_providers: ["openai"] }),
+    ]);
+    let during: UnitRecord | undefined;
+    const mergeStep = mergeStepOn(h.fake.forge, async (i) => {
+      if (i !== 0) return;
+      during = (await h.ledger()).get("story:1.1");
+      h.fake.control.mergeQueueHead();
+    });
+    expect((await h.run({ mergeStep })).outcome).toBe("progress");
+    expect(during).toMatchObject({ state: "merging", ...held, generation: 4, builder_providers: ["openai"] });
+    expect(messages(h.fake)).toEqual(["root", "foreign [skip ci]", "ledger: takeOverStale story:1.1 [skip ci]", "ledger: markMerged story:1.1 [skip ci]"]);
+  });
+
+  test("retro item 29: the vendor is deps.provider when one is given", async () => {
+    const h = harness({ behaviors: [finishes("done")] });
+    await pr(h.fake, "1.1", "open");
+    expect((await h.run({ provider: "openai" })).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")?.builder_providers).toEqual(["openai"]);
   });
 });
 

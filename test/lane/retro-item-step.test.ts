@@ -7,7 +7,7 @@ import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/f
 import { checkWrite } from "../../src/core/lane/write-check.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import { headPassedGate } from "../../src/lane/passed-gate.ts";
-import { stubReviewStep } from "./review-stub.ts";
+import { reviewStub, stubReviewStep } from "./review-stub.ts";
 import { assembleSnapshot } from "../../src/core/next/snapshot.ts";
 import { ok } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
@@ -28,7 +28,7 @@ import type { WaitEnd } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { unchangedGraph } from "./graph-stub.ts";
-import { watchPushes } from "./push-providers.ts";
+import { ledgerProviders, watchPushes } from "./push-providers.ts";
 
 // ------------------------------------------------------------------ world
 
@@ -876,7 +876,53 @@ describe("findRetroItem", () => {
   });
 });
 
+/** `files` with a policy allowing both reviewers, so the reviewer choice is cross-vendor whichever vendor built the unit. */
+const bothReviewers = (files: Record<string, string>): Record<string, string> => ({ ...files, ".xarabot/policy.yaml": "schema_version: 1\nunattended_adapters: [claude, codex]\n" });
+
+/** `forge` with each `checks` call first reading `unit`'s `builder_providers` from the ledger on `fake` into `seen`. */
+function watchChecks(forge: Forge, fake: FakeForge, unit: string, seen: (readonly string[] | undefined)[]): Forge {
+  return {
+    ...forge,
+    checks: async (sha, o) => {
+      seen.push(await ledgerProviders(fake, unit));
+      return forge.checks(sha, o);
+    },
+  };
+}
+
 describe("createRetroItemStep: an adopted PR", () => {
+  /** Opens the item's PR at a fresh head whose CI passes, and writes the record adopting it, built by `built`; the PR number. */
+  const adopt = async (h: Harness, built: readonly string[]): Promise<number> => {
+    const head = h.fake.control.makeCommit();
+    h.fake.control.setChecks(head, PASS);
+    expect((await h.fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts())).ok).toBe(true);
+    const opened = await h.fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    const record = coord(U, { globs: GLOBS, generation: 2, pr: opened.value.number, pr_owner: COORD.owner, head_sha: head, builder_providers: [...built] });
+    h.fake.control.writeForeignLedger({ message: "adopt [skip ci]", writes: tip([record]), deletes: [] });
+    return opened.value.number;
+  };
+
+  test.each([
+    ["no builder_providers (an adopted PR with no prior record, or a pre-3.3 record): the lane's vendor fenced in before CI", [], ["anthropic"], "codex"],
+    ["builder_providers codex wrote: the set unchanged", ["openai"], ["openai"], "claude"],
+  ] as const)("retro item 29: an adopted PR with %s; the review is cross-vendor by the other vendor", async (_name, built, after, reviewer) => {
+    const h = harness();
+    h.fake.control.setMain(bothReviewers(mainFiles()));
+    const pr = await adopt(h, built);
+    const seen: (readonly string[] | undefined)[] = [];
+    const stub = reviewStub({ forge: h.fake.forge, laneDir: h.laneDir, hostStop: join(h.laneDir, "..", "STOP"), lane: LANE, identity: COORD, results: [] });
+    const out = await h.run(undefined, { forge: watchChecks(h.deps().forge, h.fake, U, seen), review: stub.review });
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect(h.prompts).toEqual([]);
+    expect(seen[0]).toEqual([...after]);
+    // The vendor fence is the only edit before CI, and only for an empty set.
+    expect(h.events.slice(0, h.events.indexOf("checks"))).toEqual(built.length === 0 ? ["ledgerSwap heartbeat"] : []);
+    expect(stub.prompts).toHaveLength(1);
+    expect(h.fake.control.reviewBodies(pr)[0]).toStartWith(`🤖 Unit ${U}: cross-vendor review by ${reviewer}`);
+    expect((await h.ledger()).get(U)?.builder_providers).toEqual([...after]);
+  });
+
   test("Adopted: a released record with its PR open runs no session; CI, then the gate", async () => {
     const h = harness({ policy: GATED });
     const head = h.fake.control.makeCommit();

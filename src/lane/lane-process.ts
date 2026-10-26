@@ -9,6 +9,7 @@ import {
   claim,
   coordinatorClaimState,
   failAttempt,
+  heartbeat,
   markMerged,
   park,
   parkNew,
@@ -23,6 +24,7 @@ import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { buildPrompt, type PromptMode, type PromptSection } from "../core/prompt/build-prompt.ts";
 import { PACKAGE_TEMPLATE } from "../core/prompt/template.ts";
 import { err, ok } from "../core/result.ts";
+import { addProvider, sessionProvider, type Provider } from "../core/review/reviewer.ts";
 import type { Config } from "../core/schemas/config.ts";
 import type { Lane } from "../core/schemas/host.ts";
 import type { LaneOutcome } from "../core/schemas/journal.ts";
@@ -103,6 +105,13 @@ export { CI_FIX_LOG, readsPath, type LaneProcessResult, type PrStep, type PrStep
  * anything else is `releaseStale`d. The keeper runs only for a unit this lane
  * then holds `claimed` or `merging`.
  *
+ * A claim or takeover that leaves the lane holding a record with an open PR
+ * and an empty `builder_providers` (an adopted PR with no prior record, or a
+ * record a runner older than Story 3.3 wrote) adds the lane's vendor in a
+ * fence before anything else runs, so the review gate's reviewer choice is
+ * cross-vendor relative to this lane (AD-16, Epic 2 retro item 29). A
+ * non-empty set is never changed.
+ *
  * After each snapshot, a missing or expired `coordinator.json` posts a
  * best-effort `coordinator-missing` or `coordinator-expired` alert (Story
  * 2.4); the builder goes on either way.
@@ -157,6 +166,12 @@ export type LaneDeps = {
   readonly identity: LaneIdentity;
   /** The lane's `host.yaml` settings: repo, agent, model, effort. */
   readonly lane: Lane;
+  /**
+   * The lane's session vendor, added to an adopted PR's empty
+   * `builder_providers` (AD-16); default the vendor of the lane's agent and
+   * model (`sessionProvider`).
+   */
+  readonly provider?: Provider;
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;
   /** The host clock in epoch ms; default `Date.now`. */
@@ -224,6 +239,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   const layout: LaneLayout = laneLayout(deps.laneDir);
   const iso = (ms: number) => new Date(ms).toISOString();
   const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
+  /** The lane's session vendor; `null` for a `pi` lane, which has none in 0.x. */
+  const provider: Provider | null = deps.provider ?? (lane.agent === "pi" ? null : sessionProvider({ adapter: lane.agent, model: lane.model ?? agent.defaultModel }));
 
   let mainSha: string | null = null;
   /** The last forge time seen and the host time it was seen at. */
@@ -280,6 +297,22 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
   const keeperSignals = (): AbortSignal[] => (keeper === null ? [] : [keeper.signal]);
 
   const { checkHeld, held, failUnit, retryFail } = trackOps({ ops, identity, note, keeper: () => keeper });
+
+  /**
+   * An adopted PR's builders (AD-16, Epic 2 retro item 29): a held record
+   * with a PR and an empty `builder_providers` gets the lane's vendor in a
+   * fence; a non-empty set, or a record with no PR, is left as it is. The
+   * run's outcome when the fence failed, else `null`.
+   */
+  const adoptVendor = async (t: UnitTrack): Promise<LaneOutcome | null> => {
+    const r = t.record;
+    if (r === null || r.pr === null || r.builder_providers.length > 0) return null;
+    if (provider === null) return failUnit(t, `PR #${r.pr} adopted with no builder_providers, and a ${lane.agent} lane has no session vendor to add`);
+    note(`PR #${r.pr} adopted with no builder_providers: adding ${provider}`);
+    const set = { builder_providers: addProvider(r.builder_providers, provider) };
+    const fenced = await held(t, (now, generation) => heartbeat({ unit: t.unit, by: identity, now, generation, set }), "fence");
+    return fenced ? null : "failed";
+  };
 
   /** Appends one unit journal record, after flushing the unit's log. */
   const journal = (e: JournalEntry): void =>
@@ -832,6 +865,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
         );
         if (taken === null) continue;
         keep();
+        const fenced = await adoptVendor(t);
+        if (fenced !== null) return fenced;
         return await work(t, snap, config, null);
       }
 
@@ -879,6 +914,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       keep();
 
       if (decided.kind === "merged") return await markedMerged(decided.pr.number, await freshNow());
+      const fenced = await adoptVendor(t);
+      if (fenced !== null) return fenced;
       const start = decided.kind === "open" ? decided.pr.head_sha : snap.main.sha;
       return await work(t, snap, config, start);
     }

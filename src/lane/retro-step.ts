@@ -92,7 +92,9 @@ import type { TreeFiles } from "./tree-files.ts";
  *   the PR's head moved, the adopting claim dropped it: the result the record
  *   held before the claim is checked again (`checkRetroDiff`) against the
  *   moved head onto fresh `main`, and recorded with that head before CI and
- *   the gate; a mismatch, or no result to check, is a failed attempt.
+ *   the gate; a mismatch, or no result to check, is a failed attempt. Before
+ *   either, an empty `builder_providers` gets the lane's vendor in a fence
+ *   (Epic 2 retro item 29).
  *
  * Every push, PR change and enqueue is fenced; the push's fence adds the
  * lane's vendor to the record's `builder_providers` (AD-16). Like the
@@ -418,6 +420,19 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       return await ciAndGate(pr, head);
     };
 
+    /**
+     * An adopted PR's builders (AD-16, Epic 2 retro item 29): an empty
+     * `builder_providers` (an adopted PR with no prior record, or a record a
+     * runner older than Story 3.3 wrote) gets the lane's vendor in a fence,
+     * so the review round's reviewer is cross-vendor relative to this lane; a
+     * non-empty set is left as it is.
+     */
+    const adoptVendor = async (): Promise<void> => {
+      if (kit.record.builder_providers.length > 0) return;
+      note(`PR #${kit.record.pr ?? "none"} adopted with no builder_providers: adding ${deps.provider}`);
+      await beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
+    };
+
     /** `kit.run` for a body that may throw a `Halt` (from the review round): it reaches the process. */
     const runKit = async (body: () => Promise<PrStepOutput>): Promise<PrStepOutput> => {
       try {
@@ -440,15 +455,12 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       // The record as the snapshot shows it, before this claim: its result at another head of the same PR was validated there, not here.
       const before = snapshot.ledger.units.find((r) => r.unit === unit);
       const moved = before?.retro_result != null && before.pr === adopted && before.head_sha !== null && before.head_sha !== adoptedHead ? before : null;
-      return runKit(() =>
-        adoptedHead === null
-          ? failed(`PR #${adopted} has no head_sha on the record`)
-          : moved !== null
-            ? recheck(adopted, moved.retro_result as RetroRecordResult, moved.head_sha as string, adoptedHead)
-            : kept !== null
-              ? ciAndGate(adopted, adoptedHead)
-              : failed(`PR #${adopted} has no retro_result on the record`),
-      );
+      return runKit(async () => {
+        if (adoptedHead === null) return await failed(`PR #${adopted} has no head_sha on the record`);
+        if (moved === null && kept === null) return await failed(`PR #${adopted} has no retro_result on the record`);
+        await adoptVendor();
+        return moved !== null ? await recheck(adopted, moved.retro_result as RetroRecordResult, moved.head_sha as string, adoptedHead) : await ciAndGate(adopted, adoptedHead);
+      });
     }
 
     // The prefetch: the Epic's Story branches' PRs, each with its reviews.
