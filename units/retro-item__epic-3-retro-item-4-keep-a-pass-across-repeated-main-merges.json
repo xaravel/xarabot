@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-4-keep-a-pass-across-repeated-main-merges",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -13,7 +13,7 @@
     "test/lane/passed-gate.test.ts",
     "test/lane/review-gate.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T19:10:17.786Z",
+  "heartbeat_at": "2026-10-26T19:13:00.019Z",
   "pr": 221,
   "pr_owner": "edanisko",
   "base_sha": "628bdff88e55f3f9e4b1df9f49d536a49b87c47b",
