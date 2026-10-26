@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.2",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "builder-1",
+  "lane": "coordinator",
   "generation": 2,
   "globs": [
     "docs/maintainer/self-host.md",
@@ -25,7 +25,7 @@
     "test/core/schemas/**",
     "test/lane/**"
   ],
-  "heartbeat_at": "2026-10-26T22:23:55.585Z",
+  "heartbeat_at": "2026-10-26T23:05:10Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "f1935c4d2cd06b4eba5ce3760857925951afd7e3",
@@ -37,12 +37,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "write-check",
-    "inbox_owner": "edanisko",
-    "globs_held": []
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
