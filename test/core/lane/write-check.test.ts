@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { AGENT_CONFIG_PATHS, MANDATORY_PROTECTED_PATHS } from "../../../src/core/config/protected-paths.ts";
 import {
   checkWrite,
+  CONTENT_WRITE_CLASSES,
   COORDINATOR_WRITE_CLASSES,
   coordinatorWriteRules,
   epicContextMatch,
   sprintStatusRefusals,
   statusLineOnly,
   statusSession,
+  symlinkTarget,
   WRITE_CLASSES,
   writeRules,
   type CoordinatorWriteClass,
@@ -221,6 +223,44 @@ const CLAUDE_CASES: readonly Case[] = [
   { name: "a policy Protected Path", covers: ["protected-path"], changes: [p("secrets/key")], refused: [no("secrets/key", "protected-path")] },
   { name: "a nested policy glob", covers: ["protected-path"], changes: [p("certs/a/server.pem")], refused: [no("certs/a/server.pem", "protected-path")] },
   { name: "case-folded Protected Path", covers: ["protected-path"], changes: [p("Secrets/Key"), p("x.PEM")], refused: [no("Secrets/Key", "protected-path"), no("x.PEM", "protected-path")] },
+  {
+    name: "a file or symlink in place of a protected <dir>/** folder, case-folded",
+    covers: ["protected-path"],
+    rules: { protectedPaths: ["secrets/**", "docs/private/**"] },
+    changes: [p("secrets"), p("Docs/Private")],
+    refused: [no("Docs/Private", "protected-path"), no("secrets", "protected-path")],
+  },
+  {
+    name: "only the protected folder itself: a sibling name or a parent folder is not refused",
+    covers: [],
+    rules: { protectedPaths: ["secrets/**", "docs/private/**"] },
+    changes: [p("secrets2"), p("docs"), p("docs/privatex")],
+    refused: [],
+  },
+  { name: "a glob not ending in /** is not widened", covers: [], changes: [p("x.pem.d")], refused: [] },
+
+  // NFD before folding (as APFS compares names): a composed `é` and `e` with a combining accent are one name.
+  {
+    name: "nfd: a decomposed path in a composed Protected Path",
+    covers: ["protected-path"],
+    rules: { protectedPaths: ["café/**"] },
+    changes: [p("café/menu"), p("CAFÉ/x")],
+    refused: [no("CAFÉ/x", "protected-path"), no("café/menu", "protected-path")],
+  },
+  {
+    name: "nfd: a composed path to a decomposed Standing Authority",
+    covers: ["standing-authority"],
+    rules: { standingAuthorityPath: "docs/autorité.md" },
+    changes: [p("docs/autorité.md"), p("Docs/AUTORITÉ.md")],
+    refused: [no("Docs/AUTORITÉ.md", "standing-authority"), no("docs/autorité.md", "standing-authority")],
+  },
+  {
+    name: "nfd: the folder of a protected <dir>/** glob, decomposed",
+    covers: ["protected-path"],
+    rules: { protectedPaths: ["dépôt/**"] },
+    changes: [p("dépôt")],
+    refused: [no("dépôt", "protected-path")],
+  },
 
   // Full case folding (toUpperCase().toLowerCase(), as APFS folds): `ſ` folds to `s`, `K` (Kelvin) to `k`.
   { name: "full fold: ſ in the sprint status", covers: ["coordinator-file"], changes: [p(SPRINT.replace("sprint", "ſprint"))], refused: [no(SPRINT.replace("sprint", "ſprint"), "coordinator-file")] },
@@ -950,5 +990,123 @@ describe("checkWrite (a retro item: coordinator rules plus every builder refusal
     });
     expect(coordRules({ kind: "retro-item", globs: ["src/**"] }).refused).toBeNull();
     expect(checkWrite(coordRules({ kind: "retro-item", globs: ["src/**"] }), [{ path: "src/CLAUDE.md", mode: "100644" }])).toEqual([]);
+  });
+});
+
+describe("symlinks (Epic 2 retro item 18): a target that leaves the clone or resolves into a refused class", () => {
+  /** A symlink at `path` to `target`; `undefined` gives no target. */
+  const link = (path: string, target: string | undefined): WriteChange => (target === undefined ? { path, mode: "120000" } : { path, mode: "120000", linkTarget: target });
+  const sym = (path: string): WriteRefusal => ({ path, class: "symlink" });
+
+  test("the content classes", () => {
+    expect([...CONTENT_WRITE_CLASSES]).toEqual(["symlink"]);
+  });
+
+  test.each([
+    ["a sibling", "src/l", "a.ts", "src/a.ts"],
+    ["a parent's file", "src/x/l", "../a.ts", "src/a.ts"],
+    ["up to the root, then down", "src/x/l", "../../docs/a.md", "docs/a.md"],
+    ["./ and empty components", "src/l", ".//x/./a.ts", "src/x/a.ts"],
+    ["a trailing slash", "src/l", "x/", "src/x"],
+    ["absolute", "src/l", "/etc/passwd", null],
+    ["home, as a shell expands it", "src/l", "~/.claude", null],
+    ["home of another user", "l", "~root", null],
+    ["out of the clone", "src/l", "../../runner.git/hooks", null],
+    ["out of the clone from the root", "l", "../x", null],
+    ["out and back in", "src/l", "../../clone/src/a.ts", null],
+    ["the repo root", "src/l", "..", null],
+    ["the repo root as .", "l", ".", null],
+    ["a .. after a name", "src/l", "x/../a.ts", null],
+    ["a .. after a name that stays inside textually", "src/x/l", "y/../../a.ts", null],
+    ["the clone's .git", "src/l", "../.git/hooks", null],
+    ["a nested .git, case-folded", "src/l", "sub/.GIT", null],
+    ["an empty target", "src/l", "", null],
+  ] as const)("symlinkTarget: %s", (_name, path, target, want) => {
+    expect(symlinkTarget(path, target)).toBe(want);
+  });
+
+  test.each([
+    ["an inside target in no refused class passes", [link("src/l", "a.ts"), link("docs/l", "../src")], []],
+    ["an absolute target", [link("src/l", "/etc/passwd")], [sym("src/l")]],
+    ["~/.claude", [link("src/l", "~/.claude")], [sym("src/l")]],
+    ["../runner.git/hooks", [link("hooks", "../runner.git/hooks")], [sym("hooks")]],
+    ["the repo root", [link("src/all", "..")], [sym("src/all")]],
+    ["into .git", [link("src/h", "../.git/hooks")], [sym("src/h")]],
+    ["a .. after a name", [link("src/x/l", "y/../../a.ts")], [sym("src/x/l")]],
+    ["no target given", [link("src/l", undefined)], [sym("src/l")]],
+    ["an empty target", [link("src/l", "")], [sym("src/l")]],
+    ["into .github", [link("docs/wf", "../.github/workflows")], [sym("docs/wf")]],
+    ["into agent config, case-folded", [link("docs/s", "../.Claude/settings.json"), link("docs/a", "../AGENTS.md")], [sym("docs/a"), sym("docs/s")]],
+    ["to an agent config folder", [link("docs/c", "../pkg/.codex")], [sym("docs/c")]],
+    ["to a coordinator file", [link("docs/s", `../${SPRINT}`)], [sym("docs/s")]],
+    ["to a manifest", [link("docs/m", "../stories/1.1.md")], [sym("docs/m")]],
+    ["to .xarabot", [link("docs/x", "../.xarabot")], [sym("docs/x")]],
+    ["to the Standing Authority", [link("src/sa", `../${AUTHORITY}`)], [sym("src/sa")]],
+    ["to a live evidence file", [link("src/e", "../docs/maintainer/evidence/epic-2.md")], [sym("src/e")]],
+    ["to a protected folder (<dir>/** matched with /x)", [link("src/k", "../secrets")], [sym("src/k")]],
+    ["to a protected file", [link("src/k", "../secrets/key")], [sym("src/k")]],
+    ["to the own manifest", [link("src/m", `../${STORY}`)], [sym("src/m")]],
+    ["the path's own class wins: a .claude symlink is agent-config", [link(".claude", "src")], [no(".claude", "agent-config")]],
+    ["a deleted symlink is not checked", [{ path: "src/l", mode: "000000" }], []],
+    ["a regular file is not checked", [{ path: "src/l", mode: "100644" }], []],
+  ] as const)("builder: %s", (_name, changes, refused) => {
+    expect(checkWrite(RULES, changes)).toEqual([...refused]);
+  });
+
+  test("builder: an excepted path is still checked as a symlink, and no exception covers a target", () => {
+    expect(checkWrite(RULES, [link(SPEC, "/etc/passwd")])).toEqual([sym(SPEC)]);
+    expect(checkWrite(RULES, [link(SPEC, "x.md")])).toEqual([]);
+    const infra = { ...RULES, infrastructureApproved: true };
+    expect(checkWrite(infra, [link(".github/l", "/etc")])).toEqual([sym(".github/l")]);
+    expect(checkWrite(infra, [link(".github/l", "../src/a.ts")])).toEqual([]);
+    expect(checkWrite(infra, [link(".github/l", "workflows")])).toEqual([sym(".github/l")]);
+    expect(checkWrite(infra, [link("src/l", "../.github/workflows"), link("src/k", "../secrets")])).toEqual([sym("src/k"), sym("src/l")]);
+  });
+
+  const BUILDER_REFUSALS = { config: { ...COORD_CONFIG, standing_authority_path: AUTHORITY }, policy: { protected_paths: ["secrets/**"] } };
+  const item = (globs: readonly string[], refusals = true): CoordinatorWriteRules => ({
+    ...coordinatorWriteRules({
+      config: COORD_CONFIG,
+      globs: coordinatorGlobs({ kind: "retro-item", globs }, COORD_CONFIG),
+      graphUnit: false,
+      ...(refusals ? { builderRefusals: BUILDER_REFUSALS } : {}),
+    }),
+    unit: "retro-item:epic-2-retro-item-1-fix",
+  });
+
+  test.each([
+    ["a target inside the unit's globs passes", item(["src/**"]), [link("src/l", "a.ts")], []],
+    ["an absolute target", item(["src/**"]), [link("src/l", "/Users/x/.claude")], [sym("src/l")]],
+    ["out of the clone", item(["src/**"]), [link("src/l", "../../runner.git/hooks")], [sym("src/l")]],
+    ["a target outside the unit's globs", item(["src/**"]), [link("src/l", "../docs/a.md")], [sym("src/l")]],
+    ["a target in another case than the unit's globs", item(["src/**"]), [link("src/l", "../SRC/a.ts")], [sym("src/l")]],
+    ["a target under .xarabot", item(["**"]), [link("src/l", "../.xarabot/policy.yaml")], [sym("src/l")]],
+    ["a target that is a graph input", item(["**"]), [link("src/l", "../stories/2.1.md")], [sym("src/l")]],
+    ["a target a builder is refused (a retro item)", item(["**"]), [link("src/l", "CLAUDE.md"), link("src/k", "../secrets")], [sym("src/k"), sym("src/l")]],
+    ["without builder refusals, only the coordinator classes", item(["**"], false), [link("src/l", "CLAUDE.md")], []],
+    ["no target given", item(["src/**"]), [link("src/l", undefined)], [sym("src/l")]],
+    ["the path's own class wins", item(["src/**"]), [link("docs/l", "/etc")], [{ path: "docs/l", class: "outside-unit" }]],
+  ] as const)("coordinator: %s", (_name, rules, changes, refused) => {
+    expect(checkWrite(rules, changes)).toEqual([...refused]);
+  });
+
+  test("coordinator: a status unit's Epic context as a symlink", () => {
+    const rules = coordRules(STATUS_UNIT);
+    expect(checkWrite(rules, [link(CONTEXT_2, "sprint-status.yaml")])).toEqual([]);
+    expect(checkWrite(rules, [link(CONTEXT_2, "../../.xarabot/config.yaml")])).toEqual([sym(CONTEXT_2)]);
+    expect(checkWrite(rules, [link(CONTEXT_2, "/etc/passwd")])).toEqual([sym(CONTEXT_2)]);
+  });
+});
+
+describe("NFD before folding (coordinator)", () => {
+  test("a decomposed path to a composed sprint status is still the file: its keys are checked", () => {
+    const composed = "état/sprint-status.yaml";
+    const decomposed = "état/sprint-status.yaml";
+    const config = { ...COORD_CONFIG, sprint_status_path: composed };
+    const rules = { ...coordinatorWriteRules({ config, globs: ["**"], graphUnit: false }), unit: "planning:status.1" };
+    expect(checkWrite(rules, [sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: done"), decomposed)])).toEqual([
+      { path: key("development_status.2-2-takeover", decomposed), class: "story-done" },
+    ]);
+    expect(checkWrite(rules, [{ path: decomposed, mode: "100644" }])).toEqual([{ path: decomposed, class: "status-invalid" }]);
   });
 });

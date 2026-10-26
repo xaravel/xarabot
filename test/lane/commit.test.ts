@@ -378,6 +378,53 @@ describe("commitSession: the write check", () => {
     await noHead(repo);
   });
 
+  // Epic 2 retro item 18: a symlink's target is read from its blob and checked.
+  test("symlinks: a target outside the clone, into .git or into a refused class is refused; one inside is committed", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    symlinkSync("/etc", join(repo.clone, "src/abs"));
+    symlinkSync("../../runner.git/hooks", join(repo.clone, "src/hooks"));
+    symlinkSync("../.git/hooks", join(repo.clone, "src/git"));
+    symlinkSync("../.github/workflows", join(repo.clone, "src/wf"));
+    symlinkSync("a.ts", join(repo.clone, "src/ok"));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [
+        { path: "src/abs", class: "symlink" },
+        { path: "src/git", class: "symlink" },
+        { path: "src/hooks", class: "symlink" },
+        { path: "src/wf", class: "symlink" },
+      ],
+      reverted: [],
+    });
+    await noHead(repo);
+    for (const l of ["src/abs", "src/hooks", "src/git", "src/wf"]) rmSync(join(repo.clone, l));
+    const r = value(await commitSession(session(repo, base, base)));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(await rg(repo.gitDir, ["ls-tree", r.head_sha, "src/ok"])).toStartWith("120000 ");
+    expect((await files(repo.gitDir, r.head_sha))["src/ok"]).toBe("a.ts");
+  });
+
+  test("symlinks: a regular file changed into a symlink to ~/.claude is refused, as is one in place of the own spec", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    rmSync(join(repo.clone, "src/a.ts"));
+    symlinkSync("~/.claude", join(repo.clone, "src/a.ts"));
+    rmSync(join(repo.clone, SPEC_PATH));
+    symlinkSync("/etc/passwd", join(repo.clone, SPEC_PATH));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({
+      kind: "refused",
+      refusals: [
+        { path: SPEC_PATH, class: "symlink" },
+        { path: "src/a.ts", class: "symlink" },
+      ],
+      reverted: [],
+    });
+    await noHead(repo);
+  });
+
   test("an Epic context file replaced by a directory: the check and the commit see the same squashed tree", async () => {
     const repo = await setup();
     const base = await commit(repo.gitDir, baseFiles);
@@ -476,6 +523,41 @@ describe("commitSession: the write check", () => {
         reverted: [],
       });
       await noHead(repo);
+    });
+
+    test("an Epic context symlink out of the clone is refused symlink; one to a status file is committed", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, baseFiles);
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
+      const added = "_bmad-output/implementation-artifacts/epic-2-context.md";
+      mkdirSync(dirname(join(repo.clone, added)), { recursive: true });
+      symlinkSync("../../../.claude", join(repo.clone, added));
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit })))).toEqual({
+        kind: "refused",
+        refusals: [{ path: added, class: "symlink" }],
+        reverted: [],
+      });
+      await noHead(repo);
+      rmSync(join(repo.clone, added));
+      symlinkSync("sprint-status.yaml", join(repo.clone, added));
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit }))).kind).toBe("committed");
+    });
+
+    test("a sprint status path in another Unicode form (NFD) still gets both texts: its keys are checked", async () => {
+      const repo = await setup();
+      const composed = "_bmad-output/implementation-artifacts/\u00e9tat.yaml";
+      const nfdConfig = { ...config, sprint_status_path: "_bmad-output/implementation-artifacts/e\u0301tat.yaml" };
+      const nfdRules = coordinatorWriteRules({ config: nfdConfig, globs: ["**"], graphUnit: false });
+      const base = await commit(repo.gitDir, { ...baseFiles, [composed]: "development_status: {}\n" });
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
+      write(repo, composed, "development_status:\n  epic-2: in-progress\n");
+      expect(value(await commitSession(session(repo, base, base, { rules: nfdRules }))).kind).toBe("committed");
+      write(repo, composed, "development_status:\n  2-1-x: done\n");
+      expect(value(await commitSession(session(repo, base, base, { rules: nfdRules })))).toEqual({
+        kind: "refused",
+        refusals: [{ path: `${composed}#development_status.2-1-x`, class: "story-done" }],
+        reverted: [],
+      });
     });
 
     // Story 2.9: the retro records in retro-gates.yaml are reconcile's alone; the check reads both sides' texts.

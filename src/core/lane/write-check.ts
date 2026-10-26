@@ -11,7 +11,9 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
  * session's own change may not touch. Every refused-class comparison is
  * case-folded, because the clone lives on a case-insensitive filesystem;
  * the exceptions compare exact paths, so folding only ever widens a
- * refusal. A coordinator session's change has its own rules
+ * refusal. A symlink the change adds or changes is refused on its target
+ * too (`symlink`, Epic 2 retro item 18), under either role. A coordinator
+ * session's change has its own rules
  * (`coordinatorWriteRules`, Story 2.4): only the paths its unit holds,
  * matched exactly, so a case variant of one is refused; a retro item's
  * (Story 2.10) adds every builder refusal, with no exception; and in
@@ -22,6 +24,15 @@ import { graphInputGlobs, statusFiles } from "../next/coordinator.ts";
 /** The refused path classes, in reporting order: a path in several is reported as the first. */
 export const WRITE_CLASSES = ["coordinator-file", "live-evidence", "xarabot", "manifest", "standing-authority", "github", "agent-config", "protected-path"] as const;
 export type WriteClass = (typeof WRITE_CLASSES)[number];
+
+/**
+ * The content classes (AD-30), checked under either role after the path
+ * classes, with no exception: `symlink` is an added or changed symlink
+ * whose target leaves the clone or resolves into a refused class
+ * (`symlinkTarget`).
+ */
+export const CONTENT_WRITE_CLASSES = ["symlink"] as const;
+export type ContentWriteClass = (typeof CONTENT_WRITE_CLASSES)[number];
 
 /** The classes an approved Infrastructure Story may write. */
 const INFRASTRUCTURE_CLASSES: ReadonlySet<WriteClass> = new Set(["standing-authority", "github", "agent-config", "protected-path"]);
@@ -110,6 +121,11 @@ export type WriteChange = {
    * status file or graph input with any mode but `100644`, or none.
    */
   readonly mode?: string;
+  /**
+   * For a new side of mode `120000` (a symlink): its target, the blob's
+   * text. Missing for such a change is `symlink`.
+   */
+  readonly linkTarget?: string;
   readonly storyFile?: { readonly before: string; readonly after: string };
   /**
    * Under coordinator rules, for a change to `retro_gates_path`: its text
@@ -130,7 +146,7 @@ export type WriteChange = {
  * of `sprint_status_path` (`story-done`, `status-key`) it is
  * `<path>#<key>`, so every line that names the refusal names the key.
  */
-export type WriteRefusal = { readonly path: string; readonly class: WriteClass | CoordinatorWriteClass };
+export type WriteRefusal = { readonly path: string; readonly class: WriteClass | CoordinatorWriteClass | ContentWriteClass };
 
 /**
  * The coordinator's refused path classes (AD-13, AD-30), in reporting
@@ -151,6 +167,8 @@ export type WriteRefusal = { readonly path: string; readonly class: WriteClass |
  * that does not parse, or texts not given, is `status-invalid`. With `refused` set (a
  * retro item, Story 2.10), a path no coordinator class refuses is then
  * classified as a builder's would be, with no exception (`WRITE_CLASSES`).
+ * A path left is then `symlink` when it adds or changes a symlink whose
+ * target leaves the clone or is a path these classes refuse.
  */
 export const COORDINATOR_WRITE_CLASSES = [
   "xarabot",
@@ -219,8 +237,12 @@ export function coordinatorWriteRules(input: CoordinatorWriteRulesInput): Coordi
   };
 }
 
-/** Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with `s` and `k`. */
-const fold = (s: string): string => s.toUpperCase().toLowerCase();
+/**
+ * Full case folding, as APFS folds names: `ſ` and `K` (Kelvin) fold with
+ * `s` and `k`, and a composed `é` with `e` and a combining accent (NFD,
+ * as APFS compares names).
+ */
+const fold = (s: string): string => s.normalize("NFD").toUpperCase().toLowerCase();
 
 /** The agent config folder names, folded: a path ending in one is agent config whatever it is. */
 const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set([".agents", ".claude", ".codex", ".pi"]);
@@ -289,6 +311,14 @@ function matchesAny(globs: readonly string[], folded: string): boolean {
   return globs.some((g) => new Bun.Glob(fold(g)).match(folded));
 }
 
+/** `matchesAny`, where a `<dir>/**` glob also matches `<dir>` itself: a file or symlink in place of the folder. */
+function matchesProtected(globs: readonly string[], folded: string): boolean {
+  return globs.some((g) => {
+    const glob = new Bun.Glob(fold(g));
+    return glob.match(folded) || (g.endsWith("/**") && glob.match(`${folded}/x`));
+  });
+}
+
 /** The first refused class `path` is in, or `null`; case-folded. */
 function classify(rules: RefusedPaths, path: string): WriteClass | null {
   const p = fold(path);
@@ -302,9 +332,50 @@ function classify(rules: RefusedPaths, path: string): WriteClass | null {
   if (fold(rules.standingAuthorityPath) === p) return "standing-authority";
   if (p === ".github" || p.startsWith(".github/")) return "github";
   // A bare agent config folder name (a file or symlink there) counts too.
-  if (matchesAny(AGENT_CONFIG_PATHS, p) || AGENT_CONFIG_DIRS.has(p.slice(p.lastIndexOf("/") + 1))) return "agent-config";
-  if (matchesAny(rules.protectedPaths, p)) return "protected-path";
+  if (matchesProtected(AGENT_CONFIG_PATHS, p) || AGENT_CONFIG_DIRS.has(p.slice(p.lastIndexOf("/") + 1))) return "agent-config";
+  if (matchesProtected(rules.protectedPaths, p)) return "protected-path";
   return null;
+}
+
+/** The git mode of a symlink. */
+const SYMLINK_MODE = "120000";
+
+/**
+ * The repo path a symlink at `path` with `target` points to, or `null`
+ * when it leaves the clone: an empty target, an absolute one (`/`, or `~`
+ * as a shell expands it), one that leaves the repo root or names the root
+ * itself, one with a `..` after a name (through another symlink it can
+ * climb past the root), or one through a `.git` (case-folded). Every
+ * symlink's target is checked this way, so one that stays inside the clone
+ * only ever passes through others that do.
+ */
+export function symlinkTarget(path: string, target: string): string | null {
+  if (target === "" || target.startsWith("/") || target.startsWith("~")) return null;
+  const parts = path.split("/").slice(0, -1);
+  let named = false;
+  for (const part of target.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (named || parts.length === 0) return null;
+      parts.pop();
+      continue;
+    }
+    if (fold(part) === ".git") return null;
+    named = true;
+    parts.push(part);
+  }
+  return parts.length === 0 ? null : parts.join("/");
+}
+
+/**
+ * True when `change` adds or changes a symlink whose target is missing,
+ * leaves the clone (`symlinkTarget`), or is a path `refused` classifies.
+ */
+function symlinkRefused(change: WriteChange, refused: (path: string) => boolean): boolean {
+  if (change.mode !== SYMLINK_MODE) return false;
+  if (change.linkTarget === undefined) return true;
+  const target = symlinkTarget(change.path, change.linkTarget);
+  return target === null || refused(target);
 }
 
 const byPath = (a: WriteRefusal, b: WriteRefusal): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -469,11 +540,13 @@ export function sprintStatusRefusals(session: StatusSession, path: string, texts
 function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
   const session = statusSession(rules.unit, rules.graphUnit);
-  const folded = changes.map((c) => ({ path: c.path, p: fold(c.path), mode: c.mode, retroGates: c.retroGates, sprintStatus: c.sprintStatus }));
+  const folded = changes.map((c) => ({ change: c, path: c.path, p: fold(c.path), mode: c.mode, retroGates: c.retroGates, sprintStatus: c.sprintStatus }));
   const isGraph = (p: string) => matchesAny(rules.graphInputs, p);
   const isStatus = (p: string) => rules.statusFiles.some((f) => fold(f) === p);
   const both = folded.some((c) => isGraph(c.p)) && folded.some((c) => isStatus(c.p));
-  for (const { path, p, mode, retroGates, sprintStatus } of folded) {
+  // A symlink's target is refused where a change to the target itself would be.
+  const targetRefused = (t: string) => classifyCoordinator(rules, t, fold(t)) !== null || (rules.refused !== null && classify(rules.refused, t) !== null);
+  for (const { change, path, p, mode, retroGates, sprintStatus } of folded) {
     const kept = isGraph(p) || isStatus(p);
     const cls = classifyCoordinator(rules, path, p) ?? (both && kept ? "graph-and-status" : kept && mode !== REGULAR_MODE ? "mode" : null);
     if (cls !== null) {
@@ -484,24 +557,29 @@ function checkCoordinatorWrite(rules: CoordinatorWriteRules, changes: readonly W
     for (const c of records) out.push({ path, class: c });
     const keys = fold(rules.sprintStatusPath) === p ? sprintStatusRefusals(session, rules.sprintStatusPath, sprintStatus) : [];
     for (const k of keys) out.push({ path: k.key === null ? path : `${path}#${k.key}`, class: k.class });
-    if (records.length > 0 || keys.length > 0 || rules.refused === null) continue;
+    if (records.length > 0 || keys.length > 0) continue;
     // A retro item: then a builder's refusal, with no exception.
-    const builder = classify(rules.refused, path);
+    const builder = rules.refused === null ? null : classify(rules.refused, path);
     if (builder !== null) out.push({ path, class: builder });
+    else if (symlinkRefused(change, targetRefused)) out.push({ path, class: "symlink" });
   }
   return out.sort(byPath);
 }
 
 function checkBuilderWrite(rules: WriteRules, changes: readonly WriteChange[]): WriteRefusal[] {
   const out: WriteRefusal[] = [];
+  // A symlink's target is refused in any refused class, with no exception.
+  const targetRefused = (t: string) => classify(rules, t) !== null;
   for (const change of changes) {
     const { path } = change;
     const cls = classify(rules, path);
-    if (cls === null) continue;
-    if (path === rules.specPath) continue;
-    if (path === rules.storyFile && change.storyFile !== undefined && statusLineOnly(change.storyFile.before, change.storyFile.after)) continue;
-    if (rules.infrastructureApproved && INFRASTRUCTURE_CLASSES.has(cls)) continue;
-    out.push({ path, class: cls });
+    const excepted =
+      cls === null ||
+      path === rules.specPath ||
+      (path === rules.storyFile && change.storyFile !== undefined && statusLineOnly(change.storyFile.before, change.storyFile.after)) ||
+      (rules.infrastructureApproved && INFRASTRUCTURE_CLASSES.has(cls));
+    if (!excepted) out.push({ path, class: cls });
+    else if (symlinkRefused(change, targetRefused)) out.push({ path, class: "symlink" });
   }
   return out.sort(byPath);
 }
