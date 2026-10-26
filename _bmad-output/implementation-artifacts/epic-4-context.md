@@ -1,5 +1,5 @@
 # Epic 4 Context: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
-<!-- source: sha256:2caf4d95afb809c75a684d5ec6f501b85532be3fd3fa8d5c13dd6128055bc32f -->
+<!-- source: sha256:03402af7056b7fd7d8be1c4fbfc1f6d1fd70233f3d81ff832ad45005f00d6deb -->
 
 <!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
 
@@ -24,17 +24,18 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
 - **Checkpoints:** a checkpoint Epic whose retro is done holds all its transitive dependents until the Maintainer's go. Epics that don't depend on it keep running, and Epics in flight finish the Stories they hold but take no new ones. A checkpoint added late holds from the next claim. A checkpoint may be retired only once its go is recorded, and the go record stays.
 - **Gate changes take effect at the next claim.** An already-claimed Story finishes. An idle reason names the item, the rejected retro or the checkpoint.
 - **A takeover is not a new claim.** A held Epic takes no new Stories, but a stale `claimed` Story or a builder-held `merging` one in it is still taken over as usual, so a crashed lane's PR is never stranded behind a hold that came after its claim. This applies to every hold: dependency, rejected retro, retro item and checkpoint.
-- **Inbox:** one inbox per owner, so a solo repo has one list. It shows the bot's PRs awaiting approval and blocked units, each with its link, its age and the ruling verbs that apply. The Maintainer's inbox also shows:
+- **Inbox:** one inbox per owner, so a solo repo has one list. It shows the bot's PRs awaiting approval and blocked units, each with its link, its age and the ruling verbs that apply: only the fixed verbs for each item kind (`go`, `done`/`defer`, `approve`); this Epic's digest adds no verbs. The Maintainer's inbox also shows:
   - checkpoint gos and Infrastructure approvals;
   - Maintainer-routed retro items;
   - rejected retros, with their course-correction item and `go retro:<N>`;
   - graph-changing PRs;
   - unclaimable Story headings outside `bootstrapped_epics`;
   - Human Live Step waits;
-  - open Escalations;
-  - each `deferred` entry of a merged Story spec, until a later spec names it.
-- **Notices:** there is one daily digest mention per inbox and no other per-item notice. The only exception is the immediate alert for a condition that newly stops every lane.
-- **Journal:** a lane idle only because of something the Maintainer must do records the span as `waiting-on-maintainer`. That means a checkpoint go, a parked approval, a rejected retro, a Maintainer-routed item or an Epic's live evidence.
+  - each `deferred` entry of a merged Story spec, until a spec merged after it (merge order, not Story id order) names the entry's id in its `resolves` list.
+
+  Open Escalations are not listed here; they arrive with the consumer prerequisite checks (Story 7.6).
+- **Notices:** there is one daily digest mention per inbox and no other per-item notice. The only exception is the immediate alert for a condition that newly stops every lane. An empty inbox gets no mention. Mentions are at-most-once: the post time is stamped before posting, so a failed post loses that day's mention and never re-posts to every inbox.
+- **Journal:** a lane idle only because of something the Maintainer must do records the existing `idle` span with a reason starting `waiting-on-maintainer:`; there is no new span value. Maintainer causes are a checkpoint go, a parked approval, a rejected retro, a Maintainer-routed item or an Epic's live evidence, and the reason applies only when every reason the lane idles for is one of them.
 - **No agent session** routes items, renders the digest or applies a ruling. The write check still refuses any agent diff that changes a verdict, an item or a go.
 - **Tests:** core logic uses case tables with no mocks, including the FR10 table, the due-rule table, ruling verbs × author classes × malformed forms, and the checkpoint shapes. Forge behaviour passes the contract suite on both the fake and the GitHub adapters. Live cases need `XARABOT_LIVE=1`, and inside a sandboxed session they report skipped, never passed.
 
@@ -47,7 +48,8 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
   - a `checkpoint` record holding its `go`. A checkpoint Epic with no record is awaiting its go.
 
   Only `reconcile`'s runner code writes the file, and it is the authoritative tracker for retro items. The `action_items` in `sprint-status.yaml` are the retro skill's copy and are not reconciled.
-- **Inbox issue:** one `xarabot-inbox`-labelled issue per owner, assigned to them, found or created on first need. Only the Maintainer's is pinned, by hand, as a Human Live Step. `renderDigest` builds the body from `parked` records, PR states, `retro-gates.yaml` and open Escalations, and rewrites it only when the content changed, because a body edit sends no notification. The daily mention comment goes out on the first `reconcile` at or after config `digest_time` (default `08:00` UTC). Its time is recorded in `coordinator.json`, and a passed digest time with no digest posted counts as `reconcile` work in the due rule.
+- **Inbox issue:** one `xarabot-inbox`-labelled issue per owner, assigned to them, found or created on first need. Only the Maintainer's is pinned, by hand, as a Human Live Step. `renderDigest` builds the body from `parked` records, PR states and `retro-gates.yaml`, and rewrites it only when the content changed, because a body edit sends no notification. `reconcile` enumerates every inbox issue, so a body left stale by an owner who no longer holds any record is cleared. The daily mention comment goes out on the first `reconcile` at or after config `digest_time` (default `08:00` UTC). Its time is recorded in `coordinator.json`, and a passed digest time with no digest posted counts as `reconcile` work in the due rule.
+- **Deferred-entry ids:** each entry of a Story spec's `deferred` list has the id `<story-id>-d<n>`, its 1-based position in that append-only list; an older entry with no `id` key has the same id by position. New entries write `id:`, and a spec that settles earlier entries lists their ids in a frontmatter `resolves: [<id>, …]`.
 - **Park text:** a unit parked `blocked` with text stores it sanitized and capped below the forge's limit in `park.text`. That bumps the ledger `schema_version` by one, and every lane's runner pin advances together.
 - **Maintainer-routed retro items:** `reconcile` sets them to `waiting` in the same runner-written PR that writes the retro. `next` never returns them as `retro-item` units.
 - **Rulings:** `/xarabot <verb> <unit-id>` on an inbox issue with a well-formed unit id. Other text is ignored.
@@ -71,5 +73,6 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
 - Story 4.7 records its live command and the expected scratch-repo results in `docs/maintainer/self-host.md`. The Maintainer runs them on the host before Epic 4's retro. From Epic 4 on, `live_evidence_checks` in `.xarabot/config.yaml` lists those commands, so a failed live row holds the retro.
 - Epic 3's retro was rejected and the Maintainer's go is recorded, so Epic 4 may start. Its item 1 (reap session processes, isolate review passes) is still open and `blocking`. Story 4.1 is merged; once its gates take effect, item 1 holds Epic 3's dependents, Epic 4 included, until it closes. Item 2 (codex live re-run) is done. The switch after Epic 3 waits for item 1 to merge in a runner tag.
 - Until the switch after Epic 3, there is one builder, and every path needs the Maintainer's approving review except `reconcile` PRs.
-- Open retro items touch nearby code: `reconcile` PR hygiene, coordinator claim fencing, planning attempts, session process reaping, review-session usage in the journal, the review cap, the review plumbing, and held-Epic takeovers in `next` (Epic 3 item 13, the decision above). Check `retro-gates.yaml` for their globs.
+- Epic 3's Maintainer-routed items 7 (correct course for Epic 3 drift) and 10 (trackers, macOS CI and evidence gates) are open and not blocking, so they hold Epics two or more steps from Epic 3. Until Story 4.6's `done`/`defer` rulings exist, nothing closes them.
+- Open lane retro items touch nearby code: `reconcile` PR hygiene, coordinator claim timing and fencing, planning attempts across runs, session process reaping and review isolation, and a passing round after the review cap. Check `retro-gates.yaml` for their globs.
 - Merged code takes effect only after the Maintainer advances `runner_version`.
