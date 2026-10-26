@@ -207,4 +207,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/reconcile/plan.ts", "src/core/next/coordinator.ts", "test/core/reconcile/plan.test.ts", "test/core/next/coordinator.test.ts"]
-        status: open
+        status: done
