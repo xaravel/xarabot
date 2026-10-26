@@ -7,7 +7,9 @@
  * ledger or selection word; the retro parts (Story 2.9) carry no CI, push,
  * queue, approval, claim, `next`, ledger, sprint-status or selection word;
  * the retro-item parts (Story 2.10) carry no word the Story parts may not
- * carry (the CI-fix part may say "CI log" only). The runner does all of that.
+ * carry (the CI-fix part may say "CI log" only); the review parts (Story
+ * 3.4) carry no word the Story parts may not carry, and no PR, push,
+ * approval, status or ledger word. The runner does all of that.
  * The Story and retro-item prompts also carry `epic_context`, so a build
  * session skips the Epic context recompile that the runner always reverts;
  * the planning prompts, which compile those files, never carry it.
@@ -19,7 +21,9 @@
  * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
  * `prs_path`; for a retro item `retro_item_unit`, `retro_item_id`,
  * `retro_item_epic`, `retro_item_text` and `retro_item_globs` (and
- * `log_path` in its CI fix).
+ * `log_path` in its CI fix); for a review `review_unit`, `review_sha`,
+ * `review_main_sha`, `review_spec` (the sentence naming the spec, or saying
+ * there is none) and `spec_path` (the follow-up pass only).
  */
 export type PromptTemplate = {
   /** A `story` first build: names the Story and runs `bmad-build-auto`. */
@@ -56,6 +60,14 @@ export type PromptTemplate = {
   readonly retro_item_ci_fix: string;
   /** The result step of a retro-item unit, in either mode: always the prompt's last part. */
   readonly result_retro_item: string;
+  /** A review pass (Story 3.4): reviews the unit's change `main...HEAD` at one SHA; no skill, no file changed. */
+  readonly review: string;
+  /** The follow-up pass's addition, after `review`: the spec's unverified risks to check. */
+  readonly review_followup: string;
+  /** Rules for a review session: `rules` without leaving changes for the runner, since a review changes nothing. */
+  readonly review_rules: string;
+  /** The result step of a review pass: always the prompt's last part. */
+  readonly result_review: string;
 };
 
 export const PLACEHOLDERS = [
@@ -82,6 +94,11 @@ export const PLACEHOLDERS = [
   "retro_item_epic",
   "retro_item_text",
   "retro_item_globs",
+  "review_unit",
+  "review_sha",
+  "review_main_sha",
+  "review_spec",
+  "spec_path",
 ] as const;
 export type Placeholder = (typeof PLACEHOLDERS)[number];
 
@@ -275,4 +292,39 @@ Set \`outcome\` and \`blocked\`:
 - There was nothing to change: \`outcome\` \`no-op\`.
 
 ${RESULT_FIELDS}`,
+
+  review: `# Task
+
+Review the change of \`{{review_unit}}\` at commit \`{{review_sha}}\`.
+
+Run no skill, and change no tracked file in this checkout: your findings go only in your result. Files the verification commands write are thrown away with the checkout. This checkout's \`HEAD\` is the change's last commit, \`{{review_sha}}\`, and \`main\` is at \`{{review_main_sha}}\`. The change under review is \`git diff main...HEAD\`, and \`git log main..HEAD\` lists its commits. The agent configuration files here (such as \`AGENTS.md\`, \`CLAUDE.md\` and the \`.claude/\` and \`.agents/\` folders) are \`main\`'s, put back by the runner, so they show as uncommitted changes: they are not part of the change.
+
+{{review_spec}}
+
+Read the whole change and the code around it. Look for wrong behaviour, unhandled edge cases and errors, broken contracts between modules, security problems, and tests that are missing or do not check what they should. Run the verification commands that cover the change where you can. Report each problem you find; report nothing you have not checked.`,
+
+  review_followup: `# Follow-up review
+
+The spec \`{{spec_path}}\` asks for this follow-up review. Its \`## Auto Run Result\` section names the risks its build left unverified. Check each of them against the change: verify it where you can, and report each risk that holds, or that you cannot rule out, as a finding.`,
+
+  review_rules: `# Rules
+
+- Work only inside this checkout, your current working directory, and your temp folder.
+- When your permission mode or the sandbox refuses an action, never work around it: do not retry it another way, such as with a changed environment variable, a disabled sandbox, another tool or another command. Record it in \`denied_actions\` in your result.
+- Give each subagent you start the rule above, and record each action refused to a subagent in \`denied_actions\` too.`,
+
+  result_review: `${resultHead("review")}
+
+Set the fields:
+
+- \`reviewed_sha\`: \`{{review_sha}}\`, the commit you reviewed.
+- \`verdict\`: \`pass\` when the change is ready as it is; \`changes-requested\` when any finding must be fixed first.
+- \`findings\`: one entry for each problem you found; \`[]\` when none:
+  - \`severity\`: \`high\`, \`medium\` or \`low\`.
+  - \`blocking\`: \`true\` when the change must not go in until it is fixed; else \`false\`.
+  - \`file\`: the repo-relative path of the file the finding is about.
+  - \`text\`: what is wrong and why, and what would fix it, on one line.
+- \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
+
+Write this file last, and do nothing after it.`,
 };

@@ -42,7 +42,7 @@ forgeContract({
   name: "github (emulator)",
   enabled: !isSandboxed,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes", "addReview"],
+  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes", "addReview", "reviewBodies"],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -82,6 +82,7 @@ forgeContract({
               "commit-tree",
             ),
           comments: (pr) => gh.control.comments(pr),
+          reviewBodies: (pr) => gh.control.reviewBodies(pr),
           setChecks: (sha, checks) => gh.control.setChecks(sha, checks),
           setCiLog: (sha, check, log) => gh.control.setCiLog(sha, check, log),
           setMain: (files) => gh.control.setMain(files),
@@ -112,6 +113,8 @@ forgeContract({
 
 /** Test-only: lists a PR's comments. Not part of the adapter. */
 const LIST_COMMENTS: Operation = { name: "listComments (live test)", method: "GET", permission: "pull_requests: write" };
+/** Test-only: lists a PR's reviews with their bodies. Not part of the adapter. */
+const LIST_REVIEW_BODIES: Operation = { name: "listReviewBodies (live test)", method: "GET", permission: "pull_requests: write" };
 
 /**
  * A live scratch area: a ledger branch, a `runner.git`, a forge whose unit
@@ -179,7 +182,7 @@ forgeContract({
   name: "github (live)",
   enabled: liveGithubEnabled,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "writeForeignLedger", "trace"],
+  controls: ["makeCommit", "comments", "reviewBodies", "writeForeignLedger", "trace"],
   make: async (): Promise<ForgeFixture> => {
     const s = await liveScratch();
     // A second adapter instance on the same branch writes as another lane would.
@@ -191,6 +194,11 @@ forgeContract({
         comments: async (pr) => {
           const r = await s.raw(LIST_COMMENTS, `/issues/${pr}/comments?per_page=100`);
           if (!isSuccess(r.status) || !Array.isArray(r.body)) throw new Error(`list comments of #${pr}: ${r.status}`);
+          return r.body.map((c) => String((c as { body?: unknown }).body));
+        },
+        reviewBodies: async (pr) => {
+          const r = await s.raw(LIST_REVIEW_BODIES, `/pulls/${pr}/reviews?per_page=100`);
+          if (!isSuccess(r.status) || !Array.isArray(r.body)) throw new Error(`list reviews of #${pr}: ${r.status}`);
           return r.body.map((c) => String((c as { body?: unknown }).body));
         },
         writeForeignLedger: async (commit) => {

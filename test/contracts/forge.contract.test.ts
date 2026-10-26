@@ -14,6 +14,7 @@ const CONTROLS = {
   mergeQueueHead: true,
   addReview: true,
   comments: true,
+  reviewBodies: true,
   queue: true,
   trace: true,
 } as const satisfies Record<ForgeControlName, true>;

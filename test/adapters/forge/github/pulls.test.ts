@@ -291,6 +291,51 @@ describe("comment", () => {
   });
 });
 
+describe("postReview", () => {
+  test("GETs the PR, then POSTs one COMMENT review at commit_id with the body verbatim, and returns the id as a string", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    const posted = value(await forge.postReview(7, { commit_sha: H1, body: "🤖 review\n@nobody" }, live()));
+    expect(typeof posted.id).toBe("string");
+    expect(calls(gh)).toEqual(["GET /pulls/7", "POST /pulls/7/reviews"]);
+    expect(bodies(gh, "POST")).toContainEqual({ commit_id: H1, body: "🤖 review\n@nobody", event: "COMMENT" });
+    expect(gh.control.reviewBodies(7)).toEqual(["🤖 review\n@nobody"]);
+    expect(gh.control.reviews(7)).toMatchObject([{ login: "alice-xarabot[bot]", state: "COMMENTED", commit_id: H1 }]);
+    const listed = value(await forge.reviews(7, live()));
+    expect(listed.map((r) => [r.author, r.state, r.commit_sha])).toEqual([["alice-xarabot[bot]", "commented", H1]]);
+  });
+
+  test("never sends an approval or a change request", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    value(await forge.postReview(7, { commit_sha: H1, body: "x" }, live()));
+    const reviewPosts = gh.control.log().filter((l) => l.method === "POST" && l.path.endsWith("/reviews"));
+    expect(reviewPosts.map((l) => (l.body as { event?: unknown } | null)?.event)).toEqual(["COMMENT"]);
+  });
+
+  test("a missing PR is not-found and posts nothing", async () => {
+    const { gh, forge } = setup();
+    expect(kind(await forge.postReview(99, { commit_sha: H1, body: "x" }, live()))).toBe("not-found");
+    expect(calls(gh)).toEqual(["GET /pulls/99"]);
+  });
+
+  test("a reply with no id is a malformed reply (transient)", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    gh.control.inject("POST", /\/pulls\/7\/reviews$/, { status: 200, body: { state: "COMMENTED" } });
+    const r = await forge.postReview(7, { commit_sha: H1, body: "x" }, live());
+    expect(r.ok ? "ok" : r.error.message).toMatch(/^createReview: malformed reply/);
+  });
+
+  test("a refused review is the mapped error kind", async () => {
+    const { gh, forge } = setup();
+    gh.control.setPull(7, { state: "open", merged: false, head_sha: H1, branch: "story/1.9" });
+    gh.control.inject("POST", /\/pulls\/7\/reviews$/, { status: 403, body: { message: "Resource not accessible by integration" } });
+    expect(kind(await forge.postReview(7, { commit_sha: H1, body: "x" }, live()))).toBe("forbidden");
+    expect(gh.control.reviewBodies(7)).toEqual([]);
+  });
+});
+
 describe("prefetch", () => {
   const dirs: string[] = [];
   afterEach(() => {

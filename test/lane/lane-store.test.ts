@@ -33,6 +33,7 @@ describe("laneLayout", () => {
     expect(l).toEqual({
       laneDir: "/x/lane",
       clone: "/x/lane/clone",
+      review: "/x/lane/review",
       runnerGit: "/x/lane/runner.git",
       vendorHome: "/x/lane/vendor",
       tmp: "/x/lane/tmp",

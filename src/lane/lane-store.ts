@@ -11,13 +11,16 @@ import { unitFileId } from "./clone.ts";
  * The filesystem `LaneStore` and the lane folder's layout (AR37). The lane
  * folder holds `lane.lock` (the lane process's exclusive lock, AR3),
  * `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`, `outcome`, `STOP` and
- * `logs/`, plus the session folders `laneLayout` names. Each write creates
+ * `logs/`, plus the session folders `laneLayout` names (the agent's clone,
+ * the review checkout, `runner.git`, the vendor home, `tmp`). Each write creates
  * its parent folder.
  */
 
 export type LaneLayout = {
   readonly laneDir: string;
   readonly clone: string;
+  /** The review checkout (Story 3.4): a review session's working directory, never `clone`. */
+  readonly review: string;
   readonly runnerGit: string;
   readonly vendorHome: string;
   /** The session temp folder, emptied before each session. */
@@ -39,6 +42,7 @@ export function laneLayout(laneDirIn: string): LaneLayout {
   return {
     laneDir,
     clone: join(laneDir, "clone"),
+    review: join(laneDir, "review"),
     runnerGit: join(laneDir, "runner.git"),
     vendorHome: join(laneDir, "vendor"),
     tmp,

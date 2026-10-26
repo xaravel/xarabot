@@ -46,6 +46,8 @@ export type ForgeContractControls = {
   /** Appends a review to an existing PR, as its author submitting it would. */
   addReview(pr: number, review: ForgeReview): MaybePromise<void>;
   comments(pr: number): MaybePromise<string[]>;
+  /** The bodies of the reviews `postReview` posted on PR `pr`, oldest first. */
+  reviewBodies(pr: number): MaybePromise<string[]>;
   queue(): MaybePromise<number[]>;
   trace(): MaybePromise<string[]>;
 };
@@ -330,6 +332,7 @@ export function forgeContract(harness: ForgeHarness): void {
         listPrsByBranch: () => f.listPrsByBranch("story/9.9", aborted()),
         reviews: () => f.reviews(1, aborted()),
         comment: () => f.comment(1, "b", aborted()),
+        postReview: () => f.postReview(1, { commit_sha: sha, body: "b" }, aborted()),
         checks: () => f.checks(sha, aborted()),
         enqueue: () => f.enqueue(1, sha, aborted()),
         dequeue: () => f.dequeue(1, aborted()),
@@ -573,6 +576,35 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(typeof posted.id).toBe("string");
       expect(await need(fx, "comments")(pr.number)).toEqual(["🤖 hi"]);
       expect(kind(await fx.forge.comment(MISSING_PR, "🤖 hi", live()))).toBe("not-found");
+    });
+
+    // ------------------------------------------------------------ postReview
+
+    scenario(
+      "a review posts its body verbatim as one commented review at commit_sha; a missing PR is not-found",
+      [...OPEN_PR, "postReview", "reviews"],
+      ["makeCommit", "reviewBodies"],
+      async (fx) => {
+        const pr = await openOn(fx, "story/4.2");
+        const body = "🤖 Story 4.2: cross-vendor review\n\nVerdict: pass.\n\nFindings: none.\n@nobody";
+        const posted = value(await fx.forge.postReview(pr.number, { commit_sha: pr.head_sha, body }, live()));
+        expect(typeof posted.id).toBe("string");
+        expect(await need(fx, "reviewBodies")(pr.number)).toEqual([body]);
+        const list = value(await fx.forge.reviews(pr.number, live()));
+        expect(list).toHaveLength(1);
+        const [review] = list;
+        expect([review?.state, review?.commit_sha]).toEqual(["commented", pr.head_sha]);
+        expect(typeof review?.author).toBe("string");
+        expect(typeof review?.submitted_at).toBe("string");
+        expect(kind(await fx.forge.postReview(MISSING_PR, { commit_sha: pr.head_sha, body }, live()))).toBe("not-found");
+      },
+    );
+
+    scenario("an aborted review posts nothing", [...OPEN_PR, "postReview", "reviews"], ["makeCommit", "reviewBodies"], async (fx) => {
+      const pr = await openOn(fx, "story/4.3");
+      expect(kind(await fx.forge.postReview(pr.number, { commit_sha: pr.head_sha, body: "x" }, aborted()))).toBe("transient");
+      expect(await need(fx, "reviewBodies")(pr.number)).toEqual([]);
+      expect(value(await fx.forge.reviews(pr.number, live()))).toEqual([]);
     });
 
     // ------------------------------------------------------------ checks
