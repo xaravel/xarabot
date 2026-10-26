@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-8-consolidate-the-review-plumbing",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -29,7 +29,7 @@
     "test/lane/**",
     "test/support/boundaries.ts"
   ],
-  "heartbeat_at": "2026-10-26T20:23:44.286Z",
+  "heartbeat_at": "2026-10-26T20:23:54.189Z",
   "pr": 226,
   "pr_owner": "edanisko",
   "base_sha": "ef1986edac0ebe6767bf75ea353bb4e68a2d2123",
@@ -43,7 +43,30 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/cli/lane-run.ts",
+      "src/core/lane/write-check.ts",
+      "src/core/review/agent-config.ts",
+      "src/lane/ci-step.ts",
+      "src/lane/diff-paths.ts",
+      "src/lane/graph-trees.ts",
+      "src/lane/merge-step.ts",
+      "src/lane/merger.ts",
+      "src/lane/passed-gate.ts",
+      "src/lane/planning-step.ts",
+      "src/lane/reconcile-step.ts",
+      "src/lane/retro-step.ts",
+      "src/lane/review-gate.ts",
+      "src/lane/session.ts",
+      "test/boundaries.test.ts",
+      "test/lane/session.test.ts",
+      "test/support/boundaries.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
