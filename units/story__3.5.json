@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
   "unit": "story:3.5",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 3,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-3-5-the-review-gate-and-loopbacks.md",
@@ -59,7 +59,7 @@
     "test/lane/session.test.ts",
     "test/lane/several-lanes.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T05:55:29.763Z",
+  "heartbeat_at": "2026-10-26T05:58:07Z",
   "pr": 168,
   "pr_owner": "edanisko",
   "base_sha": "71ec3f566df1b93e4033aea06ae9fd6db3439502",
