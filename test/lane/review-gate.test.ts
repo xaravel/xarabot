@@ -9,11 +9,12 @@ import type { Lane } from "../../src/core/schemas/host.ts";
 import type { UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { BuildResult } from "../../src/core/schemas/session-result.ts";
 import type { CiFix, CiSessionDone } from "../../src/lane/ci-step.ts";
-import { headPassedGate, type PassedGate } from "../../src/lane/passed-gate.ts";
+import { createGitPassedGate, headPassedGate, type PassedGate } from "../../src/lane/passed-gate.ts";
 import { createReviewGateStep, type LoopbackRequest, type ReviewGateDeps, type ReviewGateInput, type ReviewGateOutput } from "../../src/lane/review-gate.ts";
 import type { ReviewRound, ReviewStep, ReviewStepInput, ReviewStepOutput } from "../../src/lane/review-step.ts";
 import { Halt, MarkerStop, newTrack } from "../../src/lane/session.ts";
 import { ALICE, rec, tip } from "../core/ledger/fixtures.ts";
+import { cleanup, commit, setup } from "./git-fixture.ts";
 import { BLOCKER, NIT, reviewPass, reviewSpec, reviewStub } from "./review-stub.ts";
 
 // ------------------------------------------------------------------ world
@@ -39,6 +40,7 @@ const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+afterEach(cleanup);
 
 const DONE: BuildResult = { kind: "build", outcome: "done", summary: "Fixed it", body: "", verification: ["bun test"], denied_actions: [] };
 
@@ -381,5 +383,55 @@ describe("createReviewGateStep with createReviewStep (Story 3.5)", () => {
     expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
     expect(stub.prompts).toHaveLength(1);
     expect(await h.record()).toMatchObject({ passed_sha: h.head });
+  });
+});
+
+// ------------------------------------------------------------------ with the git passed gate
+
+describe("createReviewGateStep with createGitPassedGate (Epic 3 retro item 4)", () => {
+  /** `main` after ejection `i`: one file per ejection. */
+  const mainAt = (i: number): Record<string, string> => {
+    const out: Record<string, string> = { "src/a.ts": "a\n", "src/b.ts": "b\n" };
+    for (let k = 1; k <= i; k += 1) out[`src/m${k}.ts`] = `m${k}\n`;
+    return out;
+  };
+  /** The reviewed change merged with `main` after ejection `i`. */
+  const mergedAt = (i: number): Record<string, string> => ({ ...mainAt(i), "src/a.ts": "a reviewed\n" });
+
+  test.each([2, 3])("%p queue ejections in a row, each merging main in cleanly: no review at any head; a change smuggled into the next merge is reviewed", async (n) => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, mainAt(0));
+    const reviewed = await commit(repo.gitDir, mergedAt(0), [base]);
+    const h = await harness({ record: { head_sha: reviewed, passed_sha: reviewed } });
+    // The step's fresh main is the fake forge's; the gate checks against runner.git's copy of it.
+    let main = base;
+    const git = createGitPassedGate({ gitDir: repo.gitDir, fetch: async () => err("fetch", "offline") });
+    const passed: PassedGate = (r) => git({ ...r, mainSha: main });
+    const setHead = async (sha: string): Promise<void> => {
+      const r = await h.record();
+      h.fake.control.writeForeignLedger({ message: "merge main [skip ci]", writes: tip([{ ...r, head_sha: sha }]), deletes: [] });
+    };
+    const { review, calls } = stubReview(h, [false]);
+
+    let head = reviewed;
+    for (let i = 1; i <= n; i += 1) {
+      main = await commit(repo.gitDir, mainAt(i), [main]);
+      head = await commit(repo.gitDir, mergedAt(i), [head, main]);
+      await setHead(head);
+      const out = await h.run({}, { review, passed });
+      expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+      expect(out.pushed).toBeUndefined();
+      expect(h.logs.some((l) => l.includes(`passed gate: ${head} passed (clean-merge): no review`))).toBe(true);
+    }
+    expect(calls).toHaveLength(0);
+    expect(await h.record()).toMatchObject({ passed_sha: reviewed, loopbacks: 0 });
+
+    main = await commit(repo.gitDir, mainAt(n + 1), [main]);
+    const smuggled = await commit(repo.gitDir, { ...mergedAt(n + 1), "src/evil.ts": "x\n" }, [head, main]);
+    await setHead(smuggled);
+    const out = await h.run({}, { review, passed });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    expect(calls).toHaveLength(1);
+    expect(h.logs.some((l) => l.includes("passed gate: unreviewed:") && l.includes("its tree differs"))).toBe(true);
   });
 });

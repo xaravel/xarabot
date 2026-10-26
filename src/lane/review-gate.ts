@@ -29,9 +29,9 @@ import {
  * passes and before the merge step, on a claimed record with an open PR.
  *
  * 1. Fresh `main` (an invalid config ends the step `stop`).
- * 2. The passed gate at the record's head: a head a review passed (or its
- *    clean merge with `main`) ends the step `progress` `claimed`, with no
- *    review. A gate error is a failed attempt.
+ * 2. The passed gate at the record's head: a head a review passed (or a
+ *    chain of clean merges with `main` back to it) ends the step `progress`
+ *    `claimed`, with no review. A gate error is a failed attempt.
  * 3. Otherwise one review round (the review step). Any ending other than
  *    `progress` `claimed` is passed through as it is.
  * 4. `reviewNext` decides: `cap` parks `blocked` `review-cap` in the
