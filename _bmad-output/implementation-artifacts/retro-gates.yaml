@@ -259,7 +259,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/passed-gate.ts", "src/lane/review-gate.ts", "src/lane/merge-step.ts", "test/lane/passed-gate.test.ts", "test/lane/review-gate.test.ts", "test/lane/merge-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-5-journal-review-session-usage"
         text: "Journal review sessions' usage: each review pass's tokens, cost and model reach the journal, on the unit's record or as their own spans, instead of staying on the review step's private track (C5, AR25)"
         route: lane
