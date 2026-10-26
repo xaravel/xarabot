@@ -106,6 +106,13 @@ describe("renderProfile", () => {
     expect(render().match(/mach-lookup/g)).toHaveLength(1);
   });
 
+  test("looks up configd for the system's proxy settings; the keychain services stay absent", () => {
+    expect(MACH_SERVICES).toContain("com.apple.SystemConfiguration.configd");
+    const line = render().split("\n").find((l) => l.startsWith("(allow mach-lookup")) as string;
+    expect(line).toContain('(global-name "com.apple.SystemConfiguration.configd")');
+    for (const name of MACH_SERVICES) expect(name).not.toMatch(/securityd|keychain|SecurityServer|secd|trustd/i);
+  });
+
   test("writes only to /dev/null, /dev/zero and /dev/tty* outside the writable roots", () => {
     const writes = render()
       .split("\n")

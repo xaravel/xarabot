@@ -739,6 +739,15 @@ describe("host tools", () => {
     expect(r.exitCode).not.toBe(0);
   });
 
+  sandboxTest("scutil --proxy returns the host's proxy settings", async () => {
+    // The host's own answer: without configd the session's would differ (or hang).
+    const host = Bun.spawnSync(["/usr/sbin/scutil", "--proxy"]);
+    expect(host.exitCode).toBe(0);
+    const r = await sh("/usr/sbin/scutil --proxy");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(host.stdout.toString());
+  }, 15_000);
+
   for (const [tool, args, pattern] of [
     ["claude", ["--version"], /Claude Code/],
     ["codex", ["--version"], /^codex-cli \d+\.\d+\.\d+/],

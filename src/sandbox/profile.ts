@@ -41,6 +41,9 @@ export const MACH_SERVICES: readonly string[] = [
   "com.apple.logd",
   "com.apple.system.logger",
   "com.apple.diagnosticd",
+  // Read access to the system's network and proxy settings, which reqwest's
+  // proxy setup (codex) asks for at startup; it opens no network.
+  "com.apple.SystemConfiguration.configd",
 ];
 
 /** Devices a session may write besides its own pipes. */
