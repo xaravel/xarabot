@@ -37,6 +37,24 @@ export function sessionProvider(session: { readonly adapter: SessionAdapter; rea
 }
 
 /**
+ * The vendor names runner-11 and earlier wrote to `builder_providers[]`:
+ * adapter names, before Story 3.3 made the set hold vendors (AR17).
+ */
+const LEGACY_PROVIDER: ReadonlyMap<string, Provider> = new Map([
+  ["claude", "anthropic"],
+  ["codex", "openai"],
+]);
+
+/**
+ * A unit's `builder_providers[]` as vendors (AR17, AD-16): each legacy
+ * adapter name (`claude`, `codex`) mapped to its vendor, every other entry
+ * as it is. Only for reading: a stored record keeps its names.
+ */
+export function readProviders(set: readonly string[]): string[] {
+  return set.map((p) => LEGACY_PROVIDER.get(p) ?? p);
+}
+
+/**
  * `set` with `p` added, sorted and without duplicates (AD-16): a unit's
  * `builder_providers[]` only ever grows.
  */
@@ -52,12 +70,14 @@ export type ReviewerChoice = { readonly adapter: SessionAdapter; readonly crossV
  * allows `allowed` (AD-16): the first of `REVIEWER_ORDER` that `allowed`
  * lists and whose vendor is not in the set (cross-vendor); else the first of
  * `REVIEWER_ORDER` that `allowed` lists (same-vendor); `null` when `allowed`
- * lists neither. `pi` is never a reviewer, and an unknown vendor in the set
- * matches no adapter.
+ * lists neither. The set is read through `readProviders`, so a legacy
+ * `claude` or `codex` counts as its vendor. `pi` is never a reviewer, and an
+ * unknown vendor in the set matches no adapter.
  */
 export function chooseReviewer(builderProviders: readonly string[], allowed: readonly AdapterName[]): ReviewerChoice | null {
+  const built = readProviders(builderProviders);
   const candidates = REVIEWER_ORDER.filter((a) => allowed.includes(a));
-  const cross = candidates.find((a) => !builderProviders.includes(ADAPTER_PROVIDER[a]));
+  const cross = candidates.find((a) => !built.includes(ADAPTER_PROVIDER[a]));
   if (cross !== undefined) return { adapter: cross, crossVendor: true };
   const same = candidates[0];
   return same === undefined ? null : { adapter: same, crossVendor: false };

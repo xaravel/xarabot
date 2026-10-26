@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { addProvider, chooseReviewer, PROVIDERS, REVIEWER_ORDER, sessionProvider, type Provider, type SessionAdapter } from "../../../src/core/review/reviewer.ts";
+import { addProvider, chooseReviewer, PROVIDERS, readProviders, REVIEWER_ORDER, sessionProvider, type Provider, type SessionAdapter } from "../../../src/core/review/reviewer.ts";
 import type { AdapterName } from "../../../src/core/schemas/policy.ts";
 
 describe("sessionProvider", () => {
@@ -44,6 +44,32 @@ describe("addProvider", () => {
   });
 });
 
+describe("readProviders (retro item 27)", () => {
+  test.each([
+    ["a legacy claude set", ["claude"], ["anthropic"]],
+    ["a legacy codex set", ["codex"], ["openai"]],
+    ["a legacy set of both", ["claude", "codex"], ["anthropic", "openai"]],
+    ["a mixed set", ["anthropic", "codex"], ["anthropic", "openai"]],
+    ["a mixed set, the same vendor twice", ["anthropic", "claude"], ["anthropic", "anthropic"]],
+    ["a vendor set", ["anthropic", "openai"], ["anthropic", "openai"]],
+    ["an unknown name", ["acme"], ["acme"]],
+    ["an unknown name beside a legacy one", ["acme", "codex"], ["acme", "openai"]],
+    ["a name only cased like a legacy one", ["Claude", "CODEX"], ["Claude", "CODEX"]],
+    ["pi, no 0.x vendor", ["pi"], ["pi"]],
+    ["an empty set", [], []],
+  ] as const)("%s: %j -> %j", (_name, set, want) => {
+    expect(readProviders(set)).toEqual([...want]);
+  });
+
+  test("leaves its input as it was", () => {
+    const set = ["claude", "codex"];
+    const out = readProviders(set);
+    expect(out).toEqual(["anthropic", "openai"]);
+    expect(set).toEqual(["claude", "codex"]);
+    expect(out).not.toBe(set);
+  });
+});
+
 describe("chooseReviewer", () => {
   const cross = (adapter: SessionAdapter) => ({ adapter, crossVendor: true });
   const same = (adapter: SessionAdapter) => ({ adapter, crossVendor: false });
@@ -68,6 +94,19 @@ describe("chooseReviewer", () => {
     ["neither: an empty policy", ["anthropic"], [], null],
     ["neither: pi only", ["openai"], ["pi"], null],
     ["neither, an empty set", [], [], null],
+    // Retro item 27: runner-11 and earlier wrote adapter names, not vendors.
+    ["a legacy claude set", ["claude"], ["claude", "codex"], cross("codex")],
+    ["a legacy claude set, policy order reversed", ["claude"], ["codex", "claude"], cross("codex")],
+    ["a legacy claude set, claude-only", ["claude"], ["claude"], same("claude")],
+    ["a legacy codex set", ["codex"], ["claude", "codex"], cross("claude")],
+    ["a legacy codex set, codex-only", ["codex"], ["codex"], same("codex")],
+    ["a legacy set of both", ["claude", "codex"], ["claude", "codex"], same("claude")],
+    ["a mixed set: anthropic and a legacy codex", ["anthropic", "codex"], ["claude", "codex"], same("claude")],
+    ["a mixed set: a legacy claude and openai", ["claude", "openai"], ["claude", "codex"], same("claude")],
+    ["a mixed set: a legacy claude and anthropic", ["anthropic", "claude"], ["claude", "codex"], cross("codex")],
+    ["a mixed set: a legacy codex and openai", ["codex", "openai"], ["claude", "codex"], cross("claude")],
+    ["an unknown name and a legacy claude", ["acme", "claude"], ["claude", "codex"], cross("codex")],
+    ["a legacy name, neither allowed", ["claude"], ["pi"], null],
   ] as const)("%s: %j, %j", (_name, set, allowed, want) => {
     expect(chooseReviewer(set, allowed as readonly AdapterName[])).toEqual(want);
   });
@@ -78,5 +117,11 @@ describe("chooseReviewer", () => {
       expect(chooseReviewer(set, ["pi", "claude"])?.adapter).toBe("claude");
       expect(chooseReviewer(set, ["pi", "codex"])?.adapter).toBe("codex");
     }
+  });
+
+  test("never rewrites the set it reads", () => {
+    const set = ["claude", "codex"];
+    chooseReviewer(set, ["claude", "codex"]);
+    expect(set).toEqual(["claude", "codex"]);
   });
 });
