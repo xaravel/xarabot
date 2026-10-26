@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-25-planning-attempts-across-runs",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/core/reconcile/**",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T08:21:25Z",
+  "heartbeat_at": "2026-10-26T08:24:03.384Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "402827e508014c51ec9a88078835875232ff196f",
@@ -25,7 +25,12 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "escalation",
+    "inbox_owner": "edanisko",
+    "globs_held": []
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
