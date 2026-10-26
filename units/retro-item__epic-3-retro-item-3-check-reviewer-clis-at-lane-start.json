@@ -10,7 +10,7 @@
     "src/cli/lane-run.ts",
     "test/cli/lane-run.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T17:59:55.462Z",
+  "heartbeat_at": "2026-10-26T18:01:19.697Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "8169989ff16a03c8466adda6a2a3d5012aa7bd8c",
@@ -21,7 +21,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
