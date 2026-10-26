@@ -87,7 +87,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/next/**", "src/core/schemas/snapshot.ts", "src/lane/planning-step.ts", "src/core/prompt/**", "test/core/next/**", "test/core/schemas/**", "test/lane/planning-step.test.ts", "test/core/prompt/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-14-gate-the-retro-on-the-evidence-contents"
         text: "Make an Epic's retro due only when its live evidence file holds the required live results, not merely exists (A1; Maintainer decision 2026-10-25): an optional config key live_evidence_checks maps an Epic number to the exact commands its verification Story's runbook requires (the Maintainer sets the values in .xarabot/config.yaml); the snapshot carries the evidence file's text from its existing blob reads; the retro is due only when, for each listed command, the file holds that command verbatim followed by a bun test summary with '0 fail'; otherwise next idles waiting-on-maintainer naming each missing or failing command; with no checks listed for an Epic, existence alone is enough, as now; tests for all present, one missing, one with failures, none listed"
         route: lane
