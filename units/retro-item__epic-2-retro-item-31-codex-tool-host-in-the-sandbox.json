@@ -1,37 +1,28 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-31-codex-tool-host-in-the-sandbox",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/sandbox/tools.ts",
     "test/sandbox/macos.test.ts",
     "test/sandbox/tools.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T10:28:57.169Z",
+  "heartbeat_at": "2026-10-26T10:30:27.129Z",
   "pr": 190,
   "pr_owner": "edanisko",
   "base_sha": "d90846d0cafd49f8e63e451fc337da32eb4911c0",
   "head_sha": "4ffe0f64e890987b710d55867f4d4d86953f43bf",
   "reviewed_sha": null,
   "passed_sha": null,
-  "approved_sha": null,
+  "approved_sha": "4ffe0f64e890987b710d55867f4d4d86953f43bf",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/sandbox/tools.ts",
-      "test/sandbox/macos.test.ts",
-      "test/sandbox/tools.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
