@@ -85,8 +85,10 @@ import {
  *   before any gate, fresh `main`'s policy must still allow the lane's agent
  *   and a reviewer (`allowanceRefusal`, else a failed attempt); the enqueue
  *   fence records `enqueued_sha`.
- * - A unit adopted with its open PR runs no session: its CI is polled at the
- *   record's `head_sha`, and the gate follows.
+ * - A unit adopted with its open PR runs no session: an empty
+ *   `builder_providers` first gets the lane's vendor in a fence (Epic 2 retro
+ *   item 29), then its CI is polled at the record's `head_sha`, and the gate
+ *   follows.
  *
  * Every push, PR change and enqueue is fenced; the push's fence adds the
  * lane's vendor to the record's `builder_providers` (AD-16). The session
@@ -436,6 +438,19 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       }
     };
 
+    /**
+     * An adopted PR's builders (AD-16, Epic 2 retro item 29): an empty
+     * `builder_providers` (an adopted PR with no prior record, or a record a
+     * runner older than Story 3.3 wrote) gets the lane's vendor in a fence,
+     * so the review round's reviewer is cross-vendor relative to this lane; a
+     * non-empty set is left as it is.
+     */
+    const adoptVendor = async (): Promise<void> => {
+      if (kit.record.builder_providers.length > 0) return;
+      note(`PR #${kit.record.pr ?? "none"} adopted with no builder_providers: adding ${deps.provider}`);
+      await beat("fence", { builder_providers: addProvider(kit.record.builder_providers, deps.provider) });
+    };
+
     /** `kit.run` for a body that may throw a `Halt` (from the review round): it reaches the process. */
     const runKit = async (body: () => Promise<PrStepOutput>): Promise<PrStepOutput> => {
       try {
@@ -449,12 +464,16 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
 
     // ------------------------------------------------------------ the unit
 
-    // A unit adopted with its open PR runs no session: CI at the record's head, then the gate.
+    // A unit adopted with its open PR runs no session: its vendor if the set is empty, CI at the record's head, then the gate.
     const adopted = input.record.pr;
     const adoptedHead = input.record.head_sha;
     if (adopted !== null) {
       note(`resuming PR #${adopted} at ${adoptedHead ?? "no head"}: no session`);
-      return runKit(() => (adoptedHead === null ? failed(`PR #${adopted} has no head_sha on the record`) : ciAndGate(adopted, adoptedHead)));
+      return runKit(async () => {
+        if (adoptedHead === null) return await failed(`PR #${adopted} has no head_sha on the record`);
+        await adoptVendor();
+        return await ciAndGate(adopted, adoptedHead);
+      });
     }
 
     const due = planningDue(snapshot)[kind];

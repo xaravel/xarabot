@@ -1315,4 +1315,71 @@ describe("runLaneProcess with the review gate (Story 3.5)", () => {
     const units = e.journal.filter((x): x is UnitJournalRecord => x.type === "unit");
     expect(units[0]?.reason).toContain("allowance: agent claude is not in .xarabot/policy.yaml");
   });
+
+  // An adopted PR's builders (AD-16, Epic 2 retro item 29): a stale merging takeover, ejected, then CI and a real review round.
+
+  /** Seeds Bob's stale `merging` record for UNIT built by `built`, its PR queued at its head; a review passed an earlier head. Its PR number. */
+  const seedStaleMerging = async (fake: FakeForge, built: readonly string[]): Promise<number> => {
+    const earlier = fake.control.makeCommit();
+    const head = fake.control.makeCommit();
+    value(await fake.forge.pushBranch({ branch: BRANCH, expected_sha: null, sha: head }, opts()));
+    const number = value(await fake.forge.openPr({ branch: BRANCH, base: "main", title: "t", body: "b" }, opts())).number;
+    value(await fake.forge.enqueue(number, head, opts()));
+    const stale = rec({
+      unit: UNIT,
+      state: "merging",
+      globs: ["src/s0/**"],
+      owner: BOB.owner,
+      host: BOB.host,
+      lane: BOB.lane,
+      generation: 2,
+      heartbeat_at: "2026-10-23T09:00:00Z",
+      pr: number,
+      pr_owner: BOB.owner,
+      head_sha: head,
+      reviewed_sha: earlier,
+      passed_sha: earlier,
+      enqueued_sha: head,
+      builder_providers: [...built],
+    });
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([stale]), deletes: [] });
+    return number;
+  };
+  /** The queue ejects the PR at the merge step's first sleep and merges it after. */
+  const ejectThenMerge = () => {
+    let ejected = false;
+    return (fake: FakeForge) => {
+      const [pr] = fake.control.queue();
+      if (pr === undefined) return;
+      if (ejected) return void fake.control.mergeQueueHead();
+      ejected = true;
+      fake.control.eject(pr);
+    };
+  };
+  /** The swaps from the takeover to the ejection, the vendor fence's among them. */
+  const takeoverSwaps = (e: LaneRun) => {
+    const swaps = swapsOf(e);
+    return swaps.slice(swaps.indexOf("takeOverStale"), swaps.indexOf("ejected") + 1);
+  };
+
+  test("retro item 29: an adopted merging PR with no builder_providers gets the lane's vendor before the merge step; after an ejection the review is cross-vendor by codex", async () => {
+    let number = 0;
+    const e = await laneRun({ prepare: async (fake) => void (number = await seedStaleMerging(fake, [])), onQueueSleep: ejectThenMerge() });
+    expect(e.outcome).toBe("progress");
+    expect(e.prompts).toEqual([]);
+    expect(takeoverSwaps(e)).toEqual(["takeOverStale", "heartbeat", "heartbeat", "ejected"]);
+    expect(e.reviewPrompts).toHaveLength(1);
+    expect(e.fake.control.reviewBodies(number)).toHaveLength(1);
+    expect(e.fake.control.reviewBodies(number)[0]).toStartWith("🤖 Story 1.1: cross-vendor review by codex");
+    expect(e.record).toMatchObject({ state: "merged", owner: ALICE.owner, builder_providers: ["anthropic"] });
+  });
+
+  test("retro item 29: an adopted merging PR codex built keeps its builder_providers; after an ejection the review is cross-vendor by claude", async () => {
+    let number = 0;
+    const e = await laneRun({ prepare: async (fake) => void (number = await seedStaleMerging(fake, ["openai"])), onQueueSleep: ejectThenMerge() });
+    expect(e.outcome).toBe("progress");
+    expect(takeoverSwaps(e)).toEqual(["takeOverStale", "heartbeat", "ejected"]);
+    expect(e.fake.control.reviewBodies(number)[0]).toStartWith("🤖 Story 1.1: cross-vendor review by claude");
+    expect(e.record).toMatchObject({ state: "merged", builder_providers: ["openai"] });
+  });
 });
