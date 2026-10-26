@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-23-harden-the-lane-lock",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/lane/lane-lock.test.ts",
     "test/lane/processes.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T07:23:02.890Z",
+  "heartbeat_at": "2026-10-26T07:34:45.019Z",
   "pr": 175,
   "pr_owner": "edanisko",
   "base_sha": "4ab64b6f473da4547f013d94b4df6f70c22e74b1",
