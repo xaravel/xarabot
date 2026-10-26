@@ -46,6 +46,7 @@ export type CommitOutcome =
 
 const GITLINK = "160000";
 const REGULAR = "100644";
+const SYMLINK = "120000";
 const ABSENT = "000000";
 
 /** One `diff-tree --raw` entry. */
@@ -101,8 +102,8 @@ async function revertPaths(gitDir: string, tree: string, changes: readonly RawCh
   }
 }
 
-/** Full case folding, as the write check folds. */
-const fold = (s: string): string => s.toUpperCase().toLowerCase();
+/** Full case folding, as the write check folds: NFD, then case. */
+const fold = (s: string): string => s.normalize("NFD").toUpperCase().toLowerCase();
 
 /** A side's blob text, or `null` when the path is absent on that side. */
 async function sideText(gitDir: string, mode: string, sha: string, signal: AbortSignal): Promise<CloneResult<string | null>> {
@@ -111,7 +112,8 @@ async function sideText(gitDir: string, mode: string, sha: string, signal: Abort
 }
 
 /**
- * The write check's input: each changed path and its new mode, with the own
+ * The write check's input: each changed path and its new mode, with an
+ * added or changed symlink's target (Epic 2 retro item 18), the own
  * manifest's texts when it is a regular file on both sides and, under
  * coordinator rules, `retro_gates_path`'s and `sprint_status_path`'s texts
  * (`null` on a side where it is absent; Story 2.9, AR31).
@@ -140,6 +142,10 @@ async function writeChanges(gitDir: string, rules: WriteRules | CoordinatorWrite
       const after = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
       if (!after.ok) return after;
       out.push({ path: c.path, mode: c.newMode, storyFile: { before: before.value, after: after.value } });
+    } else if (c.newMode === SYMLINK) {
+      const target = await git(gitDir, ["cat-file", "blob", c.newSha], { signal });
+      if (!target.ok) return target;
+      out.push({ path: c.path, mode: c.newMode, linkTarget: target.value });
     } else {
       out.push({ path: c.path, mode: c.newMode });
     }
