@@ -1,20 +1,21 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-16-reconcile-writes-an-epic-done-key",
-  "state": "released",
+  "state": "claimed",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/core/reconcile/plan.ts",
     "src/core/reconcile/status-edit.ts",
-    "test/core/reconcile/**"
+    "test/core/reconcile/**",
+    "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-25T23:30:55Z",
+  "heartbeat_at": "2026-10-26T00:48:13Z",
   "pr": null,
   "pr_owner": null,
-  "base_sha": "ceef6d512a025537cdf32def09264b507f0bc192",
+  "base_sha": "df46b4d14f9a247044fd0c6a44a8ab3fa06010b7",
   "head_sha": null,
   "reviewed_sha": null,
   "passed_sha": null,
