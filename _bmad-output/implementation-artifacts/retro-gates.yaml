@@ -189,7 +189,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/merge-step.ts", "src/lane/planning-step.ts", "test/lane/merge-step.test.ts", "test/lane/planning-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-31-codex-tool-host-in-the-sandbox"
         text: "Epic 3 live run (2026-10-26, ~/epic3-live on the Xarabot host): every sandboxed codex 0.163.0 session that needs a tool exits 0 with no result, because codex runs its shell and file tools through a sibling binary in its native package (vendor/<target>/bin/codex-code-mode-host, beside codex-path/rg and codex-resources) and the Seatbelt profile allows reading and running only the agent file itself (src/sandbox/macos.ts toolFiles); stderr shows 'failed to spawn code-mode host \u2026: Operation not permitted (os error 1)'. In resolveTools (src/sandbox/tools.ts), for the codex agent only, add its native package folder (the vendor/<target> folder that holds bin/codex-code-mode-host, resolved from the agent's real path) to dirs, named per vendor as VENDOR_TMP_ENV is, never for other agents; tests in test/sandbox/tools.test.ts (codex gets the folder, claude does not, a missing folder adds nothing) and a profile case in test/sandbox/macos.test.ts; the Maintainer's session re-runs the codex live checks and the cross-vendor suite after the runner tag"
         route: lane
