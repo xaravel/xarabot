@@ -265,7 +265,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/review-step.ts", "src/lane/review-gate.ts", "src/lane/session.ts", "src/lane/lane-process.ts", "src/lane/coordinator-process.ts", "test/lane/review-step.test.ts", "test/lane/review-gate.test.ts", "test/lane/lane-process.test.ts", "test/lane/coordinator-process.test.ts"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-6-run-follow-up-reviews-of-3-4-and-3-5"
         text: "Run the follow-up reviews Stories 3.4 and 3.5 recommend on their named unverified risks (the follow-up pass, a loopback reading tmp/review-findings.md, the passed gate's clean-merge branch, the planning and retro review flow) before the switch after Epic 3 (E1)"
         route: maintainer
