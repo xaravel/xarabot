@@ -794,9 +794,14 @@ later fail to sign in, log in again as above.
 
 Every request a session's proxy decides on is written to the unit log, after
 the run's stdout and stderr, under `--- proxy ---`, as `allow <host>:<port>`
-or `deny <host>:<port> (<reason>)`. `files.openai.com` and the unresolved
-`2606:4700:440b::ac40:9034` the spike saw are not on the allowlist; a `deny`
-line naming them is what the live run below records.
+or `deny <host>:<port> (<reason>)`. The codex host list is final (Maintainer
+decision 2026-10-26, `docs/maintainer/evidence/epic-3.md` § "Story 3.1's host
+list"). The address `2606:4700:440b::ac40:9034` that the spike saw is one of
+the AAAA records of the four
+`sdmntpr{central,northcentral,southcentral,westcentral}us.oaiusercontent.com`
+hosts. Those hosts stay denied: every codex run logs a `deny` line for each,
+and codex passes every live check without them. `files.openai.com` stays off
+the allowlist because no run reached it.
 
 ### The codex live evidence
 
