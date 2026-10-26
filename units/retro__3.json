@@ -12,17 +12,151 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-26T16:24:34.046Z",
-  "pr": null,
-  "pr_owner": null,
+  "heartbeat_at": "2026-10-26T16:24:41.053Z",
+  "pr": 203,
+  "pr_owner": "edanisko",
   "base_sha": "dd2ff68b9739f98a7714df32377ba44c12dcd19d",
-  "head_sha": null,
+  "head_sha": "3c11cfd75d5122ac3a633d7388ae1ed094e6db58",
   "reviewed_sha": null,
   "passed_sha": null,
   "enqueued_sha": null,
   "approved_sha": null,
   "approved_graph": null,
-  "retro_result": null,
+  "retro_result": {
+    "verdict": "rejected",
+    "items": [
+      {
+        "id": "epic-3-retro-item-1-reap-session-processes-isolate-reviews",
+        "text": "Reap every session's processes and isolate review passes: when a session ends, is aborted or lingers past its result, kill all its descendants (e.g. its own process group), not only the sandbox-exec PID; give each review pass its own temp folder, result path and vendor home, sharing no writable root with builder sessions; tests that a session's grandchild is gone after the run and that the review profile shares no writable root with the builder profile (C1)",
+        "route": "lane",
+        "blocking": true,
+        "globs": [
+          "src/sandbox/macos.ts",
+          "src/sandbox/vendor-home.ts",
+          "src/lane/review-step.ts",
+          "src/lane/lane-store.ts",
+          "src/lane/session.ts",
+          "test/sandbox/macos.test.ts",
+          "test/sandbox/vendor-home.test.ts",
+          "test/lane/review-step.test.ts",
+          "test/lane/lane-store.test.ts",
+          "test/lane/session.test.ts"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-2-finish-the-codex-live-evidence",
+        "text": "Finish Story 3.6's live evidence: after item 35 is in a runner tag, re-run XARABOT_LIVE=1 bun test test/adapters/agent/codex/codex-live.test.ts and record it in docs/maintainer/evidence/epic-3.md with the printed outcome-mapping and resume output (and the resumed run's model); name 2606:4700:440b::ac40:9034 and decide the four denied sdmntpr*.oaiusercontent.com hosts (A2, A3)",
+        "route": "maintainer",
+        "blocking": true,
+        "globs": []
+      },
+      {
+        "id": "epic-3-retro-item-3-check-reviewer-clis-at-lane-start",
+        "text": "Check every composed reviewer's CLI at lane start as the lane's own agent is checked (cliVersion and startCheck: minimum version and effort), so a claude lane with a missing or pre-0.163.0 codex reviewer refuses to start; tests in test/cli/lane-run.test.ts (A5, C3)",
+        "route": "lane",
+        "blocking": false,
+        "globs": [
+          "src/cli/lane-run.ts",
+          "test/cli/lane-run.test.ts"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-4-keep-a-pass-across-repeated-main-merges",
+        "text": "Keep a passed review across repeated clean main merges: the passed gate walks back through a chain of runner-recomputed clean merges with main to passed_sha instead of accepting only a direct parent; tests for two and three queue ejections in a row (C2)",
+        "route": "lane",
+        "blocking": false,
+        "globs": [
+          "src/lane/passed-gate.ts",
+          "src/lane/review-gate.ts",
+          "src/lane/merge-step.ts",
+          "test/lane/passed-gate.test.ts",
+          "test/lane/review-gate.test.ts",
+          "test/lane/merge-step.test.ts"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-5-journal-review-session-usage",
+        "text": "Journal review sessions' usage: each review pass's tokens, cost and model reach the journal, on the unit's record or as their own spans, instead of staying on the review step's private track (C5, AR25)",
+        "route": "lane",
+        "blocking": false,
+        "globs": [
+          "src/lane/review-step.ts",
+          "src/lane/review-gate.ts",
+          "src/lane/session.ts",
+          "src/lane/lane-process.ts",
+          "src/lane/coordinator-process.ts",
+          "test/lane/review-step.test.ts",
+          "test/lane/review-gate.test.ts",
+          "test/lane/lane-process.test.ts",
+          "test/lane/coordinator-process.test.ts"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-6-run-follow-up-reviews-of-3-4-and-3-5",
+        "text": "Run the follow-up reviews Stories 3.4 and 3.5 recommend on their named unverified risks (the follow-up pass, a loopback reading tmp/review-findings.md, the passed gate's clean-merge branch, the planning and retro review flow) before the switch after Epic 3 (E1)",
+        "route": "maintainer",
+        "blocking": false,
+        "globs": []
+      },
+      {
+        "id": "epic-3-retro-item-7-correct-course-for-epic-3-drift",
+        "text": "Run bmad-correct-course for Epic 3's drift: reconcile spine, SPEC, agent-adapters.md, app-permissions.md and the 3.1 AC with the as-built code (enqueued_sha, review-findings, schema v5, item 29's vendor rule, codex env and profile changes); decide the cap that parks a passing round, takeover re-reviews, codex usage limits with no rate_limits, a no-output watchdog, lane install checking the lane's own agent, a real bmad-build-auto codex canary and the review prompt's agent-config line; route Epic 3's unrouted deferrals (A4, A6-A10, C4, C6, C7, E3)",
+        "route": "maintainer",
+        "blocking": false,
+        "globs": []
+      },
+      {
+        "id": "epic-3-retro-item-8-consolidate-the-review-plumbing",
+        "text": "Consolidate the review plumbing: one shared passed-gate call, allowance re-check and fix-push helper in the session module; share planning and retro ciAndGate; one AGENT_CONFIG_DIRS rule for the write check and the review checkout; one missing-commit fetch helper; take the codex credential file name from the adapter in lane-run.ts (D1, D2)",
+        "route": "lane",
+        "blocking": false,
+        "globs": [
+          "src/lane/session.ts",
+          "src/lane/passed-gate.ts",
+          "src/lane/review-gate.ts",
+          "src/lane/review-step.ts",
+          "src/lane/merge-step.ts",
+          "src/lane/reconcile-step.ts",
+          "src/lane/planning-step.ts",
+          "src/lane/retro-step.ts",
+          "src/lane/ci-step.ts",
+          "src/lane/merger.ts",
+          "src/lane/graph-trees.ts",
+          "src/lane/diff-paths.ts",
+          "src/core/lane/write-check.ts",
+          "src/core/review/agent-config.ts",
+          "src/cli/lane-run.ts",
+          "test/boundaries.test.ts",
+          "test/support/boundaries.ts",
+          "test/lane/**",
+          "test/core/lane/**",
+          "test/core/review/**",
+          "test/cli/lane-run.test.ts"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-9-close-the-epic-3-verification-gaps",
+        "text": "Close Epic 3's verification gaps: tests for a takeover after a blocking review round and a codex usage-limit turn.failed with no rate_limits (pin today's behaviour); flagged-spec and loopback rehearsals in the cross-vendor suite; fix self-host.md's stale expected sandbox counts and note that pre-v5 awaiting-approval parks need a release (C4, C8)",
+        "route": "lane",
+        "blocking": false,
+        "globs": [
+          "test/lane/merge-step.test.ts",
+          "test/lane/review-gate.test.ts",
+          "test/adapters/agent/codex/usage.test.ts",
+          "test/e2e/cross-vendor.test.ts",
+          "test/e2e/cross-vendor-harness.ts",
+          "docs/maintainer/self-host.md"
+        ]
+      },
+      {
+        "id": "epic-3-retro-item-10-trackers-macos-ci-and-evidence-gates",
+        "text": "Tracker, CI and gate housekeeping: decide which file is authoritative for retro action items and bring sprint-status.yaml's 25 earlier items in line; build or decide against the macOS CI job (Epic 1 item 13); add live_evidence_checks to .xarabot/config.yaml so a failed live row holds the next retro (E2, E4, E5)",
+        "route": "maintainer",
+        "blocking": false,
+        "globs": []
+      }
+    ]
+  },
   "builder_providers": [
     "anthropic"
   ],
