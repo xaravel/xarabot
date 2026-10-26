@@ -9,7 +9,7 @@
   "globs": [
     "src/adapters/agent/codex/codex-agent.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:37:10Z",
+  "heartbeat_at": "2026-10-26T18:38:09.576Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "e7499d0df6410d3774dd389d3667599917999670",
@@ -20,7 +20,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
