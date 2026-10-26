@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "story:3.6",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -11,7 +11,7 @@
     "test/e2e/**",
     "test/fixtures/**"
   ],
-  "heartbeat_at": "2026-10-26T06:42:19.313Z",
+  "heartbeat_at": "2026-10-26T06:44:05.159Z",
   "pr": 172,
   "pr_owner": "edanisko",
   "base_sha": "096300219a4e71101ac391d2253585dd22ef1d3b",
@@ -22,7 +22,18 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-3-6-cross-vendor-verification.md",
+      "docs/maintainer/self-host.md",
+      "test/e2e/cross-vendor-harness.ts",
+      "test/e2e/cross-vendor.test.ts",
+      "test/e2e/scratch-seed.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
