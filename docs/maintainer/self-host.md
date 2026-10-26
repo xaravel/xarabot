@@ -395,7 +395,9 @@ PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" XARABOT_MAX_BUILDERS=1 bun src/cli/
 The `PATH` prefix matters: `lane install` writes its `PATH` into the plist,
 and the lane needs `claude`, `bun`, `git` and `uv` on it. `lane install`
 refuses, and writes nothing, when any of them does not resolve on that
-`PATH`; it names each missing tool and the `PATH`.
+`PATH`; it names each missing tool and the `PATH`. It also refuses `--agent
+pi`, and a `main` policy that does not parse or allows neither `claude` nor
+`codex` (see "The `pi` adapter, deferred to v1").
 
 It installs `~/.xarabot/runner/<tag>/` and writes `host.yaml`, the lane folder
 and its `runner` file, the launcher `~/.xarabot/bin/xarabot-lane` and the plist.
@@ -817,3 +819,42 @@ Record the date, the host, the `main` commit, `bun --version`,
 `codex --version`, each command as run with its `pass`/`skip`/`fail` counts,
 and the printed lines above, in the Epic 3 live evidence file
 (`docs/maintainer/evidence/epic-3.md`), as for Epic 2.
+
+## The `pi` adapter, deferred to v1 (Story 3.2)
+
+0.x has no `pi` adapter. Story 3.2's escalation found (Maintainer,
+2026-10-25) that stock pi 1.4.0 gives `bmad-build-auto` no subagents, so a pi
+session cannot run the build skill the way `claude` and `codex` sessions do.
+The adapter moves to v1.
+
+What 0.x does instead, in both `xarabot lane install` and `xarabot lane run`:
+
+- **A `pi` lane is refused.** `lane install --agent pi` exits 1 before it checks the tools (a `pi` on the plist's `PATH` changes nothing) and before it connects, installs a runner or writes anything. A lane already in `host.yaml` with `agent: pi` is refused at the start checks, a failed start, in every `lane run` that reaches them (a run that only switches the runner version, or fails before those checks, exits first).
+- **A policy with no reviewer but `pi` is refused.** When `.xarabot/policy.yaml`'s `unattended_adapters` allows neither `claude` nor `codex` (for example `[pi]`, or `[]`), the only reviewer would be `pi`. `lane install` reads the policy from `main` with `config.yaml` and refuses before the runner install; a policy that does not parse is refused too, naming `.xarabot/policy.yaml`, and an absent one is left to lane start. At `lane run` it is a failed start, checked after the `pi`-lane check and before the agent's own `unattended_adapters` check.
+
+Each refusal names the deferral:
+
+```text
+the `pi` adapter is deferred to v1: stock pi 1.4.0 gives `bmad-build-auto` no subagents
+```
+
+A failed start counts in the lane's `failed-starts`, and the third in a row
+writes `STOP` and posts the lane-start alert, as for any refused start. To
+recover, set the lane to `claude` or `codex` (`xarabot lane install` again)
+and make sure the policy allows one of them. The re-install rewrites the
+lane's plist and prints the `sudo cp` and `sudo launchctl bootstrap`
+commands for it; run them as in step 15. After three failed starts, also
+remove the lane's `STOP` file
+(`~/.xarabot/repos/<owner>__<name>/lanes/<lane>/STOP`), or the lane stays
+stopped. A policy may keep listing `pi`:
+it still parses, and only `claude` and `codex` lanes run.
+
+What the v1 adapter needs first, before anything else:
+
+1. **Subagents for `bmad-build-auto`** in the pi version it pins.
+2. **pi's agent-directory override (AR41)**, so a session reads its skills and config from the lane's vendor home, not `~/.pi`, which Xarabot's sandbox always denies, by design.
+3. **Its attribution-off and own-sandbox-off switches**, so pi adds no attribution of its own and runs inside Xarabot's sandbox with its own sandbox off, as `claude` and `codex` do.
+
+Then: its credential (an OpenRouter key), its minimum tested version, and
+its `--thinking` mapping for `effort`, with the pi rows of the cross-vendor
+review table in the spec's `agent-adapters.md`.

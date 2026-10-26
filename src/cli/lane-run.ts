@@ -9,7 +9,6 @@ import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, parseRunnerFile, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { botIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import type { AdapterName } from "../core/schemas/policy.ts";
 import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
@@ -42,6 +41,7 @@ import { credentialPath, readCredential } from "../sandbox/vendor-home.ts";
 import { FAILED_STARTS_FILE, findLane, hostPaths, RUNNER_FILE } from "./host-paths.ts";
 import { COORDINATOR_LANE, DEFAULT_CALL_TIMEOUT_MS, ensureRunner, INSTALL_TIMEOUT_MS, pinnedConfig, writeFileAtomic } from "./lane-install.ts";
 import { githubConnect, type Connect } from "./lane-connection.ts";
+import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-deferral.ts";
 
 /**
  * `xarabot lane run <owner>/<name> <lane>` (FR1, NFR15, AR22, AR26, AR34):
@@ -113,11 +113,11 @@ function present(path: string): boolean {
 }
 
 /**
- * The adapter for an agent name: `claude`, or `codex` with the credential
+ * The adapter for a session agent: `claude`, or `codex` with the credential
  * kind its one credential file names (both files, or neither, refuse).
- * `pi` has none yet (Story 3.2).
+ * `pi` is not a `SessionAdapter`: its adapter is deferred to v1 (Story 3.2).
  */
-export function adapterFor(agent: AdapterName, env: CredentialEnv): Result<Agent, "refused"> {
+export function adapterFor(agent: SessionAdapter, env: CredentialEnv): Result<Agent, "refused"> {
   if (agent === "claude") return ok(createClaudeAgent());
   if (agent === "codex") {
     const dir = credentialPath(env, "codex", "auth.json");
@@ -126,7 +126,8 @@ export function adapterFor(agent: AdapterName, env: CredentialEnv): Result<Agent
     const kind = codexCredentialKind((file) => present(join(folder, file)), folder);
     return kind.ok ? ok(createCodexAgent({ credential: kind.value })) : kind;
   }
-  return err("refused", `no adapter for agent ${agent} (only claude and codex have one)`);
+  const unknown: never = agent;
+  return err("refused", `no adapter for agent ${String(unknown)}`);
 }
 
 /**
@@ -333,9 +334,14 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     // 5. The repo config and the refusals.
     const repoConfig = loadRepoConfig({ repo: lane.repo, now: snap.now, tree: [...snap.main.tree], files: { ...snap.main.files } });
     if (!repoConfig.ok) return failedStart(`repo config ${repoConfig.error.kind}: ${repoConfig.error.message}`);
-    const unattended = unattendedRefusal(repoConfig.value.repo.policy, lane.agent);
+    // `pi` first, then a policy with no reviewer but `pi`, then the agent's own allowance (Story 3.2).
+    const sessionAgent = piAgentRefusal(lane.agent);
+    if (!sessionAgent.ok) return failedStart(sessionAgent.error.message);
+    const reviewer = piReviewerRefusal(repoConfig.value.repo.policy);
+    if (!reviewer.ok) return failedStart(reviewer.error.message);
+    const unattended = unattendedRefusal(repoConfig.value.repo.policy, sessionAgent.value);
     if (!unattended.ok) return failedStart(unattended.error.message);
-    const adapter = adapterFor(lane.agent, deps.env);
+    const adapter = adapterFor(sessionAgent.value, deps.env);
     if (!adapter.ok) return failedStart(adapter.error.message);
     const agent = adapter.value;
     const settings = { ...(lane.model !== undefined ? { model: lane.model } : {}), effort: lane.effort };

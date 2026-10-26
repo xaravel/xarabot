@@ -6,6 +6,7 @@ import { ok } from "../../src/core/result.ts";
 import { redactSecrets } from "../../src/core/sanitize.ts";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
 import { credentialSecrets, laneRun, LANE_START_FAILED, type LaneRunDeps } from "../../src/cli/lane-run.ts";
+import { PI_DEFERRAL } from "../../src/cli/pi-deferral.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
 import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
@@ -447,8 +448,11 @@ describe("xarabot lane run: the runner version", () => {
 describe("xarabot lane run: refusals", () => {
   const other = { name: "builder-2", repo: "xaravel/xaravel" };
   test.each([
-    ["agent not allowed", { main: { unattended: [] } }, "is not in .xarabot/policy.yaml unattended_adapters"],
-    ["no adapter", { host: hostYaml({ lanes: [{ agent: "pi" }] }), main: { unattended: ["pi"] } }, "no adapter for agent pi (only claude and codex have one)"],
+    ["agent not allowed", { main: { unattended: ["codex"] } }, "agent claude is not in .xarabot/policy.yaml unattended_adapters (allowed: codex)"],
+    ["a pi lane, policy [pi]", { host: hostYaml({ lanes: [{ agent: "pi" }] }), main: { unattended: ["pi"] } }, `agent pi: ${PI_DEFERRAL}`],
+    ["a pi lane, policy [claude]", { host: hostYaml({ lanes: [{ agent: "pi" }] }), main: { unattended: ["claude"] } }, `agent pi: ${PI_DEFERRAL}`],
+    ["a pi-only policy", { main: { unattended: ["pi"] } }, `allows neither claude nor codex (allowed: pi), so the only reviewer would be pi: ${PI_DEFERRAL}`],
+    ["an empty policy", { main: { unattended: [] } }, `allows neither claude nor codex (allowed: none), so the only reviewer would be pi: ${PI_DEFERRAL}`],
     ["effort refused", { host: hostYaml({ lanes: [{ model: "claude-opus-4-6", effort: "xhigh" }] }) }, "does not offer effort xhigh"],
     ["CLI too old", { version: "2.0.0 (Claude Code)" }, "is older than"],
     ["no credential", { credential: false }, "missing"],
@@ -586,6 +590,13 @@ describe("xarabot lane run: a codex lane", () => {
     expect(spec.ok && spec.value.credential).toEqual({ file: "auth.json", homeFile: "auth.json" });
     expect(spec.ok && spec.value.apiHosts).toEqual(["chatgpt.com", "ab.chatgpt.com", "auth.openai.com"]);
     expect(spec.ok && spec.value.argv[0]).toBe("codex");
+  });
+
+  test("a policy allowing claude and codex: the codex lane starts", async () => {
+    const r = await laneRunWith({ ...CODEX, main: { unattended: ["claude", "codex"] }, codex: ["auth.json"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.starts).toHaveLength(1);
   });
 
   test("only api-key: the API-key spec, with api.openai.com", async () => {

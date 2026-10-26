@@ -17,6 +17,8 @@ export const BOT_USER_ID = 4242;
 export type MainOpts = {
   readonly runnerVersion?: string;
   readonly unattended?: readonly string[];
+  /** The raw `.xarabot/policy.yaml` text in place of the one `unattended` builds; `null` leaves the file out. */
+  readonly policy?: string | null;
   /** Story ids already done; default every Story. */
   readonly done?: boolean;
 };
@@ -25,6 +27,7 @@ export type MainOpts = {
 export function mainFiles(o: MainOpts = {}): Record<string, string> {
   const version = o.runnerVersion ?? "v1";
   const unattended = o.unattended ?? ["claude"];
+  const policy = o.policy === undefined ? `schema_version: 1\nunattended_adapters: [${unattended.join(", ")}]\n` : o.policy;
   return {
     ".xarabot/config.yaml": [
       "schema_version: 1",
@@ -35,7 +38,7 @@ export function mainFiles(o: MainOpts = {}): Record<string, string> {
       "  dir: stories",
       "",
     ].join("\n"),
-    ".xarabot/policy.yaml": `schema_version: 1\nunattended_adapters: [${unattended.join(", ")}]\n`,
+    ...(policy !== null ? { ".xarabot/policy.yaml": policy } : {}),
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
     "_bmad-output/planning-artifacts/epics.md": "# Epics\n\n## Epic 1: One\n\n### Story 1.1: Story 1.1\n\nBody.\n",
     "_bmad-output/implementation-artifacts/epic-1-context.md": "# Epic 1 Context: One\n\nGoal.\n",
