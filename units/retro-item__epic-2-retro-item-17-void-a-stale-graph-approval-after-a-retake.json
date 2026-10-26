@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-17-void-a-stale-graph-approval-after-a-retake",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -13,7 +13,7 @@
     "test/core/reconcile/**",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T01:37:53.744Z",
+  "heartbeat_at": "2026-10-26T01:39:41.173Z",
   "pr": 153,
   "pr_owner": "edanisko",
   "base_sha": "f706e1a1c2f1d56739c29be54fab34cb7f7577ec",
@@ -24,7 +24,17 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/reconcile/plan.ts",
+      "src/lane/reconcile-step.ts",
+      "test/core/reconcile/plan.test.ts",
+      "test/lane/reconcile-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
