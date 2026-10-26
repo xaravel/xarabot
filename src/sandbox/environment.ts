@@ -22,12 +22,24 @@ export const PROXY_VARS: readonly string[] = ["HTTPS_PROXY", "HTTP_PROXY", "http
  */
 export const VENDOR_TMP_ENV: Readonly<Partial<Record<Vendor, string>>> = { claude: "CLAUDE_CODE_TMPDIR" };
 
+/** The system's PEM bundle of trusted roots, under `/private/etc`, which the profile lets a session read. */
+export const CA_BUNDLE = "/etc/ssl/cert.pem";
+
+/**
+ * The variable that points a vendor's CLI at `CA_BUNDLE`. codex (rustls)
+ * otherwise loads its roots from the macOS trust settings through
+ * `com.apple.SecurityServer`, which `MACH_SERVICES` leaves out on purpose,
+ * so every HTTPS request fails. Named here per vendor, never by the launch spec.
+ */
+export const VENDOR_CA_ENV: Readonly<Partial<Record<Vendor, string>>> = { codex: "SSL_CERT_FILE" };
+
 /** Names a spec may not use for its own variables: the ones the sandbox sets or forbids. */
 export function isReservedEnvName(name: string): boolean {
   return (
     ["PATH", "HOME", "TMPDIR", "TMPPREFIX", "LANG", "TERM", "UV_CACHE_DIR", "SSH_AUTH_SOCK"].includes(name) ||
     PROXY_VARS.includes(name) ||
     Object.values(VENDOR_TMP_ENV).includes(name) ||
+    Object.values(VENDOR_CA_ENV).includes(name) ||
     name.startsWith("LC_") ||
     name.startsWith("XARABOT_") ||
     name.startsWith("GH_") ||
@@ -44,7 +56,7 @@ export function sessionDirs(tempDir: string): { readonly bin: string; readonly h
 export const SESSION_DIR_NAMES: readonly string[] = ["bin", "home", "uv-cache", "cli-tmp"];
 
 export type SessionEnvParts = {
-  /** Picks the CLI's own temp-folder variable, if the vendor has one (`VENDOR_TMP_ENV`). */
+  /** Picks the CLI's own temp-folder and CA-bundle variables, if the vendor has them (`VENDOR_TMP_ENV`, `VENDOR_CA_ENV`). */
   readonly vendor: Vendor;
   readonly tempDir: string;
   readonly vendorHome: string;
@@ -90,6 +102,8 @@ export function buildSessionEnv(launching: LaunchingEnv, parts: SessionEnvParts)
   env["UV_CACHE_DIR"] = dirs.uvCache;
   const tmpEnv = VENDOR_TMP_ENV[parts.vendor];
   if (tmpEnv !== undefined) env[tmpEnv] = dirs.cliTmp;
+  const caEnv = VENDOR_CA_ENV[parts.vendor];
+  if (caEnv !== undefined) env[caEnv] = CA_BUNDLE;
   return ok(env);
 }
 
