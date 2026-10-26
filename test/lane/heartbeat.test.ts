@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
 import { unitPath, type CoordinatorRecord, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "../../src/lane/heartbeat.ts";
+import { acquireLaneLock, type LaneLockCheck } from "../../src/lane/lane-lock.ts";
 import type { Sleep } from "../../src/lane/ledger-cas.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import { ALICE, BOB, COORD, rec, tip } from "../core/ledger/fixtures.ts";
@@ -22,6 +26,8 @@ type WorldOpts = {
   /** Runs inside loop sleep `i`, after the host clock advanced. */
   readonly onLoopSleep?: (i: number, w: World) => void | Promise<void>;
   readonly retryMs?: number;
+  /** The lane lock's re-read; default the keeper's own (`checkHeldLaneLocks`). */
+  readonly laneLock?: () => LaneLockCheck;
 };
 
 type World = {
@@ -114,6 +120,7 @@ function world(o: WorldOpts = {}): World {
     sleep,
     random: () => 0,
     ...(o.retryMs !== undefined ? { retryMs: o.retryMs } : {}),
+    ...(o.laneLock !== undefined ? { laneLock: o.laneLock } : {}),
     log: (text) => logs.push(text),
   });
 
@@ -384,6 +391,84 @@ describe("startHeartbeat", () => {
     await w.keeper.stop();
     expect(w.swaps).toEqual([]);
     expect(w.keeper.end()).toBeNull();
+  });
+});
+
+describe("the keeper's lane lock re-check", () => {
+  const lostLock: LaneLockCheck = { kind: "lost", message: "/l/lane.lock is now pid 4242's (started 2026-10-23T09:00:00.000Z): another process runs this lane" };
+
+  test("a lock another process took over before a beat: lost, the signal aborts and nothing is written", async () => {
+    const checks: number[] = [];
+    const w = world({
+      laneLock: () => {
+        checks.push(w.loopSleeps.length);
+        return checks.length === 1 ? { kind: "held" } : lostLock;
+      },
+    });
+    await settle(w);
+    const end = w.keeper.end();
+    expect(end).toEqual({ kind: "lost", message: `${UNIT} lost: ${lostLock.message}` });
+    expect(w.keeper.signal.aborted).toBe(true);
+    expect(w.keeper.signal.reason).toBe("lost");
+    // One good beat, then the re-check before the second ends the keeper with no swap.
+    expect(checks).toEqual([1, 2]);
+    expect(w.keepAlives()).toBe(1);
+    expect(w.swaps).toEqual(["keepAlive"]);
+    expect(w.loopSleeps).toEqual([5 * MIN, 5 * MIN]);
+    expect(w.logs.some((l) => l.includes("pid 4242"))).toBe(true);
+    expect(await w.record()).toMatchObject({ state: "claimed", heartbeat_at: forgeIso(T0 + 5 * MIN) });
+  });
+
+  test("checked before a retry too: a lost lock ends a failing keeper with no release", async () => {
+    let n = 0;
+    const w = world({ laneLock: () => (++n === 1 ? { kind: "held" } : lostLock) });
+    w.fail(transient);
+    await settle(w);
+    expect(w.keeper.end()?.kind).toBe("lost");
+    expect(w.loopSleeps).toEqual([5 * MIN, MIN]);
+    // The failed beat's swap tries, and no release.
+    expect(new Set(w.swaps)).toEqual(new Set(["keepAlive"]));
+    expect(await w.record()).toEqual(rec());
+  });
+
+  test.each([
+    ["unreadable", (): LaneLockCheck => ({ kind: "unreadable", message: "/l/lane.lock: EIO" }), "EIO"],
+    [
+      "a throwing check",
+      (): LaneLockCheck => {
+        throw new Error("boom");
+      },
+      "boom",
+    ],
+  ] as const)("%s: logged, and the beats go on", async (_name, laneLock, words) => {
+    const w = world({ holdAt: 2, laneLock });
+    await settle(w, 2);
+    expect(w.keepAlives()).toBe(2);
+    expect(w.keeper.end()).toBeNull();
+    expect(w.keeper.signal.aborted).toBe(false);
+    expect(w.logs.some((l) => l.includes("the lane lock could not be read") && l.includes(words))).toBe(true);
+  });
+
+  test("by default the keeper re-reads the lock this process holds: taken over, the unit is lost", async () => {
+    const root = mkdtempSync(join(tmpdir(), "xarabot-heartbeat-lock-"));
+    const laneDir = join(root, "lanes", "builder-1");
+    const locked = acquireLaneLock({ laneDir, pid: process.pid, command: "bun", startedMs: T0, table: { inspect: () => null, kill: () => false } });
+    if (!locked.ok || locked.value.kind !== "acquired") throw new Error("no lock");
+    const lock = locked.value;
+    try {
+      const w = world({
+        onLoopSleep: (i) => {
+          if (i === 1) writeFileSync(join(laneDir, "lane.lock"), "4242\nbun\n2026-10-23T09:00:00.000Z\n");
+        },
+      });
+      await settle(w);
+      expect(w.keeper.end()?.kind).toBe("lost");
+      expect(w.keeper.end()?.message).toContain(`${join(laneDir, "lane.lock")} is now pid 4242's`);
+      expect(w.keepAlives()).toBe(1);
+    } finally {
+      lock.release();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

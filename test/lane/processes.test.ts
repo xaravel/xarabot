@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPsProcessTable, killRecorded, parseLstart, readPidFile, type ProcessTable } from "../../src/lane/processes.ts";
+import { createPsProcessTable, inspectPid, killRecorded, parseLstart, ProcessUnreadable, readPidFile, type ProcessTable } from "../../src/lane/processes.ts";
 import { hostTest } from "../support/sandbox.ts";
 
 const dirs: string[] = [];
@@ -61,12 +61,39 @@ describe("createPsProcessTable", () => {
     expect(createPsProcessTable().inspect(0)).toBeNull();
   });
 
+  // A `ps` that can't run, one that fails, and one whose line doesn't parse.
+  test.each(["/nonexistent/ps", "/usr/bin/false", "/bin/echo"])("a live process that %s can't read throws ProcessUnreadable, never null", (ps) => {
+    const p = spawnSleep();
+    const table = createPsProcessTable({ ps });
+    expect(() => table.inspect(p.pid)).toThrow(ProcessUnreadable);
+    expect(() => table.inspect(process.pid)).toThrow(ProcessUnreadable);
+    expect(inspectPid(table, p.pid)).toBe("unknown");
+  });
+
+  test.each(["/nonexistent/ps", "/usr/bin/false"])("a PID with no process is null even when %s fails: signal 0 finds none", async (ps) => {
+    const p = spawnSleep("0");
+    await p.exited;
+    expect(createPsProcessTable({ ps }).inspect(p.pid)).toBeNull();
+    expect(inspectPid(createPsProcessTable({ ps }), p.pid)).toBeNull();
+  });
+
   test("kill sends SIGTERM to exactly that PID", async () => {
     const p = spawnSleep();
     expect(createPsProcessTable().kill(p.pid)).toBe(true);
     await p.exited;
     expect(p.signalCode).toBe("SIGTERM");
     expect(createPsProcessTable().kill(p.pid)).toBe(false);
+  });
+});
+
+describe("inspectPid", () => {
+  test("passes the table's answer through, and any throw is unknown", () => {
+    const info = { startMs: 0, args: "sleep 5" };
+    const table = (inspect: ProcessTable["inspect"]): ProcessTable => ({ inspect, kill: () => false });
+    expect(inspectPid(table(() => info), 7)).toEqual(info);
+    expect(inspectPid(table(() => null), 7)).toBeNull();
+    expect(inspectPid(table(() => { throw new ProcessUnreadable("ps failed"); }), 7)).toBe("unknown");
+    expect(inspectPid(table(() => { throw new Error("anything"); }), 7)).toBe("unknown");
   });
 });
 
@@ -137,6 +164,28 @@ describe("killRecorded", () => {
     expect(killed).toEqual([]);
     expect(killRecorded(table, path, { first: true })).toEqual({ kind: "killed", pid: 77, command: "cat" });
     expect(killed).toEqual([77]);
+  });
+
+  test("a recorded PID the table can't read: skipped unknown, not killed", () => {
+    const killed: number[] = [];
+    const table: ProcessTable = {
+      inspect: () => {
+        throw new ProcessUnreadable("ps failed");
+      },
+      kill: (pid) => (killed.push(pid), true),
+    };
+    const path = join(tmp(), "wait.pid");
+    writeFileSync(path, "77\nsleep\n");
+    expect(killRecorded(table, path, { first: true })).toEqual({ kind: "skipped", reason: "unknown", pid: 77 });
+    expect(killed).toEqual([]);
+  });
+
+  test("a live recorded sleep that a failing ps can't read: skipped unknown, not killed", () => {
+    const p = spawnSleep();
+    const path = join(tmp(), "wait.pid");
+    writeFileSync(path, `${p.pid}\nsleep\n`);
+    expect(killRecorded(createPsProcessTable({ ps: "/usr/bin/false" }), path, { first: true })).toEqual({ kind: "skipped", reason: "unknown", pid: p.pid });
+    expect(p.exitCode).toBeNull();
   });
 
   test("a failed kill is skipped kill-failed", () => {
