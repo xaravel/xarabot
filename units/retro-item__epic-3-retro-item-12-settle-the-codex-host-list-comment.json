@@ -9,13 +9,13 @@
   "globs": [
     "src/adapters/agent/codex/codex-agent.ts"
   ],
-  "heartbeat_at": "2026-10-26T18:41:11.100Z",
+  "heartbeat_at": "2026-10-26T18:41:18.823Z",
   "pr": 216,
   "pr_owner": "edanisko",
   "base_sha": "e7499d0df6410d3774dd389d3667599917999670",
   "head_sha": "469eccb4d98efe753be6353feb5d7b8bacf023f0",
   "reviewed_sha": "469eccb4d98efe753be6353feb5d7b8bacf023f0",
-  "passed_sha": null,
+  "passed_sha": "469eccb4d98efe753be6353feb5d7b8bacf023f0",
   "enqueued_sha": null,
   "approved_sha": null,
   "approved_graph": null,
