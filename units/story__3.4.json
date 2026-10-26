@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "story:3.4",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -37,7 +37,7 @@
     "test/lane/review-step.test.ts",
     "test/ports/forge.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T02:52:19.506Z",
+  "heartbeat_at": "2026-10-26T03:06:06.019Z",
   "pr": 157,
   "pr_owner": "edanisko",
   "base_sha": "b5f597a8bd191542165fc4e9ea8dad05c9cd2348",
