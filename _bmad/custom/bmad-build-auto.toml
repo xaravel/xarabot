@@ -1,0 +1,11 @@
+# Team overrides for bmad-build-auto (merged over .claude/skills/bmad-build-auto/customize.toml).
+# Lists append to the default list.
+
+[workflow]
+
+# Maintainer decision 2026-10-26 (epics.md Story 4.2, question 1): deferred entries carry an id, and a
+# later spec names the ones it resolves, so the daily digest can tell when a deferral is settled.
+persistent_facts = [
+  "Deferred entries carry an id (Maintainer decision 2026-10-26, epics.md Story 4.2). Every item you add to a Story spec's frontmatter `deferred` list starts with `id: \"<story-id>-d<n>\"`, where <n> is the item's 1-based position in that list, for example `id: \"4.2-d1\"`. The list is append-only, so positions never change, and an item in an older spec that has no `id` has the same id by its position.",
+  "When this Story's change resolves a deferred entry of an earlier Story's spec, list that entry's id in this spec's frontmatter as `resolves: [\"<id>\", ...]`: add the key once, and leave it out when nothing is resolved. The daily digest lists a merged spec's deferred entry until a spec merged after it names the entry's id in `resolves`.",
+]

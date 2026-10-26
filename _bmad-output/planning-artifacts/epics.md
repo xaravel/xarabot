@@ -2217,6 +2217,14 @@ So that I rule on it in one sitting with no other per-item notices (FR9, AR24).
 **When** this Story stamps `digest_posted_at` on each digest
 **Then** it adds back "the daily digest time passed with no digest posted" as `reconcile` work, which Story 2.5 left out until now; the due-rule case table gains its cases.
 
+**The Maintainer's decisions of 2026-10-26 (this Story's intent gap, from its draft spec's open questions):**
+1. **Deferred entries are named by id.** Each entry of a Story spec's `deferred` list has the id `<story-id>-d<n>`, where `n` is its 1-based position in that list. The list is append-only, so an entry in an older spec with no `id` key has the same id by position. New entries write it as `id:` (`_bmad/custom/bmad-build-auto.toml`). A spec names an entry it settles in a frontmatter `resolves: [<id>, …]` list. The digest lists each `deferred` entry of a merged Story spec until a spec merged after it names the entry's id in `resolves`. "Later" means merge order, not Story id order.
+2. **`waiting-on-maintainer` is the existing `idle` span** with a reason starting `waiting-on-maintainer:`, as Story 2.9's live-evidence rule already writes. It is not a new span value. A lane is idle "only because of" Maintainer causes when every reason it idles for is a Maintainer cause.
+3. **Inbox noise.** An inbox with nothing in it gets no daily mention. `reconcile` enumerates every inbox issue, so a body left stale by an owner who no longer holds any record is cleared.
+4. **Ruling verbs:** the digest shows only AR29's fixed verbs for each item kind (`go`, `done`/`defer`, `approve`). This Story adds no verbs.
+5. **Mention posts are at-most-once.** The runner stamps the post time before it posts. A failed post loses that day's mention and never re-posts to every inbox.
+6. **Scope:** open Escalations stay in Story 7.6. Waiting checkpoint gos are listed by this Story.
+
 ### Story 4.3: Batch routing of Maintainer-only retro items
 
 As the Maintainer,
