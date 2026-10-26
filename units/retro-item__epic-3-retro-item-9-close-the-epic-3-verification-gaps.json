@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-9-close-the-epic-3-verification-gaps",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/lane/merge-step.test.ts",
     "test/lane/review-gate.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T20:53:33.931Z",
+  "heartbeat_at": "2026-10-26T20:53:43.187Z",
   "pr": 228,
   "pr_owner": "edanisko",
   "base_sha": "3e73dd471998a44ac093d1d0c0c4534c41a2c1d5",
@@ -28,7 +28,19 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "test/adapters/agent/codex/usage.test.ts",
+      "test/e2e/cross-vendor-harness.ts",
+      "test/e2e/cross-vendor.test.ts",
+      "test/lane/merge-step.test.ts",
+      "test/lane/review-gate.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
