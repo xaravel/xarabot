@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { GRAPH_PSEUDO_GLOB } from "../../../src/core/next/coordinator.ts";
+import { standingApproval } from "../../../src/core/reconcile/approval.ts";
 import { planReconcile, type ReconcilePlan } from "../../../src/core/reconcile/plan.ts";
 import { parseSprintStatus } from "../../../src/core/next/sprint-status.ts";
 import type { UnitRecord } from "../../../src/core/schemas/ledger.ts";
@@ -325,6 +326,46 @@ describe("planReconcile: approval-gated PRs (Story 2.6)", () => {
     const reviewedOnly = awaiting({ owner: COORD.owner, host: COORD.host, lane: COORD.lane, generation: 2, passed_sha: HEAD, enqueued_sha: null });
     const p = plan({ records: [reviewedOnly], prs: { "story:2.1": open(7) } });
     expect(p.takeApproved.map((t) => t.parked_at)).toEqual([null]);
+  });
+
+  describe("a first park with a posted graph delta counts only a later approval (retro item 33)", () => {
+    const hash = `sha256:${"e".repeat(64)}`;
+    const approvedAt = (minutesAgo: number) => [{ author: "edanisko", state: "approved", commit_sha: HEAD, submitted_at: minutesBefore(minutesAgo) }];
+    /** The candidate's standing approval from the Maintainer, as the reconcile step queries it. */
+    const approvalOf = (p: ReconcilePlan, minutesAgo: number) =>
+      p.takeApproved.map((t) => standingApproval(approvedAt(minutesAgo), { owner: "edanisko", head: t.head_sha, parkedAt: t.parked_at }) !== null);
+
+    test("a builder's first park with graph_posted: parked_at is its heartbeat_at; an approval before the delta comment stays parked, one after is taken", () => {
+      const builder = awaiting({ park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: ["src/2.1/a.ts"], graph_posted: hash } });
+      const p = plan({ records: [builder], prs: { "story:2.1": open(7) } });
+      expect(p.takeApproved.map((t) => [t.parked_at, t.graph_posted])).toEqual([[PARKED_AT, hash]]);
+      expect(approvalOf(p, 30)).toEqual([false]);
+      expect(approvalOf(p, 20)).toEqual([false]);
+      expect(approvalOf(p, 10)).toEqual([true]);
+    });
+
+    test("the graph planning step's first park with graph_posted (coordinator lane, no enqueued_sha): parked_at is its heartbeat_at", () => {
+      const g = coord("planning:graph.1", {
+        state: "parked",
+        globs: [EPICS_MD, GRAPH_PSEUDO_GLOB],
+        pr: 4,
+        pr_owner: COORD.owner,
+        head_sha: HEAD,
+        passed_sha: HEAD,
+        heartbeat_at: PARKED_AT,
+        park: { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", globs_held: [EPICS_MD], graph_posted: hash },
+      });
+      const p = plan({ records: [g], prs: { "planning:graph.1": open(4) } });
+      expect(p.takeApproved.map((t) => [t.parked_at, t.graph_posted])).toEqual([[PARKED_AT, hash]]);
+      expect(approvalOf(p, 30)).toEqual([false]);
+      expect(approvalOf(p, 10)).toEqual([true]);
+    });
+
+    test("a first park with no graph_posted keeps today's rule: parked_at null, an approval given while CI ran counts", () => {
+      const p = plan({ records: [awaiting()], prs: { "story:2.1": open(7) } });
+      expect(p.takeApproved.map((t) => t.parked_at)).toEqual([null]);
+      expect(approvalOf(p, 30)).toEqual([true]);
+    });
   });
 
   test("a parked reconcile record awaiting approval is a candidate of any kind; its open PR still stops a new one", () => {

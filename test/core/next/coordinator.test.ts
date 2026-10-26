@@ -244,6 +244,25 @@ describe("next(coordinator): reconcile on the Maintainer's approval (retro item 
     expect(dueFor(reviewedOnly, openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
   });
 
+  test("a first park with a posted graph delta counts only an approval submitted after it (retro item 33)", () => {
+    const graphPark: UnitRecord["park"] = { kind: "awaiting-approval", reason: null, inbox_owner: MAINTAINER, globs_held: ["docs/x.md"], graph_posted: `sha256:${"e".repeat(64)}` };
+    // A builder's first park: an approval given before the delta comment (while CI ran) is not counted.
+    const builder = awaiting({ park: graphPark });
+    expect(dueFor(builder, openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(false);
+    expect(dueFor(builder, openWith([review(MAINTAINER, HEAD, 30)])).due).toBe(false);
+    expect(dueFor(builder, openWith([review(MAINTAINER, HEAD, 20)])).due).toBe(true);
+    // The graph planning step's first park: coordinator lane, no enqueued_sha.
+    const planning = coord("planning:graph.1", { state: "parked", pr: 7, pr_owner: COORD.owner, head_sha: HEAD, passed_sha: HEAD, heartbeat_at: PARKED_AT, park: graphPark });
+    const approvedOf = (minutesAgo: number) => {
+      const s = snapshotOf(world({ records: [RECENT, planning], prs: { "planning:graph.1": openWith([review(MAINTAINER, HEAD, minutesAgo)]) } }));
+      return maintainerApproved(s.ledger.units.find((u) => u.unit === "planning:graph.1") as UnitRecord, s);
+    };
+    expect(approvedOf(40)).toBe(false);
+    expect(approvedOf(20)).toBe(true);
+    // No graph_posted: today's rule, any standing approval of the head counts.
+    expect(dueFor(awaiting(), openWith([review(MAINTAINER, HEAD, 40)])).due).toBe(true);
+  });
+
   test("maintainerApproved reads the record and its PR", () => {
     const s = snapshotOf(world({ records: [RECENT, awaiting()], prs: { "story:2.1": openWith([review(MAINTAINER, HEAD, 5)]) } }));
     const parked = s.ledger.units.find((u) => u.unit === "story:2.1") as UnitRecord;

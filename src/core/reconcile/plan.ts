@@ -1,6 +1,6 @@
 import { isDisposable, isStale, isUngatedRetro } from "../ledger/edits.ts";
 import { RETRO_ITEM_ID_PATTERN, RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
-import { doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
+import { approvalParkedAt, doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
 import { unitKind, type UnitRecord } from "../schemas/ledger.ts";
 import type { PrState, Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
@@ -37,12 +37,14 @@ export type ApprovalTarget = {
   /**
    * For a re-park (the record's `lane` is `coordinator` and it has an
    * `enqueued_sha`: the coordinator took it on approval, fenced it at its head
-   * and parked it again, or parked it again with a new graph delta), its
-   * `heartbeat_at`: an approval must be submitted after it. `null` for a first park, a builder's or the coordinator's own
-   * (a planning or `reconcile` gate park has no `enqueued_sha`), and for a
-   * taken record the runner never enqueued, returned to its park
-   * (`takeApproved` clears `enqueued_sha`): any standing owner approval of
-   * the head counts.
+   * and parked it again, or parked it again with a new graph delta), or for
+   * a park with a posted graph delta (`graph_posted`, written only once the
+   * delta comment succeeded, retro item 33), its `heartbeat_at`: an approval
+   * must be submitted after it. `null` for any other first park, a builder's
+   * or the coordinator's own (a planning or `reconcile` gate park has no
+   * `enqueued_sha`), and for a taken record the runner never enqueued,
+   * returned to its park without a graph delta (`takeApproved` clears
+   * `enqueued_sha`): any standing owner approval of the head counts.
    */
   readonly parked_at: string | null;
   /** The head a review round passed (Story 3.5): a take needs the passed gate at `head_sha`. */
@@ -367,7 +369,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
       pr: r.pr,
       pr_owner: r.pr_owner,
       head_sha: r.head_sha,
-      parked_at: r.lane === "coordinator" && r.enqueued_sha !== null ? r.heartbeat_at : null,
+      parked_at: approvalParkedAt(r),
       passed_sha: r.passed_sha,
       builder_providers: r.builder_providers,
       globs: r.park.globs_held,
