@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-26-coordinator-idle-wait-one-minute",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -13,7 +13,7 @@
     "test/lane/coordinator-process.test.ts",
     "test/lane/lane-process.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T08:30:29.207Z",
+  "heartbeat_at": "2026-10-26T08:31:02.184Z",
   "pr": 180,
   "pr_owner": "edanisko",
   "base_sha": "402827e508014c51ec9a88078835875232ff196f",
@@ -24,7 +24,18 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "src/core/lane/waits.ts",
+      "test/core/lane/waits.test.ts",
+      "test/lane/coordinator-process.test.ts",
+      "test/lane/lane-process.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
