@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-24-bind-graph-approval-to-the-posted-delta",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -19,7 +19,7 @@
     "test/core/reconcile/plan.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T08:02:50.733Z",
+  "heartbeat_at": "2026-10-26T08:14:35.022Z",
   "pr": 177,
   "pr_owner": "edanisko",
   "base_sha": "1bf0496ff9c334e5fd667de9530939c153a05dc3",
