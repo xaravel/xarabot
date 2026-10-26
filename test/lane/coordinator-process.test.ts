@@ -13,6 +13,7 @@ import { forgeErr, type Forge } from "../../src/ports/forge.ts";
 import { claimCoordinatorRecord, missingStepReason, runCoordinatorProcess, type CoordinatorDeps, type CoordinatorStep, type CoordinatorStepInput } from "../../src/lane/coordinator-process.ts";
 import type { Sleep } from "../../src/lane/ledger-cas.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
+import { addReviewUsage, newTrack } from "../../src/lane/session.ts";
 import type { WaitParams, WaitResult } from "../../src/lane/wait.ts";
 import { mainFiles } from "../cli/lane-fixture.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
@@ -240,6 +241,32 @@ describe("runCoordinatorProcess", () => {
       reason: "nothing to do",
     });
     expect(h.waits.map((w) => w.ms)).toEqual([MIN]);
+  });
+
+  test("review usage on the step's track reaches the unit record (Epic 3 retro item 5)", async () => {
+    const h = harness();
+    const line = "normal review of abc by codex gpt-6.1-sol: 2 run(s), tokens 30 in, 4 out, 0 cache read, 0 cache creation, cost $0.5000 (estimate)";
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      // What the review step does through a planning or retro step's review gate.
+      const pass = newTrack({ unit: input.unit.unit, startedMs: 0, logName: input.track.logName, state: "claimed" });
+      pass.sessions = 2;
+      pass.tokens = { input: 30, output: 4, cacheRead: 0, cacheCreation: 0 };
+      pass.cost = { usd: 0.5, estimate: true };
+      addReviewUsage(input.track, pass);
+      return { outcome: "progress", state: "claimed", reason: line };
+    };
+    expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("progress");
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({
+      unit: "reconcile:1",
+      agent: "claude",
+      model: "claude-opus-5-5",
+      sessions: 2,
+      tokens: { input: 30, output: 4, cacheRead: 0, cacheCreation: 0 },
+      cost: { usd: 0.5, estimate: true },
+      reason: line,
+    });
   });
 
   test("a stale claimed coordinator unit with its PR open is taken over, adopting the PR", async () => {

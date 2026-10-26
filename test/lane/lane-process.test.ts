@@ -13,7 +13,7 @@ import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type PrStepInput } from "../../src/lane/lane-process.ts";
-import { Halt } from "../../src/lane/session.ts";
+import { addReviewUsage, Halt, newTrack } from "../../src/lane/session.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { createCiStep } from "../../src/lane/ci-step.ts";
 import { createMergeStep } from "../../src/lane/merge-step.ts";
@@ -2132,6 +2132,42 @@ describe("runLaneProcess stale takeover", () => {
     expect(edits).toEqual(["root", "foreign [skip ci]", "takeOverStale", "heartbeat", "heartbeat", "ejected", "heartbeat", "startMerging", "markMerged"]);
     expect((await h.ledger()).get("story:1.1")).toMatchObject({ state: "merged", attempts: 2 });
     expect(h.runs).toHaveLength(0);
+  });
+
+  test("review usage reaches the journal record (Epic 3 retro item 5): a review-only run's blocked park journals the review runs, tokens and cost, with no wip_ref", async () => {
+    const h = harness();
+    const open = await staleMerging(h, true);
+    const { forge } = counted(h.fake);
+    const mergeStep = mergeStepOn(forge, (i) => {
+      if (i === 0) h.fake.control.eject(open.number);
+    });
+    const line = `normal review of ${open.head} by codex gpt-6.1-sol: 1 run(s), tokens 10 in, 2 out, 0 cache read, 0 cache creation, cost $0.2500`;
+    const r = await h.run({
+      forge,
+      mergeStep,
+      ciStep: async (input) => ({ outcome: "progress", state: "claimed", record: input.record }),
+      reviewGate: async (input) => {
+        // What the review step does with a pass's own track.
+        const pass = newTrack({ unit: "story:1.1", startedMs: 0, logName: input.track.logName, state: "claimed" });
+        pass.sessions = 1;
+        pass.reportedModel = "gpt-6.1-sol";
+        pass.tokens = { input: 10, output: 2, cacheRead: 0, cacheCreation: 0 };
+        pass.cost = { usd: 0.25, estimate: false };
+        addReviewUsage(input.track, pass);
+        input.log(line);
+        const park = { kind: "blocked" as const, reason: "attempts-cap" as const, inbox_owner: IDENTITY.owner, globs_held: [...input.record.globs] };
+        return { outcome: "progress", state: "parked", record: { ...input.record, state: "parked", park }, reason: line };
+      },
+    });
+    expect(r.outcome).toBe("progress");
+    expect(h.runs).toHaveLength(0);
+    const unit = h.unitRecord();
+    expect(unit).toMatchObject({ state: "parked", sessions: 1, tokens: { input: 10, output: 2, cacheRead: 0, cacheCreation: 0 }, cost: { usd: 0.25, estimate: false } });
+    expect(unit.reason).toContain(line);
+    // The lane's own model and agent stay the record's; the reviewer's is in the reason.
+    expect(unit.reported_model).toBeUndefined();
+    // A review session runs in `<lane>/review`, never the clone: no wip ref.
+    expect(unit.wip_ref).toBeUndefined();
   });
 
   test.each(["open, not queued", "closed", "not-found"] as const)("a stale merging record whose PR is %s: releaseStale, attempts + 1, the PR kept, no dequeue, no keeper", async (kind) => {

@@ -356,6 +356,18 @@ describe("createReviewGateStep with createReviewStep (Story 3.5)", () => {
     expect(h.sessions).toHaveLength(0);
   });
 
+  test("each pass's runs reach the caller's track, its line in the reason (Epic 3 retro item 5)", async () => {
+    const { h, stub } = await composed([reviewPass(), reviewPass()], () => ({ [SPEC]: reviewSpec("done", true) }));
+    const track = newTrack({ unit: U, startedMs: T0, logName: "story-3.5.log", state: "claimed" });
+    const out = await h.run({ track }, { review: stub.review });
+    expect(out).toMatchObject({ outcome: "progress", state: "claimed" });
+    // The stub reviewers report no usage: the runs are counted, with no tokens and no cost.
+    expect(track).toMatchObject({ sessions: 2, reviewSessions: 2, tokens: null, cost: null, uncosted: true });
+    expect(track.reason).toContain(`normal review of ${h.head} by `);
+    expect(track.reason).toContain(`followup review of ${h.head} by `);
+    expect(track.reason).toContain(": 1 run(s), no tokens reported, no cost reported");
+  });
+
   test("a flagged spec, the follow-up blocking: a loopback; the next round on the new head runs both passes again", async () => {
     const { h, stub } = await composed([reviewPass(), reviewPass([BLOCKER]), reviewPass(), reviewPass()], () => ({ [SPEC]: reviewSpec("done", true) }));
     const first = await h.run({}, { review: stub.review });

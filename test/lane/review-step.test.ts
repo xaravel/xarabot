@@ -91,6 +91,8 @@ type HarnessOpts = {
   readonly specs?: Readonly<Record<string, string>>;
   /** The model each run reports; default the configured one. */
   readonly models?: readonly (string | null)[];
+  /** The cost each run reports; default $0.25, billed. */
+  readonly costs?: readonly ({ usd: number; estimate: boolean } | null)[];
   readonly sandboxRefuses?: boolean;
   readonly record?: Partial<UnitRecord>;
   readonly usageLimits?: readonly ({ resetAt: number | null } | null)[];
@@ -158,11 +160,12 @@ async function harness(o: HarnessOpts = {}): Promise<Harness> {
     parseUsage: () => {
       const n = usageCalls++;
       const reported = o.models?.[n];
+      const cost = o.costs?.[n];
       return {
         sessionId: null,
         model: reported === undefined ? lastModel : reported,
         tokens: { input: 10, output: 2, cacheRead: 0, cacheCreation: 0 },
-        cost: { usd: 0.25, estimate: false },
+        cost: cost === undefined ? { usd: 0.25, estimate: false } : cost,
         usageLimit: o.usageLimits?.[n] ?? null,
       };
     },
@@ -647,6 +650,8 @@ describe("createReviewStep: failures", () => {
     expect((await h.record()).state).toBe("released");
     expect(track.state).toBe("released");
     expect(track.record?.state).toBe("released");
+    // The limited run still reaches the unit's journal record (Epic 3 retro item 5).
+    expect(track).toMatchObject({ sessions: 1, reviewSessions: 1, tokens: { input: 10, output: 2 }, cost: { usd: 0.25, estimate: false } });
   });
 
   test("PR mismatch: the forge's PR for the unit is not the record's; a failed attempt, no session", async () => {
@@ -668,13 +673,79 @@ describe("createReviewStep: failures", () => {
     expect(h.prompts).toEqual([]);
   });
 
-  test("the step's own track: the caller's track keeps its sessions and reported model", async () => {
-    const h = await harness({ behaviors: [reviewResult()] });
+});
+
+// ------------------------------------------------- usage on the unit's journal record (Epic 3 retro item 5)
+
+describe("createReviewStep: review usage on the caller's track", () => {
+  /** A builder's track after one billed build run. */
+  const built = () => {
     const track = newTrack({ unit: U, startedMs: T0, logName: "story-3.4.log", state: "claimed" });
     track.reportedModel = "claude-sonnet-5";
     track.sessions = 1;
+    track.tokens = { input: 100, output: 20, cacheRead: 5, cacheCreation: 1 };
+    track.cost = { usd: 1, estimate: false };
+    return track;
+  };
+
+  test("a cross-vendor pass: its runs, tokens and cost added to the caller's; the reviewer and its model in the reason; the builder's reported model kept", async () => {
+    const h = await harness({ behaviors: [reviewResult()] });
+    const track = built();
+    const out = await h.run({ track });
+    expect(out.outcome).toBe("progress");
+    expect(track).toMatchObject({
+      sessions: 2,
+      reviewSessions: 1,
+      tokens: { input: 110, output: 22, cacheRead: 5, cacheCreation: 1 },
+      cost: { usd: 1.25, estimate: false },
+      uncosted: false,
+      reportedModel: "claude-sonnet-5",
+    });
+    const line = `normal review of ${h.head} by codex ${CODEX_DEFAULT}: 1 run(s), tokens 10 in, 2 out, 0 cache read, 0 cache creation, cost $0.2500`;
+    expect(track.reason).toBe(line);
+    expect(h.logs).toContain(`review step: ${line}`);
+  });
+
+  test("a follow-up pass: each pass's own line, and both passes' runs summed", async () => {
+    const h = await harness({ behaviors: [reviewResult(), reviewResult()], specs: { [SPEC]: spec("done", true) } });
+    const track = built();
     await h.run({ track });
-    expect(track.reportedModel).toBe("claude-sonnet-5");
-    expect(track.sessions).toBe(1);
+    expect(track).toMatchObject({ sessions: 3, reviewSessions: 2, tokens: { input: 120, output: 24 }, cost: { usd: 1.5, estimate: false } });
+    expect(track.reason).toBe(
+      [
+        `normal review of ${h.head} by codex ${CODEX_DEFAULT}: 1 run(s), tokens 10 in, 2 out, 0 cache read, 0 cache creation, cost $0.2500`,
+        `followup review of ${h.head} by codex ${CODEX_DEFAULT}: 1 run(s), tokens 10 in, 2 out, 0 cache read, 0 cache creation, cost $0.2500`,
+      ].join("; "),
+    );
+  });
+
+  test("a same-vendor pass on a fresh track: the lane's model; a run with no cost makes the sum an estimate", async () => {
+    const h = await harness({ adapters: ["claude"], behaviors: [reviewResult()], costs: [null] });
+    const track = newTrack({ unit: U, startedMs: T0, logName: "story-3.4.log", state: "claimed" });
+    await h.run({ track });
+    expect(track).toMatchObject({ sessions: 1, reviewSessions: 1, tokens: { input: 10, output: 2 }, uncosted: true, cost: null, reportedModel: null });
+    expect(track.reason).toBe(`normal review of ${h.head} by claude claude-sonnet-5: 1 run(s), tokens 10 in, 2 out, 0 cache read, 0 cache creation, no cost reported`);
+    const billed = built();
+    const g = await harness({ adapters: ["claude"], behaviors: [reviewResult()], costs: [null] });
+    await g.run({ track: billed });
+    expect(billed.cost).toEqual({ usd: 1, estimate: true });
+  });
+
+  test("a failed pass still adds its runs, with the model the reviewer reported", async () => {
+    const h = await harness({ behaviors: [reviewResult()], models: ["gpt-other"] });
+    const track = built();
+    const out = await h.run({ track });
+    expect(out.outcome).toBe("failed");
+    expect(out.reason).toContain("model-mismatch");
+    expect(track).toMatchObject({ sessions: 2, reviewSessions: 1, cost: { usd: 1.25, estimate: false }, reportedModel: "claude-sonnet-5" });
+    expect(track.reason).toContain(`normal review of ${h.head} by codex ${CODEX_DEFAULT} (reported gpt-other): 1 run(s)`);
+  });
+
+  test("a pass with no run adds nothing", async () => {
+    const h = await harness({ behaviors: [reviewResult()], sandboxRefuses: true });
+    const track = built();
+    const out = await h.run({ track });
+    expect(out.outcome).toBe("failed");
+    expect(track).toMatchObject({ sessions: 1, reviewSessions: 0, tokens: { input: 100, output: 20 }, cost: { usd: 1, estimate: false }, reason: null });
   });
 });

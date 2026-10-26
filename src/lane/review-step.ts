@@ -18,6 +18,8 @@ import { laneLayout } from "./lane-store.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { checkoutFiles, reviewWorkspace, type ReviewCheckout } from "./review-checkout.ts";
 import {
+  addReason,
+  addReviewUsage,
   createSessionRunner,
   describeError,
   End,
@@ -66,9 +68,12 @@ import type { Waiter } from "./wait.ts";
  *   with no pass blocking, a `record` beat sets `passed_sha` to the head.
  *   A failed post is a failed attempt, with `passed_sha` never set.
  *
- * The step keeps its own `UnitTrack` (the caller's log), so a reviewer from
- * another vendor never changes the builder's journal record. The sessions
- * run outside `kit.run`, so a `Halt` or `MarkerStop` reaches the caller;
+ * Each pass keeps its own `UnitTrack` (the caller's log). Once its session
+ * ends, however it ends, a pass with any run adds its runs, tokens and cost
+ * to the caller's track, and its reviewer, model and usage to the caller's
+ * reason, so they reach the unit's journal record (Epic 3 retro item 5,
+ * AR25); the builder's reported model stays as it is. The sessions run
+ * outside `kit.run`, so a `Halt` or `MarkerStop` reaches the caller;
  * anything else never throws.
  */
 
@@ -111,7 +116,7 @@ export type ReviewStepInput = {
   readonly storyId: string | null;
   /** The claimed record, with its open PR at `head_sha`. */
   readonly record: UnitRecord;
-  /** The caller's track: the step logs to its log and keeps a track of its own. */
+  /** The caller's track: the step logs to its log, and each pass adds its runs, tokens, cost and usage line to it. */
   readonly track: UnitTrack;
   /** The unit budget's signal. */
   readonly signal: AbortSignal;
@@ -232,9 +237,6 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
     const model = settings.model ?? agent.defaultModel;
     note(`reviewer ${choice.adapter} (${model}), ${choice.crossVendor ? "cross-vendor" : "same-vendor"}, at ${head} onto main ${main}`);
 
-    // The step's own track: the reviewer's runs never reach the builder's journal record.
-    const track = newTrack({ unit, startedMs: clock(), logName: input.track.logName, state: kit.record.state });
-    track.record = kit.record;
     const budget = AbortSignal.any([input.signal, AbortSignal.timeout(round.budgetHours * HOUR_MS)]);
     /** Set when a STOP ended a usage-limit sleep and the unit was released. */
     let limitStopped = false;
@@ -246,8 +248,8 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
       resultPath: layout.resultPath,
       repoHosts: round.proxyHosts,
     };
-    const ctx: SessionContext = {
-      track,
+    /** Each pass's session context takes the pass's own track. */
+    const ctx: Omit<SessionContext, "track"> = {
       branch: "review",
       profile,
       budget,
@@ -319,6 +321,15 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
     let specPath: string | null = null;
     let blocking = false;
     const findings: ReviewFinding[] = [];
+    /** A pass's runs, tokens and cost on the caller's track; its reviewer, model and usage in the caller's reason. */
+    const journalPass = (pass: ReviewPass, t: UnitTrack): void => {
+      if (t.sessions === 0) return;
+      addReviewUsage(input.track, t);
+      const usage = passUsage({ pass, head, adapter: choice.adapter, model, track: t });
+      note(usage);
+      addReason(input.track, usage);
+    };
+
     /** A pass's posting went through: the round goes on. */
     const GO_ON: StepOutput = { outcome: "progress", state: null };
 
@@ -355,14 +366,19 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
         return built.ok ? { ok: true, value: built.value } : { ok: false, reason: `prompt ${built.error.kind}: ${built.error.message}` };
       };
 
+      // The pass's own track, added to the caller's however the session ends.
+      const track = newTrack({ unit, startedMs: clock(), logName: input.track.logName, state: kit.record.state });
+      track.record = kit.record;
       // The session runs outside `kit.run`: a `Halt` reaches the caller.
       let ran: SessionOutcome<"review">;
       try {
-        ran = await runner.session(ctx, { at: head, kind: "review", prompt });
+        ran = await runner.session({ ...ctx, track }, { at: head, kind: "review", prompt });
       } catch (e) {
         if (e instanceof End) return e.out;
         if (e instanceof Halt) throw e;
         return kit.run(() => failed(`${pass} review session threw: ${message(e)}`));
+      } finally {
+        journalPass(pass, track);
       }
       if (limitStopped) {
         note(`stop: ${LIMIT_STOP_REASON}`);
@@ -397,4 +413,16 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
     });
     return done.outcome === "progress" ? { ...done, review } : done;
   };
+}
+
+/** A review pass's line in the unit's journal reason: the reviewer, its configured and reported model, runs, tokens and cost. */
+function passUsage(p: { readonly pass: ReviewPass; readonly head: string; readonly adapter: SessionAdapter; readonly model: string; readonly track: UnitTrack }): string {
+  const t = p.track;
+  const reported = t.reportedModel !== null && t.reportedModel !== p.model ? ` (reported ${t.reportedModel})` : "";
+  const tokens =
+    t.tokens === null
+      ? "no tokens reported"
+      : `tokens ${t.tokens.input} in, ${t.tokens.output} out, ${t.tokens.cacheRead} cache read, ${t.tokens.cacheCreation} cache creation`;
+  const cost = t.cost === null ? "no cost reported" : `cost $${t.cost.usd.toFixed(4)}${t.cost.estimate ? " (estimate)" : ""}`;
+  return `${p.pass} review of ${p.head} by ${p.adapter} ${p.model}${reported}: ${t.sessions} run(s), ${tokens}, ${cost}`;
 }

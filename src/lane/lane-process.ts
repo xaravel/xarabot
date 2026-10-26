@@ -988,8 +988,8 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
     }
     if (t !== null) {
       note(`outcome ${outcome}`);
-      // A blocked park after a session: the work stays on this host only, saved when the lane next rebuilds its clone.
-      const parkedBlocked = t.sessions > 0 && t.state === "parked" && t.record?.state === "parked" && t.record.park?.kind === "blocked";
+      // A blocked park after a session in the clone (a review session runs elsewhere): the work stays on this host only, saved when the lane next rebuilds its clone.
+      const parkedBlocked = t.sessions > t.reviewSessions && t.state === "parked" && t.record?.state === "parked" && t.record.park?.kind === "blocked";
       const wip = parkedBlocked ? wipRef(t.unit) : null;
       if (wip !== null) note(`wip: if the session changed any file, its work is saved as ${wip} in runner.git when the lane next rebuilds its clone; it is never pushed`);
       journal({
