@@ -11,8 +11,8 @@ describe("reviewNext (Story 3.5)", () => {
     [1, false, "pass"],
     [1, true, "loopback"],
     [2, true, "cap"],
-    [2, false, "cap"],
-    [3, false, "cap"],
+    [2, false, "pass"],
+    [3, false, "pass"],
     [3, true, "cap"],
   ] as const)("loopbacks %p, blocking %p: %s", (loopbacks, blocking, want) => {
     expect(reviewNext({ loopbacks, blocking })).toBe(want);
