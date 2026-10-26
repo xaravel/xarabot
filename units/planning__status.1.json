@@ -1,15 +1,15 @@
 {
   "schema_version": 5,
   "unit": "planning:status.1",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/epic-4-context.md"
   ],
-  "heartbeat_at": "2026-10-26T19:27:13.349Z",
+  "heartbeat_at": "2026-10-26T19:29:35Z",
   "pr": 223,
   "pr_owner": "edanisko",
   "base_sha": "faf0ebac840916970508c02913f1e4775617ec88",
