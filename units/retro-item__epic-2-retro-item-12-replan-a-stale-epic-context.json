@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "unit": "retro-item:epic-2-retro-item-12-replan-a-stale-epic-context",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -20,7 +20,7 @@
     "test/core/prompt/build-prompt.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T00:13:23.077Z",
+  "heartbeat_at": "2026-10-26T00:16:42.020Z",
   "pr": 141,
   "pr_owner": "edanisko",
   "base_sha": "f6eb3187019bd13b8dc72fda8f3e131c91212026",
