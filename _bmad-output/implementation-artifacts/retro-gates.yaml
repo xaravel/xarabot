@@ -111,7 +111,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/lane/reconcile-step.ts", "src/core/reconcile/plan.ts", "src/core/reconcile/approval.ts", "test/lane/reconcile-step.test.ts", "test/core/reconcile/**"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-18-refuse-symlinks-that-leave-the-clone"
         text: "Story 2.3 follow-up review F3 (medium): the write check never reads a committed symlink's target, so a session can commit a link pointing outside the clone (an absolute path, ../runner.git/hooks, ~/.claude) and every later checkout carries it. In writeChanges read the blob of each added or changed mode-120000 entry and refuse, with a new symlink class, a target that is absolute, leaves the repo root after normalizing, or resolves into a refused class; also F4 (low): refuse a path when a protected <dir>/** glob matches it with /x appended, and F5 (low): normalize paths to NFD before folding in write-check.ts and commit.ts; tests for each"
         route: lane
