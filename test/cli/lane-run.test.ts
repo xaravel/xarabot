@@ -13,7 +13,9 @@ import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coor
 import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
 import type { ProcessInfo } from "../../src/core/lane/waits.ts";
 import type { ProcessTable } from "../../src/lane/processes.ts";
-import { forgeErr, type Forge } from "../../src/ports/forge.ts";
+import { forgeErr, rateLimited, type Forge, type ForgeResult } from "../../src/ports/forge.ts";
+import type { Connect } from "../../src/cli/lane-connection.ts";
+import * as botIdentityModule from "../../src/core/bot-identity.ts";
 import * as planningStep from "../../src/lane/planning-step.ts";
 import * as prStep from "../../src/lane/pr-step.ts";
 import * as reconcileStep from "../../src/lane/reconcile-step.ts";
@@ -26,6 +28,7 @@ import type { Agent } from "../../src/ports/agent.ts";
 import type { CoordinatorStep } from "../../src/lane/coordinator-process.ts";
 import { hostTest } from "../support/sandbox.ts";
 import {
+  BOT_USER_ID,
   cleanup,
   CODEX_AUTH,
   CODEX_REFRESH,
@@ -132,6 +135,17 @@ mock.module("../../src/lane/retro-item-step.ts", () => ({
   },
 }));
 
+/** Each bot user id `lane run` built the bot identity from. */
+const botIds: number[] = [];
+const realBotIdentity = botIdentityModule.botIdentity;
+mock.module("../../src/core/bot-identity.ts", () => ({
+  ...botIdentityModule,
+  botIdentity: (login: string, id: number) => {
+    botIds.push(id);
+    return realBotIdentity(login, id);
+  },
+}));
+
 const REPO = "xaravel/xarabot";
 
 type LaneYaml = { readonly name?: string; readonly repo?: string; readonly role?: string; readonly agent?: string; readonly model?: string; readonly effort?: string };
@@ -160,6 +174,12 @@ type Setup = {
   readonly installFails?: string;
   readonly connectFail?: string;
   readonly botUserFails?: boolean;
+  /** The bot user id read in place of the fake connection's; default the fake's. */
+  readonly botUser?: () => ForgeResult<number>;
+  /** The slug the owner's App `app.json` names; default no `app.json`. */
+  readonly appSlug?: string;
+  /** The lane's `bot-user.json` text at the start. */
+  readonly botUserCache?: string;
   /** The ledger's files at the start. */
   readonly ledger?: Record<string, string>;
   /** `lane.lock`'s text at the start, or `dir` for a folder in its place. */
@@ -192,10 +212,20 @@ type Ran = {
   readonly installs: { version: string }[];
   readonly record: ReturnType<typeof fakeConnect>["record"];
   readonly w: World;
+  /** How many times the run read the bot user id from the connection. */
+  botReads(): number;
+  botUserCache(): string | null;
   failedStarts(): string | null;
   runnerFile(): string | null;
   again(): Promise<number>;
 };
+
+/** Writes the owner's App `app.json` naming `slug`. */
+function writeApp(w: World, slug: string): void {
+  const dir = join(w.xdg, "xarabot", "apps", "alice-xarabot");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "app.json"), `${JSON.stringify({ id: 99, slug })}\n`);
+}
 
 function read(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
@@ -222,9 +252,27 @@ async function laneRunWith(
   for (const file of o.codex ?? []) writeCodexCredential(w, file);
   if (o.lockText === "dir") mkdirSync(join(laneDir, "lane.lock"));
   else if (o.lockText !== undefined) writeFileSync(join(laneDir, "lane.lock"), o.lockText);
+  if (o.appSlug !== undefined) writeApp(w, o.appSlug);
+  if (o.botUserCache !== undefined) writeFileSync(join(laneDir, "bot-user.json"), o.botUserCache);
   before?.(w);
   const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main), ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
   const conn = fakeConnect(fake, { ...(o.connectFail !== undefined ? { fail: o.connectFail } : {}), ...(o.botUserFails === true ? { botUserFails: true } : {}) });
+  let botReads = 0;
+  const connect: Connect = async (l) => {
+    const c = await conn.connect(l);
+    if (!c.ok) return c;
+    const inner = c.connection;
+    return {
+      ok: true,
+      connection: {
+        ...inner,
+        botUserId: async (signal) => {
+          botReads += 1;
+          return o.botUser !== undefined ? o.botUser() : inner.botUserId(signal);
+        },
+      },
+    };
+  };
   const installer = stubInstaller(o.installFails !== undefined ? { fail: o.installFails } : {});
   const starts: LaneDeps[] = [];
   const coordinatorStarts: CoordinatorDeps[] = [];
@@ -232,7 +280,7 @@ async function laneRunWith(
   const err: string[] = [];
   const deps: LaneRunDeps = {
     env: w.env,
-    connect: conn.connect,
+    connect,
     installRunner: installer.install,
     cliVersion: async () => ok(o.version ?? "2.1.309 (Claude Code)"),
     start:
@@ -263,6 +311,8 @@ async function laneRunWith(
     installs: installer.calls,
     record: conn.record,
     w,
+    botReads: () => botReads,
+    botUserCache: () => read(join(laneDir, "bot-user.json")),
     failedStarts: () => read(join(laneDir, "failed-starts")),
     runnerFile: () => read(join(laneDir, "runner")),
     again: () => laneRun(args, deps),
@@ -580,6 +630,89 @@ describe("xarabot lane run: a failure after the refusal table", () => {
     expect(r.failedStarts()).toBe("0\n");
     expect(existsSync(join(r.w.laneDir, "STOP"))).toBe(true);
     expect(r.starts).toHaveLength(0);
+  });
+});
+
+describe("xarabot lane run: the bot user id cache", () => {
+  const SLUG = "alice-xarabot";
+  const cacheText = (slug: string, id: number) => `${JSON.stringify({ slug, id })}\n`;
+
+  test("the first start reads the id and writes the cache; a later start makes no read", async () => {
+    const r = await laneRunWith({ appSlug: SLUG });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(1);
+    expect(r.botUserCache()).toBe(cacheText(SLUG, BOT_USER_ID));
+    expect(await r.again()).toBe(0);
+    expect(r.botReads()).toBe(1);
+    expect(r.starts).toHaveLength(2);
+    expect(botIds.slice(-2)).toEqual([BOT_USER_ID, BOT_USER_ID]);
+  });
+
+  test("a valid cache gives the bot identity its id with no read", async () => {
+    const r = await laneRunWith({ appSlug: SLUG, botUserCache: cacheText(SLUG, 777) });
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(0);
+    expect(r.starts).toHaveLength(1);
+    expect(botIds.at(-1)).toBe(777);
+  });
+
+  test.each([
+    ["another slug", cacheText("bob-xarabot", 777)],
+    ["not JSON", "{"],
+    ["a bad id", '{"slug":"alice-xarabot","id":0}'],
+    ["empty", ""],
+  ])("a cache with %s is read again and rewritten", async (_name, text) => {
+    const r = await laneRunWith({ appSlug: SLUG, botUserCache: text });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(1);
+    expect(r.botUserCache()).toBe(cacheText(SLUG, BOT_USER_ID));
+  });
+
+  test("an unreadable cache is read again", async () => {
+    const r = await laneRunWith({ appSlug: SLUG }, [REPO, "builder-1"], undefined, undefined, (w) => mkdirSync(join(w.laneDir, "bot-user.json")));
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(1);
+    expect(r.err.join("\n")).toContain("bot user id cache:");
+  });
+
+  test("a rate-limited read with a valid cache still starts, and counts no failed start", async () => {
+    const limited = () => rateLimited(3600, "getUser: 403 API rate limit exceeded");
+    const r = await laneRunWith({ failedStarts: 2, appSlug: SLUG, botUserCache: cacheText(SLUG, BOT_USER_ID), botUser: limited });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(0);
+    expect(r.starts).toHaveLength(1);
+    expect(r.failedStarts()).toBe("0\n");
+    expect(existsSync(join(r.laneDir, "STOP"))).toBe(false);
+  });
+
+  test("a coordinator uses the cache too", async () => {
+    const r = await laneRunWith(
+      { host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] }), appSlug: SLUG, botUserCache: cacheText(SLUG, BOT_USER_ID), botUser: () => forgeErr("transient", "down") },
+      [REPO, "coordinator"],
+    );
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.botReads()).toBe(0);
+    expect(r.coordinatorStarts).toHaveLength(1);
+  });
+
+  test("a rate-limited read with no cache refuses the start and writes no cache", async () => {
+    const r = await laneRunWith({ appSlug: SLUG, botUser: () => rateLimited(3600, "getUser: 403 API rate limit exceeded") });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("bot user id: rate-limited");
+    expect(r.failedStarts()).toBe("1\n");
+    expect(r.botUserCache()).toBeNull();
+  });
+
+  test("with no readable app.json the id is read on every start and nothing is cached", async () => {
+    const r = await laneRunWith({});
+    expect(r.code).toBe(0);
+    expect(await r.again()).toBe(0);
+    expect(r.botReads()).toBe(2);
+    expect(r.botUserCache()).toBeNull();
   });
 });
 

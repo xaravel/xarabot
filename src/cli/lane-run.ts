@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { basename, dirname, join } from "node:path";
 import { createClaudeAgent } from "../adapters/agent/claude/claude-agent.ts";
 import { codexCredentialKind, createCodexAgent } from "../adapters/agent/codex/codex-agent.ts";
-import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
+import { APP_FILE, appDir, type CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { loadRepoConfig, POLICY_PATH } from "../core/config/load-repo-config.ts";
 import { describeStale, LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
@@ -10,6 +10,7 @@ import { afterFailedStart, builderLimit, builderRefusal, parseFailedStarts, pars
 import { botIdentity } from "../core/bot-identity.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { chooseReviewer, REVIEWER_ORDER, sessionProvider } from "../core/review/reviewer.ts";
+import { AppRecordSchema } from "../core/schemas/github-app.ts";
 import type { CoordinatorRecord } from "../core/schemas/ledger.ts";
 import type { Agent } from "../ports/agent.ts";
 import type { Forge, ForgeSnapshot } from "../ports/forge.ts";
@@ -20,7 +21,7 @@ import { createGitDiffPaths } from "../lane/diff-paths.ts";
 import { createGitGraphTrees } from "../lane/graph-trees.ts";
 import { readsPath, runLaneProcess, type LaneDeps, type LaneProcessResult } from "../lane/lane-process.ts";
 import { acquireLaneLock } from "../lane/lane-lock.ts";
-import { createFsLaneStore, laneLayout } from "../lane/lane-store.ts";
+import { createFsLaneStore, laneLayout, readBotUserCache, writeBotUserCache } from "../lane/lane-store.ts";
 import { createMergeStep } from "../lane/merge-step.ts";
 import { createGitMerger } from "../lane/merger.ts";
 import { createPlanningStep } from "../lane/planning-step.ts";
@@ -82,6 +83,9 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * coordinator's planning, retro and retro-item steps (Stories 2.7, 2.9 and
  * 2.10). Each of those steps gets the lane's session vendor, which it adds
  * to a unit's `builder_providers` before pushing an agent-made commit.
+ * The bot account's user id is read from GitHub once per App slug and cached
+ * in the lane folder (`bot-user.json`); a later start with a valid cache for
+ * the slug makes no read, so a failing read never refuses it.
  */
 
 export const LANE_RUN_USAGE = "xarabot lane run <owner>/<name> <lane>";
@@ -241,6 +245,19 @@ export function composeReviewers(p: ComposeReviewersParams): Result<ComposedRevi
 function readText(path: string): string | null {
   try {
     return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** The slug in the owner's App `app.json`, the key of the bot user id cache; `null` when it cannot be read. */
+function appSlug(env: CredentialEnv, owner: string): string | null {
+  const dir = appDir({ login: owner, env });
+  const text = dir === null ? null : readText(join(dir, APP_FILE));
+  if (text === null) return null;
+  try {
+    const parsed = AppRecordSchema.safeParse(JSON.parse(text));
+    return parsed.success ? parsed.data.slug : null;
   } catch {
     return null;
   }
@@ -455,9 +472,20 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     // 6. Every check passed: compose the real dependencies and run one unit.
     const gitDir = await openRunnerGit(laneDir, deadline());
     if (!gitDir.ok) return failedStart(`runner.git: ${gitDir.error.message}`);
-    const botId = await connection.botUserId(AbortSignal.timeout(callTimeoutMs));
-    if (!botId.ok) return failedStart(`bot user id: ${botId.error.kind}: ${botId.error.message}`);
-    const bot = botIdentity(lane.owner, botId.value);
+    // The bot user id never changes: a valid cache for the App's slug makes no read (retro item 36).
+    // With no slug (an `app.json` gone since connecting) the id is read and not cached.
+    const slug = appSlug(deps.env, lane.owner);
+    let botUserId = slug === null ? null : readBotUserCache(layout.botUser, slug);
+    if (botUserId === null) {
+      const botId = await connection.botUserId(AbortSignal.timeout(callTimeoutMs));
+      if (!botId.ok) return failedStart(`bot user id: ${botId.error.kind}: ${botId.error.message}`);
+      botUserId = botId.value;
+      if (slug !== null) {
+        const cached = writeBotUserCache(layout.botUser, slug, botUserId);
+        if (!cached.ok) say(`bot user id cache: ${cached.error.message}`);
+      }
+    }
+    const bot = botIdentity(lane.owner, botUserId);
     if (!bot.ok) return failedStart(bot.error.message);
 
     const runnerGit = gitDir.value;

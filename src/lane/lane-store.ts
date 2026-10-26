@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
 import { err, ok } from "../core/result.ts";
@@ -10,8 +10,8 @@ import { unitFileId } from "./clone.ts";
 /**
  * The filesystem `LaneStore` and the lane folder's layout (AR37). The lane
  * folder holds `lane.lock` (the lane process's exclusive lock, AR3),
- * `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`, `outcome`, `STOP` and
- * `logs/`, plus the session folders `laneLayout` names (the agent's clone,
+ * `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`, `outcome`, `STOP`,
+ * `bot-user.json` and `logs/`, plus the session folders `laneLayout` names (the agent's clone,
  * the review checkout, `runner.git`, the vendor home, `tmp`). Each write creates
  * its parent folder.
  */
@@ -33,6 +33,8 @@ export type LaneLayout = {
   readonly stop: string;
   /** The lane process's exclusive lock (`src/lane/lane-lock.ts`). */
   readonly lock: string;
+  /** The bot account's cached user id (`readBotUserCache`). */
+  readonly botUser: string;
 };
 
 /** The absolute paths inside a lane folder. */
@@ -52,6 +54,7 @@ export function laneLayout(laneDirIn: string): LaneLayout {
     outcome: join(laneDir, "outcome"),
     stop: join(laneDir, "STOP"),
     lock: join(laneDir, LANE_LOCK_FILE),
+    botUser: join(laneDir, "bot-user.json"),
   };
 }
 
@@ -76,6 +79,35 @@ function write(path: string, text: string, append: boolean): LaneStoreResult<voi
   } catch (e) {
     return io(path, e);
   }
+}
+
+/**
+ * The bot account's user id, cached in the lane folder as
+ * `{"slug":"<App slug>","id":<user id>}` (`laneLayout(...).botUser`). The id
+ * never changes, so a lane reads it from GitHub once per App slug: every
+ * start reads it with no token, and the unauthenticated rate limit is 60
+ * requests an hour per IP. `null` when the file is missing, unreadable or
+ * malformed, or names another slug.
+ */
+export function readBotUserCache(path: string, slug: string): number | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  if (Object.keys(record).length !== 2 || record["slug"] !== slug) return null;
+  const id = record["id"];
+  return typeof id === "number" && Number.isSafeInteger(id) && id >= 1 ? id : null;
+}
+
+/** Writes the bot user id cache `readBotUserCache` reads. */
+export function writeBotUserCache(path: string, slug: string, id: number): LaneStoreResult<void> {
+  if (slug === "") return err("invalid", "bot user cache: the App slug is empty");
+  if (!Number.isSafeInteger(id) || id < 1) return err("invalid", `bot user cache: ${JSON.stringify(id)} is not a user id`);
+  return write(path, `${JSON.stringify({ slug, id })}\n`, false);
 }
 
 export type FsLaneStoreParams = {

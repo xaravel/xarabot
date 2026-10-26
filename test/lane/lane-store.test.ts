@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
-import { createFsLaneStore, laneLayout, logFileName } from "../../src/lane/lane-store.ts";
+import { createFsLaneStore, laneLayout, logFileName, readBotUserCache, writeBotUserCache } from "../../src/lane/lane-store.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -43,6 +43,7 @@ describe("laneLayout", () => {
       outcome: "/x/lane/outcome",
       stop: "/x/lane/STOP",
       lock: "/x/lane/lane.lock",
+      botUser: "/x/lane/bot-user.json",
     });
   });
 
@@ -136,5 +137,61 @@ describe("createFsLaneStore", () => {
     expect(store.writePid("lane", 1, "bun")).toMatchObject({ ok: false, error: { kind: "io" } });
     expect(store.writeOutcome("stop")).toMatchObject({ ok: false, error: { kind: "io" } });
     expect(store.appendJournal(SPAN)).toMatchObject({ ok: false, error: { kind: "io" } });
+  });
+});
+
+describe("the bot user id cache", () => {
+  const SLUG = "alice-xarabot";
+
+  test("writes the slug and id, creating the lane folder, and reads the id back for that slug", () => {
+    const { laneDir } = setup();
+    const path = laneLayout(laneDir).botUser;
+    expect(readBotUserCache(path, SLUG)).toBeNull();
+    expect(writeBotUserCache(path, SLUG, 4242)).toEqual({ ok: true, value: undefined });
+    expect(readFileSync(path, "utf8")).toBe('{"slug":"alice-xarabot","id":4242}\n');
+    expect(readBotUserCache(path, SLUG)).toBe(4242);
+    expect(writeBotUserCache(path, SLUG, 77).ok).toBe(true);
+    expect(readBotUserCache(path, SLUG)).toBe(77);
+  });
+
+  test("a cache for another slug is no cache", () => {
+    const { laneDir } = setup();
+    const path = laneLayout(laneDir).botUser;
+    expect(writeBotUserCache(path, "bob-xarabot", 4242).ok).toBe(true);
+    expect(readBotUserCache(path, SLUG)).toBeNull();
+  });
+
+  test.each([
+    ["not JSON", "{"],
+    ["empty", ""],
+    ["an array", "[]"],
+    ["null", "null"],
+    ["no id", '{"slug":"alice-xarabot"}'],
+    ["a string id", '{"slug":"alice-xarabot","id":"4242"}'],
+    ["a zero id", '{"slug":"alice-xarabot","id":0}'],
+    ["a fractional id", '{"slug":"alice-xarabot","id":1.5}'],
+    ["an extra key", '{"slug":"alice-xarabot","id":4242,"x":1}'],
+  ])("a malformed cache (%s) is no cache", (_name, text) => {
+    const { laneDir } = setup();
+    mkdirSync(laneDir, { recursive: true });
+    writeFileSync(join(laneDir, "bot-user.json"), text);
+    expect(readBotUserCache(laneLayout(laneDir).botUser, SLUG)).toBeNull();
+  });
+
+  test("an unreadable cache is no cache, not a throw", () => {
+    const { laneDir } = setup();
+    mkdirSync(join(laneDir, "bot-user.json"), { recursive: true });
+    expect(readBotUserCache(laneLayout(laneDir).botUser, SLUG)).toBeNull();
+  });
+
+  test("refuses a non-id or an empty slug, and an unwritable folder is an io error", () => {
+    const { root, laneDir } = setup();
+    const path = laneLayout(laneDir).botUser;
+    for (const id of [0, -1, 1.5, Number.NaN]) expect(writeBotUserCache(path, SLUG, id)).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    expect(writeBotUserCache(path, "", 1)).toMatchObject({ ok: false, error: { kind: "invalid" } });
+    expect(existsSync(path)).toBe(false);
+    const file = join(root, "file");
+    writeFileSync(file, "");
+    expect(writeBotUserCache(join(file, "bot-user.json"), SLUG, 1)).toMatchObject({ ok: false, error: { kind: "io" } });
   });
 });
