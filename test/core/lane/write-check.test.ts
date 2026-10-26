@@ -401,7 +401,7 @@ const CODEX_CASES: readonly Case[] = [
   },
 ];
 
-/** The write-check table, per adapter; Story 3.2 adds `pi`. */
+/** The write-check table, per adapter; `pi` joins with its adapter, deferred to v1 (Story 3.2). */
 const TABLE: Partial<Record<AdapterName, readonly Case[]>> = {
   claude: CLAUDE_CASES,
   codex: CODEX_CASES,

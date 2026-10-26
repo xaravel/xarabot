@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { loadHostConfig } from "../../src/core/config/load-host-config.ts";
@@ -7,6 +7,7 @@ import { renderLauncher, renderPlist } from "../../src/core/lane/launchd.ts";
 import { laneInstall, laneTools, missingTools, parseInstallArgs, type LaneInstallDeps } from "../../src/cli/lane-install.ts";
 import { laneLayout } from "../../src/lane/lane-store.ts";
 import { RUNNER_REPO_URL } from "../../src/cli/lane-connection.ts";
+import { PI_DEFERRAL } from "../../src/cli/pi-deferral.ts";
 import { cleanup, FAKE_TOKEN, HOST_ID, mainFiles, stubInstaller, world, fakeConnect, type World } from "./lane-fixture.ts";
 
 const dirs: string[] = [];
@@ -305,6 +306,61 @@ describe("xarabot lane install", () => {
     expect(r.code).toBe(1);
     expect(r.err.join("\n")).toContain("codex does not resolve on the PATH");
     nothingWritten(w);
+  });
+
+  test("a pi lane is refused with the deferral before the tools check, even with pi on the PATH: no connect, no runner, nothing written", async () => {
+    const w = world(dirs);
+    writeFileSync(join(w.bin, "pi"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(w.bin, "pi"), 0o755);
+    rmSync(join(w.bin, "uv"));
+    const r = await install(w, ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "pi"]);
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(PI_DEFERRAL);
+    expect(r.err.join("\n")).not.toContain("does not resolve");
+    expect(r.record.connects).toBe(0);
+    expect(r.calls).toHaveLength(0);
+    expect(existsSync(w.runnerRoot)).toBe(false);
+    nothingWritten(w);
+  });
+
+  test.each([
+    ["pi only", ["pi"]],
+    ["empty", []],
+  ] as const)("a main policy allowing neither claude nor codex (%s) is refused with the deferral before the runner installs", async (_label, unattended) => {
+    const w = world(dirs);
+    const r = await install(w, ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended }) });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain("allows neither claude nor codex");
+    expect(r.err.join("\n")).toContain(PI_DEFERRAL);
+    expect(r.calls).toHaveLength(0);
+    expect(existsSync(w.runnerRoot)).toBe(false);
+    nothingWritten(w);
+  });
+
+  test("an invalid main policy is refused naming .xarabot/policy.yaml before the runner installs", async () => {
+    const w = world(dirs);
+    const r = await install(w, ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", policy: "nope: 1\n" }) });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(".xarabot/policy.yaml");
+    expect(r.err.join("\n")).not.toContain(PI_DEFERRAL);
+    expect(r.calls).toHaveLength(0);
+    expect(existsSync(w.runnerRoot)).toBe(false);
+    nothingWritten(w);
+  });
+
+  test("an absent main policy is left to lane start: the lane installs", async () => {
+    const w = world(dirs);
+    const r = await install(w, ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", policy: null }) });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(existsSync(w.hostYaml)).toBe(true);
+  });
+
+  test("a main policy allowing claude and pi installs a claude lane", async () => {
+    const w = world(dirs);
+    const r = await install(w, ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended: ["claude", "pi"] }) });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
   });
 
   test("a coordinator lane named coordinator installs in lanes/coordinator", async () => {

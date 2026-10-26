@@ -6,28 +6,32 @@ import { CLAUDE_COMMAND } from "../adapters/agent/claude/claude-agent.ts";
 import { CODEX_COMMAND } from "../adapters/agent/codex/codex-agent.ts";
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
-import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
+import { CONFIG_PATH, POLICY_PATH } from "../core/config/load-repo-config.ts";
 import { laneLabel, plistEnv, renderLauncher, renderPlist, shQuote } from "../core/lane/launchd.ts";
 import { builderLimit, builderRefusal, checkRunnerVersion, runnerFileText } from "../core/lane/runner.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { describeIssues, parseVersionedYaml } from "../core/schemas/common.ts";
 import { ConfigSchema, type Config } from "../core/schemas/config.ts";
 import { HostConfigSchema, LaneSchema, type HostConfig, type Lane } from "../core/schemas/host.ts";
-import type { AdapterName } from "../core/schemas/policy.ts";
+import { PolicySchema } from "../core/schemas/policy.ts";
 import type { ForgeSnapshot } from "../ports/forge.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
 import { hostPaths, laneDirFor, readHostConfig, RUNNER_FILE, type HostPaths } from "./host-paths.ts";
 import { githubConnect, RUNNER_REPO_URL, type Connect, type LaneConnection } from "./lane-connection.ts";
+import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-deferral.ts";
 
 /**
  * `xarabot lane install <lane> --repo <o/n> --role <r> --owner <login>
  * --agent <a> [--model <m>] [--effort <e>]` (FR1, NFR15, AR26, AR34, AR35).
  * It checks the lane: a coordinator is named `coordinator`, a builder
- * `builder-<n>` (n >= 1), and the lane's own agent CLI (`claude` or `codex`),
- * `bun`, `git` and `uv` each resolve on the `PATH` the plist will carry. It refuses a name `host.yaml` already
+ * `builder-<n>` (n >= 1), its agent is not `pi` (deferred to v1, Story 3.2),
+ * and the lane's own agent CLI (`claude` or `codex`), `bun`, `git` and `uv`
+ * each resolve on the `PATH` the plist will carry. It refuses a name `host.yaml` already
  * holds for another repo (the same name and repo is replaced) and a lane that
  * would take the host over `XARABOT_MAX_BUILDERS`. It then reads
- * `runner_version` from `main` and installs that runner first; only then
+ * `runner_version` and `.xarabot/policy.yaml` from `main`, refuses a policy
+ * that does not parse or allows neither `claude` nor `codex` (its only
+ * reviewer would be `pi`), and installs that runner first; only then
  * does it write `host.yaml`, the lane folder, its
  * `runner` file, the fixed launcher and the lane's LaunchDaemon plist. It
  * never runs `sudo` or `launchctl`: it prints the two commands for the
@@ -35,7 +39,7 @@ import { githubConnect, RUNNER_REPO_URL, type Connect, type LaneConnection } fro
  */
 
 export const LANE_INSTALL_USAGE =
-  "xarabot lane install <lane> --repo <owner>/<name> --role <builder|coordinator> --owner <login> --agent <agent> [--model <model>] [--effort <effort>]";
+  "xarabot lane install <lane> --repo <owner>/<name> --role <builder|coordinator> --owner <login> --agent <claude|codex> [--model <model>] [--effort <effort>]";
 
 /** A `host.yaml` lane name. */
 export const LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -50,10 +54,10 @@ export const BUILDER_LANE = /^builder-[1-9][0-9]*$/;
 export const LANE_HELPER_TOOLS: readonly string[] = ["bun", "git", "uv"];
 
 /** Each agent's CLI command. */
-export const AGENT_COMMANDS: Readonly<Record<AdapterName, string>> = { claude: CLAUDE_COMMAND, codex: CODEX_COMMAND, pi: "pi" };
+export const AGENT_COMMANDS: Readonly<Record<SessionAdapter, string>> = { claude: CLAUDE_COMMAND, codex: CODEX_COMMAND };
 
 /** The tools a lane of `agent` runs, each of which must resolve on the `PATH` its plist carries: its own agent CLI first. */
-export function laneTools(agent: AdapterName): readonly string[] {
+export function laneTools(agent: SessionAdapter): readonly string[] {
   return [AGENT_COMMANDS[agent], ...LANE_HELPER_TOOLS];
 }
 
@@ -132,6 +136,19 @@ export function pinnedConfig(snap: ForgeSnapshot): Result<Config> {
   const version = checkRunnerVersion(config.value.runner_version);
   if (!version.ok) return err("invalid", `${CONFIG_PATH}: runner_version: ${version.error.message}`);
   return config;
+}
+
+/**
+ * Refuses `main`'s `.xarabot/policy.yaml` when it does not parse, or allows
+ * neither `claude` nor `codex` (Story 3.2). An absent policy passes: lane
+ * start refuses it, and it may land in the same bootstrap PR.
+ */
+export function mainPolicyRefusal(snap: ForgeSnapshot): Result<void> {
+  const text = Object.hasOwn(snap.main.files, POLICY_PATH) ? snap.main.files[POLICY_PATH] : undefined;
+  if (typeof text !== "string") return ok(undefined);
+  const policy = parseVersionedYaml(POLICY_PATH, text, PolicySchema);
+  if (!policy.ok) return policy;
+  return piReviewerRefusal(policy.value);
 }
 
 /**
@@ -219,10 +236,14 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   // The ledger takes only `builder-<n>` for a builder: any other name would stop the lane at its first snapshot.
   if (lane.role === "builder" && !BUILDER_LANE.test(name)) return fail(`a builder lane must be named builder-<n> (n >= 1), not ${JSON.stringify(name)}`);
 
+  // The `pi` adapter is deferred to v1: a `pi` on PATH changes nothing (Story 3.2).
+  const agent = piAgentRefusal(lane.agent);
+  if (!agent.ok) return fail(agent.error.message);
+
   const paths = hostPaths(deps.env);
   if (paths === null) return fail("HOME is not set");
   // The lane runs on the PATH its plist carries, so the tools it needs must resolve there.
-  const tools = missingTools(plistEnv(deps.env)["PATH"], laneTools(lane.agent));
+  const tools = missingTools(plistEnv(deps.env)["PATH"], laneTools(agent.value));
   if (tools !== null) return fail(tools);
 
   // 2. host.yaml.
@@ -240,15 +261,17 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   const builders = builderRefusal(planned, name, limit.value);
   if (!builders.ok) return fail(builders.error.message);
 
-  // 3. The pinned runner version on main.
+  // 3. The pinned runner version and the policy on main.
   const connected = await (deps.connect ?? githubConnect(deps.env))(lane);
   if (!connected.ok) return fail(connected.message);
   const connection = connected.connection;
-  const snap = await connection.forge({}).snapshot({ signal: AbortSignal.timeout(callTimeoutMs), read: (p) => p === CONFIG_PATH });
+  const snap = await connection.forge({}).snapshot({ signal: AbortSignal.timeout(callTimeoutMs), read: (p) => p === CONFIG_PATH || p === POLICY_PATH });
   if (!snap.ok) return fail(`snapshot of ${lane.repo} main: ${snap.error.kind}: ${snap.error.message}`);
   const config = pinnedConfig(snap.value);
   if (!config.ok) return fail(config.error.message);
   const version = config.value.runner_version;
+  const reviewer = mainPolicyRefusal(snap.value);
+  if (!reviewer.ok) return fail(reviewer.error.message);
 
   // 4. The runner.
   const installed = await ensureRunner({
