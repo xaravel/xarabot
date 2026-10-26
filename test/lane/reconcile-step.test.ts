@@ -49,6 +49,8 @@ type MainOpts = {
 
 const STATUS_BACKLOG = "# sprint status\ndevelopment_status:\n  epic-1: in-progress\n  1-1-first: backlog\n";
 const STATUS_DONE = "# sprint status\ndevelopment_status:\n  epic-1: in-progress\n  1-1-first: done\n";
+/** `STATUS_BACKLOG` once reconcile sets Epic 1's last Story done: the Epic's key goes done in the same edit. */
+const STATUS_EPIC_DONE = "# sprint status\ndevelopment_status:\n  epic-1: done\n  1-1-first: done\n";
 
 function mainFiles(o: MainOpts = {}): Record<string, string> {
   const stories = o.story12 === true ? "### Story 1.1: Story 1.1\n\nBody.\n\n### Story 1.2: Story 1.2\n\nBody.\n" : "### Story 1.1: Story 1.1\n\nBody.\n";
@@ -286,7 +288,7 @@ describe("reconcile texts", () => {
 // ------------------------------------------------------------------ the matrix
 
 describe("createReconcileStep: the matrix", () => {
-  test("Story merged: merged; a PR from xarabot/reconcile-<n> setting the key done; enqueued after CI with no approval; U merging", async () => {
+  test("Story merged: merged; a PR from xarabot/reconcile-<n> setting the key, and its Epic's as the last Story, done; enqueued after CI with no approval; U merging", async () => {
     let story = 0;
     const f = await setup({}, async (fake) => {
       story = (await prOn(fake, "story/1.1", true)).number;
@@ -296,13 +298,13 @@ describe("createReconcileStep: the matrix", () => {
     const out = await f.run();
     expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
     expect(await stateOf(f, "story:1.1")).toBe("merged");
-    // The commit: only sprint-status.yaml, onto the snapshot's main, 1-1-first done, the comment kept.
+    // The commit: only sprint-status.yaml, onto the snapshot's main, 1-1-first and epic-1 done, the comment kept.
     expect(f.commits).toHaveLength(1);
     const c = f.commits[0] as ReconcileCommitRequest;
     expect(c.ontoSha).toBe(main);
     expect(c.unit).toBe(U);
     expect(Object.keys(c.files)).toEqual([STATUS]);
-    expect(c.files[STATUS]).toBe(STATUS_DONE);
+    expect(c.files[STATUS]).toBe(STATUS_EPIC_DONE);
     // The PR, its record and the queue.
     const pr = await prOnBranch(f, BRANCH);
     expect(pr).toMatchObject({ state: "open", head_sha: f.head, base: "main", title: "reconcile:5: sprint status for merged units" });
@@ -1921,7 +1923,7 @@ describe("reconcile through the coordinator process", () => {
     expect(fake.control.queue()).toEqual([reconcilePr?.number ?? -1]);
     expect(commits.map((c) => Object.keys(c.files))).toEqual([[STATUS]]);
     const status = parseSprintStatus(STATUS, commits[0]?.files[STATUS] ?? "");
-    expect(status.ok && status.value.development_status).toEqual({ "epic-1": "in-progress", "1-1-first": "done" });
+    expect(status.ok && status.value.development_status).toEqual({ "epic-1": "done", "1-1-first": "done" });
     let l = parseLedger((await snapshotFiles(fake)).ledger);
     if (!l.ok) throw new Error(l.error.message);
     expect(l.value.units.get("story:1.1")?.state).toBe("merged");
