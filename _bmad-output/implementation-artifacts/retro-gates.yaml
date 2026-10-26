@@ -202,3 +202,9 @@ epics:
         blocking: false
         globs: ["src/adapters/agent/codex/usage.ts", "test/adapters/agent/codex/usage.test.ts"]
         status: open
+      - id: "epic-2-retro-item-33-graph-park-counts-only-later-approvals"
+        text: "Item 30's follow-up (PR #187; Maintainer decision Q1, 2026-10-25: a graph-change park counts only an approval submitted after the runner's delta comment): with item 30, a builder's or the graph planning step's first park carries park.graph_posted but parked_at stays null (it is set only for a coordinator re-park with enqueued_sha), so a Maintainer approval of the same head given before the delta comment (say, while CI ran) would let reconcile take the PR. In planReconcile (src/core/reconcile/plan.ts, parked_at) and maintainerApproved (src/core/next/coordinator.ts, parkedAt), also use the record's heartbeat_at when its park has graph_posted set (the park is written after the comment succeeded), so only a later approval counts; tests: an approval before the comment on a park with graph_posted is not counted and the PR stays parked, one after it is taken, and a park with no graph_posted keeps today's rule. Ships in the same runner tag as item 30"
+        route: lane
+        blocking: false
+        globs: ["src/core/reconcile/plan.ts", "src/core/next/coordinator.ts", "test/core/reconcile/plan.test.ts", "test/core/next/coordinator.test.ts"]
+        status: open
