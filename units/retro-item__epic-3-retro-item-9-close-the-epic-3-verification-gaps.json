@@ -14,7 +14,7 @@
     "test/lane/merge-step.test.ts",
     "test/lane/review-gate.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T20:46:08.690Z",
+  "heartbeat_at": "2026-10-26T20:46:14.547Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "3e73dd471998a44ac093d1d0c0c4534c41a2c1d5",
