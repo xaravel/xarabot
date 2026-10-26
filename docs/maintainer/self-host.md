@@ -54,7 +54,7 @@ usage-limit sleep, the claim, the bot commit, the PR, CI, the merge queue and
 
 1. Create the scratch repo `xaravel/xarabot-scratch`, with an initial commit on `main`.
 2. Install the `edanisko-xarabot` App on it.
-3. Seed it with the canary's files: the config, policy, Standing Authority, `epics.md` with Story 1.1, the manifest and the CI workflow. Run this **on your own machine**, from a checkout of this repo, because the push needs your git credentials. The lane's macOS user has none:
+3. Seed it with the canary's files: the config, policy, Standing Authority, `epics.md` with Story 1.1, the manifest and the CI workflow, plus the stand-in `bmad-build-auto` skill and the `AGENTS.md` that the cross-vendor suite (Story 3.6) uses. Run this **on your own machine**, from a checkout of this repo, because the push needs your git credentials. The lane's macOS user has none:
 
    ```sh
    seed=$(mktemp -d)/xarabot-scratch
@@ -111,9 +111,10 @@ run it again as often as you like. Each merged run adds `canary/<run>.md` to
 the scratch `main`.
 
 Without the three variables, or inside a sandbox (`XARABOT_SANDBOXED=1`), the
-live case reports skipped. With the claims race suite (Story 2.12, below),
-`bun test test/e2e/` gives `37 pass`, `5 skip`, `0 fail` on the host, and
-`34 pass`, `8 skip`, `0 fail` inside a sandbox.
+live case reports skipped. With the claims race suite (Story 2.12, below) and
+the cross-vendor suite (Story 3.6, in "Epic 3's live evidence" below),
+`bun test test/e2e/` gives `109 pass`, `9 skip`, `0 fail` on the host, and
+`106 pass`, `12 skip`, `0 fail` inside a sandbox.
 
 ### `xarabot graph check` on this repo
 
@@ -538,7 +539,13 @@ decision, 2026-10-24).
 
   2. Reload each reinstalled lane without cutting a unit short. `sudo launchctl bootout` on a running lane sends it SIGTERM mid-session or mid-PR-step, so drain it first:
      1. `bun ~/.xarabot/runner/<tag>/src/cli/main.ts stop <lane>` writes the lane's `STOP`.
-     2. Wait until the lane's `outcome` is written and no unit is running (`cat ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/outcome`; no `lane.lock` in its folder).
+     2. Wait until the process named in the lane's `lane.lock` is gone. Its first line is the lane run's PID, its second the runtime's command name (`bun`). Neither a written `outcome` nor a missing `lane.lock` shows that: a run writes `outcome` before its trailing wait, and a lane stopped by SIGTERM leaves its `lane.lock` behind. A lock whose PID is already gone is fine. The loop also compares the running process's command name with the lock's second line, because once the lane has exited its PID can be reused by an unrelated process, and waiting on the PID alone would then wait forever:
+
+        ```sh
+        lock=~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/lane.lock
+        pid=$(sed -n 1p "$lock" 2>/dev/null); cmd=$(sed -n 2p "$lock" 2>/dev/null)
+        while [ -n "$pid" ] && [ "$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)" 2>/dev/null)" = "$cmd" ]; do sleep 10; done; echo drained
+        ```
      3. As your admin account, `sudo launchctl bootout system/<label>`, then run the two `sudo` commands the reinstall printed to bootstrap the new plist.
      4. Remove the lane's `STOP` (`rm ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/STOP`).
   3. Then install the new lane with `XARABOT_MAX_BUILDERS=2`, and run the two `sudo` commands it prints:
@@ -710,7 +717,8 @@ until the file holds each of the three commands, exactly as run above, with a
 ### After Epic 3: lifting the builder limit
 
 Before you raise `XARABOT_MAX_BUILDERS` above 1 for good, run a coordinator
-and 2 builders on the host for 24 hours. Set them up as "Several builder
+and 2 builders on the host for 24 hours. This is the last step of "The switch
+after Epic 3", in "Epic 3's live evidence (Story 3.6)" below. Set them up as "Several builder
 lanes" (in "While Epic 2 is built") describes, with `XARABOT_MAX_BUILDERS=2`.
 Note the start time, then check both of these:
 
@@ -858,3 +866,174 @@ What the v1 adapter needs first, before anything else:
 Then: its credential (an OpenRouter key), its minimum tested version, and
 its `--thinking` mapping for `effort`, with the pi rows of the cross-vendor
 review table in the spec's `agent-adapters.md`.
+
+## Epic 3's live evidence (Story 3.6)
+
+Epic 3's retro (`retro:3`) waits until `docs/maintainer/evidence/epic-3.md`
+is on `main`. Run the commands below on the Xarabot host as
+`edanisko-xarabot`, outside any sandbox (`XARABOT_SANDBOXED` must be unset),
+from a checkout of a `main` commit that has Story 3.6. Update it and note its
+commit first, as for Epic 2:
+
+```sh
+git -C ~/xarabot-switch pull --ff-only && cd ~/xarabot-switch && bun install --frozen-lockfile
+git rev-parse HEAD
+```
+
+### Before the first run
+
+**Re-seed the scratch repo** (`xaravel/xarabot-scratch`, set up as in "The
+canary" above). The cross-vendor suite needs the stand-in `bmad-build-auto`
+skill (`.claude/skills/bmad-build-auto/SKILL.md`, and the same text at
+`.agents/skills/bmad-build-auto/SKILL.md` for codex) and an `AGENTS.md` on its
+`main`. The scratch repo has no BMAD install: for `Build Story 1.6
+(`<key>`)` the stand-in writes `verify/<key>.md` and the Story's spec, then
+halts `done`, so a real session builds the Story in about a minute. The
+scratch `main` only takes changes through its merge queue, so open a PR. Run
+this **on your own machine**, as for the first seed:
+
+```sh
+seed=$(mktemp -d)/xarabot-scratch
+git clone https://github.com/xaravel/xarabot-scratch.git "$seed"
+bun test/e2e/scratch-seed.ts "$seed" xaravel/xarabot-scratch edanisko
+git -C "$seed" status --short   # expected: only the two SKILL.md files and AGENTS.md, all new; restore any other change (git -C "$seed" checkout -- <path>)
+git -C "$seed" switch -c seed/stand-in-skill
+git -C "$seed" add -A
+git -C "$seed" commit -m "Seed the stand-in build skill and AGENTS.md"
+git -C "$seed" push origin seed/stand-in-skill
+cd "$seed" && gh pr create --fill --base main && gh pr merge --squash   # adds it to the merge queue
+```
+
+Wait until the PR has merged. Until then, every live case fails at the step
+`scratch main loads`, naming the missing skill file.
+
+**Both vendors' credentials at once.** A lane's vendor home holds one vendor's
+credential, but the suite needs both: each case copies (mode 600) every file
+in `~/.config/xarabot/vendors/claude/` and `~/.config/xarabot/vendors/codex/`
+(under `$XDG_CONFIG_HOME` when it is set) into the case's own temp config. So
+keep the Claude token (`docs/maintainer/claude-credential.md`) and exactly one
+codex credential ("The codex credential" above) in place, with `claude` and
+`codex` both on `PATH`. A missing CLI or credential fails a case; it never
+skips. A missing CLI or vendor folder fails at the first step, `the CLIs and
+the vendor credentials`; a vendor folder that holds no credential file fails
+at `host setup`. The `edanisko-xarabot`
+App credentials are the canary's.
+
+### The cross-vendor suite
+
+Each case runs one real `laneRun` against the scratch repo, with the real
+`claude` and `codex` CLIs in the real macOS sandbox. The lane builds Story
+1.6, "Cross-vendor verification" (glob `verify/**`), at effort `low`, then
+takes it through the PR, CI, the review gate and the merge queue. A reviewer
+of the other adapter runs its default model at effort `high`; a reviewer of
+the lane's own adapter (the claude-only case) runs at the lane's model and
+effort, `low`. The lane reads
+the scratch `main` with Story 1.6 and the case's `.xarabot/policy.yaml`
+overlaid (`expected_checks: []`), and the test records every push, posted
+review and enqueue. Each case uses a fresh sprint key `1-6-xv-<case>-<8 hex>`,
+ledger branch `xarabot/test-<uuid>` and unit branches under
+`xarabot-test/<uuid>/`. The branches are deleted when the case ends, whether
+it passes or fails, as for the claims race suite (the same command lists any a
+timeout or Ctrl-C leaves behind). Nothing is pushed to the scratch `main`;
+only the merge queue merges, so each case adds its `verify/<key>.md` there.
+Alerts are recorded by the test, not posted. The sessions use a little of
+both subscriptions: about ten short sessions in all.
+
+```sh
+XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/cross-vendor.test.ts
+```
+
+**Expected result:** `76 pass`, `0 skip`, `0 fail`, in about 30 to 60
+minutes. Each live case runs to the lane's trailing wait, then writes the
+lane's `STOP`, as the canary does. The lane gets 40 minutes, inside the
+test's 50-minute timeout (the rest is for cleanup); past them the case fails
+`laneRun did not exit within 40 min`. Every case checks all of these:
+
+- `laneRun` exits 0 with outcome `progress`. The ledger holds only `story:1.6`, `merged`.
+- The record's `builder_providers` names the builder's vendor. Its `passed_sha` and `enqueued_sha` both equal its `head_sha`, and GitHub shows the PR merged with that head.
+- Every review the lane posted starts `🤖 Story 1.6: <cross-vendor|same-vendor> review by <adapter> (` and ends with the full SHA it was posted on. One of them passed at the merged head, and GitHub lists a `commented` review on that SHA.
+- The review gate held: every enqueue's head had a review posted at exactly that SHA, saying `Verdict: pass.` and `Outcome: not blocking.`, with no push of another SHA between that review and the enqueue. Every enqueue that reached the queue was at the merged head.
+- The journal's line for `story:1.6` is `result: done`, `state: merged`.
+- The lane's clone holds what this run's build wrote: `verify/<key>.md` starting with `Built for <key>.`, and `spec-1-6-verify.md` naming the key (the spec path is shared across runs, so one an earlier run left never counts).
+
+The cases:
+
+| Case | Lane, policy | Expected |
+|---|---|---|
+| `live cross-vendor: claude builds Story 1.6, codex reviews it, …` | `claude`; `[claude, codex]` | `builder_providers` holds `anthropic`; a cross-vendor review by `codex` at the merged head; merged. |
+| `live cross-vendor: codex builds Story 1.6, claude reviews it, …` | `codex`; `[claude, codex]` | `builder_providers` holds `openai`; a cross-vendor review by `claude` at the merged head; merged. |
+| `live cross-vendor: a later agent change after a passed review …` | `claude`; `[claude, codex]` | The first enqueue, at H1 after a passing review at H1, is held by the test, so the queue read sees the PR ejected (`attempts` ≥ 1). A failing `xarabot-verify` check on H1 and its log, asking for one more line in `verify/<key>.md`, make a real CI-fix session (`ci_fixes` ≥ 1). Its push of H2 is reviewed again, passing, before the enqueue at H2, and H2 ≠ H1 merges. |
+| `live cross-vendor: a claude-only policy …` | `claude`; `[claude]` | A same-vendor review by `claude`, at the lane's model and effort `low`, at the merged head, and the PR merges on its required check. The lane's `review` folder is a checkout of its own, separate from `clone`, whose `HEAD` is that SHA and whose `core.hooksPath` is `/dev/null`. |
+
+A real reviewer may block and send the unit through a loopback session; that
+is allowed, as long as the gate holds and the unit merges. After each case
+the test prints one line, `cross-vendor <case>: <key> PR #<n> merged at
+<sha>; …`, followed by the first line of each review the lane posted. Record
+those lines.
+
+A failed assertion starts `step "<name>":` and names the step, followed by
+the lane's output, the recorded events and alerts, and the tail of each unit
+log. Fix the cause and run the suite again; the scratch branches were already
+deleted.
+
+**The skip rule.** Without the three variables, or inside a sandbox
+(`XARABOT_SANDBOXED=1`), the four live cases report skipped, never passed:
+`72 pass`, `4 skip`, `0 fail`. That is not evidence. The four cases are also
+rehearsed against the fake forge in every `bun test`, through the real lane
+process and the real PR, CI, review-gate and merge steps; only the GitHub,
+CLI and sandbox wiring is live-only.
+
+### Story 3.1's sandbox cases and the codex live commands
+
+Run the three commands of "The codex live evidence" above, with the same
+expected results, and record what they print. Then, until the macOS CI job
+runs the sandbox suites (the Story 2.5c deferral, Epic 1 item 13), run the
+whole sandbox suite on the host as its own evidence row:
+
+```sh
+bun test test/sandbox/
+```
+
+**Expected result:** the counts of the `bun test test/sandbox/` rows of "The
+sandbox suites" table above, with `0 fail`. On the host, outside a sandbox,
+every nested `sandbox-exec` case runs and passes; the only skips are that
+table's live cases (its `XARABOT_LIVE=1` row runs them too). Record the
+counts. If a
+nested case is skipped on the host, stop and investigate, as in "The sandbox
+suites".
+
+### Committing the evidence
+
+Commit the results as `docs/maintainer/evidence/epic-3.md` in a Maintainer PR
+from a `planning/<topic>` branch, and merge it before Epic 3's retro.
+Builders are refused any change to this file (`live-evidence`), so only you
+write it. The file holds:
+
+- the date, the host, the `main` commit (and its tag, if any) the checkout was at, `bun --version`, `claude --version` and `codex --version`;
+- each command of this section, exactly as run, with its summary lines (`pass`, `skip` and `fail` counts) and how long it took: the cross-vendor suite, the three codex commands and `bun test test/sandbox/`;
+- the lines the cross-vendor cases and `codex-live.test.ts` printed;
+- for any run that failed: the failing `step "<name>":` line, what you changed, and the re-run that passed. Never replace a failed result silently.
+
+### The switch after Epic 3
+
+Once Epic 3 has merged and its evidence file is on `main`, in this order:
+
+1. **Drop the every-path approval rule.** In a Maintainer PR, remove `owner_approval_paths: ["**"]` from `.xarabot/policy.yaml`. The Protected Paths stay gated.
+2. **Allow the adapters unattended.** In the same PR, set `unattended_adapters: [claude, codex]`.
+3. **Confirm lane item 23 is done.** `epic-2-retro-item-23-harden-the-lane-lock` (the lane-lock hardening) must be `status: done` in `_bmad-output/implementation-artifacts/retro-gates.yaml` on `main`. Until it is, keep the limit at 1:
+
+   ```sh
+   grep -A6 'id: "epic-2-retro-item-23-harden-the-lane-lock"' _bmad-output/implementation-artifacts/retro-gates.yaml | grep status
+   # expected: status: done
+   ```
+
+4. **Raise `XARABOT_MAX_BUILDERS`**, as "Several builder lanes" (in "While Epic 2 is built") describes.
+5. **Run the 24-hour check**: a coordinator and 2 builders for 24 hours, as "After Epic 3: lifting the builder limit" describes. If it fails, set the limit back to 1.
+
+Dropping the every-path rule makes status planning PRs ungated, and so
+disposable, like `reconcile`'s own PRs: one that goes stale or is ejected is
+closed and replaced instead of parking for your approval. That settles the
+stale gated status planning PR that Story 2.7's spec (`spec-2-7`) accepted
+until this switch. The "Several builder lanes" drain step waits for the PID
+in the lane's `lane.lock` to be gone, not for a missing `lane.lock` or a
+written `outcome`.
