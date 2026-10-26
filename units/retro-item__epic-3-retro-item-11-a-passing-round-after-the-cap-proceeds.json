@@ -14,7 +14,7 @@
     "test/lane/retro-item-step.test.ts",
     "test/lane/review-gate.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T22:25:39Z",
+  "heartbeat_at": "2026-10-26T22:30:07.573Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "2574e9e8198a42a8d7839de2bda06cb60537f3bd",
@@ -25,7 +25,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
