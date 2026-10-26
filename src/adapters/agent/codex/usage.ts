@@ -15,7 +15,9 @@ import type { AgentUsage, TokenTotals } from "../../../ports/agent.ts";
  *   `cache_write_input_tokens`, `output_tokens`}; `turn.failed` {`error`:
  *   {`message`}}. No model, no cost, no rate limits.
  * - A session file: `session_meta` (its thread id and, for a subagent, its
- *   `parent_thread_id`), `turn_context` {`model`, `effort`}, and
+ *   `parent_thread_id`; a subagent's file, from codex 0.163.0, also carries
+ *   its parent's `session_meta` after its own, so only the first counts),
+ *   `turn_context` {`model`, `effort`}, and
  *   `token_count` events {`info.total_token_usage`, `rate_limits`:
  *   `primary`/`secondary` {`used_percent`, `window_minutes`, `resets_at`
  *   Unix s}, `rate_limit_reached_type`}. Each line is either the record itself
@@ -113,9 +115,9 @@ export type CodexRateLimits = {
 export type CodexSession = {
   readonly file: string;
   readonly mtimeMs: number;
-  /** The thread id: `session_meta`'s, else the file name's trailing UUID. */
+  /** The thread id: the first `session_meta`'s, else the file name's trailing UUID. */
   readonly id: string | null;
-  /** A subagent's parent thread, `null` for a top-level thread. */
+  /** A subagent's parent thread, from the first `session_meta`; `null` for a top-level thread. */
   readonly parentId: string | null;
   /** The last `turn_context.model`. */
   readonly model: string | null;
@@ -191,16 +193,15 @@ export function readCodexSession(file: string): CodexSession | null {
   } catch {
     return null;
   }
-  let id: string | null = null;
-  let parentId: string | null = null;
+  let meta: Json | null = null;
   let model: string | null = null;
   let tokens: TokenTotals | null = null;
   let rateLimits: CodexRateLimits | null = null;
   for (const line of jsonLines(text)) {
     const { type, body } = entry(line);
     if (type === "session_meta") {
-      id = str(body["id"]) ?? str(body["thread_id"]) ?? id;
-      parentId = parentOf(body) ?? parentId;
+      // Later ones are another thread's: a subagent's file repeats its parent's.
+      meta ??= body;
     } else if (type === "turn_context") {
       model = str(body["model"]) ?? model;
     } else if (type === "token_count") {
@@ -209,6 +210,8 @@ export function readCodexSession(file: string): CodexSession | null {
       if (limits !== null) rateLimits = limits;
     }
   }
+  const id = meta === null ? null : (str(meta["id"]) ?? str(meta["thread_id"]));
+  const parentId = meta === null ? null : parentOf(meta);
   return { file, mtimeMs, id: id ?? FILE_ID.exec(file)?.[1] ?? null, parentId, model, tokens, rateLimits };
 }
 
