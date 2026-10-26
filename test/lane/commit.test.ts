@@ -346,6 +346,69 @@ describe("commitSession: the write check", () => {
     expect(await rg(repo.gitDir, ["log", "-1", "--format=%B", r.head_sha])).toBe("1.15: used [REDACTED] and [REDACTED]");
   });
 
+  // Epic 2 retro item 20: every added or changed blob is scanned for the seeded credential and token shapes.
+  test("credential: an added or changed blob holding the seeded credential or a token shape is refused, naming the path only", async () => {
+    const repo = await setup();
+    const token = `ghp_${"z".repeat(36)}`;
+    const base = await commit(repo.gitDir, { ...baseFiles, "src/held.ts": `export const t = "${token}";\n`, "src/kept.ts": `// ${token}\n` });
+    value(await rebuildClone(rebuild(repo, base)));
+    const secrets = ["cred-xyz-123"];
+    write(repo, "src/a.ts", "const k = 'cred-xyz-123';\n");
+    write(repo, "src/new.ts", `const t = "${token}";\n`);
+    write(repo, "src/held.ts", `export const t = "${token}";\nexport const u = 1;\n`);
+    write(repo, SPEC_PATH, `---\nstatus: done\n---\n\nlog: cred-xyz-123\n`);
+    symlinkSync(token, join(repo.clone, "src/l"));
+    const r = value(await commitSession(session(repo, base, base, { secrets })));
+    expect(r).toEqual({
+      kind: "refused",
+      refusals: [
+        { path: SPEC_PATH, class: "credential" },
+        { path: "src/a.ts", class: "credential" },
+        { path: "src/held.ts", class: "credential" },
+        { path: "src/l", class: "credential" },
+        { path: "src/new.ts", class: "credential" },
+      ],
+      reverted: [],
+    });
+    expect(JSON.stringify(r)).not.toContain("cred-xyz-123");
+    expect(JSON.stringify(r)).not.toContain(token);
+    await noHead(repo);
+
+    // A deleted blob has no new side, and an unchanged one is not in the change: both commit.
+    write(repo, "src/a.ts", "SESSION\n");
+    write(repo, SPEC_PATH, "---\nstatus: done\n---\n");
+    for (const f of ["src/new.ts", "src/held.ts", "src/l"]) rmSync(join(repo.clone, f));
+    const ok = value(await commitSession(session(repo, base, base, { secrets })));
+    if (ok.kind !== "committed") throw new Error(JSON.stringify(ok));
+    const out = await files(repo.gitDir, ok.head_sha);
+    expect(out["src/held.ts"]).toBeUndefined();
+    expect(out["src/kept.ts"]).toBe(`// ${token}`);
+  });
+
+  test("credential: without seeded secrets only token shapes count; the check runs on the squashed tree, after the reverts", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, "src/a.ts", "const k = 'cred-xyz-123';\n");
+    // A builder's Epic context change is reverted, so its credential never reaches the squash.
+    write(repo, EPIC_CONTEXT, `# Epic 1 Context: One\n${`sk-ant-oat01-${"Q".repeat(40)}`}\n`);
+    const r = value(await commitSession(session(repo, base, base)));
+    if (r.kind !== "committed") throw new Error(JSON.stringify(r));
+    expect(r.reverted).toEqual([EPIC_CONTEXT]);
+    expect((await files(repo.gitDir, r.head_sha))["src/a.ts"]).toBe("const k = 'cred-xyz-123';");
+  });
+
+  test("the own manifest: a status that is not a BMAD Story status is refused", async () => {
+    const repo = await setup();
+    const base = await commit(repo.gitDir, baseFiles);
+    value(await rebuildClone(rebuild(repo, base)));
+    write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: shipped"));
+    expect(value(await commitSession(session(repo, base, base)))).toEqual({ kind: "refused", refusals: [{ path: STORY_FILE, class: "manifest" }], reverted: [] });
+    await noHead(repo);
+    write(repo, STORY_FILE, MANIFEST.replace("status: ready", "status: review"));
+    expect(value(await commitSession(session(repo, base, base))).kind).toBe("committed");
+  });
+
   test("an approved Infrastructure Story commits .github and agent config, never .xarabot", async () => {
     const repo = await setup();
     const base = await commit(repo.gitDir, { ...baseFiles, ".xarabot/policy.yaml": "schema_version: 1\n" });
@@ -621,6 +684,24 @@ describe("commitSession: the write check", () => {
         expect(r).toEqual({ kind: "refused", refusals: refused.map(([path, cls]) => ({ path, class: cls })), reverted: [] });
         await noHead(repo);
       }
+    });
+
+    test("credential: a status unit's Epic context and sprint status are scanned too", async () => {
+      const repo = await setup();
+      const base = await commit(repo.gitDir, baseFiles);
+      value(await rebuildClone(rebuild(repo, base, STATUS)));
+      write(repo, EPIC_CONTEXT, "# Epic 1 Context: recompiled\nkey: cred-xyz-123\n");
+      // A comment is free under the key rules, so only the credential class refuses it.
+      write(repo, SPRINT, `# ${`xoxb-${"1".repeat(12)}`}\ndevelopment_status: {}\n`);
+      expect(value(await commitSession(session(repo, base, base, { rules: statusUnit, secrets: ["cred-xyz-123"] })))).toEqual({
+        kind: "refused",
+        refusals: [
+          { path: EPIC_CONTEXT, class: "credential" },
+          { path: SPRINT, class: "credential" },
+        ],
+        reverted: [],
+      });
+      await noHead(repo);
     });
 
     test("sprint-status.yaml written where none was: both texts reach the check, the absent side as none", async () => {

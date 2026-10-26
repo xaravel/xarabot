@@ -1,5 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { capText, FORGE_TEXT_LIMITS, REDACTED, sanitizeAgentText, TRUNCATION_MARKER } from "../../src/core/sanitize.ts";
+import { readFileSync } from "node:fs";
+import { capText, FORGE_TEXT_LIMITS, holdsCredential, redactSecrets, REDACTED, sanitizeAgentText, TRUNCATION_MARKER } from "../../src/core/sanitize.ts";
+
+/** One input per token shape; each literal is split so this file itself holds no token-shaped string. */
+const redacted: readonly [string, string][] = [
+  ["Anthropic API key", `key sk-ant-api03-${"a1B2_c3-".repeat(8)}AA here`],
+  ["Claude OAuth token", `token sk-ant-oat01-${"Zz9".repeat(20)} here`],
+  ["OpenAI key", `key sk-proj-${"x".repeat(48)} here`],
+  ["OpenAI legacy key", `key sk-${"A1b2".repeat(12)} here`],
+  ["GitHub personal token", `ghp_${"a".repeat(36)} here`],
+  ["GitHub OAuth token", `gho_${"B".repeat(36)} here`],
+  ["GitHub user-to-server token", `ghu_${"c".repeat(36)} here`],
+  ["GitHub server-to-server token", `ghs_${"D".repeat(36)} here`],
+  ["GitHub refresh token", `ghr_${"e".repeat(36)} here`],
+  ["GitHub fine-grained token", `github_pat_11ABCDEFG0${"x".repeat(60)} here`],
+  ["AWS access key id", `${"AKIA"}IOSFODNN7EXAMPLE here`],
+  ["Slack bot token", `xoxb-${"1234567890"}-0987654321-AbCdEfGhIj here`],
+  ["Slack user token", `xoxp-${"1234567890"}-AbCdEfGhIj here`],
+  ["npm token", `npm_${"aB3".repeat(12)} here`],
+  ["GitLab personal access token", `glpat-${"xY_9-".repeat(4)} here`],
+  ["Google API key", `AIza${"Sy0_-".repeat(7)} here`],
+  ["Stripe live secret key", `sk_live_${"51Hx".repeat(6)} here`],
+  ["Stripe live restricted key", `rk_live_${"51Hx".repeat(6)} here`],
+  ["JWT", `eyJhbGciOiJIUzI1NiJ9.${"eyJ"}zdWIiOiIxMjM0In0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk here`],
+];
 
 describe("sanitizeAgentText", () => {
   const changed: readonly [string, string, string][] = [
@@ -52,27 +76,6 @@ describe("sanitizeAgentText", () => {
     test(`unchanged: ${name}`, () => expect(sanitizeAgentText(input)).toBe(input));
   }
 
-  const redacted: readonly [string, string][] = [
-    ["Anthropic API key", `key sk-ant-api03-${"a1B2_c3-".repeat(8)}AA here`],
-    ["Claude OAuth token", `token sk-ant-oat01-${"Zz9".repeat(20)} here`],
-    ["OpenAI key", `key sk-proj-${"x".repeat(48)} here`],
-    ["OpenAI legacy key", `key sk-${"A1b2".repeat(12)} here`],
-    ["GitHub personal token", `ghp_${"a".repeat(36)} here`],
-    ["GitHub OAuth token", `gho_${"B".repeat(36)} here`],
-    ["GitHub user-to-server token", `ghu_${"c".repeat(36)} here`],
-    ["GitHub server-to-server token", `ghs_${"D".repeat(36)} here`],
-    ["GitHub refresh token", `ghr_${"e".repeat(36)} here`],
-    ["GitHub fine-grained token", `github_pat_11ABCDEFG0${"x".repeat(60)} here`],
-    ["AWS access key id", "AKIAIOSFODNN7EXAMPLE here"],
-    ["Slack bot token", "xoxb-1234567890-0987654321-AbCdEfGhIj here"],
-    ["Slack user token", "xoxp-1234567890-AbCdEfGhIj here"],
-    ["npm token", `npm_${"aB3".repeat(12)} here`],
-    ["GitLab personal access token", `glpat-${"xY_9-".repeat(4)} here`],
-    ["Google API key", `AIza${"Sy0_-".repeat(7)} here`],
-    ["Stripe live secret key", `sk_live_${"51Hx".repeat(6)} here`],
-    ["Stripe live restricted key", `rk_live_${"51Hx".repeat(6)} here`],
-    ["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk here"],
-  ];
   for (const [name, input] of redacted) {
     test(`redacts: ${name}`, () => {
       const out = sanitizeAgentText(input);
@@ -83,9 +86,9 @@ describe("sanitizeAgentText", () => {
   }
 
   test("redacts a PEM private-key block, ended or not", () => {
-    const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----";
+    const pem = `-----BEGIN OPENSSH ${"PRIVATE"} KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----`;
     expect(sanitizeAgentText(`before\n${pem}\nafter`)).toBe(`before\n${REDACTED}\nafter`);
-    expect(sanitizeAgentText("x\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nrest")).toBe(`x\n${REDACTED}`);
+    expect(sanitizeAgentText(`x\n-----BEGIN RSA ${"PRIVATE"} KEY-----\nMIIEow\nrest`)).toBe(`x\n${REDACTED}`);
     expect(sanitizeAgentText("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----")).toBe("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----");
   });
 
@@ -143,5 +146,49 @@ describe("sanitizeAgentText", () => {
     for (const s of ["\n", "\n\n", "@", "#", "fixes", "Cc:", "\u{1F916}", "a\0b", "x: y\n\nz: w"]) {
       expect(typeof sanitizeAgentText(s)).toBe("string");
     }
+  });
+});
+
+describe("holdsCredential (the write check's credential class, Epic 2 retro item 20)", () => {
+  test.each(redacted)("holds: %s", (_name, input) => {
+    expect(holdsCredential(input)).toBe(true);
+  });
+
+  test("a PEM private-key block, ended or not; a public key is not one", () => {
+    expect(holdsCredential(`a\n-----BEGIN EC ${"PRIVATE"} KEY-----\nMHc\n-----END EC PRIVATE KEY-----\n`)).toBe(true);
+    expect(holdsCredential(`-----BEGIN ${"PRIVATE"} KEY-----\nMIIE`)).toBe(true);
+    expect(holdsCredential("-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----")).toBe(false);
+  });
+
+  test("the seeded credential, of any shape, trimmed; empty secrets are ignored", () => {
+    expect(holdsCredential("config: hunter2-xyz\n", ["  hunter2-xyz \n"])).toBe(true);
+    expect(holdsCredential('{"t":1}', ['{"t":1}'])).toBe(true);
+    expect(holdsCredential("nothing secret", ["hunter2", "", "  "])).toBe(false);
+    expect(holdsCredential("", [""])).toBe(false);
+  });
+
+  test("words that only look like token prefixes are not credentials", () => {
+    for (const s of ["task-runner", "sk-short", "a ghp_short token", "AKIA too short", "eyJ.only", "mask-0123456789abcdefghijklmnop", REDACTED]) {
+      expect(holdsCredential(s)).toBe(false);
+    }
+  });
+
+  test("agrees with redactSecrets: true exactly when redacting changes the text", () => {
+    const secrets = ["hunter2-xyz"];
+    for (const [, input] of redacted) expect(holdsCredential(input, secrets)).toBe(redactSecrets(input, secrets) !== input);
+    for (const input of ["plain", "use hunter2-xyz", "sk-short", `a ${"gh"}p_${"x".repeat(36)}`]) {
+      expect(holdsCredential(input, secrets)).toBe(redactSecrets(input, secrets) !== input);
+    }
+  });
+
+  test("repeated calls give the same answer: the shared global patterns keep no state", () => {
+    const input = `ghp_${"a".repeat(36)}`;
+    for (let i = 0; i < 3; i++) expect(holdsCredential(input)).toBe(true);
+    expect(redactSecrets(input)).toBe(REDACTED);
+    expect(holdsCredential(input)).toBe(true);
+  });
+
+  test("this test file holds no token-shaped string, so a change to it is not refused", () => {
+    expect(holdsCredential(readFileSync(import.meta.path, "utf8"))).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import {
   sprintStatusRefusals,
   statusLineOnly,
   statusSession,
+  STORY_STATUSES,
   symlinkTarget,
   WRITE_CLASSES,
   writeRules,
@@ -50,7 +51,7 @@ const RULES: WriteRules = writeRules({
 });
 
 const manifest = (lines: readonly string[], body = "Body.\n") => `---\n${lines.join("\n")}\n---\n\n${body}`;
-const M = ['story_id: "2.3"', "epic: 2", "title: The write check", "status: ready", 'globs: ["src/**"]'];
+const M = ['story_id: "2.3"', "epic: 2", "title: The write check", "status: ready-for-dev", 'globs: ["src/**"]'];
 const M0 = manifest(M);
 const withStatus = (s: string) => manifest(M.map((l) => (l.startsWith("status:") ? `status: ${s}` : l)));
 
@@ -369,6 +370,18 @@ const CLAUDE_CASES: readonly Case[] = [
     changes: [p("Stories/2.3.md", { before: M0, after: withStatus("done") })],
     refused: [no("Stories/2.3.md", "manifest")],
   },
+  {
+    name: "own manifest: a status that is not a BMAD Story status",
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: M0, after: withStatus("shipped") })],
+    refused: [no(STORY, "manifest")],
+  },
+  {
+    name: 'own manifest: a quoted "status": key is not the status line (fails closed)',
+    covers: ["own-manifest-status"],
+    changes: [p(STORY, { before: manifest(M.map((l) => (l.startsWith("status:") ? '"status": ready-for-dev' : l))), after: manifest(M.map((l) => (l.startsWith("status:") ? '"status": done' : l))) })],
+    refused: [no(STORY, "manifest")],
+  },
 
   // Exception: an approved Infrastructure Story.
   {
@@ -557,6 +570,14 @@ describe("epicContextMatch", () => {
 });
 
 describe("statusLineOnly", () => {
+  test("the BMAD Story status values", () => {
+    expect([...STORY_STATUSES]).toEqual(["backlog", "ready-for-dev", "in-progress", "review", "done"]);
+  });
+
+  test.each([...STORY_STATUSES])("the status set to %s passes", (status) => {
+    expect(statusLineOnly(M0, withStatus(status))).toBe(true);
+  });
+
   test.each([
     ["the status value changes", M0, withStatus("done"), true],
     ["nothing changes", M0, M0, true],
@@ -576,9 +597,24 @@ describe("statusLineOnly", () => {
     ["a lone CR in the status line before", manifest(M.map((l) => (l.startsWith("status:") ? "status: x\ry: 1" : l))), M0, false],
     ["a trailing CR on the status line is fine", M0, manifest(M.map((l) => (l.startsWith("status:") ? "status: done\r" : l))), true],
     ["an indented line after an added status line becomes its continuation", manifest(["a: x", "  b"]), manifest(["a: x", "status: s", "  b"]), false],
-    ["an indented line after a moved status line changes another field", manifest(["title: a", "status: s", "  b"]), manifest(["status: s", "title: a", "  b"]), false],
+    ["an indented line after a moved status line changes another field", manifest(["title: a", "status: done", "  b"]), manifest(["status: done", "title: a", "  b"]), false],
     ["an unclosed quote in the status value", M0, manifest(M.map((l) => (l.startsWith("status:") ? 'status: "done' : l))), false],
     ["a non-string status value", M0, manifest(M.map((l) => (l.startsWith("status:") ? "status: [done]" : l))), false],
+    ["an empty status value", M0, withStatus(""), false],
+    ["a quoted status value", M0, withStatus('"done"'), true],
+    ["a status value with a comment", M0, withStatus("done # built"), true],
+    ["a status that is not a BMAD Story status", M0, withStatus("shipped"), false],
+    ["a status in another case", M0, withStatus("Done"), false],
+    ["a status with inner spaces kept by quotes", M0, withStatus('"done "'), false],
+    ["a spec status, not a Story status", M0, withStatus("in-review"), false],
+    ["a legacy v6 status", M0, withStatus("drafted"), false],
+    ["a non-BMAD status unchanged still fails", withStatus("shipped"), withStatus("shipped\r"), false],
+    ["a non-BMAD status before may be set to a BMAD one", withStatus("shipped"), withStatus("review"), true],
+    // 2.3 follow-up F2 (accepted, fails closed): only a bare `status:` key is the status line.
+    ['a double-quoted "status": key', manifest(['"status": ready-for-dev', "a: 1"]), manifest(['"status": done', "a: 1"]), false],
+    ["a single-quoted 'status': key", manifest(["'status': ready-for-dev", "a: 1"]), manifest(["'status': done", "a: 1"]), false],
+    ['a quoted "status": key added', manifest(["a: 1"]), manifest(["a: 1", '"status": done']), false],
+    ['a bare status: line replacing a quoted "status": key', manifest(['"status": ready-for-dev', "a: 1"]), manifest(["status: done", "a: 1"]), false],
     ["an empty frontmatter is not a mapping", "---\n---\nBody\n", "---\n---\nBody\n", false],
   ] as const)("%s -> %p", (_name, before, after, want) => {
     expect(statusLineOnly(before, after)).toBe(want);
@@ -999,7 +1035,7 @@ describe("symlinks (Epic 2 retro item 18): a target that leaves the clone or res
   const sym = (path: string): WriteRefusal => ({ path, class: "symlink" });
 
   test("the content classes", () => {
-    expect([...CONTENT_WRITE_CLASSES]).toEqual(["symlink"]);
+    expect([...CONTENT_WRITE_CLASSES]).toEqual(["symlink", "credential"]);
   });
 
   test.each([
@@ -1095,6 +1131,69 @@ describe("symlinks (Epic 2 retro item 18): a target that leaves the clone or res
     expect(checkWrite(rules, [link(CONTEXT_2, "sprint-status.yaml")])).toEqual([]);
     expect(checkWrite(rules, [link(CONTEXT_2, "../../.xarabot/config.yaml")])).toEqual([sym(CONTEXT_2)]);
     expect(checkWrite(rules, [link(CONTEXT_2, "/etc/passwd")])).toEqual([sym(CONTEXT_2)]);
+  });
+});
+
+describe("credentials (Epic 2 retro item 20): an added or changed blob holding a credential", () => {
+  /** A regular file whose new blob holds a credential, as the committer marks it. */
+  const held = (path: string, extra: Partial<WriteChange> = {}): WriteChange => ({ path, mode: "100644", credential: true, ...extra });
+  const cred = (path: string): WriteRefusal => ({ path, class: "credential" });
+
+  test.each([
+    ["a source file", [held("src/a.ts")], [cred("src/a.ts")]],
+    ["an executable", [held("bin/x", { mode: "100755" })], [cred("bin/x")]],
+    ["a symlink whose target text holds one", [held("src/l", { mode: "120000", linkTarget: "a.ts" })], [cred("src/l")]],
+    ["several, in path order", [held("src/b.ts"), { path: "src/c.ts", mode: "100644" }, held("docs/a.md")], [cred("docs/a.md"), cred("src/b.ts")]],
+    ["no credential marked", [{ path: "src/a.ts", mode: "100644" }], []],
+    ["marked false", [held("src/a.ts", { credential: false })], []],
+    ["the own spec file is still checked", [held(SPEC)], [cred(SPEC)]],
+    ["the own manifest's status-only change is still checked", [held(STORY, { storyFile: { before: M0, after: withStatus("done") } })], [cred(STORY)]],
+    ["the path's own class wins", [held(".claude/settings.json"), held(SPRINT)], [no(".claude/settings.json", "agent-config"), no(SPRINT, "coordinator-file")]],
+    ["a refused symlink is symlink", [held("src/l", { mode: "120000", linkTarget: "/etc/passwd" })], [{ path: "src/l", class: "symlink" }]],
+  ] as const)("builder: %s", (_name, changes, refused) => {
+    expect(checkWrite(RULES, changes)).toEqual([...refused]);
+  });
+
+  test("builder: an approved Infrastructure Story's Protected Paths are still checked", () => {
+    const infra = { ...RULES, infrastructureApproved: true };
+    expect(checkWrite(infra, [held(".github/workflows/ci.yml"), held("secrets/key"), { path: "CLAUDE.md", mode: "100644" }])).toEqual([
+      cred(".github/workflows/ci.yml"),
+      cred("secrets/key"),
+    ]);
+  });
+
+  test("a refusal names the path and the class only, never what matched", () => {
+    const [refusal] = checkWrite(RULES, [held("src/a.ts")]);
+    expect(Object.keys(refusal ?? {}).sort()).toEqual(["class", "path"]);
+  });
+
+  test.each([
+    ["a path inside the unit's globs", coordRules(ANY_UNIT), [held("src/a.ts")], [cred("src/a.ts")]],
+    ["the path's own class wins", coordRules({ kind: "retro-item", globs: ["src/**"] }), [held("docs/a.md")], [{ path: "docs/a.md", class: "outside-unit" }]],
+    ["a status unit's Epic context", coordRules(STATUS_UNIT), [held(CONTEXT_2)], [cred(CONTEXT_2)]],
+    ["a status unit's allowed sprint status change", coordRules(STATUS_UNIT), [{ ...sprint(S0, withKeys("2-3-write-check: backlog")), credential: true }], [cred(SPRINT)]],
+    [
+      "a sprint status change already refused by key is reported by key",
+      coordRules(STATUS_UNIT),
+      [{ ...sprint(S0, S0.replace("2-2-takeover: review", "2-2-takeover: in-progress")), credential: true }],
+      [{ path: key("development_status.2-2-takeover"), class: "status-key" }],
+    ],
+    ["no credential marked", coordRules(ANY_UNIT), [{ path: "src/a.ts", mode: "100644" }], []],
+  ] as const)("coordinator: %s", (_name, rules, changes, refused) => {
+    expect(checkWrite(rules, changes)).toEqual([...refused]);
+  });
+
+  test("coordinator: a retro item's builder refusal wins over a credential", () => {
+    const rules = {
+      ...coordinatorWriteRules({
+        config: COORD_CONFIG,
+        globs: coordinatorGlobs({ kind: "retro-item", globs: ["**"] }, COORD_CONFIG),
+        graphUnit: false,
+        builderRefusals: { config: { ...COORD_CONFIG, standing_authority_path: AUTHORITY }, policy: { protected_paths: [] } },
+      }),
+      unit: "retro-item:epic-2-retro-item-1-fix",
+    };
+    expect(checkWrite(rules, [held("src/CLAUDE.md"), held("src/a.ts")])).toEqual([no("src/CLAUDE.md", "agent-config"), cred("src/a.ts")]);
   });
 });
 

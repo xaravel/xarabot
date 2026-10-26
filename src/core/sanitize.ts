@@ -40,13 +40,25 @@ const TOKEN_SHAPES: readonly RegExp[] = [
   /(?<![A-Za-z0-9_])(?:sk|rk)_live_[A-Za-z0-9]{10,}/g,
 ];
 
+/** The given secrets, trimmed, without empty ones or repeats, longest first. */
+const exactSecrets = (secrets: readonly string[]): string[] => [...new Set(secrets.map((s) => s.trim()).filter((s) => s !== ""))].sort((a, b) => b.length - a.length);
+
 /** `text` with every given secret (longest first) and every token-shaped string replaced by `[REDACTED]`. */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
   let out = text;
-  const exact = [...new Set(secrets.map((s) => s.trim()).filter((s) => s !== ""))].sort((a, b) => b.length - a.length);
-  for (const secret of exact) out = out.split(secret).join(REDACTED);
+  for (const secret of exactSecrets(secrets)) out = out.split(secret).join(REDACTED);
   for (const shape of TOKEN_SHAPES) out = out.replace(shape, REDACTED);
   return out;
+}
+
+/**
+ * True when `text` holds a given secret or a token-shaped string: something
+ * `redactSecrets` would redact. The write check's `credential` class (Epic 2
+ * retro item 20) refuses a committed blob for which this holds.
+ */
+export function holdsCredential(text: string, secrets: readonly string[] = []): boolean {
+  // `search` ignores a global pattern's `lastIndex`, so the shared patterns keep no state.
+  return exactSecrets(secrets).some((s) => text.includes(s)) || TOKEN_SHAPES.some((shape) => text.search(shape) !== -1);
 }
 
 /**
