@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-5-journal-review-session-usage",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -17,7 +17,7 @@
     "test/lane/review-gate.test.ts",
     "test/lane/review-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T19:52:29.175Z",
+  "heartbeat_at": "2026-10-26T19:52:38.332Z",
   "pr": 224,
   "pr_owner": "edanisko",
   "base_sha": "e736f8930e417f974339931a7d32b76141a26134",
@@ -31,7 +31,20 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/lane/lane-process.ts",
+      "src/lane/review-step.ts",
+      "src/lane/session.ts",
+      "test/lane/coordinator-process.test.ts",
+      "test/lane/lane-process.test.ts",
+      "test/lane/review-gate.test.ts",
+      "test/lane/review-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
