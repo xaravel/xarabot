@@ -1,17 +1,17 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-34-allow-the-configd-lookup",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/sandbox/profile.ts",
     "test/sandbox/macos.test.ts",
     "test/sandbox/profile.test.ts"
   ],
-  "heartbeat_at": "2026-10-26T11:49:22.165Z",
+  "heartbeat_at": "2026-10-26T11:50:52.125Z",
   "pr": 198,
   "pr_owner": "edanisko",
   "base_sha": "a245533d980cc2b923d05e530ef74819b3282601",
@@ -19,22 +19,13 @@
   "reviewed_sha": "cff80906a0acc55937b7872778214728a247a1f7",
   "passed_sha": "cff80906a0acc55937b7872778214728a247a1f7",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "cff80906a0acc55937b7872778214728a247a1f7",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/sandbox/profile.ts",
-      "test/sandbox/macos.test.ts",
-      "test/sandbox/profile.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
