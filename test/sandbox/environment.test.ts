@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { buildSessionEnv, configDir, deniedPaths, isReservedEnvName, sessionDirs, type SessionEnvParts } from "../../src/sandbox/environment.ts";
+import { MACH_SERVICES } from "../../src/sandbox/profile.ts";
+import {
+  buildSessionEnv,
+  CA_BUNDLE,
+  configDir,
+  deniedPaths,
+  isReservedEnvName,
+  sessionDirs,
+  type SessionEnvParts,
+} from "../../src/sandbox/environment.ts";
 
 const PARTS: SessionEnvParts = {
   vendor: "claude",
@@ -62,6 +71,23 @@ describe("buildSessionEnv", () => {
     expect(build({ ...LAUNCHING, CLAUDE_CODE_TMPDIR: "/tmp" })["CLAUDE_CODE_TMPDIR"]).toBe("/l/tmp/cli-tmp");
   });
 
+  test("SSL_CERT_FILE is /etc/ssl/cert.pem for codex only", () => {
+    expect(CA_BUNDLE).toBe("/etc/ssl/cert.pem");
+    expect(build(LAUNCHING, { ...PARTS, vendor: "codex", vendorHomeEnv: "CODEX_HOME" })["SSL_CERT_FILE"]).toBe("/etc/ssl/cert.pem");
+    expect(build()["SSL_CERT_FILE"]).toBeUndefined();
+    expect(build(LAUNCHING, { ...PARTS, vendor: "pi", vendorHomeEnv: "PI_HOME" })["SSL_CERT_FILE"]).toBeUndefined();
+  });
+
+  test("a launching SSL_CERT_FILE never passes through", () => {
+    const launching = { ...LAUNCHING, SSL_CERT_FILE: "/tmp/evil.pem" };
+    expect(build(launching)["SSL_CERT_FILE"]).toBeUndefined();
+    expect(build(launching, { ...PARTS, vendor: "codex", vendorHomeEnv: "CODEX_HOME" })["SSL_CERT_FILE"]).toBe("/etc/ssl/cert.pem");
+  });
+
+  test("the CA bundle replaces the keychain service: MACH_SERVICES still has no SecurityServer", () => {
+    expect(MACH_SERVICES.filter((name) => /security|keychain|trust/i.test(name))).toEqual([]);
+  });
+
   test("TMPPREFIX is <tempDir>/zsh for every vendor, whatever the launching env holds", () => {
     expect(build()["TMPPREFIX"]).toBe("/l/tmp/zsh");
     expect(build({ ...LAUNCHING, TMPPREFIX: "/tmp/zsh" })["TMPPREFIX"]).toBe("/l/tmp/zsh");
@@ -111,6 +137,8 @@ describe("buildSessionEnv", () => {
     ["a GH_ credential name", { ...PARTS, credential: { name: "GH_TOKEN", value: "x" } }],
     ["a CLAUDE_CODE_TMPDIR credential name", { ...PARTS, credential: { name: "CLAUDE_CODE_TMPDIR", value: "x" } }],
     ["a CLAUDE_CODE_TMPDIR vendor home name", { ...PARTS, vendorHomeEnv: "CLAUDE_CODE_TMPDIR" }],
+    ["an SSL_CERT_FILE credential name", { ...PARTS, credential: { name: "SSL_CERT_FILE", value: "x" } }],
+    ["an SSL_CERT_FILE vendor home name", { ...PARTS, vendorHomeEnv: "SSL_CERT_FILE" }],
     ["a TMPPREFIX credential name", { ...PARTS, credential: { name: "TMPPREFIX", value: "x" } }],
     ["a TMPPREFIX vendor home name", { ...PARTS, vendorHomeEnv: "TMPPREFIX" }],
     ["a GITHUB_ credential name", { ...PARTS, credential: { name: "GITHUB_TOKEN", value: "x" } }],
@@ -121,7 +149,7 @@ describe("buildSessionEnv", () => {
 });
 
 describe("isReservedEnvName", () => {
-  test.each(["PATH", "HOME", "TMPDIR", "TMPPREFIX", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy", "CLAUDE_CODE_TMPDIR"])(
+  test.each(["PATH", "HOME", "TMPDIR", "TMPPREFIX", "LANG", "LC_ALL", "TERM", "UV_CACHE_DIR", "XARABOT_RESULT", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "HTTPS_PROXY", "http_proxy", "CLAUDE_CODE_TMPDIR", "SSL_CERT_FILE"])(
     "%s is reserved",
     (name) => expect(isReservedEnvName(name)).toBe(true),
   );

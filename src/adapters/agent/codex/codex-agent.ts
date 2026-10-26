@@ -11,12 +11,14 @@ import { checkCodexModel, parseCodexUsage } from "./usage.ts";
  * full notes are `_bmad-output/planning-artifacts/notes/codex-ar42-spike-2026-10-25.md`):
  *
  * - Launch: `codex exec -m <model> --json -c model_reasoning_effort=<effort>
- *   --dangerously-bypass-approvals-and-sandbox -c commit_attribution="" --
- *   <prompt>`. The bypass flag turns codex's own sandbox and approvals off
- *   (`approval_policy: never`, `danger-full-access`); Xarabot's sandbox is
- *   the only one. `commit_attribution = ""` turns the `Co-authored-by:
- *   Codex` trailer off (from docs); the sanitizer strips that trailer and
- *   the "Generated with [Codex]" line anyway. The prompt is the last
+ *   --dangerously-bypass-approvals-and-sandbox -- <prompt>`. The bypass flag
+ *   turns codex's own sandbox and approvals off (`approval_policy: never`,
+ *   `danger-full-access`); Xarabot's sandbox is the only one. No
+ *   attribution setting is passed: codex 0.163.0 ignores `-c
+ *   commit_attribution=""` ("`commit_attribution` is ignored", live check
+ *   2026-10-26), so only the runner's sanitizer keeps the `Co-authored-by:
+ *   Codex` trailer and the "Generated with [Codex]" line out of forge text,
+ *   and commits are the runner's own. The prompt is the last
  *   argument, after `--`; stdin stays closed (`/dev/null`), since codex
  *   reads a piped stdin into the prompt. Never `--ephemeral`: it saves no
  *   session file, so the run could not be resumed or its model read.
@@ -155,8 +157,6 @@ export function codexLaunchSpec(
       "-c",
       `model_reasoning_effort=${settings.effort}`,
       "--dangerously-bypass-approvals-and-sandbox",
-      "-c",
-      'commit_attribution=""',
       ...resume,
       "--",
       prompt,

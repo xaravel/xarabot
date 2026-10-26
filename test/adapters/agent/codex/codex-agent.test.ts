@@ -36,8 +36,6 @@ function options(model: string, effort: string): string[] {
     "-c",
     `model_reasoning_effort=${effort}`,
     "--dangerously-bypass-approvals-and-sandbox",
-    "-c",
-    'commit_attribution=""',
   ];
 }
 
@@ -205,11 +203,14 @@ describe("codexCredentialKind", () => {
 });
 
 describe("AR42 spike record", () => {
-  test("the agent's own sandbox and approvals are off, and attribution is off", () => {
-    const argv = spec(agent, { kind: "fresh", prompt: PROMPT }, { effort: "high" }, RESULT).argv;
-    expect(argv).toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(argv[argv.indexOf('commit_attribution=""') - 1]).toBe("-c");
-    expect(argv).toContain("--json");
+  test("the agent's own sandbox and approvals are off; no attribution setting, which codex 0.163.0 ignores", () => {
+    for (const unit of [{ kind: "fresh", prompt: PROMPT }, { kind: "resume", sessionId: SID }] as const) {
+      const argv = spec(agent, unit, { effort: "high" }, RESULT).argv;
+      expect(argv).toContain("--dangerously-bypass-approvals-and-sandbox");
+      expect(argv).toContain("--json");
+      expect(argv.slice(0, -1).filter((a) => a.includes("commit_attribution"))).toEqual([]);
+      expect(argv.filter((a, i) => argv[i - 1] === "-c")).toEqual(["model_reasoning_effort=high"]);
+    }
   });
 
   test("outcome mapping: the shared build prompt maps ready-for-dev to blocked/other and never offers no-op", () => {
