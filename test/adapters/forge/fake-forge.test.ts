@@ -171,6 +171,27 @@ describe("fake forge", () => {
     expect(await forge.branchHead("story/1.1", live())).toEqual({ ok: false, error: { kind: "transient", message: "down" } });
   });
 
+  test("deleteBranch refuses the protected branches and a branch with an open PR, and frees a deleted one for a null lease", async () => {
+    const { forge, control } = createFakeForge();
+    expect(await forge.deleteBranch("main", live())).toEqual({ ok: false, error: { kind: "forbidden", message: "deleteBranch: main is protected" } });
+    expect((await forge.deleteBranch("xarabot/claims", live())).ok ? "ok" : "refused").toBe("refused");
+    const sha = control.makeCommit();
+    value(await forge.pushBranch({ branch: "xarabot/reconcile-1", expected_sha: null, sha }, live()));
+    const pr = value(await forge.openPr({ branch: "xarabot/reconcile-1", base: "main", title: "t", body: "b" }, live()));
+    expect(await forge.deleteBranch("xarabot/reconcile-1", live())).toEqual({
+      ok: false,
+      error: { kind: "conflict", message: `deleteBranch: xarabot/reconcile-1 has open PR #${pr.number}` },
+    });
+    value(await forge.closePr(pr.number, live()));
+    control.injectError("deleteBranch", { kind: "transient", message: "down" });
+    expect(await forge.deleteBranch("xarabot/reconcile-1", live())).toEqual({ ok: false, error: { kind: "transient", message: "down" } });
+    expect(value(await forge.branchHead("xarabot/reconcile-1", live()))).toBe(sha);
+    expect(value(await forge.deleteBranch("xarabot/reconcile-1", live()))).toEqual({ deleted: true });
+    expect(value(await forge.branchHead("xarabot/reconcile-1", live()))).toBeNull();
+    const next = control.makeCommit();
+    expect(value(await forge.pushBranch({ branch: "xarabot/reconcile-1", expected_sha: null, sha: next }, live()))).toEqual({ sha: next });
+  });
+
   test("protected branches refuse pushes", async () => {
     const { forge, control } = createFakeForge();
     for (const branch of ["main", "xarabot/claims"]) {

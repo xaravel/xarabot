@@ -245,11 +245,14 @@ describe("the operation table", () => {
     }
   });
 
-  test("no operation deletes, merges or approves", () => {
+  test("no operation merges or approves, and the one delete is deleteRef under contents: write", () => {
     for (const [key, op] of Object.entries(GITHUB_OPERATIONS) as [string, Operation][]) {
+      expect(key).not.toMatch(/merge(?!Queue)|approve/i);
+      if (key === "deleteRef") continue;
       expect([key, op.method]).not.toEqual([key, "DELETE"]);
-      expect(key).not.toMatch(/merge(?!Queue)|approve|delete/i);
+      expect(key).not.toMatch(/delete/i);
     }
+    expect(GITHUB_OPERATIONS.deleteRef).toEqual({ name: "deleteRef", method: "DELETE", permission: "contents: write" });
   });
 });
 

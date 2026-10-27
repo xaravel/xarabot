@@ -33,6 +33,7 @@ import {
 import type { AppCredentials } from "./credentials.ts";
 import {
   formatDate,
+  githubMessage,
   GITHUB_OPERATIONS,
   isSuccess,
   mapGraphqlErrors,
@@ -52,7 +53,8 @@ import { createTokenSource } from "./tokens.ts";
  * AR27, AR38, AR39). `snapshot` and `ledgerSwap` work over the REST git data
  * API (`snapshot` reads blobs and each unit's PR, with its reviewers' latest
  * decisive reviews, over GraphQL); `pushBranch` runs `git push
- * --force-with-lease` from the lane's private `runner.git`; the PR
+ * --force-with-lease` from the lane's private `runner.git`, and
+ * `deleteBranch` deletes a branch no open PR uses over REST; the PR
  * operations, `comment`, `postReview` (a comment-only review: the adapter
  * never sends an `APPROVE` or `REQUEST_CHANGES` event), `checks` (check runs
  * plus the combined commit status) and the CI-log prefetch use REST; `enqueue` and
@@ -620,6 +622,33 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
       const r = await readRef(ctx, branch);
       if (!r.ok) return r.error.kind === "not-found" ? forgeOk(null) : r;
       return r;
+    });
+  }
+
+  /**
+   * `DELETE /git/refs/heads/{branch}`, after listing the branch's open PRs:
+   * one is `conflict`, since GitHub would close it with its branch. A
+   * missing branch (GitHub's 422 "Reference does not exist", or a 404) is
+   * `deleted: false`.
+   */
+  async function deleteBranch(branch: string, opts: CallOpts): Promise<ForgeResult<{ readonly deleted: boolean }>> {
+    return guarded<{ readonly deleted: boolean }>("deleteBranch", opts, async (ctx) => {
+      if (branch === mainBranch || branch === ledgerBranch) return forgeErr("forbidden", `deleteBranch: ${branch} is reserved`);
+      const listOp = GITHUB_OPERATIONS.listPulls;
+      const head = encodeURIComponent(`${owner}:${branch}`);
+      const listed = await paged(ctx, listOp, (page) => `/pulls?head=${head}&state=open&per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
+      if (!listed.ok) return listed;
+      for (const raw of listed.value) {
+        const pr = toPr(raw);
+        if (pr === undefined) return malformed(listOp, "not a pull request");
+        if (pr.branch === branch && pr.state === "open") return forgeErr("conflict", `deleteBranch: ${branch} has open PR #${pr.number}`);
+      }
+      const op = GITHUB_OPERATIONS.deleteRef;
+      const r = await apiReply(ctx, op, `/git/refs/heads/${encodeBranch(branch)}`);
+      if (!r.ok) return r;
+      if (r.value.status === 404 || (r.value.status === 422 && /reference does not exist/i.test(githubMessage(r.value.body)))) return forgeOk({ deleted: false });
+      if (!isSuccess(r.value.status)) return redacted(mapHttpError(op, r.value));
+      return forgeOk({ deleted: true });
     });
   }
 
@@ -1199,6 +1228,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     ledgerSwap,
     pushBranch,
     branchHead,
+    deleteBranch,
     openPr,
     updatePr,
     closePr,
