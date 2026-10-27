@@ -1,11 +1,11 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-21-reconcile-pr-hygiene",
-  "state": "released",
+  "state": "claimed",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/adapters/forge/**",
     "src/lane/planning-step.ts",
@@ -14,12 +14,14 @@
     "test/adapters/forge/**",
     "test/contracts/forge.contract.ts",
     "test/lane/planning-step.test.ts",
-    "test/lane/reconcile-step.test.ts"
+    "test/lane/reconcile-step.test.ts",
+    "test/ports/forge.test.ts",
+    "test/support/live-github.ts"
   ],
-  "heartbeat_at": "2026-10-27T01:31:31Z",
+  "heartbeat_at": "2026-10-27T03:26:46Z",
   "pr": null,
   "pr_owner": null,
-  "base_sha": "096300219a4e71101ac391d2253585dd22ef1d3b",
+  "base_sha": "44c18a409c5a3d372320db75c4a53fbd0ebfab76",
   "head_sha": null,
   "reviewed_sha": null,
   "passed_sha": null,
