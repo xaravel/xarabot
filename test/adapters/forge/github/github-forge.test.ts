@@ -491,6 +491,10 @@ describe("every operation", () => {
       queueState: () => f.queueState(1, o),
       alert: () => f.alert("c", sha, o),
       prefetch: () => f.prefetch({ kind: "ci-log", sha, dir: join(tmpdir(), "xarabot-never") }, o),
+      inboxes: () => f.inboxes(o),
+      openInbox: () => f.openInbox("alice", o),
+      setInboxBody: () => f.setInboxBody(1, "b", o),
+      inboxComment: () => f.inboxComment(1, "b", o),
     };
   };
 

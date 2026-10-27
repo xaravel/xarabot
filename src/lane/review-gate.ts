@@ -136,6 +136,7 @@ export function createReviewGateStep(deps: ReviewGateDeps): ReviewGateStep {
       abortReason: "unit budget passed during the review gate",
       clock,
       sleep,
+      secrets,
     });
 
     /** The loopback session's result, pushed as a fix; returns once the fix is pushed. */

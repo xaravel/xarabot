@@ -5,7 +5,7 @@ import { describeIssues } from "../schemas/common.ts";
 import type { UnitRecord } from "../schemas/ledger.ts";
 import { LaneRole, SnapshotSchema, type Snapshot, type SnapshotManifest } from "../schemas/snapshot.ts";
 import { compareStoryIds, storyKey } from "../story-id.ts";
-import { nextCoordinator, type CoordinatorOutcome } from "./coordinator.ts";
+import { nextCoordinator, WAITING_ON_MAINTAINER, type CoordinatorOutcome } from "./coordinator.ts";
 import { epicHolds } from "./epic-gates.ts";
 import type { Reason } from "./reasons.ts";
 import { epicContextPath } from "./snapshot.ts";
@@ -69,8 +69,9 @@ function stop(reason: string): { readonly kind: "stop"; readonly reason: string 
  * A builder gets the lowest eligible Epic, then its lowest eligible Story:
  * the Story as a `unit` (a stale `claimed` or builder-held `merging` record
  * as a `take_over`), an Infrastructure Story without a current approval as
- * `park`, `idle` with the reasons nothing is eligible, or `stop`. An Epic
- * hold (dependency, retro-rejected, retro-item) bars new claims but not a
+ * `park`, `idle` with the reasons nothing is eligible (its reason prefixed
+ * `waiting-on-maintainer: ` when every one is a Maintainer cause, Story
+ * 4.2), or `stop`. An Epic hold (dependency, retro-rejected, retro-item) bars new claims but not a
  * takeover; an unloadable Epic context bars both.
  *
  * The coordinator gets a `coordinator` unit in AD-13's order
@@ -166,12 +167,16 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
       // so its stale records are still taken over as usual (Story 4.1's deferral).
       if (held && takeOver === null) continue;
       if (rec !== undefined && rec.state !== "released" && takeOver === null) {
-        reasons.push({ subject: unit, code: "record-state", message: `${unit} is ${rec.state}` });
+        const message = `${unit} is ${rec.state}`;
+        // A park awaiting an approval waits on the Maintainer (Story 4.2).
+        const approval = rec.state === "parked" && (rec.park?.kind === "awaiting-approval" || rec.park?.kind === "needs-approval");
+        reasons.push(approval ? { subject: unit, code: "record-state", message, maintainer: true } : { subject: unit, code: "record-state", message });
       } else if (takeOver !== null && m.infrastructure && rec?.approval?.manifest_sha !== m.sha) {
         reasons.push({
           subject: unit,
           code: "record-state",
           message: `${unit} is ${takeOver} and stale, but has no approval for manifest ${m.sha}`,
+          maintainer: true,
         });
       }
 
@@ -213,7 +218,10 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
 
   const chosen = candidates[0];
   if (chosen === undefined) {
-    return { kind: "idle", reason: reasons.length === 0 ? NOTHING_LEFT : reasons.map((r) => r.message).join("; "), reasons };
+    if (reasons.length === 0) return { kind: "idle", reason: NOTHING_LEFT, reasons };
+    // Idle only for Maintainer causes: the span says it waits on the Maintainer (Story 4.2, AR25).
+    const waiting = reasons.every((r) => r.maintainer === true) ? WAITING_ON_MAINTAINER : "";
+    return { kind: "idle", reason: `${waiting}${reasons.map((r) => r.message).join("; ")}`, reasons };
   }
   const rec = records.get(storyUnit(chosen.story_id));
   const takeOver = takeOverOf(rec, snap.now);

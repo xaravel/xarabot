@@ -18,7 +18,8 @@ const CLOSED_ITEM: ReadonlySet<RetroItem["status"]> = new Set<RetroItem["status"
  * `waiting`) holds every Epic at distance ≥ 1 when it is `blocking` and ≥ 2
  * otherwise (`retro-item`), whatever its route or verdict, and a go never
  * releases it. A bootstrapped dependency never holds, but a bootstrapped
- * Epic's items do. Its own module, so `next` and the coordinator side share
+ * Epic's items do. A rejected retro's hold, and an item's routed to the
+ * Maintainer, are Maintainer causes (`maintainer`, Story 4.2). Its own module, so `next` and the coordinator side share
  * it with no import cycle. Pure.
  */
 
@@ -91,12 +92,14 @@ export function epicHolds(snap: Snapshot): EpicHolds {
       const d = distance(n, e);
       if (d === undefined) continue;
       if (src.rejected) {
-        reasons.push({ subject, code: "retro-rejected", message: `Epic ${n} is held by Epic ${e}'s rejected retro (retro:${e}), which has no go` });
+        reasons.push({ subject, code: "retro-rejected", message: `Epic ${n} is held by Epic ${e}'s rejected retro (retro:${e}), which has no go`, maintainer: true });
       }
       for (const item of src.items) {
         if (d < (item.blocking ? 1 : 2)) continue;
         const tag = item.blocking ? "blocking" : "untagged";
-        reasons.push({ subject, code: "retro-item", message: `Epic ${n} is held by Epic ${e}'s retro item retro-item:${item.id} (${item.status}, ${tag}, distance ${d})` });
+        const message = `Epic ${n} is held by Epic ${e}'s retro item retro-item:${item.id} (${item.status}, ${tag}, distance ${d})`;
+        // An item routed to the Maintainer waits on the Maintainer (Story 4.2).
+        reasons.push(item.route === "maintainer" ? { subject, code: "retro-item", message, maintainer: true } : { subject, code: "retro-item", message });
       }
     }
     return reasons;

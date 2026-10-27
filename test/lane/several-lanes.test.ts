@@ -207,7 +207,7 @@ describe("two builder lanes and a coordinator on one host", () => {
     const root = mkdtempSync(join(tmpdir(), "xarabot-several-"));
     dirs.push(root);
     const claim: CoordinatorRecord = {
-      schema_version: 5,
+      schema_version: 6,
       owner: COORD.owner,
       host: COORD.host,
       lane: "coordinator",

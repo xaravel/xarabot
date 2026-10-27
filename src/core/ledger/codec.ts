@@ -22,7 +22,7 @@ export type Ledger = {
 
 export type LedgerParseErrorKind = "stop" | "invalid";
 
-/** `1, 2, 3, 4 and 5`. */
+/** `1, 2, 3, 4, 5 and 6`. */
 function readable(versions: readonly number[]): string {
   const head = versions.slice(0, -1);
   const last = versions[versions.length - 1];
@@ -124,10 +124,14 @@ function text(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-/** A park in key order; `graph_posted` is written only when set. */
+/** A park in key order; `graph_posted` and `text` are written only when set. */
 function orderedPark(p: Park): Park {
   const ordered: Park = { kind: p.kind, reason: p.reason, inbox_owner: p.inbox_owner, globs_held: sortedSet(p.globs_held) };
-  return p.graph_posted === undefined ? ordered : { ...ordered, graph_posted: p.graph_posted };
+  return {
+    ...ordered,
+    ...(p.graph_posted === undefined ? {} : { graph_posted: p.graph_posted }),
+    ...(p.text === undefined ? {} : { text: p.text }),
+  };
 }
 
 /** A unit record as ledger file text: fixed key order, sorted sets, 2-space indent, trailing newline. */

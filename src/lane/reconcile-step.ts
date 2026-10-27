@@ -12,11 +12,15 @@ import {
   reparkGraph,
   releaseDisposable,
   releaseEjected,
+  stampDigest,
   startMerging,
   takeApproved,
   type HeartbeatSet,
   type LedgerEdit,
 } from "../core/ledger/edits.ts";
+import { openDeferred } from "../core/inbox/deferred.ts";
+import { digestDue, digestSlot } from "../core/inbox/digest-time.ts";
+import { renderDigest } from "../core/inbox/render-digest.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
@@ -27,7 +31,8 @@ import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
 import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
-import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
+import { syncInboxes } from "./inbox-step.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
 import { allowanceReason, callPassedGate, describeError, message, stepKit, stepOps, type FreshMain, type PassedGate, type PrStepOutput } from "./session.ts";
@@ -132,6 +137,17 @@ import { allowanceReason, callPassedGate, describeError, message, stepKit, stepO
  * `merging` and never watches the queue; it gets no review and no passed
  * gate, and its enqueue fence records `enqueued_sha`. Every push, PR change
  * and enqueue is fenced. It never throws; a lost unit ends `failed` with state `null`.
+ *
+ * Story 4.2: right after the ledger work, before the PR branches, the inbox
+ * step (`syncInboxes`) brings the owners' inbox issues up to date from the
+ * run's snapshot (`renderDigest` over it and `main`'s Story specs; a spec
+ * whose frontmatter does not parse is logged and skipped): each body is
+ * rewritten only when it differs, an owner with no items is cleared to the
+ * empty text, and when today's digest slot passed unposted, `digest_posted_at`
+ * is stamped (`stampDigest`, fenced on the run's own record and held at the
+ * snapshot's coordinator generation) before one mention per non-empty inbox
+ * is posted. Its forge errors are logged and skipped: they never fail or
+ * stop the run.
  */
 
 export type ReconcileStepDeps = {
@@ -141,7 +157,7 @@ export type ReconcileStepDeps = {
   readonly graphTrees: GraphTrees;
   /** Who writes the ledger records: the coordinator lane. */
   readonly identity: LaneIdentity;
-  /** The repo slug, for the Standing Authority check. */
+  /** The repo slug, for the Standing Authority check and the inbox links (`https://github.com/<repo>`). */
   readonly repo: string;
   /** The lane's agent, which fresh `main`'s policy must still allow before a take (Story 3.5). */
   readonly agent: string;
@@ -883,6 +899,50 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       return settled;
     };
 
+    // ------------------------------------------------------------ inboxes
+
+    /**
+     * Story 4.2: the owners' inboxes from the run's snapshot, then, when
+     * the digest is due, the stamp and the mentions. Never fails the run.
+     */
+    const inboxes = async (): Promise<void> => {
+      aborted();
+      const config = snapshot.config;
+      const coordinator = snapshot.ledger.coordinator;
+      let digests: ReturnType<typeof renderDigest>;
+      try {
+        for (const s of openDeferred(config.story_spec_path, Object.keys(input.files), input.files).skipped) note(`deferred entries: ${s.message}; skipped`);
+        digests = renderDigest({ snapshot, files: input.files, repoUrl: `https://github.com/${deps.repo}` });
+      } catch (e) {
+        // Pure code, so never expected; still, the inboxes never fail the run.
+        note(`inbox step: rendering threw: ${message(e)}; no inbox rewritten this run`);
+        return;
+      }
+      const due = digestDue(snapshot.now, config.digest_time, coordinator?.digest_posted_at ?? null);
+      const stamp = async (): Promise<boolean> => {
+        if (coordinator === null) {
+          note("digest: no coordinator.json in the snapshot; not stamped");
+          return false;
+        }
+        const slot = digestSlot(snapshot.now, config.digest_time);
+        const edit = fenced(
+          heartbeat({ unit, by: identity, now: forgeNow(), generation }),
+          stampDigest({ by: identity, now: forgeNow(), generation: coordinator.generation, slot }),
+        );
+        const r = await swapLedger({
+          forge,
+          edit,
+          signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+          sleep,
+          ...(deps.random !== undefined ? { random: deps.random } : {}),
+        });
+        if (r.ok) return true;
+        note(`digest: stampDigest refused or failed: ${r.error.message}`);
+        return false;
+      };
+      await syncInboxes({ forge, digests, digestDue: due, stamp, log: note, signal: input.signal, callTimeoutMs });
+    };
+
     // ------------------------------------------------------------ ending
 
     /** No PR this run: `merged` with no PR, then the older `merged` reconcile records deleted. */
@@ -1037,6 +1097,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         note(`${u} merged but ${snapshot.config.retro_gates_path} does not list its item: nothing to set done, skipped`);
       }
       const settled = await ledgerWork(plan);
+      await inboxes();
 
       // A PR the ledger work closed, or whose record it released or deleted, no longer stops a new one.
       const open = plan.openPrs.find((o) => !settled.has(o.unit));

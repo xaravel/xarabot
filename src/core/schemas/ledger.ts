@@ -12,16 +12,27 @@ import { RETRO_ITEM_ID_PATTERN, RetroRecordResultSchema } from "./retro-gates.ts
 /**
  * The ledger's own `schema_version` (Story 2.7; 3 since Story 2.8 added
  * `approved_graph`, 4 since Story 2.9 added `retro_result`, 5 since Story 3.5
- * added `enqueued_sha`, which retro item 24's `park.graph_posted` shares): every record
- * written carries it; the reader accepts each of `LEDGER_SCHEMA_VERSIONS`.
- * The other versioned files keep `SCHEMA_VERSION` (1).
+ * added `enqueued_sha`, which retro item 24's `park.graph_posted` shares, 6
+ * since Story 4.2 added `park.text`): every record written carries it; the
+ * reader accepts each of `LEDGER_SCHEMA_VERSIONS`. The other versioned files
+ * keep `SCHEMA_VERSION` (1).
  */
-export const LEDGER_SCHEMA_VERSION = 5;
+export const LEDGER_SCHEMA_VERSION = 6;
 
 /** The ledger `schema_version`s this runner reads. */
-export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, 2, 3, 4, LEDGER_SCHEMA_VERSION];
+export const LEDGER_SCHEMA_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, LEDGER_SCHEMA_VERSION];
 
-export const LedgerSchemaVersion = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(LEDGER_SCHEMA_VERSION)]);
+export const LedgerSchemaVersion = z.union([
+  z.literal(1),
+  z.literal(2),
+  z.literal(3),
+  z.literal(4),
+  z.literal(5),
+  z.literal(LEDGER_SCHEMA_VERSION),
+]);
+
+/** The longest `park.text` (Story 4.2), in UTF-16 code units. */
+export const PARK_TEXT_MAX = 4_000;
 
 /** A `resolveGraph` hash: `sha256:` and 64 lowercase hex digits. */
 export const GraphHash = z.string().regex(/^sha256:[0-9a-f]{64}$/, "must be sha256: and 64 lowercase hex digits");
@@ -159,6 +170,13 @@ export const ParkSchema = z
      * approval submitted after it was posted. Absent when none was posted.
      */
     graph_posted: GraphHash.optional(),
+    /**
+     * The blocked session's own words (Story 4.2): a build result's
+     * `blocked.text` or a planning unit's readiness summary, sanitized and
+     * capped at `PARK_TEXT_MAX`, which the owner's inbox shows under the
+     * item. Absent when the park has none.
+     */
+    text: z.string().max(PARK_TEXT_MAX).optional(),
   })
   .refine((p) => (p.kind === "blocked") === (p.reason !== null), {
     message: "reason is required when kind is blocked and must be null otherwise",

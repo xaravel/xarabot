@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { LedgerCommit } from "../../src/core/ledger/edits.ts";
 import { serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { EMPTY_INBOX_BODY, renderDigest } from "../../src/core/inbox/render-digest.ts";
 import { unitPath } from "../../src/core/schemas/ledger.ts";
 import {
   FORGE_ERROR_KINDS,
@@ -20,6 +21,7 @@ import {
   type GitSha,
 } from "../../src/ports/forge.ts";
 import { rec } from "../core/ledger/fixtures.ts";
+import { snapshotOf, storyRec } from "../core/next/fixtures.ts";
 import { runContract } from "./run-contract.ts";
 
 /**
@@ -50,6 +52,19 @@ export type ForgeContractControls = {
   reviewBodies(pr: number): MaybePromise<string[]>;
   queue(): MaybePromise<number[]>;
   trace(): MaybePromise<string[]>;
+  /** Every inbox issue, open or closed, ascending by number (Story 4.2). */
+  inboxes(): MaybePromise<readonly ContractInbox[]>;
+  /** Comment bodies on inbox issue `issue`, oldest first. */
+  inboxComments(issue: number): MaybePromise<string[]>;
+};
+
+/** An inbox issue as the `inboxes` control reports it. */
+export type ContractInbox = {
+  readonly number: number;
+  readonly title: string;
+  readonly owner: string | null;
+  readonly body: string;
+  readonly open: boolean;
 };
 
 export type ForgeControlName = keyof ForgeContractControls;
@@ -69,6 +84,8 @@ export type ForgeHarness = {
   readonly enabled?: boolean;
   /** The operations the forge implements; cases calling others skip. Default all. */
   readonly operations?: readonly ForgeOperation[];
+  /** A login the inbox cases may open an inbox for; default `alice`. A live harness names a real one. */
+  readonly inboxOwner?: string;
 };
 
 const live = (): CallOpts => ({ signal: new AbortController().signal });
@@ -106,6 +123,7 @@ export function forgeContract(harness: ForgeHarness): void {
   const has = new Set(harness.controls);
   const offers = new Set<ForgeOperation>(harness.operations ?? FORGE_OPERATIONS);
   const enabled = harness.enabled ?? true;
+  const owner = harness.inboxOwner ?? "alice";
 
   /** Pushes a fresh commit to `branch` and opens a PR on it. */
   async function openOn(fx: ForgeFixture, branch: string): Promise<ForgePr> {
@@ -339,6 +357,10 @@ export function forgeContract(harness: ForgeHarness): void {
         queueState: () => f.queueState(1, aborted()),
         alert: () => f.alert("c", sha, aborted()),
         prefetch: () => f.prefetch({ kind: "ci-log", sha, dir: join(tmpdir(), "xarabot-never") }, aborted()),
+        inboxes: () => f.inboxes(aborted()),
+        openInbox: () => f.openInbox("alice", aborted()),
+        setInboxBody: () => f.setInboxBody(1, "b", aborted()),
+        inboxComment: () => f.inboxComment(1, "b", aborted()),
       };
       for (const op of FORGE_OPERATIONS.filter((o) => offers.has(o))) expect([op, kind(await calls[op]())]).toEqual([op, "transient"]);
     });
@@ -680,6 +702,80 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(value(await fx.forge.alert("forge-auth", a, live()))).toEqual({ posted: false });
       expect(value(await fx.forge.alert("forge-auth", b, live()))).toEqual({ posted: true });
       expect(value(await fx.forge.alert("other", a, live()))).toEqual({ posted: true });
+    });
+
+    // ------------------------------------------------------------ inboxes (Story 4.2)
+
+    scenario("openInbox finds or creates the owner's inbox; a second call returns the same issue, which inboxes lists", ["openInbox", "inboxes"], [], async (fx) => {
+      const first = value(await fx.forge.openInbox(owner, live()));
+      const again = value(await fx.forge.openInbox(owner, live()));
+      expect(again.number).toBe(first.number);
+      expect(first.owner?.toLowerCase()).toBe(owner.toLowerCase());
+      expect(first.url).toMatch(new RegExp(`/issues/${first.number}$`));
+      const listed = value(await fx.forge.inboxes(live()));
+      expect(listed.map((i) => i.number)).toContain(first.number);
+      expect([...listed].map((i) => i.number)).toEqual([...listed].map((i) => i.number).sort((a, b) => a - b));
+    });
+
+    scenario("setInboxBody replaces the body verbatim and inboxes reads it back", ["openInbox", "setInboxBody", "inboxes"], [], async (fx) => {
+      const inbox = value(await fx.forge.openInbox(owner, live()));
+      const body = "🤖 Xarabot inbox: 1 item waits on you.\n\n### Blocked (1)\n\n- [story:4.2](https://github.com/o/r/pull/12) · blocked `intent-gap` · 2d\n  > Which inbox owns graph PRs? ünïcode\n";
+      const set = value(await fx.forge.setInboxBody(inbox.number, body, live()));
+      expect(set).toMatchObject({ number: inbox.number, body });
+      expect(value(await fx.forge.inboxes(live())).find((i) => i.number === inbox.number)?.body).toBe(body);
+      expect(value(await fx.forge.setInboxBody(inbox.number, EMPTY_INBOX_BODY, live())).body).toBe(EMPTY_INBOX_BODY);
+    });
+
+    scenario("inboxComment posts its body verbatim on the inbox", ["openInbox", "inboxComment"], ["inboxComments"], async (fx) => {
+      const inbox = value(await fx.forge.openInbox(owner, live()));
+      const before = await need(fx, "inboxComments")(inbox.number);
+      const posted = value(await fx.forge.inboxComment(inbox.number, "🤖 digest: 2 items", live()));
+      expect(typeof posted.id).toBe("string");
+      expect(await need(fx, "inboxComments")(inbox.number)).toEqual([...before, "🤖 digest: 2 items"]);
+    });
+
+    scenario("a missing inbox issue is not-found; a non-login owner is rejected", ["openInbox", "setInboxBody", "inboxComment"], [], async (fx) => {
+      expect(kind(await fx.forge.setInboxBody(MISSING_PR, "b", live()))).toBe("not-found");
+      expect(kind(await fx.forge.inboxComment(MISSING_PR, "b", live()))).toBe("not-found");
+      expect(kind(await fx.forge.openInbox("not a login", live()))).toBe("rejected");
+    });
+
+    scenario("an owner with no inbox gets one: open, titled 🤖 Xarabot inbox, assigned to them", ["openInbox"], ["inboxes"], async (fx) => {
+      const inbox = value(await fx.forge.openInbox("bob", live()));
+      const held = (await need(fx, "inboxes")()).find((i) => i.number === inbox.number);
+      expect(held).toMatchObject({ number: inbox.number, title: "🤖 Xarabot inbox", owner: "bob", open: true });
+      expect(inbox.body).toBe("");
+    });
+
+    scenario("an aborted inbox call changes nothing", ["openInbox", "setInboxBody", "inboxComment"], ["inboxes", "inboxComments"], async (fx) => {
+      expect(kind(await fx.forge.openInbox("carol", aborted()))).toBe("transient");
+      expect(await need(fx, "inboxes")()).toEqual([]);
+      const inbox = value(await fx.forge.openInbox("carol", live()));
+      expect(kind(await fx.forge.setInboxBody(inbox.number, "x", aborted()))).toBe("transient");
+      expect(kind(await fx.forge.inboxComment(inbox.number, "x", aborted()))).toBe("transient");
+      expect((await need(fx, "inboxes")()).find((i) => i.number === inbox.number)?.body).toBe("");
+      expect(await need(fx, "inboxComments")(inbox.number)).toEqual([]);
+    });
+
+    scenario("renderDigest's bodies land verbatim in each owner's inbox, and a re-render matches them", ["openInbox", "setInboxBody", "inboxes"], ["inboxes"], async (fx) => {
+      const snapshot = snapshotOf({
+        epics: { 1: [], 2: ["1", "2"] },
+        bootstrapped: [1],
+        records: [
+          storyRec("2.1", { state: "parked", pr: 12, park: { kind: "blocked", reason: "intent-gap", inbox_owner: "dave", globs_held: [], text: "Which inbox owns graph PRs?\n\nAsk @erin." } }),
+          storyRec("2.2", { state: "parked", pr: 13, park: { kind: "awaiting-approval", reason: null, inbox_owner: "erin", globs_held: [] } }),
+        ],
+      });
+      const render = () => renderDigest({ snapshot, files: {}, repoUrl: "https://github.com/xaravel/xarabot" });
+      const digests = render();
+      expect([...digests.keys()]).toEqual(["dave", "erin"]);
+      for (const [who, d] of digests) {
+        const inbox = value(await fx.forge.openInbox(who, live()));
+        value(await fx.forge.setInboxBody(inbox.number, d.body, live()));
+      }
+      const listed = value(await fx.forge.inboxes(live()));
+      for (const [who, d] of render()) expect(listed.find((i) => i.owner === who)?.body).toBe(d.body);
+      expect((await need(fx, "inboxes")()).map((i) => i.owner)).toEqual(["dave", "erin"]);
     });
 
     // ------------------------------------------------------------ prefetch

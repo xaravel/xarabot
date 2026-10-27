@@ -204,6 +204,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       abortReason: "the unit or the coordinator claim was lost during the planning step",
       clock,
       sleep,
+      secrets,
     });
 
     /** Nothing to commit: `merged` with no PR, then the record deleted at once. */
@@ -426,7 +427,7 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       note(`result: ${result.outcome}`);
       switch (result.outcome) {
         case "blocked":
-          return await parkBlocked("readiness", `blocked readiness: ${capText(sanitizeAgentText(result.summary, { secrets }).trim(), FORGE_TEXT_LIMITS.body)}`);
+          return await parkBlocked("readiness", `blocked readiness: ${capText(sanitizeAgentText(result.summary, { secrets }).trim(), FORGE_TEXT_LIMITS.body)}`, result.summary);
         case "nothing-due":
           return await finish(`nothing-due: ${sanitizeAgentText(result.summary, { secrets }).replace(/\s+/g, " ").trim()}`);
         case "done":

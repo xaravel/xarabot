@@ -19,6 +19,7 @@ import {
   type ForgeReview,
   type ForgeSnapshot,
   type GitSha,
+  type InboxIssue,
   type PostReviewRequest,
   type PrefetchRequest,
   type PushLease,
@@ -57,7 +58,9 @@ import { createTokenSource } from "./tokens.ts";
  * `queueState` does) and then call `enqueuePullRequest` or
  * `dequeuePullRequest` (the merge queue is the only merge path; the adapter
  * has no direct or admin merge call); `alert`
- * posts one deduplicated comment on the Maintainer's inbox issue. Each call
+ * posts one deduplicated comment on the Maintainer's inbox issue; the inbox
+ * operations (Story 4.2) list, find or create, rewrite and comment on the
+ * owners' inbox issues over REST. Each call
  * makes one attempt, never throws, and returns `transient` for an
  * already-aborted signal before any request.
  */
@@ -997,27 +1000,54 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
   const inboxLabel = options.inboxLabel ?? DEFAULT_INBOX_LABEL;
   const botLogin = `${options.credentials.app.slug}[bot]`;
 
-  /** The lowest-numbered open inbox issue assigned to `maintainer`, created when missing. */
-  async function inboxIssue(ctx: Ctx, maintainer: string): Promise<ForgeResult<number>> {
+  const gitUrl = (options.gitUrl ?? DEFAULT_GIT_URL).replace(/\/+$/, "");
+
+  /** An issue item as an `InboxIssue`; `undefined` when malformed. */
+  function toInbox(raw: unknown): InboxIssue | undefined {
+    const issue = asObj(raw);
+    const number = issue?.["number"];
+    if (issue === undefined || typeof number !== "number") return undefined;
+    const body = issue["body"] ?? "";
+    if (typeof body !== "string") return undefined;
+    const assignees = issue["assignees"];
+    const first = Array.isArray(assignees) && assignees.length > 0 ? str(assignees[0], "login") : str(issue["assignee"], "login");
+    const url = str(issue, "html_url") ?? `${gitUrl}/${owner}/${name}/issues/${number}`;
+    return { number, owner: first ?? null, body, url };
+  }
+
+  /** Every open inbox issue, or only `login`'s with `login`, ascending by number; PRs are left out. */
+  async function listInboxes(ctx: Ctx, login: string | null): Promise<ForgeResult<InboxIssue[]>> {
     const listOp = GITHUB_OPERATIONS.listIssues;
-    const query = `labels=${encodeURIComponent(inboxLabel)}&assignee=${encodeURIComponent(maintainer)}&state=open&sort=created&direction=asc`;
+    const assignee = login === null ? "" : `&assignee=${encodeURIComponent(login)}`;
+    const query = `labels=${encodeURIComponent(inboxLabel)}${assignee}&state=open&sort=created&direction=asc`;
     const listed = await paged(ctx, listOp, (page) => `/issues?${query}&per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
     if (!listed.ok) return listed;
-    let lowest: number | undefined;
+    const out: InboxIssue[] = [];
     for (const raw of listed.value) {
-      const issue = asObj(raw);
-      const number = issue?.["number"];
-      if (typeof number !== "number") return malformed(listOp, "not an issue");
-      if (issue?.["pull_request"] !== undefined) continue;
-      if (lowest === undefined || number < lowest) lowest = number;
+      if (asObj(raw)?.["pull_request"] !== undefined) continue;
+      const inbox = toInbox(raw);
+      if (inbox === undefined) return malformed(listOp, "not an issue");
+      out.push(inbox);
     }
+    return forgeOk(out.sort((a, b) => a.number - b.number));
+  }
+
+  /**
+   * The lowest-numbered open inbox issue whose owner (first assignee) is
+   * `login`, created with `body` when there is none. GitHub's `assignee`
+   * filter matches any assignee, so an issue owned by another login is
+   * skipped.
+   */
+  async function inboxIssue(ctx: Ctx, login: string, body: string): Promise<ForgeResult<InboxIssue>> {
+    const listed = await listInboxes(ctx, login);
+    if (!listed.ok) return listed;
+    const lowest = listed.value.find((i) => i.owner?.toLowerCase() === login.toLowerCase());
     if (lowest !== undefined) return forgeOk(lowest);
     const createOp = GITHUB_OPERATIONS.createIssue;
-    const body = `🤖 Xarabot posts alerts for @${maintainer} here: each comment names a condition that stops every lane.`;
-    const created = await api(ctx, createOp, "/issues", { title: INBOX_TITLE, body, labels: [inboxLabel], assignees: [maintainer] });
+    const created = await api(ctx, createOp, "/issues", { title: INBOX_TITLE, body, labels: [inboxLabel], assignees: [login] });
     if (!created.ok) return created;
-    const number = asObj(created.value.body)?.["number"];
-    return typeof number === "number" ? forgeOk(number) : malformed(createOp, "no number");
+    const inbox = toInbox(created.value.body);
+    return inbox === undefined ? malformed(createOp, "no number") : forgeOk(inbox);
   }
 
   /** The dedupe scan's lower bound: `mainSha`'s committer date less 24 h; `null` when GitHub has no such commit. */
@@ -1040,8 +1070,10 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
         return forgeErr("forbidden", `alert: maintainer ${JSON.stringify(maintainer ?? null)} is not a GitHub login`);
       }
       if (!SHA_PATTERN.test(mainSha)) return forgeErr("not-found", `alert: ${JSON.stringify(mainSha)} is not a commit SHA`);
-      const issue = await inboxIssue(ctx, maintainer);
-      if (!issue.ok) return issue;
+      const body = `🤖 Xarabot posts alerts for @${maintainer} here: each comment names a condition that stops every lane.`;
+      const inbox = await inboxIssue(ctx, maintainer, body);
+      if (!inbox.ok) return inbox;
+      const issue = inbox.value.number;
       const since = await alertSince(ctx, mainSha);
       if (!since.ok) return since;
       const marker = alertMarker(condition, mainSha);
@@ -1050,7 +1082,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
       const comments = await paged(
         ctx,
         listOp,
-        (page) => `/issues/${issue.value}/comments?${sinceQuery}per_page=${PER_PAGE}&page=${page}`,
+        (page) => `/issues/${issue}/comments?${sinceQuery}per_page=${PER_PAGE}&page=${page}`,
         (b) => (Array.isArray(b) ? b : undefined),
       );
       if (!comments.ok) return comments;
@@ -1060,9 +1092,44 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
         if (login === botLogin && body !== undefined && body.includes(marker)) return forgeOk({ posted: false });
       }
       const postOp = GITHUB_OPERATIONS.createIssueComment;
-      const posted = await api(ctx, postOp, `/issues/${issue.value}/comments`, { body: alertBody(maintainer, condition, mainSha) });
+      const posted = await api(ctx, postOp, `/issues/${issue}/comments`, { body: alertBody(maintainer, condition, mainSha) });
       if (!posted.ok) return posted;
       return forgeOk({ posted: true });
+    });
+  }
+
+  // ------------------------------------------------------------ inboxes
+
+  async function inboxes(opts: CallOpts): Promise<ForgeResult<readonly InboxIssue[]>> {
+    return guarded("inboxes", opts, (ctx) => listInboxes(ctx, null));
+  }
+
+  async function openInbox(login: string, opts: CallOpts): Promise<ForgeResult<InboxIssue>> {
+    return guarded("openInbox", opts, async (ctx) => {
+      if (!LOGIN_PATTERN.test(login)) return forgeErr("rejected", `openInbox: ${JSON.stringify(login)} is not a GitHub login`);
+      // Created empty: the inbox step writes its body.
+      return inboxIssue(ctx, login, "");
+    });
+  }
+
+  async function setInboxBody(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<InboxIssue>> {
+    return guarded("setInboxBody", opts, async (ctx) => {
+      const op = GITHUB_OPERATIONS.updateIssue;
+      const r = await api(ctx, op, `/issues/${issue}`, { body });
+      if (!r.ok) return r;
+      const inbox = toInbox(r.value.body);
+      return inbox === undefined ? malformed(op, "not an issue") : forgeOk(inbox);
+    });
+  }
+
+  async function inboxComment(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>> {
+    return guarded("inboxComment", opts, async (ctx) => {
+      const op = GITHUB_OPERATIONS.createIssueComment;
+      const r = await api(ctx, op, `/issues/${issue}/comments`, { body });
+      if (!r.ok) return r;
+      const id = asObj(r.value.body)?.["id"];
+      if (typeof id !== "number" && typeof id !== "string") return malformed(op, "no id");
+      return forgeOk({ id: String(id) });
     });
   }
 
@@ -1084,5 +1151,9 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     queueState,
     alert,
     prefetch: prefetchCiLogs,
+    inboxes,
+    openInbox,
+    setInboxBody,
+    inboxComment,
   };
 }

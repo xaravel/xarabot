@@ -9,6 +9,7 @@ import {
   GraphHash,
   LaneIdentity,
   LEDGER_SCHEMA_VERSION,
+  PARK_TEXT_MAX,
   ParkReason,
   ParkSchema,
   planningKindOf,
@@ -21,6 +22,7 @@ import {
   type UnitState,
 } from "../schemas/ledger.ts";
 import { RetroRecordResultSchema } from "../schemas/retro-gates.ts";
+import { capText, sanitizeAgentText } from "../sanitize.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord, type Ledger } from "./codec.ts";
 import { checkTransition } from "./transitions.ts";
 
@@ -568,7 +570,23 @@ export type ParkParams = HeldParams & {
    * was posted.
    */
   readonly graphPosted?: string;
+  /**
+   * The blocked session's own words (Story 4.2), kept as `park.text`:
+   * already sanitized (`parkText`) and at most `PARK_TEXT_MAX` long. Absent
+   * or empty: the park has none.
+   */
+  readonly text?: string;
 };
+
+/**
+ * Agent text as a park keeps it (Story 4.2): `sanitizeAgentText` with the
+ * lane's known `secrets`, trimmed and capped at `PARK_TEXT_MAX`; `undefined`
+ * when nothing is left.
+ */
+export function parkText(text: string, secrets: readonly string[] = []): string | undefined {
+  const clean = sanitizeAgentText(text, { secrets }).trim();
+  return clean === "" ? undefined : capText(clean, PARK_TEXT_MAX);
+}
 
 /**
  * `claimed → parked` and, for an approval-gated ejection, `merging → parked`
@@ -605,6 +623,7 @@ export function park(p: ParkParams): LedgerEdit {
       inbox_owner: inbox.value,
       globs_held: held,
       ...(posted.value !== null ? { graph_posted: posted.value } : {}),
+      ...(p.text !== undefined && p.text !== "" ? { text: p.text } : {}),
     });
     if (!parkValue.ok) return parkValue;
     if (reason.value === "unclaimable") return bad("park: unclaimable is not a reason for parking a claimed unit");
@@ -1127,6 +1146,38 @@ export function keepCoordinator(p: KeepCoordinatorParams): LedgerEdit {
       return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
     }
     return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, heartbeat_at: ctx.now });
+  });
+}
+
+export type StampDigestParams = CoordinatorEditBase & {
+  readonly generation: number;
+  /** Today's digest slot (`digestSlot`): a stamp at or after it means today's digest is already taken. */
+  readonly slot: string;
+};
+
+/**
+ * The daily digest's claim (Story 4.2): sets `digest_posted_at` to `now`,
+ * the forge's time, only while the writer holds `coordinator.json` at
+ * `generation` and its `digest_posted_at` is unset or before `slot`. A stamp
+ * already at or after `slot` refuses, so at most one run a day posts the
+ * digest's mentions.
+ */
+export function stampDigest(p: StampDigestParams): LedgerEdit {
+  return makeCoordinatorEdit("stampDigest", p, (ctx) => {
+    const g = check("stampDigest generation", Generation, p.generation);
+    if (!g.ok) return g;
+    const slot = check("stampDigest slot", IsoDateTime, p.slot);
+    if (!slot.ok) return slot;
+    const rec = ctx.current;
+    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
+    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
+    if (rec.generation !== g.value) {
+      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
+    }
+    if (rec.digest_posted_at !== null && Date.parse(rec.digest_posted_at) >= Date.parse(slot.value)) {
+      return pre(`${COORDINATOR_PATH}: the digest was already posted at ${rec.digest_posted_at}, at or after today's slot ${slot.value}`);
+    }
+    return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, digest_posted_at: ctx.now });
   });
 }
 

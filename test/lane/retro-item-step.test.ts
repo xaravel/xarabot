@@ -639,7 +639,7 @@ describe("createRetroItemStep: other results", () => {
     const h = harness({ behaviors: [writes(built({ outcome: "blocked", blocked: { kind: "intent-gap", text: "unclear" } }))] });
     const out = await h.run();
     expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
-    expect((await h.ledger()).get(U)).toMatchObject({ park: { kind: "blocked", reason: "intent-gap" } });
+    expect((await h.ledger()).get(U)).toMatchObject({ park: { kind: "blocked", reason: "intent-gap", text: "unclear" } });
     expect(h.commits).toEqual([]);
   });
 

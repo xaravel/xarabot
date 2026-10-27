@@ -653,6 +653,77 @@ describe("next: Infrastructure Stories", () => {
   });
 });
 
+describe("next: waiting on the Maintainer (Story 4.2, AR25)", () => {
+  const PREFIX = "waiting-on-maintainer: ";
+  // Chain 1 → 2 → 3 → 4, Epics 1-3 done with retros recorded; Epic 5 depends on nothing.
+  const EPIC5 = "version: 1\nepics:\n  5:\n    depends_on: []\n";
+  const chain = (items: readonly ItemSpec[], verdict: Verdict, over: Partial<World> = {}): World => ({
+    epics: { 1: ["1"], 2: ["1"], 3: ["1"], 4: ["1"], 5: ["1", "2"] },
+    status: { "1.1": "done", "2.1": "done", "3.1": "done" },
+    retro: { 1: verdict, 2: "accepted", 3: "accepted" },
+    items: { 1: items },
+    epicsYaml: EPIC5,
+    ...over,
+  });
+  const parked = (id: string, kind: "awaiting-approval" | "needs-approval" | "blocked") =>
+    storyRec(id, { state: "parked", park: { kind, reason: kind === "blocked" ? "intent-gap" : null, inbox_owner: "alice", globs_held: [] } });
+  const done5 = { "1.1": "done", "2.1": "done", "3.1": "done", "5.2": "done" };
+  const cases: { name: string; world: World; waiting: boolean }[] = [
+    {
+      name: "idle only for a rejected retro and a parked approval",
+      world: chain([], "rejected", { status: done5, records: [parked("5.1", "awaiting-approval")] }),
+      waiting: true,
+    },
+    { name: "a rejected retro and a needs-approval park", world: chain([], "rejected", { status: done5, records: [parked("5.1", "needs-approval")] }), waiting: true },
+    {
+      name: "a hold by an item routed to the Maintainer",
+      world: chain([{ seq: 1, blocking: false, status: "open", route: "maintainer" }], "accepted-with-open-items", { status: { ...done5, "5.1": "done" } }),
+      waiting: true,
+    },
+    {
+      name: "a hold by an item routed to a lane: plain",
+      world: chain([{ seq: 1, blocking: false, status: "open", route: "lane" }], "accepted-with-open-items", { status: { ...done5, "5.1": "done" } }),
+      waiting: false,
+    },
+    { name: "a rejected retro and a blocked park: plain", world: chain([], "rejected", { status: done5, records: [parked("5.1", "blocked")] }), waiting: false },
+    {
+      name: "a depends-on among them: plain",
+      world: chain([], "rejected", {
+        status: { "1.1": "done", "2.1": "done", "3.1": "done" },
+        manifests: [{ id: "1.1" }, { id: "2.1" }, { id: "3.1" }, { id: "4.1" }, { id: "5.1" }, { id: "5.2", deps: ["5.1"] }],
+        records: [parked("5.1", "awaiting-approval")],
+      }),
+      waiting: false,
+    },
+    {
+      name: "a stale Infrastructure record with no approval",
+      world: { epics: { 1: [], 2: ["1"] }, bootstrapped: [1], manifests: [{ id: "2.1", infra: true }], records: [storyRec("2.1", { state: "claimed", heartbeat_at: "2020-01-01T00:00:00Z" })] },
+      waiting: true,
+    },
+    { name: "a claimed record: plain", world: { epics: { 1: [], 2: ["1"] }, bootstrapped: [1], records: [storyRec("2.1", { state: "claimed" })] }, waiting: false },
+  ];
+  test.each(cases)("$name", ({ world, waiting }) => {
+    const o = pick(world);
+    expect(o.kind).toBe("idle");
+    const reason = idleReason(o);
+    expect(reason.startsWith(PREFIX)).toBe(waiting);
+    // The prefix is all that changes: the messages follow it as before.
+    const messages = o.kind === "idle" ? o.reasons.map((r) => r.message).join("; ") : "";
+    expect(reason).toBe(`${waiting ? PREFIX : ""}${messages}`);
+    expect(o.kind === "idle" && o.reasons.length > 0).toBe(true);
+  });
+
+  test("the Maintainer causes are flagged on their reasons", () => {
+    const o = pick(chain([{ seq: 1, blocking: false, status: "open", route: "maintainer" }], "rejected", { status: done5, records: [parked("5.1", "awaiting-approval")] }));
+    const flagged = o.kind === "idle" ? o.reasons.map((r) => `${r.code} ${r.maintainer === true}`) : [];
+    expect([...new Set(flagged)].sort()).toEqual(["record-state true", "retro-item true", "retro-rejected true"]);
+  });
+
+  test("nothing left: no prefix", () => {
+    expect(idleReason(pick({ epics: { 1: [], 2: ["1"] }, bootstrapped: [1], status: { "2.1": "done" } }))).toBe("no Story left to build");
+  });
+});
+
 describe("next: unmanifested and unclaimable", () => {
   test("both listed, never returned", () => {
     const w = BOOT(["1", "3", "4"], {

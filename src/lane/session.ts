@@ -4,7 +4,7 @@ import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { unattendedRefusal } from "../core/lane/runner.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
-import { failAttempt, failClaimed, heartbeat, park, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import { failAttempt, failClaimed, heartbeat, park, parkText, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { allowanceRefusal } from "../core/review/allowance.ts";
@@ -613,13 +613,19 @@ export type StepOpsParams = {
   readonly clock: () => number;
   /** The CI poll's sleep. */
   readonly sleep: Sleep;
+  /** The lane's known secrets, redacted from a park's `text` (Story 4.2); default none. */
+  readonly secrets?: readonly string[];
 };
 
 export type StepOps = {
   /** Once `signal` aborted: ends the step `failed`, the record left as it is for the process (or the lane's budget rule) to judge. */
   aborted(): void;
-  /** Parks the unit `blocked` for `reason`, then ends the step `progress`. */
-  parkBlocked(reason: ParkReason, why: string): Promise<never>;
+  /**
+   * Parks the unit `blocked` for `reason`, then ends the step `progress`.
+   * `text`, the session's own words (a `blocked.text` or a readiness
+   * summary), is kept as `park.text`, sanitized and capped (`parkText`).
+   */
+  parkBlocked(reason: ParkReason, why: string, text?: string): Promise<never>;
   /**
    * Fresh `main`, after `aborted`: one snapshot, then the config and
    * Standing Authority loaded from it. An invalid one ends the step `stop`;
@@ -669,10 +675,11 @@ export function stepOps(p: StepOpsParams): StepOps {
     throw kit.end("failed", kit.record.state);
   };
 
-  const parkBlocked = async (reason: ParkReason, why: string): Promise<never> => {
+  const parkBlocked = async (reason: ParkReason, why: string, text?: string): Promise<never> => {
     reasons.push(why);
     kit.note(`parking blocked ${reason}: ${why}`);
-    await kit.held("park", park({ unit, by: identity, now: kit.forgeNow(), generation, kind: "blocked", reason }));
+    const kept = text === undefined ? undefined : parkText(text, p.secrets ?? []);
+    await kit.held("park", park({ unit, by: identity, now: kit.forgeNow(), generation, kind: "blocked", reason, ...(kept !== undefined ? { text: kept } : {}) }));
     throw kit.end("progress", kit.record.state);
   };
 
@@ -754,7 +761,7 @@ export function stepOps(p: StepOpsParams): StepOps {
   const pushSessionFix = async (what: string, done: CiSessionDone, needsSpec: boolean, push: PushFix): Promise<void> => {
     const { result, specPath, superseded } = done;
     kit.note(`${what} result: ${result.outcome}`);
-    if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`);
+    if (result.outcome === "blocked") return await parkBlocked(result.blocked.kind, `${what} blocked ${result.blocked.kind}: ${result.blocked.text}`, result.blocked.text);
     if (result.outcome === "no-op") return await parkBlocked("no-op", `${what}: no-op`);
     if (needsSpec && specPath === null) return await kit.failed(`${what} session: a done result with no spec file`);
     let out: PrStepOutput;

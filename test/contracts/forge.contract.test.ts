@@ -17,6 +17,8 @@ const CONTROLS = {
   reviewBodies: true,
   queue: true,
   trace: true,
+  inboxes: true,
+  inboxComments: true,
 } as const satisfies Record<ForgeControlName, true>;
 const ALL_CONTROLS = Object.keys(CONTROLS) as ForgeControlName[];
 

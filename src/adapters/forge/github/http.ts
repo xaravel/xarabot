@@ -72,6 +72,8 @@ export const GITHUB_OPERATIONS = {
   dequeuePullRequest: { name: "dequeuePullRequest", method: "POST", permission: "contents: write" },
   listIssues: { name: "listIssues", method: "GET", permission: "issues: write" },
   createIssue: { name: "createIssue", method: "POST", permission: "issues: write" },
+  /** An inbox issue's body (Story 4.2). */
+  updateIssue: { name: "updateIssue", method: "PATCH", permission: "issues: write" },
   listIssueComments: { name: "listIssueComments", method: "GET", permission: "issues: write" },
   createIssueComment: { name: "createIssueComment", method: "POST", permission: "issues: write" },
   getJobLogs: { name: "getJobLogs", method: "GET", permission: "actions: read" },
