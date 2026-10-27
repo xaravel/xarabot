@@ -18,7 +18,7 @@
     "test/core/reconcile/retro-gates-edit.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T00:56:53.974Z",
+  "heartbeat_at": "2026-10-27T00:56:58.414Z",
   "pr": 240,
   "pr_owner": "edanisko",
   "base_sha": "f2eaf11831e23e26d1cd568bcae4b185dd2feda3",
