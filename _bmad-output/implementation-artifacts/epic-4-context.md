@@ -1,5 +1,5 @@
 # Epic 4 Context: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
-<!-- source: sha256:8769d8383df38cf4a8e55179c2a55a257f41a6d75dfb1a62f491a48605a0923b -->
+<!-- source: sha256:622cd939380e93ccf2641322cc4091b9e41eb7f4d797609504957ab277308119 -->
 
 <!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
 
@@ -50,29 +50,30 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
   Only `reconcile`'s runner code writes the file, and it is the authoritative tracker for retro items. The `action_items` in `sprint-status.yaml` are the retro skill's copy and are not reconciled.
 - **Inbox issue:** one `xarabot-inbox`-labelled issue per owner, assigned to them, found or created on first need. Only the Maintainer's is pinned, by hand, as a Human Live Step. `renderDigest` builds the body from `parked` records, PR states and `retro-gates.yaml`, and rewrites it only when the content changed, because a body edit sends no notification. `reconcile` enumerates every inbox issue, so a body left stale by an owner who no longer holds any record is cleared. The daily mention comment goes out on the first `reconcile` at or after config `digest_time` (default `08:00` UTC). Its time is recorded in `coordinator.json`, and a passed digest time with no digest posted counts as `reconcile` work in the due rule.
 - **Deferred-entry ids:** each entry of a Story spec's `deferred` list has the id `<story-id>-d<n>`, its 1-based position in that append-only list; an older entry with no `id` key has the same id by position. New entries write `id:`, and a spec that settles earlier entries lists their ids in a frontmatter `resolves: [<id>, …]`.
-- **Park text:** a unit parked `blocked` with text stores it sanitized and capped below the forge's limit in `park.text`. That bumps the ledger `schema_version` by one, and every lane's runner pin advances together.
+- **Park text:** a unit parked `blocked` with text stores it sanitized and capped below the forge's limit in `park.text`. That bumps the ledger `schema_version` to 6, and every lane's runner pin advances together at the tag that carries 6. The rulings' new `coordinator.json` fields (the pending list and the dismissal list) ride the same version 6, because no runner tag has shipped it yet; there is no bump to 7.
 - **Maintainer-routed retro items:** `reconcile` sets them to `waiting` in the same runner-written PR that writes the retro. `next` never returns them as `retro-item` units.
 - **Rulings:** `/xarabot <verb> <unit-id>` on an inbox issue with a well-formed unit id. Other text is ignored.
   - Verbs and authority: `go`, `approve`, `block`, `unblock`, `done` and `defer` count only from the Maintainer named in config. `rebuild`, `release` and `dismiss` count from the item's owner or the Maintainer.
   - `go` applies to a `checkpoint:<epic>`, or to a `retro:<epic>` whose verdict is `rejected`. `done` and `defer` apply only to a `retro-item:<id>`.
   - `reconcile` reads new comments through `Forge.readRulings(cursor)`. The cursor lives in `coordinator.json` and advances in the same ledger swap that applies the rulings.
   - Every ruling gets a 🤖 reply. A valid one is acknowledged. A malformed, unauthorized or mis-targeted one changes nothing, and the reply gives the reason.
+  - **Pending `retro-gates.yaml` rulings:** `go`, `block`, `unblock`, `done` and `defer` are written by `reconcile`'s PR. Each acknowledged one goes into a pending list in `coordinator.json`, in the same ledger swap that moves the cursor. Every `reconcile` run re-applies each pending ruling until `main`'s `retro-gates.yaml` shows it, then drops it, so a ruling survives a PR that never opens, is closed or fails CI, and a run that dies in between.
 - **Verb effects:**
   - `go` records the go in `retro-gates.yaml`.
   - `approve` records `approval` {Maintainer login, current `manifest_sha`} and releases the record. A later manifest change voids it.
   - `block` and `unblock` flip the item's `blocking` tag.
   - `release` resets `attempts`, `loopbacks` and `ci_fixes` and keeps `builder_providers[]`.
   - `rebuild` also closes the open PR and clears `reviewed_sha`, `passed_sha` and `builder_providers[]`.
-  - `dismiss` removes only the inbox item.
+  - `dismiss` removes only the inbox item and changes no unit record or retro gate. The dismissal is kept in `coordinator.json` with the item's id and the instance it dismissed (its subject and start time). The digest leaves out an item matching a stored dismissal, and the dismissal is dropped once the item comes back as a new instance (its subject or start time changes), so a fresh problem is never hidden.
   - `done` and `defer` set the item's status to `done` or `deferred`.
-  - `xarabot rule <verb> <unit-id>` on the host applies every verb with the same edit.
+  - `xarabot rule <verb> <unit-id>` on the host applies every verb with the same edit, and writes the same pending entry.
 
 ## Cross-Story Dependencies
 
 - 4.1 and 4.2 build on the retro-item units (Story 2.10). 4.3 and 4.4 need both. 4.5 needs 4.2. 4.6 needs 4.3, 4.4 and 4.5. 4.7 comes last.
 - Story 4.7 records its live command and the expected scratch-repo results in `docs/maintainer/self-host.md`. The Maintainer runs them on the host before Epic 4's retro. From Epic 4 on, `live_evidence_checks` in `.xarabot/config.yaml` lists those commands, so a failed live row holds the retro.
-- Epic 3's retro was rejected and the Maintainer's go is recorded, so Epic 4 may start. Its item 1 (reap session processes, isolate review passes) is still open and `blocking`; it may kill the process group the sandbox created for a session with `setsid`, signalled by that group's id (the session's exact PID), and kill by exact PID still holds everywhere else. Stories 4.1 to 4.3 are merged; once its gates take effect, item 1 holds Epic 3's dependents, Epic 4 included, until it closes. Item 2 (codex live re-run) is done. The switch after Epic 3 waits for item 1 to merge in a runner tag.
+- Epic 3's retro was rejected and the Maintainer's go is recorded, so Epic 4 may start. Its blocking item 1 (reap session processes, isolate review passes) is done: a session's own `setsid` process group is killed by that group's id (the session's exact PID), and kill by exact PID still holds everywhere else. Item 2 (codex live re-run) is done. Stories 4.1 to 4.5 are merged.
 - Until the switch after Epic 3, there is one builder, and every path needs the Maintainer's approving review except `reconcile` PRs.
-- Epic 3's Maintainer-routed items 7 (correct course for Epic 3 drift) and 10 (trackers, macOS CI and evidence gates) are open and not blocking, so they hold Epics two or more steps from Epic 3. Until Story 4.6's `done`/`defer` rulings exist, nothing closes them.
-- Open lane retro items touch nearby code: `reconcile` PR hygiene, coordinator claim timing and fencing, planning attempts across runs, and session process reaping and review isolation. Check `retro-gates.yaml` for their globs.
+- Epic 3's Maintainer-routed items 7 (correct course for Epic 3 drift) and 10 (trackers, macOS CI and evidence gates) are open and not blocking, so they hold Epics two or more steps from Epic 3. Nothing closes them until Story 4.6's `done`/`defer` rulings exist.
+- Open lane retro items touch nearby code: coordinator claim timing and fencing, and planning attempts across runs. The `reconcile` PR hygiene item's fix has merged. Check `retro-gates.yaml` for their globs.
 - Merged code takes effect only after the Maintainer advances `runner_version`.
