@@ -25,7 +25,7 @@
     "test/core/schemas/**",
     "test/lane/**"
   ],
-  "heartbeat_at": "2026-10-27T00:06:56.484Z",
+  "heartbeat_at": "2026-10-27T00:10:43.169Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "60238eeea14e008f9f6a6d183ca673c51a614356",
@@ -36,7 +36,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
