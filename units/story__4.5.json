@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.5",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-4-5-rulings-grammar-authority-and-cursor.md",
@@ -28,7 +28,7 @@
     "test/lane/rulings-step.test.ts",
     "test/ports/forge.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T02:35:18.237Z",
+  "heartbeat_at": "2026-10-27T02:37:47Z",
   "pr": 247,
   "pr_owner": "edanisko",
   "base_sha": "cfdd7ea9cfc655b286f4ef364d0ec04f8f230225",
