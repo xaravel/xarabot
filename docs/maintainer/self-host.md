@@ -1099,3 +1099,140 @@ stale gated status planning PR that Story 2.7's spec (`spec-2-7`) accepted
 until this switch. The "Several builder lanes" drain step waits for the PID
 in the lane's `lane.lock` to be gone, not for a missing `lane.lock` or a
 written `outcome`.
+
+## Epic 4's live evidence (Story 4.7)
+
+Epic 4's retro (`retro:4`) waits until `docs/maintainer/evidence/epic-4.md`
+is on `main`. Run the commands below on the Xarabot host as
+`edanisko-xarabot`, outside any sandbox (`XARABOT_SANDBOXED` must be unset),
+from `~/xarabot-switch`, a checkout of a `main` commit that has Story 4.7.
+Update it and note its commit first, as for Epic 3:
+
+```sh
+git -C ~/xarabot-switch pull --ff-only && cd ~/xarabot-switch && bun install --frozen-lockfile
+git rev-parse HEAD
+```
+
+### Before the run
+
+**No re-seed is needed** beyond the canary's ("The canary" above). The suite
+lays its own Xaravel-shaped graph over the scratch `main`: Epics 1 to 8
+bootstrapped (8 a checkpoint after 7), then `runtime` (9), `contracts` (10),
+`macroable`, `conditionable` and `json-schema` (11 to 13, each after 10) and
+`tooling` (14, after 9), each with two Stories on `packages/<slug>/**`. It
+hides every scratch path under `_bmad-output/` and `stories/` and
+`.xarabot/epics.yaml`, and takes the rest from the scratch `main`: the
+policy (`expected_checks: [check]`), the Standing Authority and the CI
+workflow. The `edanisko-xarabot` App credentials are the canary's, with the
+issue permissions the inbox already needs (Story 4.2).
+
+Both cases use your inbox on the scratch repo: the lowest-numbered open
+`xarabot-inbox` issue assigned to you (`reconcile` opens one if there is
+none). Its body is rewritten by each case; that is expected. Run this suite
+alone on the scratch repo, never alongside the canary, the claims race or
+the cross-vendor suite: they share that inbox. Afterwards your scratch inbox
+body keeps the fixture digest until the next real `reconcile` run rewrites
+it.
+
+### The parallel Epics suite
+
+Each live case runs the real coordinator process with the real `reconcile`
+step (no agent session) against a fresh ledger branch `xarabot/test-<uuid>`,
+with its branches under `xarabot-test/<uuid>/`, and builders claim through
+the real `next` and the lane's own claim edits on that ledger. The rulings
+read, the 🤖 ack, the inbox issue, the ledger swaps and the `reconcile` PR
+with its CI run are real. Only the merge is simulated: the PR's enqueue is
+held, and the `retro-gates.yaml` it committed is laid over `main` in the
+test, so nothing reaches the scratch `main` and the canary and cross-vendor
+runs never see the fixture. The PR is closed and the branches deleted when
+the case ends, whether it passes or fails. Alerts are recorded by the test,
+not posted; a recorded alert fails the case.
+
+A run cut short by Bun's per-test timeout or by Ctrl-C skips that cleanup
+and can leave the `xarabot/test-<uuid>` and `xarabot-test/<uuid>/…`
+branches and an open `reconcile` PR behind. The claims race suite's command
+lists the branches; delete them by hand. To find and close a leftover PR:
+
+```sh
+gh pr list --repo xaravel/xarabot-scratch --state open --json number,headRefName --jq '.[] | select(.headRefName | startswith("xarabot-test/")) | .number'
+gh pr close --repo xaravel/xarabot-scratch <number>
+```
+
+```sh
+XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/parallel-epics.test.ts
+```
+
+**Your step during the checkpoint case.** After its first coordinator round
+the test prints
+
+```text
+live gates: comment "/xarabot go checkpoint:10" on <issue url> within 15 minutes
+```
+
+Open that issue and post this comment from your own account, exactly, with
+nothing else in it:
+
+```text
+/xarabot go checkpoint:10
+```
+
+Only a comment from the Maintainer's own account counts, so the test never
+posts it for you. Past 15 minutes the case fails at the step `the
+Maintainer's comment`. The test then waits until `reconcile` is due again
+(10 minutes after the first run, polled every 30 s, at most 12 minutes)
+before its second round.
+
+**Expected result** (expected counts, not yet measured on the host):
+`67 pass`, `0 skip`, `0 fail`, in an estimated 15 to 35 minutes, most of it
+the wait for your comment and for `reconcile` to be due again. The digest case has a 10-minute timeout and the checkpoint case 45
+minutes. The scratch cases:
+
+| Case | World | Expected |
+|---|---|---|
+| `live gates: the digest …` | Epics 9 and 10 done; Epic 9's retro `rejected` with no go and a `waiting` item routed to you; Epic 10's retro `accepted-with-open-items`, a checkpoint with no go, and an `open` blocking item routed to you; `story:14.1` parked blocked `intent-gap` with text, `story:11.1` `needs-approval`, `story:12.1` blocked `human-live-step`; `spec-9-1-runtime.md` with one deferred entry. Each item dated whole days and 6 hours back. | After one coordinator round your inbox reads `🤖 Xarabot inbox: 8 items wait on you.` and lists exactly `checkpoint:10`, `retro:9`, the two retro items, the three units and `9.1-d1`, each once, with its link and its age in whole days (`<1d` for `story:11.1`). No PR is opened. The three units' links point at `xarabot/claims`, the digest's fixed ledger branch, while the case's records live on its test ledger branch: those links are checked as text and do not resolve during the run. |
+| `live gates: the checkpoint go …` | Epics 9 and 10 done with `accepted` retros; Epic 10 a checkpoint with no go. | Before the go, only `story:14.1` is claimed, and round 1's inbox lists `checkpoint:10`. After your comment, round 2 stores the pending go `{go, checkpoint:10, by: you, at: the comment's time, ruling: its id}` in `coordinator.json`, replies ``🤖 Ruling acknowledged: `/xarabot go checkpoint:10` from edanisko``, opens its PR whose `retro-gates.yaml` sets `epics.10.checkpoint.go` (CI `check` passes; the enqueue is held), and leaves your inbox `🤖 Xarabot inbox: nothing waits on you.` Once that file is laid over `main`, builders claim `story:11.1`, `story:12.1` and `story:13.1`. |
+
+After each case the test prints one line: `live gates: digest: inbox #<n>,
+PR none, comment none; 8 items`, or `live gates: checkpoint go: inbox #<n>,
+PR #<n>, comment <id>`. Record those lines. A failed assertion starts
+`step "<name>":` and names the step, or lists every way the case broke its
+check. Fix the cause and run the suite again; a case that ended normally,
+passed or failed, already closed its PR and deleted its branches.
+
+**The skip rule.** Without the three variables, or inside a sandbox
+(`XARABOT_SANDBOXED=1`), the two live cases report skipped, never passed:
+`65 pass`, `2 skip`, `0 fail`, measured in a sandboxed session. That is not
+evidence. A missing App credential with the switch on fails the step `the
+live area`; it never skips. Every `bun test` runs the rest: every fixture row
+of the Story's gates matrix on the fake forge (parallel Epics, dependency,
+checkpoint, rejected retro and retro item holds, the go and block rulings),
+the two checks' case tables, and both cases rehearsed on the fake forge
+through the same coordinator process, `reconcile` step and builder claims.
+
+### Committing the evidence
+
+Commit the results as `docs/maintainer/evidence/epic-4.md` in a Maintainer
+PR from a `planning/<topic>` branch, and merge it before Epic 4's retro.
+Builders are refused any change to this file (`live-evidence`), so only you
+write it. The file holds:
+
+- the date, the host, the `main` commit (and its tag, if any) the checkout was at, and `bun --version`;
+- the command above, exactly as run, with its summary lines (`pass`, `skip` and `fail` counts) and how long it took. Record only a run that shows `0 skip`: a skipped run also ends `0 fail`, and the `live_evidence_checks` gate below cannot tell the two apart;
+- the two `live gates:` lines the cases printed, and the URL of your `/xarabot go checkpoint:10` comment;
+- for any run that failed: the failing `step "<name>":` line or the listed problems, what you changed, and the re-run that passed. Never replace a failed result silently.
+
+To make Epic 4's retro wait for the live result too, not just the file, add
+the command to `live_evidence_checks` in `.xarabot/config.yaml`, in a
+Maintainer PR:
+
+```yaml
+live_evidence_checks:
+  "4": ["XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/parallel-epics.test.ts"]
+```
+
+Keep any other Epic's entries. The retro is then due only once the evidence
+file holds that command with a `0 fail` summary after it, so a failed live
+row holds `retro:4`. The gate looks only for `0 fail`, so it is your record
+of a `0 skip` run that makes the row evidence. As for Story 2.9, set
+`live_evidence_checks` only once every lane's pin has this check: an older
+runner refuses the unknown key and stops on bad config.
