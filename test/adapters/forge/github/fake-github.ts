@@ -372,7 +372,15 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     return c;
   }
 
-  const commentJson = (c: FakeComment) => ({ id: c.id, body: c.body, user: { login: c.login }, created_at: c.created_at, updated_at: c.created_at });
+  /** A comment on issue or PR `n` as GitHub returns it, with its web link. */
+  const commentJson = (n: number, c: FakeComment) => ({
+    id: c.id,
+    body: c.body,
+    user: { login: c.login },
+    created_at: c.created_at,
+    updated_at: c.created_at,
+    html_url: `https://github.com/${owner}/${name}/${pulls.has(n) ? "pull" : "issues"}/${n}#issuecomment-${c.id}`,
+  });
 
   function issueJson(i: FakeIssue): Record<string, unknown> {
     return {
@@ -721,7 +729,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       if (!pulls.has(n) && !issues.has(n)) return notFound();
       const text = b?.["body"];
       if (typeof text !== "string") return unprocessable("Invalid request.");
-      return json(201, commentJson(addComment(n, text, botLogin)));
+      return json(201, commentJson(n, addComment(n, text, botLogin)));
     }
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(route)) !== null) {
       const n = Number(m[1]);
@@ -731,7 +739,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       if (Number.isNaN(from)) return unprocessable("Invalid since");
       const perPage = Number(params.get("per_page") ?? "30");
       const page = Number(params.get("page") ?? "1");
-      const list = (comments.get(n) ?? []).filter((c) => Date.parse(c.created_at) >= from).map(commentJson);
+      const list = (comments.get(n) ?? []).filter((c) => Date.parse(c.created_at) >= from).map((c) => commentJson(n, c));
       return json(200, list.slice((page - 1) * perPage, page * perPage));
     }
     if (method === "GET" && route === "/issues") {

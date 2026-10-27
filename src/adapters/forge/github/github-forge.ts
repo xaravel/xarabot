@@ -19,12 +19,14 @@ import {
   type ForgeReview,
   type ForgeSnapshot,
   type GitSha,
+  type InboxComment,
   type InboxIssue,
   type PostReviewRequest,
   type PrefetchRequest,
   type PushLease,
   type QueueState,
   rateLimited,
+  type RulingsRead,
   REVIEW_STATES,
   type ReviewState,
 } from "../../../ports/forge.ts";
@@ -60,7 +62,9 @@ import { createTokenSource } from "./tokens.ts";
  * has no direct or admin merge call); `alert`
  * posts one deduplicated comment on the Maintainer's inbox issue; the inbox
  * operations (Story 4.2) list, find or create, rewrite and comment on the
- * owners' inbox issues over REST. Each call
+ * owners' inbox issues over REST, and `readRulings` (Story 4.5) reads the
+ * comments on the open ones, its cursor `<created_at>|<id>` of the last
+ * comment it returned. Each call
  * makes one attempt, never throws, and returns `transient` for an
  * already-aborted signal before any request.
  */
@@ -100,6 +104,20 @@ export function alertMarker(condition: string, mainSha: GitSha): string {
 
 /** The builders' coordinator-claim alerts (Story 2.4), which stop nothing: condition → the claim's state. */
 const COORDINATOR_ALERTS: Readonly<Record<string, string>> = { "coordinator-missing": "missing", "coordinator-expired": "expired" };
+
+/**
+ * A `readRulings` cursor, `<created_at>|<id>`: the time (epoch ms) and id of
+ * the last comment returned, and the time as written; `undefined` when
+ * `cursor` is not one.
+ */
+export function parseRulingsCursor(cursor: string): { readonly created_at: string; readonly at: number; readonly id: number } | undefined {
+  const m = /^([^|]+)\|(0|[1-9][0-9]*)$/.exec(cursor);
+  if (m === null) return undefined;
+  const createdAt = m[1] as string;
+  const at = IsoDateTime.safeParse(createdAt).success ? Date.parse(createdAt) : Number.NaN;
+  const id = Number(m[2]);
+  return Number.isFinite(at) && Number.isSafeInteger(id) ? { created_at: createdAt, at, id } : undefined;
+}
 
 /** The body of the alert comment for (`condition`, `mainSha`) to `maintainer`. */
 export function alertBody(maintainer: string, condition: string, mainSha: GitSha): string {
@@ -1100,6 +1118,49 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
 
   // ------------------------------------------------------------ inboxes
 
+  /** An issue comment as an `InboxComment` on `inbox`, with its time (epoch ms) and numeric id; `undefined` when malformed. */
+  function toInboxComment(raw: unknown, inbox: InboxIssue): { readonly comment: InboxComment; readonly at: number; readonly n: number } | undefined {
+    const c = asObj(raw);
+    const id = c?.["id"];
+    if (c === undefined || typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return undefined;
+    const created = str(c, "created_at");
+    // Held to the cursor's own check, so every comment returned can end a cursor `parseRulingsCursor` reads back.
+    const at = created === undefined || !IsoDateTime.safeParse(created).success ? Number.NaN : Date.parse(created);
+    if (created === undefined || !Number.isFinite(at)) return undefined;
+    const body = c["body"] ?? "";
+    if (typeof body !== "string") return undefined;
+    const user = c["user"];
+    if (user !== null && user !== undefined && asObj(user) === undefined) return undefined;
+    const url = str(c, "html_url") ?? `${inbox.url}#issuecomment-${id}`;
+    return { comment: { id: String(id), issue: inbox.number, author: str(user, "login") ?? null, body, created_at: created, url }, at, n: id };
+  }
+
+  async function readRulings(cursor: string | null, opts: CallOpts): Promise<ForgeResult<RulingsRead>> {
+    return guarded("readRulings", opts, async (ctx) => {
+      const after = cursor === null ? null : parseRulingsCursor(cursor);
+      if (after === undefined) return forgeErr("rejected", `readRulings: ${JSON.stringify(cursor)} is not a cursor this forge issued`);
+      const listed = await listInboxes(ctx, null);
+      if (!listed.ok) return listed;
+      const op = GITHUB_OPERATIONS.listIssueComments;
+      const since = after === null ? "" : `since=${encodeURIComponent(after.created_at)}&`;
+      const kept: { readonly comment: InboxComment; readonly at: number; readonly n: number }[] = [];
+      for (const inbox of listed.value) {
+        const r = await paged(ctx, op, (page) => `/issues/${inbox.number}/comments?${since}per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
+        if (!r.ok) return r;
+        for (const raw of r.value) {
+          const c = toInboxComment(raw, inbox);
+          if (c === undefined) return malformed(op, "not a comment");
+          // `since` filters on the update time: a comment edited after the cursor but posted before it is dropped here.
+          if (after === null || c.at > after.at || (c.at === after.at && c.n > after.id)) kept.push(c);
+        }
+      }
+      kept.sort((a, b) => a.at - b.at || a.n - b.n);
+      const comments = kept.map((k) => k.comment);
+      const last = comments.at(-1);
+      return forgeOk({ comments, cursor: last === undefined ? cursor : `${last.created_at}|${last.id}` });
+    });
+  }
+
   async function inboxes(opts: CallOpts): Promise<ForgeResult<readonly InboxIssue[]>> {
     return guarded("inboxes", opts, (ctx) => listInboxes(ctx, null));
   }
@@ -1155,5 +1216,6 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     openInbox,
     setInboxBody,
     inboxComment,
+    readRulings,
   };
 }

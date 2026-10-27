@@ -16,6 +16,7 @@ import {
   type ForgeResult,
   type ForgeReview,
   type GitSha,
+  type InboxComment,
   type InboxIssue,
 } from "../../../ports/forge.ts";
 
@@ -26,7 +27,9 @@ import {
  * state change, so concurrent calls interleave; the compare-and-set itself is
  * synchronous. Blob SHAs are real git blob SHA-1s; commit SHAs are
  * deterministic per forge instance. Tests drive it through `control`, which
- * is not part of `Forge`.
+ * is not part of `Forge`. An inbox comment's id comes from the counter PR
+ * comments and reviews share, so ids rise with time across all of them;
+ * `readRulings`'s cursor is the id of the last comment it returned.
  */
 
 export type FakeForgeOptions = {
@@ -108,6 +111,8 @@ export type FakeForgeControl = {
   inboxes(): FakeInbox[];
   /** Comment bodies on inbox issue `issue`, oldest first. */
   inboxComments(issue: number): string[];
+  /** Adds a comment by `author` on inbox issue `issue` (which must exist) at the forge's time, as that user posting it would; returns its id. */
+  addInboxComment(issue: number, author: string, body: string): string;
   /** Closes inbox issue `issue`, as its owner closing it would; `false` when there is none. */
   closeInbox(issue: number): boolean;
   /** Queued PR numbers, head first. */
@@ -170,7 +175,13 @@ type PrRecord = {
   merge_sha: GitSha | null;
 };
 
-type InboxRecord = { number: number; title: string; owner: string | null; body: string; open: boolean; comments: string[] };
+/** A comment on an inbox issue; `id` is numeric. */
+type InboxCommentRecord = { readonly id: number; readonly author: string; readonly body: string; readonly created_at: string };
+
+type InboxRecord = { number: number; title: string; owner: string | null; body: string; open: boolean; comments: InboxCommentRecord[] };
+
+/** A cursor `readRulings` issues: a comment id. */
+const CURSOR_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 
 export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   let commits = 0;
@@ -202,6 +213,14 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   let nextIssue = options.firstIssueNumber ?? 1001;
   const repoUrl = options.repoUrl ?? FAKE_REPO_URL;
   const inboxView = (i: InboxRecord): InboxIssue => ({ number: i.number, owner: i.owner, body: i.body, url: `${repoUrl}/issues/${i.number}` });
+  const commentView = (i: InboxRecord, c: InboxCommentRecord): InboxComment => ({
+    id: String(c.id),
+    issue: i.number,
+    author: c.author,
+    body: c.body,
+    created_at: c.created_at,
+    url: `${repoUrl}/issues/${i.number}#issuecomment-${c.id}`,
+  });
   const findInbox = (issue: number, operation: string): ForgeResult<InboxRecord> => {
     const i = inboxes.get(issue);
     return i === undefined ? forgeErr("not-found", `${operation}: no issue #${issue}`) : forgeOk(i);
@@ -512,8 +531,24 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       call("inboxComment", opts, () => {
         const found = findInbox(issue, "inboxComment");
         if (!found.ok) return found;
-        found.value.comments.push(body);
-        return forgeOk({ id: String(nextComment++) });
+        const id = nextComment++;
+        found.value.comments.push({ id, author: botLogin, body, created_at: now });
+        return forgeOk({ id: String(id) });
+      }),
+
+    readRulings: (cursor, opts) =>
+      call("readRulings", opts, () => {
+        // A cursor is an id the forge handed out: numeric and below the next one.
+        if (cursor !== null && (!CURSOR_PATTERN.test(cursor) || Number(cursor) >= nextComment)) {
+          return forgeErr("rejected", `readRulings: ${JSON.stringify(cursor)} is not a cursor this forge issued`);
+        }
+        const after = cursor === null ? 0 : Number(cursor);
+        const list = [...inboxes.values()]
+          .filter((i) => i.open)
+          .flatMap((i) => i.comments.filter((c) => c.id > after).map((c) => ({ id: c.id, view: commentView(i, c) })))
+          .sort((a, b) => a.id - b.id);
+        const last = list.at(-1);
+        return forgeOk({ comments: list.map((c) => c.view), cursor: last === undefined ? cursor : String(last.id) });
       }),
   };
 
@@ -578,7 +613,14 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       [...inboxes.values()]
         .sort((a, b) => a.number - b.number)
         .map((i) => ({ number: i.number, title: i.title, owner: i.owner, body: i.body, open: i.open })),
-    inboxComments: (issue) => [...(inboxes.get(issue)?.comments ?? [])],
+    inboxComments: (issue) => (inboxes.get(issue)?.comments ?? []).map((c) => c.body),
+    addInboxComment(issue, author, body) {
+      const i = inboxes.get(issue);
+      if (i === undefined) throw new Error(`addInboxComment: no issue #${issue}`);
+      const id = nextComment++;
+      i.comments.push({ id, author, body, created_at: now });
+      return String(id);
+    },
     closeInbox(issue) {
       const i = inboxes.get(issue);
       if (i === undefined) return false;

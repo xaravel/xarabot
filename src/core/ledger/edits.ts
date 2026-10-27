@@ -1181,6 +1181,43 @@ export function stampDigest(p: StampDigestParams): LedgerEdit {
   });
 }
 
+export type AdvanceRulingsCursorParams = CoordinatorEditBase & {
+  readonly generation: number;
+  /** The cursor the rulings were read from: `coordinator.json`'s `rulings_cursor` in the run's snapshot. */
+  readonly from: string | null;
+  /** The forge's cursor past the last comment read. */
+  readonly to: string;
+};
+
+/**
+ * The rulings cursor (Story 4.5, AD-28): sets `rulings_cursor` to `to` only
+ * while the writer holds `coordinator.json` at `generation` and its cursor
+ * is still `from`, keeping every other field. A cursor another run moved
+ * (even to `to` itself) refuses, so two runs that read the same comments
+ * never both answer them. Story 4.6 composes its ledger effects (approve,
+ * release, rebuild) into the same fenced swap.
+ */
+export function advanceRulingsCursor(p: AdvanceRulingsCursorParams): LedgerEdit {
+  return makeCoordinatorEdit("advanceRulingsCursor", p, (ctx) => {
+    const g = check("advanceRulingsCursor generation", Generation, p.generation);
+    if (!g.ok) return g;
+    const from = check("advanceRulingsCursor from", NonEmpty.nullable(), p.from);
+    if (!from.ok) return from;
+    const to = check("advanceRulingsCursor to", NonEmpty, p.to);
+    if (!to.ok) return to;
+    const rec = ctx.current;
+    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
+    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
+    if (rec.generation !== g.value) {
+      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
+    }
+    if (rec.rulings_cursor !== from.value) {
+      return pre(`${COORDINATOR_PATH}: rulings_cursor is ${JSON.stringify(rec.rulings_cursor)}, not ${JSON.stringify(from.value)}: another run read these rulings`);
+    }
+    return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, rulings_cursor: to.value });
+  });
+}
+
 export type CoordinatorClaimState = "live" | "missing" | "expired";
 
 /** The coordinator claim at `now` (the forge's time): live, missing, or expired (stale). */

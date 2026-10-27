@@ -58,6 +58,7 @@ forgeContract({
     "reviewBodies",
     "inboxes",
     "inboxComments",
+    "addInboxComment",
   ],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
@@ -102,6 +103,7 @@ forgeContract({
           inboxes: () =>
             gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
           inboxComments: (issue) => gh.control.comments(issue),
+          addInboxComment: (issue, author, body) => gh.control.addComment(issue, body, author),
           setChecks: (sha, checks) => gh.control.setChecks(sha, checks),
           setCiLog: (sha, check, log) => gh.control.setCiLog(sha, check, log),
           setMain: (files) => gh.control.setMain(files),
@@ -133,7 +135,7 @@ forgeContract({
 forgeContract({
   name: "github (emulator, no git remote)",
   operations: FORGE_OPERATIONS.filter((op) => op !== "pushBranch"),
-  controls: ["comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace", "inboxes", "inboxComments"],
+  controls: ["comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace", "inboxes", "inboxComments", "addInboxComment"],
   make: (): ForgeFixture => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -159,6 +161,7 @@ forgeContract({
         trace: () => [...trace],
         inboxes: () => gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
         inboxComments: (issue) => gh.control.comments(issue),
+        addInboxComment: (issue, author, body) => gh.control.addComment(issue, body, author),
       },
     };
   },
