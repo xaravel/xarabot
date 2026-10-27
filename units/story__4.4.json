@@ -17,7 +17,7 @@
     "test/core/next/checkpoints.test.ts",
     "test/core/next/fixtures.ts"
   ],
-  "heartbeat_at": "2026-10-27T01:57:55.979Z",
+  "heartbeat_at": "2026-10-27T01:58:00.162Z",
   "pr": 242,
   "pr_owner": "edanisko",
   "base_sha": "d98a8a94a18c0c3286244bc0650ef7d117894a5a",
