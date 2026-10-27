@@ -2428,7 +2428,7 @@ describe("createReconcileStep: retro-gates.yaml (Story 2.9)", () => {
       return [coord("retro:1", { state: "merging", pr: pr.number, pr_owner: COORD.owner, head_sha: pr.head, passed_sha: pr.head, retro_result: RESULT, ...over })];
     };
 
-  test("AC: retro:1 merged with a result, the file absent: the run's PR creates retro-gates.yaml at schema_version 1 with the verdict and the items open", async () => {
+  test("AC: retro:1 merged with a result, the file absent: the run's one runner-written PR creates retro-gates.yaml at schema_version 1 with the verdict, the lane item open and the Maintainer item waiting (Story 4.3)", async () => {
     const f = await setup({ status: STATUS_DONE }, retroMerged());
     const out = await f.run();
     expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
@@ -2443,7 +2443,7 @@ describe("createReconcileStep: retro-gates.yaml (Story 2.9)", () => {
       epics: {
         "1": {
           retro: { verdict: "accepted-with-open-items", unit: "retro:1", recorded_at: FORGE_NOW },
-          items: RESULT.items.map((i) => ({ ...i, status: "open" })),
+          items: RESULT.items.map((i) => ({ ...i, status: i.route === "maintainer" ? "waiting" : "open" })),
         },
       },
     });
@@ -2452,6 +2452,10 @@ describe("createReconcileStep: retro-gates.yaml (Story 2.9)", () => {
     expect(pr?.body).toContain(`Changes to \`${RETRO}\`:`);
     expect(pr?.body).toContain("- epics.1.retro: accepted-with-open-items (retro:1)");
     expect(pr?.body).toContain("- epics.1.items: epic-1-retro-item-1-wire-it added as open");
+    expect(pr?.body).toContain("- epics.1.items: epic-1-retro-item-2-ask added as waiting");
+    expect(pr?.body).toContain("no agent session");
+    const onBranch = await f.fake.forge.listPrsByBranch(BRANCH, opts());
+    expect(onBranch.ok && onBranch.value.length).toBe(1);
     expect(f.fake.control.queue()).toEqual([pr?.number ?? -1]);
   });
 

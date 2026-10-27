@@ -533,7 +533,7 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     return planReconcile(snapshotOf(full), U, text(STATUS), text(RETRO));
   };
 
-  test("retro:2 merged with a result, the file absent: a new file with schema_version 1, the verdict and the items open", () => {
+  test("retro:2 merged with a result, the file absent: a new file with schema_version 1, the verdict, the lane item open and the Maintainer item waiting (Story 4.3)", () => {
     const p = planWith({ records: [retroRec()], prs: { "retro:2": merged(9) } });
     expect(p.markMerged).toEqual(["retro:2"]);
     expect(p.deleteMerged).toEqual([]);
@@ -548,7 +548,7 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
           retro: { verdict: "accepted-with-open-items", unit: "retro:2", recorded_at: NOW },
           items: [
             { id: "epic-2-retro-item-1-fix", text: "Fix it", route: "lane", blocking: true, globs: ["src/x/**"], status: "open" },
-            { id: "epic-2-retro-item-2-ask", text: "Ask the Maintainer", route: "maintainer", blocking: false, globs: [], status: "open" },
+            { id: "epic-2-retro-item-2-ask", text: "Ask the Maintainer", route: "maintainer", blocking: false, globs: [], status: "waiting" },
           ],
         },
       },
@@ -556,7 +556,7 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     expect(p.retroGates.summary).toEqual([
       "epics.2.retro: accepted-with-open-items (retro:2)",
       "epics.2.items: epic-2-retro-item-1-fix added as open",
-      "epics.2.items: epic-2-retro-item-2-ask added as open",
+      "epics.2.items: epic-2-retro-item-2-ask added as waiting",
     ]);
   });
 
@@ -612,7 +612,7 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     expect(p.retroGates.kind).toBe("invalid");
   });
 
-  test("an item already listed is not appended again", () => {
+  test("an item already listed is not appended again; the new Maintainer item is written waiting", () => {
     const listed = [
       "schema_version: 1",
       "epics:",
@@ -631,8 +631,32 @@ describe("planReconcile: retro-gates.yaml (Story 2.9)", () => {
     const parsed = parseRetroGates(RETRO, p.retroGates.text);
     expect(parsed.ok && parsed.value.epics["2"]?.items?.map((i) => [i.id, i.status])).toEqual([
       ["epic-2-retro-item-1-fix", "done"],
-      ["epic-2-retro-item-2-ask", "open"],
+      ["epic-2-retro-item-2-ask", "waiting"],
     ]);
+  });
+
+  test("a Maintainer item already listed open keeps open (Story 4.3)", () => {
+    const listed = [
+      "schema_version: 1",
+      "epics:",
+      '  "2":',
+      "    items:",
+      '      - id: "epic-2-retro-item-2-ask"',
+      "        text: Ask the Maintainer",
+      "        route: maintainer",
+      "        blocking: false",
+      "        globs: []",
+      "        status: open",
+      "",
+    ].join("\n");
+    const p = planWith({ files: { [RETRO]: listed }, records: [retroRec({ state: "merged" })] });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    expect(parsed.ok && parsed.value.epics["2"]?.items?.map((i) => [i.id, i.status])).toEqual([
+      ["epic-2-retro-item-2-ask", "open"],
+      ["epic-2-retro-item-1-fix", "open"],
+    ]);
+    expect(p.retroGates.summary).toEqual(["epics.2.retro: accepted-with-open-items (retro:2)", "epics.2.items: epic-2-retro-item-1-fix added as open"]);
   });
 
   test("both files change in one run", () => {

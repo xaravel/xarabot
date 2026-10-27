@@ -13,10 +13,13 @@ import { openDeferred } from "./deferred.ts";
  * - The Maintainer's inbox also lists the waiting checkpoint gos (an Epic in
  *   `graph.checkpoints` whose retro is recorded, with no `checkpoint.go`),
  *   the rejected retros with no go (each naming its open Maintainer-routed
- *   items as its course-correction items), the open retro items routed to
- *   the Maintainer, the unmanifested Story headings of Epics not
- *   bootstrapped, and each unresolved deferred entry of a Story spec on
- *   `main` (`openDeferred`).
+ *   items as its course-correction items), the open (`open`, `in-progress`
+ *   or `waiting`) retro items routed to the Maintainer, each once, naming
+ *   its Epic and aged from the Epic's `retro.recorded_at` (Story 4.3), the
+ *   unmanifested Story headings of Epics not bootstrapped, and each
+ *   unresolved deferred entry of a Story spec on `main` (`openDeferred`).
+ *   An `open` and a `waiting` Maintainer item list alike: items recorded
+ *   before Story 4.3 stay `open`.
  *
  * Each item shows a link, an age in whole days (`<1d` under a day; none when
  * nothing dates it) and its fixed verb only: `/xarabot go checkpoint:<N>`,
@@ -195,7 +198,7 @@ function maintainerItems(input: RenderDigestInput): Item[] {
         key: `retro-item:${i.id}`,
         label: `retro-item:${i.id}`,
         url: gatesUrl,
-        what: `${i.status}${i.blocking ? ", blocking" : ""}: ${oneLine(i.text)}`,
+        what: `Epic ${epic} · ${i.status}${i.blocking ? ", blocking" : ""}: ${oneLine(i.text)}`,
         since: retro?.recorded_at ?? null,
         verb: `/xarabot done|defer retro-item:${i.id}`,
         under: [],

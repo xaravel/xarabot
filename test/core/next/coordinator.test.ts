@@ -1020,6 +1020,8 @@ describe("next(coordinator): retro items (Story 2.10)", () => {
     ["due: an open lane item with globs", DUE, `unit ${UNIT_X}`],
     ["no globs: never returned", items({ 2: [{ id: X, globs: [] }] }), "idle"],
     ["a maintainer item: skipped", items({ 2: [{ id: X, route: "maintainer" }] }), "idle"],
+    ["a waiting maintainer item: skipped (Story 4.3)", items({ 2: [{ id: X, route: "maintainer", status: "waiting" }] }), "idle"],
+    ["a maintainer item passes to the lane item after it (Story 4.3)", items({ 2: [{ id: X, route: "maintainer", status: "waiting" }, { id: Y }] }), `unit retro-item:${Y}`],
     ["a done item: skipped", items({ 2: [{ id: X, status: "done" }] }), "idle"],
     ["an in-progress item: skipped", items({ 2: [{ id: X, status: "in-progress" }] }), "idle"],
     ["a deferred item: skipped", items({ 2: [{ id: X, status: "deferred" }] }), "idle"],

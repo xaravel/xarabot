@@ -655,8 +655,9 @@ export function retroItemUnit(id: string): string {
 /**
  * The retro items a lane may work (Story 2.10): `status: open` items with
  * `route: lane`, Epics in ascending order, then items in file order. An item
- * with no globs is a candidate too; `next` reports it `unclaimable`. Records
- * are not looked at here.
+ * with no globs is a candidate too; `next` reports it `unclaimable`. A
+ * `route: maintainer` item, `waiting` or `open`, never is: it waits on the
+ * Maintainer's ruling (Story 4.3). Records are not looked at here.
  */
 export function retroItemCandidates(snapshot: Snapshot): RetroItemCandidate[] {
   const out: RetroItemCandidate[] = [];
