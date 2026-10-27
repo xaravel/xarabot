@@ -18,7 +18,7 @@
     "test/ports/forge.test.ts",
     "test/support/live-github.ts"
   ],
-  "heartbeat_at": "2026-10-27T03:36:54.044Z",
+  "heartbeat_at": "2026-10-27T03:41:25.171Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "44c18a409c5a3d372320db75c4a53fbd0ebfab76",
@@ -29,7 +29,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
