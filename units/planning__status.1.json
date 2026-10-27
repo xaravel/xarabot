@@ -1,17 +1,17 @@
 {
   "schema_version": 5,
   "unit": "planning:status.1",
-  "state": "released",
+  "state": "claimed",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/epic-*-context.md",
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-27T01:42:27.571Z",
+  "heartbeat_at": "2026-10-27T01:59:32Z",
   "pr": 245,
   "pr_owner": "edanisko",
   "base_sha": "682dd47506ce027df167cfbfe0bcb5e9853f3a6c",
