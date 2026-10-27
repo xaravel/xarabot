@@ -25,19 +25,22 @@ import {
   markMerged,
   park,
   parkNew,
+  parkText,
   release,
   releaseDeadReconcile,
   releaseDisposable,
   releaseEjected,
   releaseStale,
   reparkGraph,
+  stampDigest,
   startMerging,
   STALE_AFTER_MS,
   takeApproved,
   takeOverStale,
   type LedgerEdit,
 } from "../../../src/core/ledger/edits.ts";
-import type { CoordinatorRecord, LaneIdentity, Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { PARK_TEXT_MAX, type CoordinatorRecord, type LaneIdentity, type Park, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { REDACTED, TRUNCATION_MARKER } from "../../../src/core/sanitize.ts";
 import { ALICE, BOB, COORD, LATE, NOW, rec, SHA_A, SHA_B, SHA_C, SHA_D, T0, tip } from "./fixtures.ts";
 
 const U = "story:1.5";
@@ -569,11 +572,11 @@ describe("ledger edits", () => {
     expect(STALE_AFTER_MS).toBe(30 * 60 * 1000);
   });
 
-  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 5', '"schema_version": 6') };
-  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 5', '"schema_version": 0') };
+  const v2 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 6', '"schema_version": 7') };
+  const v0 = { "units/story__9.9.json": serializeUnitRecord(rec({ unit: "story:9.9" })).replace('"schema_version": 6', '"schema_version": 0') };
   const everyEdit: readonly [string, LedgerEdit][] = CASES.map(([name, edit]) => [name, edit]);
   for (const [name, edit] of everyEdit) {
-    test(`${name}: a schema_version 6 or 0 record on the tip stops`, () => {
+    test(`${name}: a schema_version 7 or 0 record on the tip stops`, () => {
       for (const files of [v2, v0]) {
         const r = edit({ ...tip([rec()]), ...files });
         expect(r.ok).toBe(false);
@@ -604,7 +607,7 @@ describe("ledger edits", () => {
 
 function coordRec(who: LaneIdentity, at: string, over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
   return {
-    schema_version: 5,
+    schema_version: 6,
     owner: who.owner,
     host: who.host,
     lane: "coordinator",
@@ -660,8 +663,8 @@ describe("claimCoordinator", () => {
     expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
   });
 
-  test("a schema_version 6 coordinator.json stops", () => {
-    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 5', '"schema_version": 6');
+  test("a schema_version 7 coordinator.json stops", () => {
+    const v2 = serializeCoordinator(coordRec(COORD, T0)).replace('"schema_version": 6', '"schema_version": 7');
     const r = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v2 });
     expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
@@ -678,6 +681,84 @@ describe("keepCoordinator", () => {
     ["generation 0: invalid", COORD, 0, coordRec(COORD, T0), "invalid"],
   ] as const)("%s", (_name, who, generation, current, want) => {
     expectCoordinator(keepCoordinator({ by: who, now: NOW, generation }), coordTip(current), want, "keepCoordinator");
+  });
+});
+
+describe("stampDigest (Story 4.2)", () => {
+  const SLOT = "2026-10-22T08:00:00.000Z";
+  test.each([
+    ["never posted: stamped now, nothing else changes", COORD, 2, coordRec(COORD, T0, { generation: 2, rulings_cursor: "r" }), coordRec(COORD, T0, { generation: 2, rulings_cursor: "r", digest_posted_at: NOW })],
+    ["posted yesterday: stamped", COORD, 1, coordRec(COORD, T0, { digest_posted_at: "2026-10-21T08:00:00Z" }), coordRec(COORD, T0, { digest_posted_at: NOW })],
+    ["posted just before the slot: stamped", COORD, 1, coordRec(COORD, T0, { digest_posted_at: "2026-10-22T07:59:59Z" }), coordRec(COORD, T0, { digest_posted_at: NOW })],
+    ["posted at the slot: refused", COORD, 1, coordRec(COORD, T0, { digest_posted_at: "2026-10-22T08:00:00Z" }), "precondition"],
+    ["posted after the slot: refused", COORD, 1, coordRec(COORD, T0, { digest_posted_at: "2026-10-22T09:00:00Z" }), "precondition"],
+    ["the wrong generation: refused", COORD, 1, coordRec(COORD, T0, { generation: 2 }), "precondition"],
+    ["another identity holds it: refused", COORD, 1, coordRec(COORD_2, T0), "precondition"],
+    ["no record: refused", COORD, 1, null, "precondition"],
+    ["a builder lane: refused", ALICE, 1, coordRec(COORD, T0), "precondition"],
+    ["generation 0: invalid", COORD, 0, coordRec(COORD, T0), "invalid"],
+  ] as const)("%s", (_name, who, generation, current, want) => {
+    expectCoordinator(stampDigest({ by: who, now: NOW, generation, slot: SLOT }), coordTip(current), want, "stampDigest");
+  });
+
+  test("an older record is written at the current schema_version", () => {
+    expectCoordinator(stampDigest({ by: COORD, now: NOW, generation: 1, slot: SLOT }), coordTip(coordRec(COORD, T0, { schema_version: 2 })), coordRec(COORD, T0, { digest_posted_at: NOW }), "stampDigest");
+  });
+
+  test("a bad slot is invalid", () => {
+    const r = stampDigest({ by: COORD, now: NOW, generation: 1, slot: "today" })(coordTip(coordRec(COORD, T0)));
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+
+  test("fenced on the run's own record: a lost unit refuses the stamp", () => {
+    const own = by(COORD, T0, { unit: "reconcile:5", globs: [] });
+    const files = coordTip(coordRec(COORD, T0), [own]);
+    const stamp = stampDigest({ by: COORD, now: NOW, generation: 1, slot: SLOT });
+    const ok = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 1 }), stamp)(files);
+    expect(ok.ok && ok.value !== null ? Object.keys(ok.value.writes).sort() : []).toEqual([COORDINATOR_PATH, "units/reconcile__5.json"]);
+    const lost = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 2 }), stamp)(files);
+    expect(lost.ok ? "ok" : lost.error.kind).toBe("precondition");
+  });
+});
+
+describe("park text (Story 4.2)", () => {
+  const parkedWith = (text: string | undefined) =>
+    park({ ...held, kind: "blocked", reason: "intent-gap", ...(text !== undefined ? { text } : {}) })(tip([rec()]));
+  const written = (r: ReturnType<ReturnType<typeof park>>) => (r.ok && r.value !== null ? (JSON.parse(r.value.writes[PATH] as string) as UnitRecord) : null);
+
+  test("a blocked park keeps its text, and the record is v6", () => {
+    const r = written(parkedWith("Which inbox owns graph PRs?"));
+    expect(r?.schema_version).toBe(6);
+    expect(r?.park).toEqual({ ...blocked("intent-gap"), text: "Which inbox owns graph PRs?" });
+  });
+
+  test("no text, or an empty one: no text key", () => {
+    expect(Object.keys(written(parkedWith(undefined))?.park ?? {})).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
+    expect(Object.keys(written(parkedWith(""))?.park ?? {})).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
+  });
+
+  test("a text over PARK_TEXT_MAX is invalid", () => {
+    const r = parkedWith("x".repeat(PARK_TEXT_MAX + 1));
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+    expect(written(parkedWith("x".repeat(PARK_TEXT_MAX)))?.park?.text).toHaveLength(PARK_TEXT_MAX);
+  });
+
+  test.each([
+    ["plain text is kept, trimmed", "  Ask first.\n", "Ask first."],
+    ["an @mention loses its @", "Ask @bob first.", "Ask bob first."],
+    ["a closing keyword is dropped", "Blocked, see fixes #12 here.", "Blocked, see here."],
+    ["blank: nothing", " \n ", undefined],
+  ] as const)("parkText: %s", (_name, text, want) => {
+    expect(parkText(text)).toBe(want);
+  });
+
+  test("parkText redacts the lane's secrets and token-shaped strings, then caps at PARK_TEXT_MAX", () => {
+    const secret = "lane-secret-value-123";
+    const token = "gh" + "p_" + "a".repeat(36);
+    expect(parkText(`uses ${secret} and ${token}`, [secret])).toBe(`uses ${REDACTED} and ${REDACTED}`);
+    const long = parkText("y".repeat(PARK_TEXT_MAX * 2)) ?? "";
+    expect(long.length).toBe(PARK_TEXT_MAX);
+    expect(long.endsWith(TRUNCATION_MARKER)).toBe(true);
   });
 });
 
@@ -824,33 +905,33 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     expect(r.ok && r.value).toEqual({ message: `ledger: deleteReleasedRecurring ${u} [skip ci]`, writes: {}, deletes: [path(u)] });
   });
 
-  test("every record an edit writes carries schema_version 5, whatever the tip held", () => {
+  test("every record an edit writes carries schema_version 6, whatever the tip held", () => {
     const v1 = rec({ schema_version: 1, state: "claimed" });
     const r = heartbeat({ unit: U, by: ALICE, now: NOW, generation: 1 })(tip([v1]));
     if (!r.ok || r.value === null) throw new Error("expected a write");
-    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(5);
+    expect(JSON.parse(r.value.writes[PATH] as string).schema_version).toBe(6);
     const c = claim({ unit: "story:7.1", by: ALICE, now: NOW, globs: ["src/7/**"], expectGeneration: null })(tip([v1]));
     if (!c.ok || c.value === null) throw new Error("expected a write");
-    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(5);
+    expect(JSON.parse(c.value.writes["units/story__7.1.json"] as string).schema_version).toBe(6);
   });
 
-  test("an edit over a raw v4 record (no enqueued_sha key, passed_sha set) writes v5 with enqueued_sha the old passed_sha and passed_sha null", () => {
+  test("an edit over a raw v4 record (no enqueued_sha key, passed_sha set) writes v6 with enqueued_sha the old passed_sha and passed_sha null", () => {
     const raw = JSON.parse(serializeUnitRecord(rec({ pr: 7, head_sha: SHA_A, passed_sha: SHA_A }))) as Record<string, unknown>;
     raw["schema_version"] = 4;
     delete raw["enqueued_sha"];
     const r = heartbeat(held)({ [PATH]: JSON.stringify(raw) });
     if (!r.ok || r.value === null) throw new Error("expected a write");
-    expect(JSON.parse(r.value.writes[PATH] as string)).toMatchObject({ schema_version: 5, passed_sha: null, enqueued_sha: SHA_A, head_sha: SHA_A });
+    expect(JSON.parse(r.value.writes[PATH] as string)).toMatchObject({ schema_version: 6, passed_sha: null, enqueued_sha: SHA_A, head_sha: SHA_A });
   });
 
-  test("coordinator.json writes carry schema_version 5: a claim over a v1 record, and the keeper's beat", () => {
+  test("coordinator.json writes carry schema_version 6: a claim over a v1 record, and the keeper's beat", () => {
     const v1 = serializeCoordinator(coordRec(COORD, T0, { schema_version: 1 }));
     const claimed = claimCoordinator({ by: COORD, now: NOW })({ [COORDINATOR_PATH]: v1 });
     if (!claimed.ok || claimed.value === null) throw new Error("expected a write");
-    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(5);
+    expect(JSON.parse(claimed.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(6);
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
-    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(5);
+    expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(6);
   });
 });
 
@@ -915,7 +996,7 @@ describe("retro_result (Story 2.9)", () => {
 
   test("a heartbeat records retro_result with the PR fields", () => {
     const r = heartbeat({ unit: R, by: COORD, now: NOW, generation: 1, set: { pr: 9, retro_result: RESULT } })(tip([retro({ retro_result: null, pr: null })]));
-    expect(written(r)).toMatchObject({ pr: 9, retro_result: RESULT, schema_version: 5 });
+    expect(written(r)).toMatchObject({ pr: 9, retro_result: RESULT, schema_version: 6 });
   });
 
   test("a heartbeat with an invalid retro_result is invalid", () => {

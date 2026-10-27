@@ -22,6 +22,7 @@ import * as reconcileStep from "../../src/lane/reconcile-step.ts";
 import * as retroItemStep from "../../src/lane/retro-item-step.ts";
 import * as retroStep from "../../src/lane/retro-step.ts";
 import * as mergeStep from "../../src/lane/merge-step.ts";
+import * as ciStep from "../../src/lane/ci-step.ts";
 import * as reviewGate from "../../src/lane/review-gate.ts";
 import * as reviewStep from "../../src/lane/review-step.ts";
 import type { Agent } from "../../src/ports/agent.ts";
@@ -61,6 +62,7 @@ const built = {
   review: [] as { deps: reviewStep.ReviewStepDeps; step: reviewStep.ReviewStep }[],
   reviewGate: [] as { deps: reviewGate.ReviewGateDeps; step: reviewGate.ReviewGateStep }[],
   merge: [] as { deps: mergeStep.MergeStepDeps; step: mergeStep.MergeStep }[],
+  ci: [] as { deps: ciStep.CiStepDeps; step: ciStep.CiStep }[],
 };
 const realReconcile = reconcileStep.createReconcileStep;
 const realPlanning = planningStep.createPlanningStep;
@@ -70,6 +72,15 @@ const realPr = prStep.createPrStep;
 const realReview = reviewStep.createReviewStep;
 const realReviewGate = reviewGate.createReviewGateStep;
 const realMerge = mergeStep.createMergeStep;
+const realCi = ciStep.createCiStep;
+mock.module("../../src/lane/ci-step.ts", () => ({
+  ...ciStep,
+  createCiStep: (deps: ciStep.CiStepDeps) => {
+    const step = realCi(deps);
+    built.ci.push({ deps, step });
+    return step;
+  },
+}));
 mock.module("../../src/lane/review-step.ts", () => ({
   ...reviewStep,
   createReviewStep: (deps: reviewStep.ReviewStepDeps) => {
@@ -894,6 +905,15 @@ describe("xarabot lane run: the reviewer and the session vendor (Story 3.3)", ()
     expect(r.failedStarts()).toBe("1\n");
   });
 
+  test("a builder lane's process and its CI step get the lane's secrets, for the park text (Story 4.2)", async () => {
+    built.ci.length = 0;
+    const r = await laneRunWith({ main: { unattended: ["claude"] } });
+    expect(r.err).toEqual([]);
+    expect((r.starts[0] as LaneDeps).secrets).toContain(CLAUDE_CREDENTIAL);
+    expect(built.ci).toHaveLength(1);
+    expect((built.ci[0] as (typeof built.ci)[number]).deps.secrets).toContain(CLAUDE_CREDENTIAL);
+  });
+
   test("a claude lane, policy [claude]: starts with its own credential only, vendor anthropic", async () => {
     built.pr.length = 0;
     const r = await laneRunWith({ main: { unattended: ["claude"] } });
@@ -1321,6 +1341,8 @@ describe("xarabot lane run: a coordinator lane", () => {
       "root",
       "ledger: claimCoordinator coordinator [skip ci]",
       "ledger: claim reconcile:1 [skip ci]",
+      // Story 4.2: the forge's clock is past today's digest slot and none is posted, so the run stamps it.
+      "ledger: stampDigest coordinator [skip ci]",
       "ledger: finishRecurring reconcile:1 [skip ci]",
     ]);
   });

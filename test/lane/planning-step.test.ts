@@ -389,9 +389,21 @@ describe("createPlanningStep: the result", () => {
     const h = harness({ contextMissing: true, behaviors: [writes(planningResult("blocked"))] });
     const out = await h.run();
     expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
-    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "parked", park: { kind: "blocked", reason: "readiness", globs_held: [] } });
+    // Story 4.2: the readiness summary is kept as the park's text, for the inbox.
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({
+      state: "parked",
+      park: { kind: "blocked", reason: "readiness", globs_held: [], text: "FAIL: Epic 2 has no acceptance criteria" },
+    });
     expect(out.reason).toBe("blocked readiness: FAIL: Epic 2 has no acceptance criteria");
     expect(h.commits).toEqual([]);
+  });
+
+  test("the park's text is redacted with the lane's secrets through parkBlocked (Story 4.2)", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("blocked", "FAIL: the run printed sekrit-credential, ask @bob"))] });
+    await h.run();
+    const text = (await h.ledger()).get("planning:status.1")?.park?.text ?? "";
+    expect(text).toBe("FAIL: the run printed [REDACTED], ask bob");
+    expect(text).not.toContain("sekrit-credential");
   });
 
   test("a blocked graph result parks blocked readiness too", async () => {

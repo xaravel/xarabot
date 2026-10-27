@@ -1,0 +1,225 @@
+import { describe, expect, test } from "bun:test";
+import { ageText, EMPTY_INBOX_BODY, renderDigest } from "../../../src/core/inbox/render-digest.ts";
+import { FORGE_TEXT_LIMITS } from "../../../src/core/sanitize.ts";
+import type { Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import type { Snapshot } from "../../../src/core/schemas/snapshot.ts";
+import { RETRO, snapshotOf, storyRec, type World } from "../next/fixtures.ts";
+
+// NOW is 2026-10-22T10:10:00Z; the fixtures' Maintainer is edanisko.
+const REPO = "https://github.com/xaravel/xarabot";
+const DAY = (d: number) => new Date(Date.parse("2026-10-22T10:10:00Z") - d * 86_400_000).toISOString();
+const SPEC41 = "_bmad-output/implementation-artifacts/spec-4-1-gates.md";
+const SPEC43 = "_bmad-output/implementation-artifacts/spec-4-3-waiting.md";
+
+function parked(id: string, park: Omit<Park, "globs_held"> & { globs_held?: string[] }, over: Partial<UnitRecord> = {}): UnitRecord {
+  return storyRec(id, { state: "parked", heartbeat_at: DAY(2), park: { globs_held: [], ...park }, ...over });
+}
+
+/** Epic 1 bootstrapped, Epic 2 with Stories 2.1-2.4; the records and files given. */
+function world(over: Partial<World> = {}): World {
+  return { epics: { 1: [], 2: ["1", "2", "3", "4"] }, bootstrapped: [1], ...over };
+}
+
+function digest(w: World, files: Record<string, string> = {}): Map<string, { body: string; count: number }> {
+  const snapshot: Snapshot = snapshotOf({ ...w, files: { ...w.files, ...files } });
+  return renderDigest({ snapshot, files, repoUrl: REPO });
+}
+
+/** Each owner's item lines (the `- ` lines), by owner. */
+function itemLines(d: Map<string, { body: string; count: number }>): Record<string, string[]> {
+  return Object.fromEntries([...d].map(([owner, { body }]) => [owner, body.split("\n").filter((l) => l.startsWith("- "))]));
+}
+
+const RETRO_GATES = [
+  "schema_version: 1",
+  "epics:",
+  '  "1":',
+  "    retro:",
+  "      verdict: rejected",
+  '      unit: "retro:1"',
+  `      recorded_at: ${DAY(3)}`,
+  "    items:",
+  "      - id: epic-1-retro-item-1-fix-the-gate",
+  '        text: "Fix the gate for @bob, fixes #12."',
+  "        route: maintainer",
+  "        blocking: true",
+  "        globs: []",
+  "        status: open",
+  "      - id: epic-1-retro-item-2-lane-work",
+  "        text: Lane work.",
+  "        route: lane",
+  "        blocking: false",
+  "        globs: []",
+  "        status: open",
+  "      - id: epic-1-retro-item-3-done",
+  "        text: Done already.",
+  "        route: maintainer",
+  "        blocking: false",
+  "        globs: []",
+  "        status: done",
+  '  "2":',
+  "    retro:",
+  "      verdict: accepted",
+  '      unit: "retro:2"',
+  `      recorded_at: ${DAY(1)}`,
+  '  "3":',
+  "    retro:",
+  "      verdict: accepted",
+  '      unit: "retro:3"',
+  `      recorded_at: ${DAY(1)}`,
+  "    checkpoint:",
+  "      go:",
+  "        by: edanisko",
+  `        at: ${DAY(0)}`,
+  "        ruling: maintainer-pr",
+  "",
+].join("\n");
+
+const CHECKPOINTS = "version: 1\nepics:\n  2:\n    depends_on: [1]\n    checkpoint: true\n  3:\n    depends_on: [2]\n    checkpoint: true\n";
+
+describe("renderDigest: who gets what", () => {
+  test.each([
+    ["no records: no inbox has items", world(), {}],
+    [
+      "awaiting-approval goes to its inbox_owner, with no verb",
+      world({ records: [parked("2.1", { kind: "awaiting-approval", reason: null, inbox_owner: "alice" }, { pr: 12 })] }),
+      { alice: [`- [story:2.1](${REPO}/pull/12) · awaiting approval · 2d`] },
+    ],
+    [
+      "a graph change awaiting approval says so, in its inbox_owner's (the Maintainer's) inbox",
+      world({ records: [parked("2.1", { kind: "awaiting-approval", reason: null, inbox_owner: "edanisko", graph_posted: `sha256:${"9".repeat(64)}` }, { pr: 12 })] }),
+      { edanisko: [`- [story:2.1](${REPO}/pull/12) · awaiting approval (graph change) · 2d`] },
+    ],
+    [
+      "needs-approval goes to the Maintainer with the approve verb",
+      world({ records: [parked("2.1", { kind: "needs-approval", reason: null, inbox_owner: "alice" })] }),
+      { edanisko: [`- [story:2.1](${REPO}/blob/xarabot/claims/units/story__2.1.json) · needs approval · 2d · \`/xarabot approve story:2.1\``] },
+    ],
+    [
+      "blocked goes to its inbox_owner; a human-live-step block to the Maintainer",
+      world({
+        records: [
+          parked("2.1", { kind: "blocked", reason: "intent-gap", inbox_owner: "alice" }, { pr: 12 }),
+          parked("2.2", { kind: "blocked", reason: "human-live-step", inbox_owner: "alice" }, { heartbeat_at: DAY(0.5) }),
+        ],
+      }),
+      {
+        alice: [`- [story:2.1](${REPO}/pull/12) · blocked \`intent-gap\` · 2d`],
+        edanisko: [`- [story:2.2](${REPO}/blob/xarabot/claims/units/story__2.2.json) · blocked \`human-live-step\` · <1d`],
+      },
+    ],
+    [
+      "claimed, merging, released and merged records list nothing",
+      world({ records: [storyRec("2.1", { state: "claimed" }), storyRec("2.2", { state: "merging", pr: 3 }), storyRec("2.3", { state: "released" }), storyRec("2.4", { state: "merged" })] }),
+      {},
+    ],
+    [
+      "owners differing only in case share one inbox",
+      world({
+        records: [
+          parked("2.1", { kind: "awaiting-approval", reason: null, inbox_owner: "Alice" }, { pr: 1 }),
+          parked("2.2", { kind: "awaiting-approval", reason: null, inbox_owner: "alice" }, { pr: 2 }),
+        ],
+      }),
+      { Alice: [`- [story:2.1](${REPO}/pull/1) · awaiting approval · 2d`, `- [story:2.2](${REPO}/pull/2) · awaiting approval · 2d`] },
+    ],
+  ] as const)("%s", (_name, w, want) => {
+    expect(itemLines(digest(w as World))).toEqual(want as unknown as Record<string, string[]>);
+  });
+
+  test("the Maintainer's own items: checkpoint gos, rejected retros, routed items, unmanifested headings and deferred entries", () => {
+    const w = world({
+      epics: { 1: ["1"], 2: ["1"], 3: ["1"], 4: ["1", "2"], 5: ["1"] },
+      bootstrapped: [1],
+      manifests: [{ id: "1.1" }, { id: "2.1" }, { id: "3.1" }, { id: "4.1" }],
+      epicsYaml: CHECKPOINTS,
+      files: { [RETRO]: RETRO_GATES },
+    });
+    const files = {
+      [SPEC41]: "---\ncreated: '2026-10-19'\ndeferred:\n  - summary: First @carol item, closes #3.\n  - summary: Second item.\n---\n",
+      [SPEC43]: "---\ncreated: '2026-10-21'\nresolves: [\"4.1-d1\"]\n---\n",
+    };
+    const d = digest(w, files);
+    expect([...d.keys()]).toEqual(["edanisko"]);
+    const gates = `${REPO}/blob/main/_bmad-output/implementation-artifacts/retro-gates.yaml`;
+    expect(itemLines(d)["edanisko"]).toEqual([
+      `- [checkpoint:2](${gates}) · Epic 2's retro is recorded (accepted) · 1d · \`/xarabot go checkpoint:2\``,
+      `- [retro:1](${gates}) · rejected, no go · 3d · \`/xarabot go retro:1\``,
+      `- [retro-item:epic-1-retro-item-1-fix-the-gate](${gates}) · open, blocking: Fix the gate for bob,. · 3d · \`/xarabot done|defer retro-item:epic-1-retro-item-1-fix-the-gate\``,
+      `- [story:4.2](${REPO}/blob/main/_bmad-output/planning-artifacts/epics.md#L31) · Epic 4's heading has no manifest`,
+      `- [story:5.1](${REPO}/blob/main/_bmad-output/planning-artifacts/epics.md#L37) · Epic 5's heading has no manifest`,
+      `- [4.1-d2](${REPO}/blob/main/${SPEC41}) · deferred: Second item. · 3d`,
+    ]);
+    const body = d.get("edanisko")?.body ?? "";
+    expect(body).toContain("  - course correction: retro-item:epic-1-retro-item-1-fix-the-gate");
+    expect(d.get("edanisko")?.count).toBe(6);
+  });
+
+  test("an unmanifested heading of a bootstrapped Epic is not listed", () => {
+    const d = digest(world({ epics: { 1: ["1"], 2: ["1"] }, bootstrapped: [1], manifests: [{ id: "2.1" }] }));
+    expect(d.size).toBe(0);
+  });
+});
+
+describe("renderDigest: the body", () => {
+  const records = [
+    parked("2.2", { kind: "blocked", reason: "intent-gap", inbox_owner: "alice", text: "Which inbox owns graph PRs?\n\nAsk @bob first." }, { pr: 12 }),
+    parked("2.1", { kind: "awaiting-approval", reason: null, inbox_owner: "alice" }, { pr: 7, heartbeat_at: DAY(0) }),
+  ];
+
+  test("sections in a fixed order, items sorted, the park text quoted under its item", () => {
+    expect(digest(world({ records })).get("alice")).toEqual({
+      count: 2,
+      body: [
+        "🤖 Xarabot inbox: 2 items wait on you.",
+        "",
+        "### Awaiting approval (1)",
+        "",
+        `- [story:2.1](${REPO}/pull/7) · awaiting approval · <1d`,
+        "",
+        "### Blocked (1)",
+        "",
+        `- [story:2.2](${REPO}/pull/12) · blocked \`intent-gap\` · 2d`,
+        "  > Which inbox owns graph PRs?",
+        "  >",
+        "  > Ask bob first.",
+        "",
+        "Each reconcile run rewrites this list; ages are in whole days.",
+        "",
+      ].join("\n"),
+    });
+  });
+
+  test("deterministic: the same snapshot renders the same bodies", () => {
+    const w = world({ records });
+    expect(digest(w)).toEqual(digest(w));
+  });
+
+  test("never an @mention, and capped at the forge's body limit", () => {
+    const many = Array.from({ length: 30 }, (_, i) =>
+      parked(`2.${i + 1}`, { kind: "blocked", reason: "other", inbox_owner: "alice", text: `@carol ${"x".repeat(3_990)}` }, { pr: i + 1 }),
+    );
+    const d = digest(world({ epics: { 1: [], 2: many.map((_, i) => String(i + 1)) }, records: many }));
+    const body = d.get("alice")?.body ?? "";
+    expect(d.get("alice")?.count).toBe(30);
+    expect(body.length).toBeLessThanOrEqual(FORGE_TEXT_LIMITS.body);
+    expect(body).toEndWith("[truncated by xarabot]");
+    expect(/(?<![\w`])@[A-Za-z0-9]/.test(body)).toBe(false);
+  });
+
+  test("the empty body mentions no one", () => {
+    expect(EMPTY_INBOX_BODY).not.toContain("@");
+  });
+});
+
+describe("ageText", () => {
+  test.each([
+    ["2026-10-22T10:10:00Z", "<1d"],
+    ["2026-10-21T10:10:01Z", "<1d"],
+    ["2026-10-21T10:10:00Z", "1d"],
+    ["2026-10-19", "3d"],
+    ["2026-10-23T00:00:00Z", "<1d"],
+  ] as const)("since %s: %s", (since, want) => {
+    expect(ageText("2026-10-22T10:10:00Z", since)).toBe(want);
+  });
+});

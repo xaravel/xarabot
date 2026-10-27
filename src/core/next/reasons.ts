@@ -19,5 +19,9 @@ export type ReasonCode =
   | "planning-held"
   | "live-evidence";
 
-/** Why a Story or Epic was passed over. `subject` is `epic:<N>` or a unit id. */
-export type Reason = { readonly subject: string; readonly code: ReasonCode; readonly message: string };
+/**
+ * Why a Story or Epic was passed over. `subject` is `epic:<N>` or a unit id.
+ * `maintainer` marks a Maintainer cause (Story 4.2): a builder idling only
+ * for such reasons is waiting on the Maintainer.
+ */
+export type Reason = { readonly subject: string; readonly code: ReasonCode; readonly message: string; readonly maintainer?: true };

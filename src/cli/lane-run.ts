@@ -615,13 +615,14 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       store,
       workspace,
       prStep: createPrStep({ forge, committer, identity, repo: lane.repo, provider, secrets }),
-      ciStep: createCiStep({ forge, merger, identity, repo: lane.repo }),
+      ciStep: createCiStep({ forge, merger, identity, repo: lane.repo, secrets }),
       reviewGate: createReviewGateStep({ forge, identity, repo: lane.repo, review, passed, secrets }),
       mergeStep: createMergeStep({ forge, diffPaths, graphTrees, identity, repo: lane.repo, agent: lane.agent, passed }),
       laneDir,
       identity,
       lane,
       waiter,
+      secrets,
     };
     return afterRun(await (deps.start ?? runLaneProcess)(laneDeps));
   };

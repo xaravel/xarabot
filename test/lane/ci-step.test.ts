@@ -570,7 +570,8 @@ describe("createCiStep", () => {
     const w = await world({ checks: [[failure("lint")]], sessions: [ok({ result: buildResult("blocked"), specPath: null, superseded: [] })] });
     const out = await w.run();
     expect(out).toMatchObject({ outcome: "progress", state: "parked" });
-    expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "verification" } });
+    // Story 4.2: the CI-fix session's blocked text is kept as the park's text.
+    expect(await w.ledger()).toMatchObject({ park: { kind: "blocked", reason: "verification", text: "tests cannot run" } });
     expect(w.prSteps).toEqual([]);
   });
 

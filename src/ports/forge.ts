@@ -171,6 +171,18 @@ export type ForgeReview = {
 /** A review `postReview` posts: its body, on the commit it reviewed. */
 export type PostReviewRequest = { readonly commit_sha: GitSha; readonly body: string };
 
+/**
+ * An owner's inbox issue (Story 4.2): an open issue labelled with the inbox
+ * label. `owner` is its first assignee, or `null` when it has none; `body`
+ * is `""` for an empty body; `url` is the issue's web page.
+ */
+export type InboxIssue = {
+  readonly number: number;
+  readonly owner: string | null;
+  readonly body: string;
+  readonly url: string;
+};
+
 export type Forge = {
   snapshot(opts: SnapshotOpts): Promise<ForgeResult<ForgeSnapshot>>;
   /** Fast-forward only: the tip must still be `oldSha`, else `conflict`. One new commit. */
@@ -209,6 +221,18 @@ export type Forge = {
   alert(condition: string, mainSha: GitSha, opts: CallOpts): Promise<ForgeResult<{ readonly posted: boolean }>>;
   /** Writes the failing checks' logs for `sha` into `dir`; returns their absolute paths. */
   prefetch(request: PrefetchRequest, opts: CallOpts): Promise<ForgeResult<{ readonly files: readonly string[] }>>;
+  /** Every open inbox issue (Story 4.2), ascending by number. Read-only. */
+  inboxes(opts: CallOpts): Promise<ForgeResult<readonly InboxIssue[]>>;
+  /**
+   * `owner`'s inbox: the lowest-numbered open inbox issue assigned to them,
+   * created (titled `🤖 Xarabot inbox`, labelled, assigned to `owner`) when
+   * they have none. The same issue `alert` posts on.
+   */
+  openInbox(owner: string, opts: CallOpts): Promise<ForgeResult<InboxIssue>>;
+  /** Replaces inbox issue `issue`'s body with `body`, verbatim. A missing issue is `not-found`. */
+  setInboxBody(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<InboxIssue>>;
+  /** Posts `body` verbatim as one comment on inbox issue `issue`. A missing issue is `not-found`. */
+  inboxComment(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>>;
 };
 
 export type ForgeOperation = keyof Forge;
@@ -232,6 +256,10 @@ export const FORGE_OPERATIONS = [
   "queueState",
   "alert",
   "prefetch",
+  "inboxes",
+  "openInbox",
+  "setInboxBody",
+  "inboxComment",
 ] as const satisfies readonly ForgeOperation[];
 
 /* Compile-time check: `FORGE_OPERATIONS` lists every key of `Forge`. */

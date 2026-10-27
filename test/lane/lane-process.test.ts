@@ -8,7 +8,7 @@ import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/c
 import { ok } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import { UnitJournalRecordSchema, type JournalRecord, type UnitJournalRecord } from "../../src/core/schemas/journal.ts";
-import type { CoordinatorRecord, LaneIdentity, UnitRecord } from "../../src/core/schemas/ledger.ts";
+import { PARK_TEXT_MAX, type CoordinatorRecord, type LaneIdentity, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { Agent, AgentLaunchSpec, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { LaunchSpec, Sandbox, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
@@ -680,6 +680,34 @@ describe("runLaneProcess", () => {
     expect(h.unitRecord()).toMatchObject({ outcome: "progress", state: "parked", result: "blocked" });
   });
 
+  test("blocked: the park keeps the result's text, sanitized with the lane's secrets and capped (Story 4.2, ledger v6)", async () => {
+    const secret = "lane-credential-value-42";
+    const token = "gh" + "p_" + "b".repeat(36);
+    const text = `Ask @bob: the spec does not say. Seen ${secret} and ${token}.\n${"z".repeat(5_000)}`;
+    const h = harness({
+      behaviors: [
+        ({ profile }) => {
+          writeIn(profile.clone, `${SPEC_DIR}/spec-1-1-first.md`, specText("blocked"));
+          writeFileSync(profile.resultPath, buildResult("blocked", { blocked: { kind: "intent-gap", text } }));
+        },
+      ],
+    });
+    expect((await h.run({ secrets: [secret] })).outcome).toBe("progress");
+    const record = (await h.ledger()).get("story:1.1");
+    expect(record).toMatchObject({ schema_version: 6, state: "parked", park: { kind: "blocked", reason: "intent-gap", inbox_owner: "alice" } });
+    const kept = record?.park?.text ?? "";
+    expect(kept.startsWith("Ask bob: the spec does not say. Seen [REDACTED] and [REDACTED].\n")).toBe(true);
+    expect(kept).not.toContain(secret);
+    expect(kept.length).toBe(PARK_TEXT_MAX);
+    expect(kept.endsWith("[truncated by xarabot]")).toBe(true);
+  });
+
+  test("no-op: the park has no text", async () => {
+    const h = harness({ behaviors: [finishes("no-op", "done")] });
+    expect((await h.run()).outcome).toBe("progress");
+    expect((await h.ledger()).get("story:1.1")?.park).toEqual({ kind: "blocked", reason: "no-op", inbox_owner: "alice", globs_held: [] });
+  });
+
   test("a session that ran another model: the attempt fails model-mismatch, the journal has the reported model", async () => {
     const h = harness({ behaviors: [finishes("done")], reportedModel: "claude-sonnet-5-5" });
     expect((await h.run()).outcome).toBe("failed");
@@ -1010,7 +1038,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown ledger schema_version alerts ledger-schema-version and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 6 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.2" }), schema_version: 7 });
     h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.2.json": v2 }, deletes: [] });
     const main = await mainSha(h.fake);
     expect((await h.run()).outcome).toBe("stop");
@@ -1021,7 +1049,7 @@ describe("runLaneProcess", () => {
 
   test("an unknown schema_version found by the claim's swap alerts and stops", async () => {
     const h = harness();
-    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 6 });
+    const v2 = JSON.stringify({ ...rec({ unit: "story:1.3", globs: ["src/zz/**"] }), schema_version: 7 });
     h.fake.control.beforeSwap(({ n }) => {
       if (n === 1) h.fake.control.writeForeignLedger({ message: "future [skip ci]", writes: { "units/story__1.3.json": v2 }, deletes: [] });
     });
@@ -1895,6 +1923,14 @@ describe("runLaneProcess stale takeover", () => {
     expect(h.prepares[0]).toMatchObject({ unit: "story:1.1", start: main, fetch: [main], generation: 4 });
     expect(h.prSteps.map((s) => [s.unit.unit, s.record.generation])).toEqual([["story:1.1", 4]]);
     expect(h.unitRecord()).toMatchObject({ unit: "story:1.1", outcome: "progress", generation: 4, attempts: 1 });
+  });
+
+  test("idle only for a Maintainer cause (a park awaiting approval): the idle span's reason starts waiting-on-maintainer (Story 4.2, AR25)", async () => {
+    const h = harness({ done: ["1.2", "1.3"] });
+    foreignRecords(h.fake, [bobs({ state: "parked", pr: 7, park: { kind: "awaiting-approval", reason: null, inbox_owner: "bob", globs_held: ["src/s0/a.ts"] } })]);
+    expect((await h.run()).outcome).toBe("idle");
+    expect(h.journal()).toMatchObject([{ type: "span", span: "idle", reason: "waiting-on-maintainer: story:1.1 is parked" }]);
+    expect(h.runs).toHaveLength(0);
   });
 
   test("a claimed record 29:59 old is passed over with a record-state reason", async () => {

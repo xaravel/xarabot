@@ -59,6 +59,9 @@ function coord(unit: string, over: Partial<UnitRecord> = {}): UnitRecord {
 const reconciled = (n: number, minutes: number) => coord(`reconcile:${n}`, { state: "merged", heartbeat_at: minutesBefore(minutes) });
 /** The latest reconcile ran 1 min ago: not due on time alone. */
 const RECENT = reconciled(4, 1);
+/** A digest slot 5 min before NOW (10:05), and the latest reconcile run 9 min ago, before it. */
+const SLOT_TIME = "10:05";
+const BEFORE_SLOT = reconciled(4, 9);
 
 const open = (n: number): PrState => ({ number: n, state: "open", head_sha: HEAD });
 const merged = (n: number): PrState => ({ number: n, state: "merged", head_sha: HEAD });
@@ -93,8 +96,22 @@ describe("next(coordinator): reconcile", () => {
       { records: [RECENT, storyRec("2.1", { state: "merged", pr: 7 })], status: { "2.1": "done" } },
       "unit reconcile:5",
     ],
-    ["a passed digest slot, unposted, is no work until Story 4.2", { records: [RECENT], coordinator: coordinator({ digest_posted_at: null }) }, "idle"],
-    ["a digest last posted yesterday is no work until Story 4.2", { records: [RECENT], coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }) }, "idle"],
+    // Story 4.2: the 10:05 slot passed at 10:10; the last run, 9 min ago (10:01), was before it.
+    ["a passed digest slot, unposted, is work (Story 4.2)", { records: [BEFORE_SLOT], digestTime: SLOT_TIME, coordinator: coordinator({ digest_posted_at: null }) }, "unit reconcile:5"],
+    ["a digest last posted yesterday is work (Story 4.2)", { records: [BEFORE_SLOT], digestTime: SLOT_TIME, coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }) }, "unit reconcile:5"],
+    ["a digest posted today after the slot is no work", { records: [BEFORE_SLOT], digestTime: SLOT_TIME, coordinator: coordinator({ digest_posted_at: "2026-10-22T10:06:00Z" }) }, "idle"],
+    ["a digest posted today just before the slot is work", { records: [BEFORE_SLOT], digestTime: SLOT_TIME, coordinator: coordinator({ digest_posted_at: "2026-10-22T10:04:59Z" }) }, "unit reconcile:5"],
+    ["no coordinator.json: the slot passed with no digest posted is work", { records: [BEFORE_SLOT], digestTime: SLOT_TIME, coordinator: null }, "unit reconcile:5"],
+    [
+      "slot passed, unposted, last run after the slot and under 10 min ago: not due (a run failed to stamp)",
+      { records: [RECENT], coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }), digestTime: SLOT_TIME },
+      "idle",
+    ],
+    [
+      "slot passed, unposted, last run before the slot: due",
+      { records: [BEFORE_SLOT], coordinator: coordinator({ digest_posted_at: "2026-10-21T08:00:00Z" }), digestTime: SLOT_TIME },
+      "unit reconcile:5",
+    ],
     ["under 10 min, no work: not due", { records: [reconciled(4, 9)] }, "idle"],
     ["the last run is the newest merged one: a newer merging run does not count", { records: [reconciled(4, 12), coord("reconcile:5", { state: "merging", passed_sha: HEAD })] }, "unit reconcile:6"],
     ["a newer merging run does not make an older recent run stale", { records: [RECENT, coord("reconcile:5", { state: "merging", passed_sha: HEAD, heartbeat_at: minutesBefore(40) })] }, "idle"],
@@ -138,10 +155,16 @@ describe("next(coordinator): reconcile", () => {
     expect(reconcileDue(snapshotOf(w)).due).toBe(false);
   });
 
-  test("a configured digest_time already passed (09:00), last posted at 08:00: still not due (the digest is Story 4.2's)", () => {
+  test("a configured digest_time already passed (10:05), last posted at 08:00, last run before it: due, saying why (Story 4.2)", () => {
+    const w = world({ records: [BEFORE_SLOT], digestTime: SLOT_TIME });
+    expect(picked(next(snapshotOf(w), "coordinator"))).toBe("unit reconcile:5");
+    expect(reconcileDue(snapshotOf(w))).toMatchObject({ due: true, why: "the digest slot 2026-10-22T10:05:00.000Z passed with no digest posted (last 2026-10-22T08:00:00Z)" });
+  });
+
+  test("a run after the slot that failed to stamp: the 10-min rule applies again", () => {
     const w = world({ records: [RECENT], digestTime: "09:00" });
-    expect(picked(next(snapshotOf(w), "coordinator"))).toBe("idle");
     expect(reconcileDue(snapshotOf(w)).due).toBe(false);
+    expect(reconcileDue(snapshotOf(world({ records: [reconciled(4, 10)], digestTime: "09:00" }))).due).toBe(true);
   });
 
   test("reconcileDue reports the last run: the newest merged reconcile record", () => {

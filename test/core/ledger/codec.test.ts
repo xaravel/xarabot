@@ -36,7 +36,24 @@ describe("serializeUnitRecord", () => {
     expect(parsed.builder_providers).toEqual(["anthropic", "openai"]);
     expect(Object.keys(parsed.park)).toEqual(["kind", "reason", "inbox_owner", "globs_held"]);
     expect(parsed.park.globs_held).toEqual(["a.ts", "z.ts"]);
-    expect(text).toContain('\n  "schema_version": 5,\n');
+    expect(text).toContain('\n  "schema_version": 6,\n');
+  });
+
+  test("a park's text comes last, after graph_posted, and round-trips (Story 4.2, ledger v6)", () => {
+    const blocked = rec({ state: "parked", park: { text: "Which inbox?", globs_held: [], inbox_owner: "alice", reason: "intent-gap", kind: "blocked" } });
+    const text = serializeUnitRecord(blocked);
+    expect(Object.keys(JSON.parse(text).park)).toEqual(["kind", "reason", "inbox_owner", "globs_held", "text"]);
+    const graph = `sha256:${"9".repeat(64)}`;
+    const awaiting = rec({ state: "parked", park: { text: "t", graph_posted: graph, kind: "awaiting-approval", reason: null, inbox_owner: "alice", globs_held: [] } });
+    expect(Object.keys(JSON.parse(serializeUnitRecord(awaiting)).park)).toEqual(["kind", "reason", "inbox_owner", "globs_held", "graph_posted", "text"]);
+    const parsed = parseLedger({ "units/story__1.5.json": text });
+    expect(parsed.ok && parsed.value.units.get("story:1.5")?.park).toEqual({ kind: "blocked", reason: "intent-gap", inbox_owner: "alice", globs_held: [], text: "Which inbox?" });
+  });
+
+  test("a v5 record with no park text still reads", () => {
+    const v5 = serializeUnitRecord(rec({ state: "parked", park: { kind: "blocked", reason: "other", inbox_owner: "alice", globs_held: [] } })).replace('"schema_version": 6', '"schema_version": 5');
+    const parsed = parseLedger({ "units/story__1.5.json": v5 });
+    expect(parsed.ok && parsed.value.units.get("story:1.5")?.park).toEqual({ kind: "blocked", reason: "other", inbox_owner: "alice", globs_held: [] });
   });
 });
 
@@ -77,10 +94,10 @@ describe("parseLedger", () => {
     expect(parseLedger({})).toEqual({ ok: true, value: { units: new Map(), coordinator: null } });
   });
 
-  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 5', `"schema_version": ${n}`);
+  const v = (n: number) => serializeUnitRecord(rec()).replace('"schema_version": 6', `"schema_version": ${n}`);
   const cv = (n: number) => serializeCoordinator(COORDINATOR).replace('"schema_version": 2', `"schema_version": ${n}`);
 
-  test.each([1, 2, 3, 4, 5])("unit and coordinator records at schema_version %p both parse (Stories 2.7, 2.8, 2.9, 3.5)", (n) => {
+  test.each([1, 2, 3, 4, 5, 6])("unit and coordinator records at schema_version %p both parse (Stories 2.7, 2.8, 2.9, 3.5, 4.2)", (n) => {
     const r = parseLedger({ "units/story__1.5.json": v(n), [COORDINATOR_PATH]: cv(n) });
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value.units.get("story:1.5")?.schema_version).toBe(n as 1 | 2 | 3 | 4 | 5);
@@ -232,31 +249,31 @@ describe("parseLedger", () => {
     });
   });
 
-  test("a tip mixing schema_version 2 and 5 records parses", () => {
+  test("a tip mixing schema_version 2 and 6 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(2), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(2) });
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value.units.get("story:1.5")?.schema_version).toBe(2);
-    expect(r.value.units.get("story:1.6")?.schema_version).toBe(5);
+    expect(r.value.units.get("story:1.6")?.schema_version).toBe(6);
   });
 
-  test("a tip mixing schema_version 1 and 5 records parses", () => {
+  test("a tip mixing schema_version 1 and 6 records parses", () => {
     const r = parseLedger({ "units/story__1.5.json": v(1), "units/story__1.6.json": serializeUnitRecord(rec({ unit: "story:1.6" })), [COORDINATOR_PATH]: cv(1) });
     expect(r.ok).toBe(true);
   });
 
   const stop: readonly [string, Record<string, string>][] = [
-    ["unit schema_version 6", { "units/story__1.5.json": v(6) }],
+    ["unit schema_version 7", { "units/story__1.5.json": v(7) }],
     ["unit schema_version 0", { "units/story__1.5.json": v(0) }],
-    ["coordinator schema_version 6", { [COORDINATOR_PATH]: cv(6) }],
+    ["coordinator schema_version 7", { [COORDINATOR_PATH]: cv(7) }],
     ["coordinator schema_version 0", { [COORDINATOR_PATH]: cv(0) }],
-    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(6) }],
+    ["stop wins over an earlier invalid file", { "units/a__1.json": "{", "units/story__1.5.json": v(7) }],
   ];
   for (const [name, files] of stop) {
     test(`${name} -> stop`, () => {
       const r = parseLedger(files);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.kind).toBe("stop");
-      if (!r.ok) expect(r.error.message).toContain("this runner reads 1, 2, 3, 4 and 5");
+      if (!r.ok) expect(r.error.message).toContain("this runner reads 1, 2, 3, 4, 5 and 6");
     });
   }
 
@@ -269,7 +286,7 @@ describe("parseLedger", () => {
     ["nested path", { "units/x/story__1.5.json": good }],
     ["bad park.reason", { "units/story__1.5.json": serializeUnitRecord(rec({ state: "parked", park: { kind: "blocked", reason: "x" as never, inbox_owner: "alice", globs_held: [] } })) }],
     ["park on a non-parked record", { "units/story__1.5.json": serializeUnitRecord(rec({ park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } })) }],
-    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 5', '"schema_version": "5"') }],
+    ["string schema_version", { "units/story__1.5.json": good.replace('"schema_version": 6', '"schema_version": "5"') }],
     ["bad coordinator", { [COORDINATOR_PATH]: "{}" }],
   ];
   for (const [name, files] of invalid) {

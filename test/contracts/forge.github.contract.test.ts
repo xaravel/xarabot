@@ -42,7 +42,23 @@ forgeContract({
   name: "github (emulator)",
   enabled: !isSandboxed,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "queue", "mergeQueueHead", "trace", "refusePushes", "addReview", "reviewBodies"],
+  controls: [
+    "makeCommit",
+    "comments",
+    "setChecks",
+    "setCiLog",
+    "setMain",
+    "setNow",
+    "writeForeignLedger",
+    "queue",
+    "mergeQueueHead",
+    "trace",
+    "refusePushes",
+    "addReview",
+    "reviewBodies",
+    "inboxes",
+    "inboxComments",
+  ],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -83,6 +99,9 @@ forgeContract({
             ),
           comments: (pr) => gh.control.comments(pr),
           reviewBodies: (pr) => gh.control.reviewBodies(pr),
+          inboxes: () =>
+            gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
+          inboxComments: (issue) => gh.control.comments(issue),
           setChecks: (sha, checks) => gh.control.setChecks(sha, checks),
           setCiLog: (sha, check, log) => gh.control.setCiLog(sha, check, log),
           setMain: (files) => gh.control.setMain(files),
@@ -106,6 +125,42 @@ forgeContract({
       rmSync(dir, { recursive: true, force: true });
       throw e;
     }
+  },
+});
+
+// The emulator with no git remote: nothing binds a socket, so it runs inside a
+// session too. The cases that push (and so need `makeCommit`) report skipped.
+forgeContract({
+  name: "github (emulator, no git remote)",
+  operations: FORGE_OPERATIONS.filter((op) => op !== "pushBranch"),
+  controls: ["comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace", "inboxes", "inboxComments"],
+  make: (): ForgeFixture => {
+    const { privateKey, publicKey } = testKeys();
+    const gh = createFakeGitHub({ publicKey });
+    const trace: SnapshotPart[] = [];
+    const forge = createGitHubForge({
+      repo: { owner: "acme", name: "widgets" },
+      credentials: { app: { id: 4242, slug: "alice-xarabot" }, key: privateKey },
+      fetch: gh.fetch,
+      apiUrl: gh.control.apiUrl,
+      now: gh.control.clock,
+      onRead: (part) => trace.push(part),
+      maintainer: "alice",
+    });
+    return {
+      forge,
+      control: {
+        comments: (pr) => gh.control.comments(pr),
+        setChecks: (sha, checks) => gh.control.setChecks(sha, checks),
+        setCiLog: (sha, check, log) => gh.control.setCiLog(sha, check, log),
+        setMain: (files) => gh.control.setMain(files),
+        setNow: (now) => gh.control.setNow(now),
+        writeForeignLedger: (commit) => gh.control.writeForeignLedger(commit),
+        trace: () => [...trace],
+        inboxes: () => gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
+        inboxComments: (issue) => gh.control.comments(issue),
+      },
+    };
   },
 });
 
@@ -182,7 +237,8 @@ forgeContract({
   name: "github (live)",
   enabled: liveGithubEnabled,
   operations: IMPLEMENTED,
-  controls: ["makeCommit", "comments", "reviewBodies", "writeForeignLedger", "trace"],
+  controls: ["makeCommit", "comments", "reviewBodies", "writeForeignLedger", "trace", "inboxComments"],
+  inboxOwner: LIVE_LOGIN,
   make: async (): Promise<ForgeFixture> => {
     const s = await liveScratch();
     // A second adapter instance on the same branch writes as another lane would.
@@ -194,6 +250,12 @@ forgeContract({
         comments: async (pr) => {
           const r = await s.raw(LIST_COMMENTS, `/issues/${pr}/comments?per_page=100`);
           if (!isSuccess(r.status) || !Array.isArray(r.body)) throw new Error(`list comments of #${pr}: ${r.status}`);
+          return r.body.map((c) => String((c as { body?: unknown }).body));
+        },
+        // An issue's comments list as a PR's do.
+        inboxComments: async (issue) => {
+          const r = await s.raw(LIST_COMMENTS, `/issues/${issue}/comments?per_page=100`);
+          if (!isSuccess(r.status) || !Array.isArray(r.body)) throw new Error(`list comments of #${issue}: ${r.status}`);
           return r.body.map((c) => String((c as { body?: unknown }).body));
         },
         reviewBodies: async (pr) => {

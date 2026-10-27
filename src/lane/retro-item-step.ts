@@ -159,7 +159,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
   const layout = laneLayout(deps.laneDir);
   const settings: AgentSettings = { effort: deps.lane.effort, ...(deps.lane.model !== undefined ? { model: deps.lane.model } : {}) };
   const timing = { now: clock, callTimeoutMs, sleep, ...(deps.random !== undefined ? { random: deps.random } : {}) };
-  const ciStep = createCiStep({ forge, merger: deps.merger, identity, repo: deps.lane.repo, ...timing });
+  const ciStep = createCiStep({ forge, merger: deps.merger, identity, repo: deps.lane.repo, secrets, ...timing });
   const mergeStep = createMergeStep({ forge, diffPaths: deps.diffPaths, graphTrees: deps.graphTrees, identity, repo: deps.lane.repo, agent: deps.lane.agent, passed: deps.passed, ...timing });
   const reviewGate = createReviewGateStep({ forge, identity, repo: deps.lane.repo, review: deps.review, passed: deps.passed, secrets, ...timing });
 
@@ -183,7 +183,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
     const overBudget = () => `unit budget of ${config.unit_budget_hours} h passed`;
     /** The unit or the coordinator claim lost, or the unit budget passed. */
     const signal = AbortSignal.any([input.signal, budget]);
-    const opsParams = { forge, identity, repo: deps.lane.repo, signal: input.signal, clock, sleep };
+    const opsParams = { forge, identity, repo: deps.lane.repo, signal: input.signal, clock, sleep, secrets };
     const { aborted, parkBlocked } = stepOps({ ...opsParams, kit, abortReason: "the unit or the coordinator claim was lost during the retro-item step" });
 
     // ------------------------------------------------------------ the item
@@ -545,7 +545,7 @@ export function createRetroItemStep(deps: RetroItemStepDeps): CoordinatorStep {
     const result = ran.result;
     if (result.outcome === "blocked") {
       const b = result.blocked;
-      return kit.run(() => parkBlocked(b.kind, `blocked ${b.kind}: ${b.text}`));
+      return kit.run(() => parkBlocked(b.kind, `blocked ${b.kind}: ${b.text}`, b.text));
     }
     if (result.outcome === "no-op") return kit.run(() => parkBlocked("no-op", "no-op"));
 

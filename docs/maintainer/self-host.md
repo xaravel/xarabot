@@ -468,6 +468,51 @@ Xarabot requests no review and sends no notice for a parked PR. Until Story
 Watch → All Activity) so GitHub notifies you of each new bot PR (Maintainer
 decision, 2026-10-24).
 
+### Your inbox and the daily digest (Story 4.2)
+
+With a `runner_version` that has Story 4.2 and the coordinator lane running,
+each owner has one inbox: the lowest-numbered open issue labelled
+`xarabot-inbox` and assigned to them, titled `🤖 Xarabot inbox`. It is the
+issue the alerts already post on; `reconcile` creates one only for an owner
+with items who has none. Every `reconcile` run rewrites each inbox's body
+from the ledger and `main`, and only when it changed: your parked PRs and
+blocked units, and, in your inbox as the Maintainer, every `needs-approval`
+unit, every `human-live-step` block, every graph change awaiting your
+approval, the waiting checkpoint gos, the rejected retros with no go, the
+open retro items routed to you, the Story headings with no manifest, and
+each deferred entry of a Story spec on `main` that no later spec
+`resolves`. Each item shows its link, its age in whole days and its
+`/xarabot` verb where it has one. An inbox with nothing in it reads
+`🤖 Xarabot inbox: nothing waits on you.` The body never @-mentions anyone,
+so a rewrite notifies no one.
+
+A blocked unit shows text under its item only when a session wrote it: a
+build, CI-fix or retro-item session's blocked result, or a planning unit's
+readiness summary. A park the runner caused (`write-check`, `review-cap`,
+`ci-fix-cap`, `ci-timeout`, `attempts-cap`, `graph-invalid` and the like)
+shows its reason only; its unit log says more.
+
+The first run lists every `deferred` entry of every Story spec already on
+`main`, however old. An entry leaves your inbox only when a later spec lists
+its id (`<story id>-d<n>`, or the entry's own `id`) in its frontmatter
+`resolves`.
+
+Once a day, at `digest_time` (UTC, default `08:00`, in
+`.xarabot/config.yaml`), the first `reconcile` run past the slot stamps
+`digest_posted_at` in `coordinator.json` and then posts one comment on each
+non-empty inbox, `@<owner>` with the item count and the issue link: that
+comment is the notice. A run that fails to post one does not retry it that
+day.
+
+**Human Live Step: pin your inbox, once.** After the first `reconcile` run
+with Story 4.2 has created or rewritten your inbox, open the repo's Issues
+tab, find the open `🤖 Xarabot inbox` issue assigned to you (filter
+`label:xarabot-inbox assignee:@me`), and choose **Pin issue** in its right
+sidebar. Xarabot never pins it: the runner has no pin operation. Keep that
+issue open; if you close it, the next run opens a new one, which you pin
+again. Once the inbox is pinned and the daily digest arrives, you can drop
+the "All Activity" watch above.
+
 ## While Epic 2 is built
 
 - **Advancing the runner.** A lane runs only the pinned `runner_version` (Story 1.19). When a Story merges whose code the lanes need:
@@ -483,6 +528,7 @@ decision, 2026-10-24).
   3. Story 2.8 writes ledger records at `schema_version` 3 (the new `approved_graph` field), and a runner without 2.8 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 2.8 together, in one Maintainer PR, and never roll back past it once version-3 records are on the ledger. A runner with 2.8 still reads version 1 and 2 records.
   4. Story 2.9 writes ledger records at `schema_version` 4 (the new `retro_result` field), and a runner without 2.9 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 2.9 together, in one Maintainer PR, and never roll back past it once version-4 records are on the ledger. A runner with 2.9 still reads version 1 to 3 records. Set `live_evidence_glob` in `.xarabot/config.yaml` only once every lane's pin has 2.9: a runner without 2.9 refuses the unknown key and stops on bad config. Until then, the default path applies.
   5. Story 3.5 writes ledger records at `schema_version` 5 (the new `enqueued_sha` field), and a runner without 3.5 stops on one (`ledger-schema-version`). Advance every lane's pin to a tag with 3.5 together, as in step 3. A runner with 3.5 reads a record below version 5 that has no `enqueued_sha` with its `passed_sha` moved to `enqueued_sha`, so the record reads as unreviewed. A unit parked `awaiting-approval` before the advance is therefore never taken: `reconcile` leaves it parked whatever you approve (its note says `is unreviewed at <sha>`, `not taken, left parked`), and nothing else tells you. After the advance, release each such unit with `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule release <unit-id>` ("Releasing a parked unit", below): the next claim adopts its open PR, which goes through CI and a review before it is queued. `rule rebuild <unit-id>` closes the PR and starts the unit fresh instead.
+  6. Story 4.2 writes ledger records at `schema_version` 6 (the new `park.text` field, the blocked session's own words), and a runner without 4.2 stops on one (`ledger-schema-version`). Advance every lane's pin, builders and the coordinator alike, to a tag with 4.2 together, in one Maintainer PR, as in step 3, and never roll back past it once version-6 records are on the ledger. A runner with 4.2 still reads version 1 to 5 records; a unit parked before the advance has no text, so its inbox item shows none.
 - **The coordinator lane.** Never install it while `runner_version` lacks Stories 2.4 (the coordinator lane and its claim) and 2.5 (`reconcile` marks units done). A runner with 2.4 alone claims `coordinator.json` and then idles ("no reconcile step (Story 2.5)"). In this order:
   1. Make the `Protect main` change in "`reconcile` PRs and `Protect main`" (below).
   2. Once Stories 2.4 and 2.5 have both merged, tag a `main` commit that holds both, as in "Advancing the runner" step 1.

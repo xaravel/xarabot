@@ -383,6 +383,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       labels: i.labels.map((name) => ({ name })),
       assignees: i.assignees.map((login) => ({ login })),
       assignee: i.assignees[0] === undefined ? null : { login: i.assignees[0] },
+      html_url: `https://github.com/${owner}/${name}/issues/${i.number}`,
     };
   }
 
@@ -759,6 +760,25 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       const issue: FakeIssue = { number: nextNumber(), title, body: text, state: "open", labels: labels as string[], assignees: assignees as string[] };
       issues.set(issue.number, issue);
       return json(201, issueJson(issue));
+    }
+    if (method === "PATCH" && (m = /^\/issues\/(\d+)$/.exec(route)) !== null) {
+      const n = Number(m[1]);
+      const issue = issues.get(n);
+      if (issue === undefined) return notFound();
+      const title = b?.["title"];
+      const text = b?.["body"];
+      const state = b?.["state"];
+      if (title !== undefined && typeof title !== "string") return unprocessable("Invalid request.");
+      if (text !== undefined && text !== null && typeof text !== "string") return unprocessable("Invalid request.");
+      if (state !== undefined && state !== "open" && state !== "closed") return unprocessable("Invalid request.");
+      const updated: FakeIssue = {
+        ...issue,
+        ...(typeof title === "string" ? { title } : {}),
+        ...(text !== undefined ? { body: text ?? "" } : {}),
+        ...(state === "open" || state === "closed" ? { state } : {}),
+      };
+      issues.set(n, updated);
+      return json(200, issueJson(updated));
     }
     if (method === "GET" && (m = /^\/commits\/([0-9a-f]{40})\/status$/.exec(route)) !== null) {
       const perPage = Number(params.get("per_page") ?? "30");

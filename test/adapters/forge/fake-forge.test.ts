@@ -304,3 +304,38 @@ describe("fake forge", () => {
     expect(value(await forge.checks(sha, live())).checks[0]?.status).toBe("queued");
   });
 });
+
+describe("fake forge inboxes (Story 4.2)", () => {
+  test("issue numbers start apart from PR numbers; links use the repo URL", async () => {
+    const { forge } = createFakeForge({ repoUrl: "https://github.com/o/r", firstIssueNumber: 50 });
+    expect(value(await forge.openInbox("alice", live()))).toEqual({ number: 50, owner: "alice", body: "", url: "https://github.com/o/r/issues/50" });
+  });
+
+  test("an owner's inbox is the lowest-numbered open one, matched case-insensitively; a closed one is left out", async () => {
+    const { forge, control } = createFakeForge();
+    const first = value(await forge.openInbox("alice", live()));
+    expect(value(await forge.openInbox("ALICE", live())).number).toBe(first.number);
+    expect(control.closeInbox(first.number)).toBe(true);
+    expect(control.closeInbox(4242)).toBe(false);
+    const second = value(await forge.openInbox("alice", live()));
+    expect(second.number).toBe(first.number + 1);
+    expect(value(await forge.inboxes(live())).map((i) => i.number)).toEqual([second.number]);
+    expect(control.inboxes().map((i) => [i.number, i.open])).toEqual([
+      [first.number, false],
+      [second.number, true],
+    ]);
+  });
+
+  test("bodies and comments; an injected error changes nothing", async () => {
+    const { forge, control } = createFakeForge();
+    const inbox = value(await forge.openInbox("bob", live()));
+    control.injectError("setInboxBody", { kind: "transient", message: "502" });
+    expect((await forge.setInboxBody(inbox.number, "x", live())).ok).toBe(false);
+    expect(value(await forge.setInboxBody(inbox.number, "y", live())).body).toBe("y");
+    control.injectError("inboxComment", { kind: "transient", message: "502" });
+    expect((await forge.inboxComment(inbox.number, "c1", live())).ok).toBe(false);
+    value(await forge.inboxComment(inbox.number, "c2", live()));
+    expect(control.inboxComments(inbox.number)).toEqual(["c2"]);
+    expect(control.inboxComments(999)).toEqual([]);
+  });
+});

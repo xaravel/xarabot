@@ -10,7 +10,7 @@ operation table in `src/adapters/forge/github/http.ts` by
 |---|---|
 | `contents: write` | `getRef`, `getCommit`, `getTree`, `getBlob`, `createBlob`, `createTree`, `createCommit`, `createRef`, `updateRef`, `git push` of unit branches, `enqueuePullRequest`, `dequeuePullRequest` |
 | `pull_requests: write` | `getPull`, `listPulls`, `listReviews`, `createPull`, `updatePull`, `createComment`, `pullQueueState` |
-| `issues: write` | `listIssues`, `createIssue`, `listIssueComments`, `createIssueComment` (the Maintainer's `xarabot-inbox` alerts) |
+| `issues: write` | `listIssues`, `createIssue`, `updateIssue`, `listIssueComments`, `createIssueComment` (the owners' `xarabot-inbox` issues: the Maintainer's alerts, and Story 4.2's inbox bodies and daily digest mentions) |
 | `checks: read` | `listCheckRuns` |
 | `statuses: read` | `getCombinedStatus` |
 | `actions: read` | `getJobLogs` |

@@ -16,6 +16,7 @@ import {
   type ForgeResult,
   type ForgeReview,
   type GitSha,
+  type InboxIssue,
 } from "../../../ports/forge.ts";
 
 /**
@@ -39,7 +40,16 @@ export type FakeForgeOptions = {
   readonly ledger?: Readonly<Record<string, string>>;
   /** The login `postReview`'s reviews are by; default `FAKE_BOT_LOGIN`. */
   readonly botLogin?: string;
+  /** The number the first inbox issue gets; default 1001, apart from PR numbers. */
+  readonly firstIssueNumber?: number;
+  /** The repo's web URL, for inbox issue links; default `FAKE_REPO_URL`. */
+  readonly repoUrl?: string;
 };
+
+/** The repo web URL the fake's inbox issues link under, unless `repoUrl` names another. */
+export const FAKE_REPO_URL = "https://github.com/fake/repo";
+/** The title `openInbox` gives an inbox it creates. */
+export const FAKE_INBOX_TITLE = "🤖 Xarabot inbox";
 
 /** The bot account the fake's own reviews are by, unless `botLogin` names another. */
 export const FAKE_BOT_LOGIN = "fake-xarabot[bot]";
@@ -52,6 +62,15 @@ export type FakeLedgerCommit = {
 };
 
 export type FakeAlert = { readonly condition: string; readonly main_sha: GitSha };
+
+/** An inbox issue as the fake holds it. */
+export type FakeInbox = {
+  readonly number: number;
+  readonly title: string;
+  readonly owner: string | null;
+  readonly body: string;
+  readonly open: boolean;
+};
 
 /** Runs inside `ledgerSwap` after its yield and before the compare-and-set. */
 export type BeforeSwapHook = (call: { readonly n: number; readonly oldSha: GitSha }) => void | Promise<void>;
@@ -85,6 +104,12 @@ export type FakeForgeControl = {
   /** The bodies of the reviews `postReview` posted on PR `pr`, oldest first. */
   reviewBodies(pr: number): string[];
   alerts(): FakeAlert[];
+  /** Every inbox issue, open or closed, ascending by number. */
+  inboxes(): FakeInbox[];
+  /** Comment bodies on inbox issue `issue`, oldest first. */
+  inboxComments(issue: number): string[];
+  /** Closes inbox issue `issue`, as its owner closing it would; `false` when there is none. */
+  closeInbox(issue: number): boolean;
   /** Queued PR numbers, head first. */
   queue(): number[];
   /** Reads `snapshot` made, in order: `ledger`, `main`, `prs`. */
@@ -100,6 +125,8 @@ const DEFAULT_NOW = "2026-01-01T00:00:00Z";
 const RESERVED_BRANCHES: readonly string[] = ["main", "xarabot/claims"];
 const PASSING_CONCLUSIONS: readonly string[] = ["success", "neutral", "skipped"];
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** A GitHub login, as the GitHub adapter checks one. */
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 
 function sha1(...parts: (string | Uint8Array)[]): string {
   const hasher = new Bun.CryptoHasher("sha1");
@@ -143,6 +170,8 @@ type PrRecord = {
   merge_sha: GitSha | null;
 };
 
+type InboxRecord = { number: number; title: string; owner: string | null; body: string; open: boolean; comments: string[] };
+
 export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   let commits = 0;
   const newSha = (kind: string): GitSha => sha1(`fake-forge ${kind} ${commits++}`);
@@ -169,6 +198,14 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const ciLogs = new Map<GitSha, Map<string, string>>();
   const queue: number[] = [];
   const alerts: FakeAlert[] = [];
+  const inboxes = new Map<number, InboxRecord>();
+  let nextIssue = options.firstIssueNumber ?? 1001;
+  const repoUrl = options.repoUrl ?? FAKE_REPO_URL;
+  const inboxView = (i: InboxRecord): InboxIssue => ({ number: i.number, owner: i.owner, body: i.body, url: `${repoUrl}/issues/${i.number}` });
+  const findInbox = (issue: number, operation: string): ForgeResult<InboxRecord> => {
+    const i = inboxes.get(issue);
+    return i === undefined ? forgeErr("not-found", `${operation}: no issue #${issue}`) : forgeOk(i);
+  };
   const injected = new Map<ForgeOperation, ForgeError>();
   const refused = new Set<string>();
   let hook: BeforeSwapHook | null = null;
@@ -441,6 +478,43 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         if (signal.aborted) return deadlinePassed("prefetch");
         return forgeOk({ files });
       }),
+
+    inboxes: (opts) =>
+      call("inboxes", opts, () =>
+        forgeOk(
+          [...inboxes.values()]
+            .filter((i) => i.open)
+            .sort((a, b) => a.number - b.number)
+            .map(inboxView),
+        ),
+      ),
+
+    openInbox: (owner, opts) =>
+      call("openInbox", opts, () => {
+        if (!LOGIN_PATTERN.test(owner)) return forgeErr("rejected", `openInbox: ${JSON.stringify(owner)} is not a GitHub login`);
+        const mine = [...inboxes.values()].filter((i) => i.open && i.owner?.toLowerCase() === owner.toLowerCase()).sort((a, b) => a.number - b.number);
+        const found = mine[0];
+        if (found !== undefined) return forgeOk(inboxView(found));
+        const created: InboxRecord = { number: nextIssue++, title: FAKE_INBOX_TITLE, owner, body: "", open: true, comments: [] };
+        inboxes.set(created.number, created);
+        return forgeOk(inboxView(created));
+      }),
+
+    setInboxBody: (issue, body, opts) =>
+      call("setInboxBody", opts, () => {
+        const found = findInbox(issue, "setInboxBody");
+        if (!found.ok) return found;
+        found.value.body = body;
+        return forgeOk(inboxView(found.value));
+      }),
+
+    inboxComment: (issue, body, opts) =>
+      call("inboxComment", opts, () => {
+        const found = findInbox(issue, "inboxComment");
+        if (!found.ok) return found;
+        found.value.comments.push(body);
+        return forgeOk({ id: String(nextComment++) });
+      }),
   };
 
   const control: FakeForgeControl = {
@@ -500,6 +574,17 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     comments: (pr) => [...(comments.get(pr) ?? [])],
     reviewBodies: (pr) => [...(reviewBodies.get(pr) ?? [])],
     alerts: () => alerts.map((a) => ({ ...a })),
+    inboxes: () =>
+      [...inboxes.values()]
+        .sort((a, b) => a.number - b.number)
+        .map((i) => ({ number: i.number, title: i.title, owner: i.owner, body: i.body, open: i.open })),
+    inboxComments: (issue) => [...(inboxes.get(issue)?.comments ?? [])],
+    closeInbox(issue) {
+      const i = inboxes.get(issue);
+      if (i === undefined) return false;
+      i.open = false;
+      return true;
+    },
     queue: () => [...queue],
     trace: () => [...trace],
     ledgerLog: () => ledgerLog.map((c) => ({ ...c })),

@@ -12,6 +12,7 @@ import {
   heartbeat,
   markMerged,
   park,
+  parkText,
   parkNew,
   release,
   releaseStale,
@@ -172,6 +173,8 @@ export type LaneDeps = {
    * model (`sessionProvider`).
    */
   readonly provider?: Provider;
+  /** The lane's known secrets, redacted from a blocked build's park text (Story 4.2); default none. */
+  readonly secrets?: readonly string[];
   /** The PID `lane.pid` records; default `process.pid`. */
   readonly pid?: number;
   /** The host clock in epoch ms; default `Date.now`. */
@@ -567,9 +570,11 @@ export async function runLaneProcess(deps: LaneDeps): Promise<LaneProcessResult>
       if (result.outcome !== "done") {
         const reason: ParkReason = result.outcome === "blocked" ? result.blocked.kind : "no-op";
         t.reason = result.outcome === "blocked" ? `blocked ${result.blocked.kind}: ${result.blocked.text}` : "no-op";
+        // The session's own words land in the owner's inbox (Story 4.2).
+        const text = result.outcome === "blocked" ? parkText(result.blocked.text, deps.secrets ?? []) : undefined;
         const parked = await held(
           t,
-          (now, gen) => park({ unit: story.unit, by: identity, now, generation: gen, kind: "blocked", reason }),
+          (now, gen) => park({ unit: story.unit, by: identity, now, generation: gen, kind: "blocked", reason, ...(text !== undefined ? { text } : {}) }),
           "park",
         );
         return { end: parked ? "progress" : "failed" };

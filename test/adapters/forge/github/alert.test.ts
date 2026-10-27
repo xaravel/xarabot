@@ -124,7 +124,8 @@ describe("alert", () => {
       status: 200,
       body: [
         { number: 1, pull_request: { url: "x" } },
-        { number: n },
+        // As GitHub lists it: the inbox's owner is its first assignee.
+        { number: n, assignees: [{ login: "alice" }] },
       ],
     });
     value(await forge.alert("c", "a".repeat(40), live()));

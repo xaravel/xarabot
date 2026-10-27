@@ -46,6 +46,8 @@ type MainOpts = {
   readonly policy?: readonly string[];
   /** Story 1.2 in `epics.md` with a manifest. */
   readonly story12?: boolean;
+  /** More `main` files, by path. */
+  readonly extra?: Readonly<Record<string, string>>;
 };
 
 const STATUS_BACKLOG = "# sprint status\ndevelopment_status:\n  epic-1: in-progress\n  1-1-first: backlog\n";
@@ -67,6 +69,7 @@ function mainFiles(o: MainOpts = {}): Record<string, string> {
   if (o.story12 === true) files["stories/1.2.md"] = '---\nstory_id: "1.2"\nepic: 1\nsprint_key: 1-2-second\ntitle: Story 1.2\nglobs: ["src/b/**"]\n---\n';
   const status = o.status === undefined ? STATUS_BACKLOG : o.status;
   if (status !== null) files[STATUS] = status;
+  Object.assign(files, o.extra ?? {});
   return files;
 }
 
@@ -77,8 +80,9 @@ const coord = (unit: string, over: Partial<UnitRecord> = {}): UnitRecord =>
 /** This run's claimed record, as the coordinator process claims it. */
 const OWN = coord(U, { state: "claimed" });
 
-function claimRec(): CoordinatorRecord {
-  return { schema_version: 2, ...COORD, lane: "coordinator", generation: 1, heartbeat_at: FORGE_NOW, digest_posted_at: null, rulings_cursor: null };
+/** The coordinator claim, with today's digest already posted (so only the Story 4.2 cases see a digest due). */
+function claimRec(over: Partial<CoordinatorRecord> = {}): CoordinatorRecord {
+  return { schema_version: 2, ...COORD, lane: "coordinator", generation: 1, heartbeat_at: FORGE_NOW, digest_posted_at: FORGE_NOW, rulings_cursor: null, ...over };
 }
 
 /** The edit name in a ledger commit message, `ledger: <name> <unit> [skip ci]`. */
@@ -87,14 +91,19 @@ const editName = (message: string) => /^ledger: (\S+ \S+)/.exec(message)?.[1] ??
 /**
  * The fake forge, recording each call in order; a ledger swap is
  * `ledgerSwap <edit> <unit>`. A snapshot reading `main` files (the fresh-main
- * re-check, not a swap's tip read) is recorded only when `mainReads`.
+ * re-check, not a swap's tip read) is recorded only when `mainReads`. The
+ * inbox step's calls (Story 4.2) are recorded only when `inboxCalls`: its
+ * own cases cover them.
  */
-function spied(fake: FakeForge, events: string[], mainReads = false): Forge {
+const INBOX_CALLS: readonly string[] = ["inboxes", "openInbox", "setInboxBody", "inboxComment"];
+function spied(fake: FakeForge, events: string[], mainReads = false, inboxCalls = false): Forge {
   const out = {} as Record<string, unknown>;
   for (const [name, fn] of Object.entries(fake.forge)) {
     out[name] = (...args: unknown[]) => {
       if (name === "ledgerSwap") events.push(`ledgerSwap ${editName((args[1] as { message: string }).message)}`);
-      else if (name !== "snapshot" || (mainReads && (args[0] as { read?: unknown }).read !== undefined)) events.push(name);
+      else if (INBOX_CALLS.includes(name) && !inboxCalls) {
+        // Left out: the inbox step's own cases record its calls.
+      } else if (name !== "snapshot" || (mainReads && (args[0] as { read?: unknown }).read !== undefined)) events.push(name);
       return (fn as (...a: unknown[]) => unknown)(...args);
     };
   }
@@ -130,6 +139,8 @@ type Fake = {
 };
 
 type FakeOpts = MainOpts & {
+  /** The seeded `coordinator.json` fields; default today's digest already posted. */
+  readonly coordinator?: Partial<CoordinatorRecord>;
   readonly committer?: (r: ReconcileCommitRequest) => Result<ReconcileCommit, WorkspaceErrorKind>;
   readonly onSleep?: (i: number, f: Fake) => void | Promise<void>;
 };
@@ -143,7 +154,7 @@ afterEach(() => {
 async function setup(o: FakeOpts = {}, seed: (fake: FakeForge) => Promise<readonly UnitRecord[]> = async () => []): Promise<Fake> {
   const fake = createFakeForge({ now: FORGE_NOW, main: mainFiles(o) });
   const records = await seed(fake);
-  fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([OWN, ...records], { [COORDINATOR_PATH]: serializeCoordinator(claimRec()) }), deletes: [] });
+  fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([OWN, ...records], { [COORDINATOR_PATH]: serializeCoordinator(claimRec(o.coordinator)) }), deletes: [] });
   const events: string[] = [];
   const forge = spied(fake, events);
   const logs: string[] = [];
@@ -2744,5 +2755,139 @@ describe("createReconcileStep: a retro-item PR parked awaiting approval takes St
     expect(Date.parse(r?.heartbeat_at ?? "")).toBe(T0);
     expect(swaps(f.events).slice(0, 1)).toEqual([`park ${UNIT_X}`]);
     expect(f.fake.control.comments(pr.number)).toEqual([reparkComment(UNIT_X, "not-queued")]);
+  });
+});
+
+// ------------------------------------------------------------------ Story 4.2
+
+describe("createReconcileStep: owners' inboxes and the daily digest (Story 4.2)", () => {
+  const REPO_URL = "https://github.com/xaravel/xarabot";
+  const TWO_DAYS = minutesBefore(2 * 24 * 60);
+  const ALICE_ID: LaneIdentity = { owner: "alice", host: "11111111-1111-4111-8111-111111111111", lane: "builder-1" };
+  const BOB_ID: LaneIdentity = { owner: "bob", host: "22222222-2222-4222-8222-222222222222", lane: "builder-2" };
+  const DUE = { digest_posted_at: "2026-10-22T08:00:00Z" };
+
+  /** alice's Story 1.1 parked blocked with its text and no PR; bob's Story 1.2 parked awaiting approval on an open PR. */
+  const seedTwo = async (fake: FakeForge): Promise<readonly UnitRecord[]> => {
+    const pr = await prOn(fake, "story/1.2");
+    return [
+      rec({
+        ...ALICE_ID,
+        unit: "story:1.1",
+        state: "parked",
+        globs: ["src/a/**"],
+        heartbeat_at: TWO_DAYS,
+        park: { kind: "blocked", reason: "intent-gap", inbox_owner: "alice", globs_held: [], text: "Which inbox owns graph PRs? Ask @carol." },
+      }),
+      rec({
+        ...BOB_ID,
+        unit: "story:1.2",
+        state: "parked",
+        globs: ["src/b/**"],
+        heartbeat_at: TWO_DAYS,
+        pr: pr.number,
+        pr_owner: "bob",
+        head_sha: pr.head,
+        passed_sha: pr.head,
+        park: { kind: "awaiting-approval", reason: null, inbox_owner: "bob", globs_held: ["src/b/x.ts"] },
+      }),
+    ];
+  };
+
+  /** The run's own record claimed again, as the next `reconcile` run's claim would leave it. */
+  const reclaim = (f: Fake, more: Record<string, string> = {}, deletes: string[] = []) =>
+    f.fake.control.writeForeignLedger({ message: "next run [skip ci]", writes: { ...tip([OWN]), ...more }, deletes });
+
+  const inboxOf = (f: Fake, owner: string) => f.fake.control.inboxes().find((i) => i.owner === owner);
+  const coordinatorRecord = async (f: Fake) => {
+    const s = await f.fake.forge.snapshot(opts());
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  };
+
+  test("parked records of two owners: one labelled, assigned inbox each, listing the unit with its link, age and park text; a second run writes no body", async () => {
+    const f = await setup({}, seedTwo);
+    const out = await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(out.state).toBe("merged");
+    const pr = (await f.ledger()).get("story:1.2")?.pr as number;
+    expect(f.fake.control.inboxes().map((i) => [i.owner, i.title, i.open])).toEqual([
+      ["alice", "🤖 Xarabot inbox", true],
+      ["bob", "🤖 Xarabot inbox", true],
+    ]);
+    const alice = inboxOf(f, "alice")?.body ?? "";
+    expect(alice).toContain(`- [story:1.1](${REPO_URL}/blob/xarabot/claims/units/story__1.1.json) · blocked \`intent-gap\` · 2d\n  > Which inbox owns graph PRs? Ask carol.\n`);
+    expect(inboxOf(f, "bob")?.body).toContain(`- [story:1.2](${REPO_URL}/pull/${pr}) · awaiting approval · 2d\n`);
+    expect(alice).not.toContain("story:1.2");
+    // Today's digest is posted already: no stamp and no mention.
+    expect(f.events.filter((e) => e.startsWith("inbox") || e.startsWith("openInbox") || e.startsWith("setInboxBody") || e.includes("stampDigest"))).toEqual([
+      "inboxes",
+      "openInbox",
+      "setInboxBody",
+      "openInbox",
+      "setInboxBody",
+    ]);
+    reclaim(f);
+    f.events.length = 0;
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(f.events.filter((e) => ["inboxes", "openInbox", "setInboxBody", "inboxComment"].includes(e))).toEqual(["inboxes"]);
+  });
+
+  test("an owner whose records all cleared: their inbox body becomes the empty text", async () => {
+    const f = await setup({}, seedTwo);
+    await f.run();
+    expect(inboxOf(f, "bob")?.body).toContain("story:1.2");
+    reclaim(f, {}, [unitPath("story:1.2")]);
+    await f.run();
+    expect(inboxOf(f, "bob")?.body).toBe("🤖 Xarabot inbox: nothing waits on you.\n");
+    expect(inboxOf(f, "alice")?.body).toContain("story:1.1");
+  });
+
+  test("the digest slot passed: the first run stamps digest_posted_at before one mention per non-empty inbox; a second run that day posts nothing", async () => {
+    const f = await setup({ coordinator: DUE }, seedTwo);
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    const order = f.events.filter((e) => e === "ledgerSwap stampDigest coordinator" || e === "inboxComment");
+    expect(order).toEqual(["ledgerSwap stampDigest coordinator", "inboxComment", "inboxComment"]);
+    expect(Date.parse((await coordinatorRecord(f))?.digest_posted_at ?? "")).toBe(T0);
+    const [alice, bob] = [inboxOf(f, "alice"), inboxOf(f, "bob")];
+    expect(f.fake.control.inboxComments(alice?.number as number)).toEqual([`🤖 @alice Xarabot daily digest: 1 item waits on you in https://github.com/fake/repo/issues/${alice?.number}.`]);
+    expect(f.fake.control.inboxComments(bob?.number as number)).toHaveLength(1);
+    // The second run of the day.
+    reclaim(f);
+    f.events.length = 0;
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(f.events.filter((e) => e === "inboxComment" || e.includes("stampDigest"))).toEqual([]);
+    expect(f.fake.control.inboxComments(alice?.number as number)).toHaveLength(1);
+  });
+
+  test("a refused stamp (another coordinator holds coordinator.json) posts no mention", async () => {
+    const f = await setup({ coordinator: { ...DUE, owner: "dave", host: "44444444-4444-4444-8444-444444444444" } }, seedTwo);
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.fake.control.inboxes()).toHaveLength(2);
+    for (const i of f.fake.control.inboxes()) expect(f.fake.control.inboxComments(i.number)).toEqual([]);
+    expect(f.logs.some((l) => l.includes("stampDigest refused or failed"))).toBe(true);
+  });
+
+  test("forge errors in the inbox step are logged and never fail the run", async () => {
+    const f = await setup({ coordinator: DUE }, seedTwo);
+    f.fake.control.injectError("inboxes", { kind: "forbidden", message: "no issues: write" });
+    const out = await f.run();
+    expect(out.outcome).toBe("progress");
+    expect(out.state).toBe("merged");
+    expect(f.fake.control.inboxes()).toEqual([]);
+    expect(f.logs.some((l) => l.includes("inbox step: inboxes failed: forbidden"))).toBe(true);
+    // Nothing was stamped, so the next run still owes today's digest.
+    expect((await coordinatorRecord(f))?.digest_posted_at).toBe(DUE.digest_posted_at);
+  });
+
+  test("a Story spec on main whose frontmatter does not parse is logged and skipped; its neighbours' deferred entries still list", async () => {
+    const bad = "_bmad-output/implementation-artifacts/spec-1-2-broken.md";
+    const good = "_bmad-output/implementation-artifacts/spec-1-1-first.md";
+    const f = await setup({ extra: { [bad]: "---\ndeferred: [unclosed\n---\n", [good]: "---\ncreated: '2026-10-22'\ndeferred:\n  - summary: Left for later.\n---\n" } });
+    await f.run();
+    expect(f.logs.some((l) => l.includes(`deferred entries: ${bad}`) && l.includes("skipped"))).toBe(true);
+    expect(inboxOf(f, "edanisko")?.body).toContain(`- [1.1-d1](${REPO_URL}/blob/main/${good}) · deferred: Left for later. · 1d`);
   });
 });

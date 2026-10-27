@@ -1,4 +1,5 @@
 import { EPICS_YAML_PATH } from "../config/load-repo-config.ts";
+import { digestDue, digestSlot } from "../inbox/digest-time.ts";
 import { heldGlobs, isStale } from "../ledger/edits.ts";
 import { globsOverlap } from "../manifests/globs.ts";
 import { standingApproval } from "../reconcile/approval.ts";
@@ -12,6 +13,7 @@ import type { Reason } from "./reasons.ts";
 import { epicContextPath, liveEvidenceGaps, liveEvidenceGlob } from "./snapshot.ts";
 
 export { GRAPH_PSEUDO_GLOB, planningSlug, type PlanningKind };
+export { digestDue, digestSlot };
 
 /**
  * The coordinator's side of `next` (FR4, AR14, AD-8, AD-9, AD-13): the globs
@@ -230,19 +232,6 @@ export function doneOnMain(record: UnitRecord, snapshot: Snapshot): boolean {
   }
 }
 
-/**
- * Whether the daily digest slot has passed unposted: today's `digest_time`
- * (UTC, by `now`) is due when `now` is at or past it and `postedAt` is
- * `null` or before it.
- */
-export function digestDue(now: string, digestTime: string, postedAt: string | null): boolean {
-  const nowMs = Date.parse(now);
-  const day = new Date(nowMs).toISOString().slice(0, 10);
-  const slot = Date.parse(`${day}T${digestTime}:00Z`);
-  if (nowMs < slot) return false;
-  return postedAt === null || Date.parse(postedAt) < slot;
-}
-
 export type ReconcileDue = {
   readonly due: boolean;
   /** Why it is due, or why not. */
@@ -289,10 +278,12 @@ export function approvalParkedAt(record: UnitRecord): string | null {
  * When `reconcile` is due (the Maintainer's 2026-10-24 decision, amended
  * 2026-10-25): the snapshot shows work (a record not `merged` whose PR
  * merged, a record parked awaiting an approval the Maintainer has given
- * (`maintainerApproved`), or a `merged` record whose unit is done on
- * `main`), there is no `merged` `reconcile:<n>` record, or `now` is 10 min
- * or more past the newest `merged` one's `heartbeat_at`. A passed digest
- * slot is not work until Story 4.2 adds it back.
+ * (`maintainerApproved`), a `merged` record whose unit is done on `main`,
+ * or, since Story 4.2, today's digest slot passed with no digest posted
+ * (`digestDue` over `coordinator.json`'s `digest_posted_at`) and no `merged`
+ * `reconcile:<n>` run at or after the slot), there is no
+ * `merged` `reconcile:<n>` record, or `now` is 10 min or more past the
+ * newest `merged` one's `heartbeat_at`.
  */
 export function reconcileDue(snapshot: Snapshot): ReconcileDue {
   const last = newestMergedReconcile(snapshot);
@@ -309,6 +300,13 @@ export function reconcileDue(snapshot: Snapshot): ReconcileDue {
   }
   for (const r of snapshot.ledger.units) {
     if (r.state === "merged" && doneOnMain(r, snapshot)) return { due: true, why: `${r.unit} is merged and done on main`, last };
+  }
+  const posted = snapshot.ledger.coordinator?.digest_posted_at ?? null;
+  const slot = digestSlot(snapshot.now, snapshot.config.digest_time);
+  // Only until a run finishes past the slot: a run that failed to stamp leaves the 10-min rule in charge, so it never starves the rest.
+  const ranSinceSlot = last !== null && Date.parse(last.heartbeat_at) >= Date.parse(slot);
+  if (digestDue(snapshot.now, snapshot.config.digest_time, posted) && !ranSinceSlot) {
+    return { due: true, why: `the digest slot ${slot} passed with no digest posted (last ${posted ?? "never"})`, last };
   }
   if (last === null) return { due: true, why: "no merged reconcile run on the ledger", last };
   const since = Date.parse(snapshot.now) - Date.parse(last.heartbeat_at);

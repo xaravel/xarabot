@@ -88,6 +88,8 @@ export type CiStepDeps = {
   /** The poll and ledger back-off sleep. */
   readonly sleep?: Sleep;
   readonly random?: () => number;
+  /** The lane's known secrets, redacted from a CI-fix session's park text (Story 4.2); default none. */
+  readonly secrets?: readonly string[];
 };
 
 const MINUTE_MS = 60_000;
@@ -185,6 +187,7 @@ export function createCiStep(deps: CiStepDeps): CiStep {
       abortReason: "unit budget passed during the CI step",
       clock,
       sleep,
+      ...(deps.secrets !== undefined ? { secrets: deps.secrets } : {}),
     });
 
     const merge = async (head: string, main: string, statusPaths: readonly string[], lockfiles?: Readonly<Record<string, string>>): Promise<MergeOutcome> => {

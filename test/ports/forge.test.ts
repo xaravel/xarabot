@@ -36,7 +36,11 @@ type Operations =
   | "dequeue"
   | "queueState"
   | "alert"
-  | "prefetch";
+  | "prefetch"
+  | "inboxes"
+  | "openInbox"
+  | "setInboxBody"
+  | "inboxComment";
 
 type AR33Kinds = "conflict" | "not-fast-forward" | "auth" | "forbidden" | "rate-limited" | "not-found" | "uninstalled" | "transient" | "rejected";
 
@@ -66,7 +70,29 @@ function feed(s: ForgeSnapshot): Pick<AssembleInput, "now" | "main_sha" | "tree"
 describe("Forge port", () => {
   test("lists the operations and the nine AR33 error kinds", () => {
     expect([...FORGE_OPERATIONS].sort()).toEqual(
-      ["alert", "branchHead", "checks", "closePr", "comment", "dequeue", "enqueue", "ledgerSwap", "listPrsByBranch", "openPr", "postReview", "prefetch", "pushBranch", "queueState", "reviews", "snapshot", "updatePr"],
+      [
+        "alert",
+        "branchHead",
+        "checks",
+        "closePr",
+        "comment",
+        "dequeue",
+        "enqueue",
+        "inboxComment",
+        "inboxes",
+        "ledgerSwap",
+        "listPrsByBranch",
+        "openInbox",
+        "openPr",
+        "postReview",
+        "prefetch",
+        "pushBranch",
+        "queueState",
+        "reviews",
+        "setInboxBody",
+        "snapshot",
+        "updatePr",
+      ],
     );
     expect([...FORGE_ERROR_KINDS].sort()).toEqual(
       ["auth", "conflict", "forbidden", "not-fast-forward", "not-found", "rate-limited", "rejected", "transient", "uninstalled"],
