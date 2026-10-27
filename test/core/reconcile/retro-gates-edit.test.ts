@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseRetroGates } from "../../../src/core/graph/retro-gates.ts";
-import { applyItemStatuses, applyItemsDone, applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
+import { applyItemStatuses, applyItemsDone, applyPendingRulings, applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
 import type { RetroGates, RetroItem } from "../../../src/core/schemas/retro-gates.ts";
 
 const PATH = "_bmad-output/implementation-artifacts/retro-gates.yaml";
@@ -266,5 +266,73 @@ describe("applyItemStatuses and editRetroGates: ruled done and defer (Story 4.3)
     const r = editRetroGates(PATH, serializeRetroGates(START), [], [], [{ epic: 2, id: B, status: "done" }]);
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value.summary).toEqual([`epics.2.items: ${B} waiting -> done`]);
+  });
+});
+
+describe("applyPendingRulings (Story 4.6)", () => {
+  const A = "epic-2-retro-item-1-a";
+  const at = "2026-10-27T09:00:00Z";
+  const entry = (verb: "go" | "block" | "unblock" | "done" | "defer", unit: string, ruling = "1234567") => ({ verb, unit, by: "edanisko", at, ruling });
+  const item = (over: Partial<RetroItem> = {}): RetroItem => ({ id: A, text: "Do A", route: "maintainer", blocking: false, globs: [], status: "waiting", ...over });
+  const gates = (o: { verdict?: "rejected" | "accepted"; go?: boolean; checkpoint?: boolean; item?: Partial<RetroItem> } = {}): RetroGates => ({
+    schema_version: 1,
+    epics: {
+      "2": {
+        retro: { verdict: o.verdict ?? "rejected", unit: "retro:2", recorded_at: AT, ...(o.go === true ? { go: GO } : {}) },
+        items: [item(o.item)],
+        ...(o.checkpoint === true ? { checkpoint: { go: GO } } : {}),
+      },
+    },
+  });
+  const ruled = { by: "edanisko", at, ruling: "1234567" };
+
+  test.each([
+    ["go checkpoint:2", entry("go", "checkpoint:2"), gates(), (g: RetroGates) => g.epics["2"]?.checkpoint, { go: ruled }, "epics.2.checkpoint: go by edanisko (1234567)"],
+    ["go checkpoint:4 on an Epic with no entry", entry("go", "checkpoint:4"), gates(), (g: RetroGates) => g.epics["4"], { checkpoint: { go: ruled } }, "epics.4.checkpoint: go by edanisko (1234567)"],
+    ["go retro:2", entry("go", "retro:2"), gates(), (g: RetroGates) => g.epics["2"]?.retro?.go, ruled, "epics.2.retro: go by edanisko (1234567)"],
+    ["block", entry("block", `retro-item:${A}`), gates(), (g: RetroGates) => g.epics["2"]?.items?.[0]?.blocking, true, `epics.2.items: ${A} blocking false -> true`],
+    ["unblock", entry("unblock", `retro-item:${A}`), gates({ item: { blocking: true } }), (g: RetroGates) => g.epics["2"]?.items?.[0]?.blocking, false, `epics.2.items: ${A} blocking true -> false`],
+    ["done", entry("done", `retro-item:${A}`), gates(), (g: RetroGates) => g.epics["2"]?.items?.[0]?.status, "done", `epics.2.items: ${A} waiting -> done`],
+    ["defer", entry("defer", `retro-item:${A}`), gates({ item: { status: "open" } }), (g: RetroGates) => g.epics["2"]?.items?.[0]?.status, "deferred", `epics.2.items: ${A} open -> deferred`],
+  ] as const)("%s", (_name, e, before, pick, want, line) => {
+    const r = applyPendingRulings(before, [e]);
+    expect(pick(r.gates)).toEqual(want);
+    expect(r.summary).toEqual([line]);
+  });
+
+  test.each([
+    ["go checkpoint:2 with a go already there", entry("go", "checkpoint:2"), gates({ checkpoint: true })],
+    ["go retro:2 with a go already there", entry("go", "retro:2"), gates({ go: true })],
+    ["go retro:2 on an accepted retro", entry("go", "retro:2"), gates({ verdict: "accepted" })],
+    ["go retro:3 with no retro recorded", entry("go", "retro:3"), gates()],
+    ["block on an item already blocking", entry("block", `retro-item:${A}`), gates({ item: { blocking: true } })],
+    ["unblock on an item not blocking", entry("unblock", `retro-item:${A}`), gates()],
+    ["block on an item no longer listed", entry("block", "retro-item:epic-2-retro-item-9-z"), gates()],
+    ["done on a done item", entry("done", `retro-item:${A}`), gates({ item: { status: "done" } })],
+    ["defer on a done item", entry("defer", `retro-item:${A}`), gates({ item: { status: "done" } })],
+    ["defer on a deferred item", entry("defer", `retro-item:${A}`), gates({ item: { status: "deferred" } })],
+    ["done on an item of an Epic with no entry", entry("done", "retro-item:epic-5-retro-item-1-a"), gates()],
+  ] as const)("no-op: %s (shown: no summary, the gates unchanged)", (_name, e, before) => {
+    const r = applyPendingRulings(before, [e]);
+    expect(r.summary).toEqual([]);
+    expect(r.gates).toEqual(before);
+  });
+
+  test("entries apply in order: a later one sees the earlier one's result", () => {
+    const r = applyPendingRulings(gates(), [entry("block", `retro-item:${A}`, "1"), entry("unblock", `retro-item:${A}`, "2"), entry("go", "retro:2", "3"), entry("go", "retro:2", "4")]);
+    expect(r.gates.epics["2"]?.items?.[0]?.blocking).toBe(false);
+    expect(r.gates.epics["2"]?.retro?.go?.ruling).toBe("3");
+    expect(r.summary).toHaveLength(3);
+  });
+
+  test("editRetroGates applies the rulings last, after the items done, and the text parses back", () => {
+    const text = serializeRetroGates(gates());
+    const r = editRetroGates(PATH, text, [], [{ epic: 2, id: A }], [], [entry("block", `retro-item:${A}`), entry("go", "checkpoint:2")]);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.summary).toEqual([`epics.2.items: ${A} waiting -> done`, `epics.2.items: ${A} blocking false -> true`, "epics.2.checkpoint: go by edanisko (1234567)"]);
+    const back = parseRetroGates(PATH, r.value.text);
+    if (!back.ok) throw new Error(back.error.message);
+    expect(back.value.epics["2"]?.checkpoint).toEqual({ go: ruled });
+    expect(r.value.text).toContain('        ruling: "1234567"');
   });
 });

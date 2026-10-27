@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { COORDINATOR_PATH, serializeCoordinator, serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
 import {
   advanceRulingsCursor,
+  allOf,
   applyRuling,
+  changeRulingLists,
   ATTEMPTS_CAP,
   ciFix,
   claim,
@@ -32,6 +34,7 @@ import {
   releaseDisposable,
   releaseEjected,
   releaseStale,
+  recordRulings,
   reparkGraph,
   stampDigest,
   startMerging,
@@ -40,7 +43,7 @@ import {
   takeOverStale,
   type LedgerEdit,
 } from "../../../src/core/ledger/edits.ts";
-import { PARK_TEXT_MAX, type CoordinatorRecord, type LaneIdentity, type Park, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import { PARK_TEXT_MAX, type CoordinatorRecord, type Dismissal, type LaneIdentity, type Park, type PendingRuling, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import { REDACTED, TRUNCATION_MARKER } from "../../../src/core/sanitize.ts";
 import { ALICE, BOB, COORD, LATE, NOW, rec, SHA_A, SHA_B, SHA_C, SHA_D, T0, tip } from "./fixtures.ts";
 
@@ -454,6 +457,13 @@ const CASES: readonly Case[] = [
     [rec({ state: "parked", globs: [], park: needs })],
     by(COORD, NOW, { state: "released", globs: [], approval: { by: "carol", manifest_sha: SHA_A } }),
   ],
+  [
+    "applyRuling approve with an approver (Story 4.6: the ruling's author)",
+    applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve", manifestSha: SHA_A, approver: "edanisko" }),
+    [rec({ state: "parked", globs: [], park: needs })],
+    by(COORD, NOW, { state: "released", globs: [], approval: { by: "edanisko", manifest_sha: SHA_A } }),
+  ],
+  ["applyRuling approve with a bad approver", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve", manifestSha: SHA_A, approver: "not a login" }), [rec({ state: "parked", park: needs })], "invalid"],
   ["applyRuling approve on a blocked park", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve", manifestSha: SHA_A }), [rec({ state: "parked", park: blocked("other") })], "precondition"],
   ["applyRuling approve without a manifest_sha", applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "approve" }), [rec({ state: "parked", park: needs })], "invalid"],
   [
@@ -979,6 +989,118 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
     expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(6);
+  });
+});
+
+describe("recordRulings (Story 4.6)", () => {
+  const GO: PendingRuling = { verb: "go", unit: "checkpoint:4", by: "edanisko", at: T0, ruling: "17" };
+  const BLOCK: PendingRuling = { verb: "block", unit: "retro-item:epic-2-retro-item-1-a", by: "edanisko", at: T0, ruling: "18" };
+  const UNBLOCK: PendingRuling = { ...BLOCK, verb: "unblock", ruling: "19" };
+  const DONE: PendingRuling = { verb: "done", unit: "retro-item:epic-2-retro-item-1-a", by: "edanisko", at: T0, ruling: "20" };
+  const DISMISS: Dismissal = { unit: "story:2.1", subject: "blocked `intent-gap`", since: T0 };
+  const DISMISS_2: Dismissal = { ...DISMISS, subject: "blocked `other`" };
+  const kept = { generation: 2, digest_posted_at: "2026-10-22T08:00:00Z", rulings_cursor: "17" };
+  const held = (over: Partial<CoordinatorRecord> = {}) => coordRec(COORD, T0, { ...kept, ...over });
+  const edit = (p: Partial<Parameters<typeof recordRulings>[0]> = {}) => recordRulings({ by: COORD, now: NOW, generation: 2, ...p });
+
+  test.each([
+    ["adds a pending entry and a dismissal, keeping every other field", edit({ add: { pending: [GO], dismissals: [DISMISS] } }), held(), held({ pending_rulings: [GO], dismissals: [DISMISS] })],
+    ["moves the cursor and adds", edit({ cursor: { from: "17", to: "21" }, add: { pending: [GO] } }), held(), held({ rulings_cursor: "21", pending_rulings: [GO] })],
+    ["a pending entry supersedes its family on the same unit, appended last", edit({ add: { pending: [UNBLOCK] } }), held({ pending_rulings: [BLOCK, GO] }), held({ pending_rulings: [GO, UNBLOCK] })],
+    ["another family on the same unit is kept", edit({ add: { pending: [DONE] } }), held({ pending_rulings: [BLOCK] }), held({ pending_rulings: [BLOCK, DONE] })],
+    ["a dismissal replaces the unit's dismissal", edit({ add: { dismissals: [DISMISS_2] } }), held({ dismissals: [DISMISS] }), held({ dismissals: [DISMISS_2] })],
+    ["drops listed entries; an empty list leaves the key out", edit({ drop: { pending: [GO], dismissals: [DISMISS] } }), held({ pending_rulings: [GO], dismissals: [DISMISS] }), held()],
+    ["a drop matches the whole entry: another ruling of the same go is kept", edit({ drop: { pending: [{ ...GO, ruling: "99" }] } }), held({ pending_rulings: [GO] }), "null"],
+    ["drops, then adds: a re-dismissed unit keeps the new one", edit({ drop: { dismissals: [DISMISS] }, add: { dismissals: [DISMISS_2] } }), held({ dismissals: [DISMISS] }), held({ dismissals: [DISMISS_2] })],
+    ["nothing changed writes nothing", edit({ add: { pending: [GO] } }), held({ pending_rulings: [GO] }), "null"],
+    ["no change at all writes nothing", edit(), held(), "null"],
+    ["a cursor mismatch refuses", edit({ cursor: { from: "16", to: "21" } }), held(), "precondition"],
+    ["a wrong generation refuses", edit({ generation: 1, add: { pending: [GO] } }), held(), "precondition"],
+    ["another holder refuses", edit({ add: { pending: [GO] } }), coordRec(COORD_2, T0, kept), "precondition"],
+    ["a missing record refuses", edit({ add: { pending: [GO] } }), null, "precondition"],
+    ["a builder lane refuses", recordRulings({ by: ALICE, now: NOW, generation: 2 }), held(), "precondition"],
+    ["a go on a retro item is invalid", edit({ add: { pending: [{ ...GO, unit: "retro-item:epic-2-retro-item-1-a" }] } }), held(), "invalid"],
+    ["a block on a checkpoint is invalid", edit({ add: { pending: [{ ...BLOCK, unit: "checkpoint:4" }] } }), held(), "invalid"],
+    ["a dismissal with a bad since is invalid", edit({ add: { dismissals: [{ ...DISMISS, since: "today" }] } }), held(), "invalid"],
+  ] as const)("%s", (_name, e, current, want) => {
+    if (want === "null") {
+      const r = e(coordTip(current));
+      expect(r.ok && r.value).toBeNull();
+      return;
+    }
+    expectCoordinator(e, coordTip(current), want, "recordRulings");
+  });
+
+  test("an older record with nothing to change stays as it is; with a change it is written at the current schema_version", () => {
+    const v2 = coordRec(COORD, T0, { ...kept, schema_version: 2 });
+    const none = edit()(coordTip(v2));
+    expect(none.ok && none.value).toBeNull();
+    expectCoordinator(edit({ add: { pending: [GO] } }), coordTip(v2), coordRec(COORD, T0, { ...kept, pending_rulings: [GO] }), "recordRulings");
+  });
+
+  test("changeRulingLists: drop first, then add with supersede", () => {
+    expect(changeRulingLists({ pending: [BLOCK, GO], dismissals: [DISMISS] }, { pending: [GO] }, { pending: [UNBLOCK], dismissals: [DISMISS_2] })).toEqual({ pending: [UNBLOCK], dismissals: [DISMISS_2] });
+  });
+
+  test("the claim and a takeover keep both lists", () => {
+    const lists = { pending_rulings: [GO], dismissals: [DISMISS] };
+    expectCoordinator(claimCoordinator({ by: COORD, now: NOW }), coordTip(coordRec(COORD, T0, { generation: 3, ...lists })), coordRec(COORD, NOW, { generation: 3, ...lists }), "claimCoordinator");
+    expectCoordinator(claimCoordinator({ by: COORD_2, now: NOW }), coordTip(coordRec(COORD, "2026-10-22T09:40:00Z", { generation: 3, ...lists })), coordRec(COORD_2, NOW, { generation: 4, ...lists }), "claimCoordinator");
+    expectCoordinator(keepCoordinator({ by: COORD, now: NOW, generation: 1 }), coordTip(coordRec(COORD, T0, lists)), coordRec(COORD, NOW, lists), "keepCoordinator");
+    expectCoordinator(
+      advanceRulingsCursor({ by: COORD, now: NOW, generation: 1, from: null, to: "5" }),
+      coordTip(coordRec(COORD, T0, lists)),
+      coordRec(COORD, T0, { ...lists, rulings_cursor: "5" }),
+      "advanceRulingsCursor",
+    );
+  });
+});
+
+describe("allOf (Story 4.6)", () => {
+  const own = by(COORD, T0, { unit: "reconcile:5", globs: [] });
+  const ownPath = "units/reconcile__5.json";
+  const parked = rec({ state: "parked", park: blocked("other") });
+  const record = recordRulings({ by: COORD, now: NOW, generation: 1, cursor: { from: null, to: "5" } });
+  const release = applyRuling({ unit: U, by: COORD, now: NOW, generation: 1, ruling: "release" });
+
+  test("each edit applies to what the earlier left; the writes merge under the first change's message", () => {
+    const files = coordTip(coordRec(COORD, T0), [own, parked]);
+    const r = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 1 }), allOf([record, release]))(files);
+    if (!r.ok || r.value === null) throw new Error("expected a commit");
+    expect(r.value.message).toBe("ledger: recordRulings coordinator [skip ci]");
+    expect(Object.keys(r.value.writes).sort()).toEqual([COORDINATOR_PATH, PATH, ownPath].sort());
+    expect(JSON.parse(r.value.writes[PATH] as string)).toMatchObject({ state: "released" });
+  });
+
+  test("a later edit sees the earlier one's result: a second release of the same record refuses", () => {
+    const r = allOf([release, release])(tip([parked]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+  });
+
+  test("a null edit adds nothing; all null writes nothing; the first error is the result", () => {
+    const noop = recordRulings({ by: COORD, now: NOW, generation: 1 });
+    const files = coordTip(coordRec(COORD, T0), [parked]);
+    const one = allOf([noop, release])(files);
+    expect(one.ok && one.value?.message).toBe(`ledger: applyRuling ${U} [skip ci]`);
+    const none = allOf([noop])(files);
+    expect(none.ok && none.value).toBeNull();
+    expect(allOf([])(files)).toEqual({ ok: true, value: null });
+    const failed = allOf([recordRulings({ by: COORD, now: NOW, generation: 9, cursor: { from: null, to: "5" } }), release])(files);
+    expect(failed.ok ? "ok" : failed.error.kind).toBe("precondition");
+  });
+
+  const path4 = "units/reconcile__4.json";
+  const del: LedgerEdit = () => ({ ok: true, value: { message: "ledger: del [skip ci]", writes: {}, deletes: [path4] } });
+  const write: LedgerEdit = () => ({ ok: true, value: { message: "ledger: write [skip ci]", writes: { [path4]: "{}\n" }, deletes: [] } });
+
+  test("a delete then a write of one path keeps the write", () => {
+    const r = allOf([del, write])({ [path4]: "old\n" });
+    expect(r.ok && r.value).toEqual({ message: "ledger: del [skip ci]", writes: { [path4]: "{}\n" }, deletes: [] });
+  });
+
+  test("a write then a delete of one path keeps the delete", () => {
+    const r = allOf([write, del])({ [path4]: "old\n" });
+    expect(r.ok && r.value).toEqual({ message: "ledger: write [skip ci]", writes: {}, deletes: [path4] });
   });
 });
 

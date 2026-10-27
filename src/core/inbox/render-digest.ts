@@ -33,6 +33,11 @@ import { openDeferred } from "./deferred.ts";
  * once a day from ageing alone. Free text goes through `sanitizeAgentText`,
  * so a body never @-mentions anyone, and it is capped at
  * `FORGE_TEXT_LIMITS.body`. Pure.
+ *
+ * Story 4.6: an item whose unit, text (`what`) and start time (`since`)
+ * match a dismissal in the snapshot's `coordinator.json` is left out; the
+ * same item comes back with another text or start time (a new instance)
+ * lists again. `inboxInstance` gives a unit's item as a dismissal names it.
  */
 
 /** The body of an inbox with nothing in it. */
@@ -265,13 +270,43 @@ function renderBody(now: string, items: readonly Item[]): string {
   return capText(lines.join("\n"), FORGE_TEXT_LIMITS.body);
 }
 
+/** Every inbox item of the snapshot with the owner whose inbox lists it, dismissed ones included. */
+function ownedItems(input: RenderDigestInput): { readonly owner: string; readonly item: Item }[] {
+  const { snapshot, repoUrl } = input;
+  const maintainer = snapshot.config.maintainer;
+  const out: { owner: string; item: Item }[] = maintainerItems(input).map((item) => ({ owner: maintainer, item }));
+  for (const r of snapshot.ledger.units) {
+    const parked = parkedItem(snapshot, repoUrl, r);
+    if (parked !== null) out.push(parked);
+  }
+  return out;
+}
+
+/** An inbox item as a dismissal names it: its text and start time, as the digest shows them. */
+export type InboxInstance = { readonly subject: string; readonly since: string | null };
+
+/**
+ * The inbox item `unit` names in `snapshot`, as a dismissal records it
+ * (Story 4.6), or `null` when no inbox lists it. Deferred entries are not
+ * units, so no file is read.
+ */
+export function inboxInstance(snapshot: Snapshot, unit: string): InboxInstance | null {
+  const found = ownedItems({ snapshot, files: {}, repoUrl: "" }).find((o) => o.item.key === unit);
+  return found === undefined ? null : { subject: found.item.what, since: found.item.since };
+}
+
+/** Whether a dismissal in the snapshot's `coordinator.json` names this very item. */
+function dismissed(snapshot: Snapshot, item: Item): boolean {
+  return (snapshot.ledger.coordinator?.dismissals ?? []).some((d) => d.unit === item.key && d.subject === item.what && d.since === item.since);
+}
+
 /**
  * One body per owner with at least one item, keyed by login (owners
  * compared case-insensitively, under the first spelling met: the
- * Maintainer's own first), in login order.
+ * Maintainer's own first), in login order. A dismissed item is left out.
  */
 export function renderDigest(input: RenderDigestInput): Map<string, OwnerDigest> {
-  const { snapshot, repoUrl } = input;
+  const { snapshot } = input;
   const maintainer = snapshot.config.maintainer;
   const byOwner = new Map<string, { login: string; items: Item[] }>([[maintainer.toLowerCase(), { login: maintainer, items: [] }]]);
   const add = (owner: string, item: Item) => {
@@ -280,11 +315,7 @@ export function renderDigest(input: RenderDigestInput): Map<string, OwnerDigest>
     slot.items.push(item);
     byOwner.set(key, slot);
   };
-  for (const item of maintainerItems(input)) add(maintainer, item);
-  for (const r of snapshot.ledger.units) {
-    const parked = parkedItem(snapshot, repoUrl, r);
-    if (parked !== null) add(parked.owner, parked.item);
-  }
+  for (const { owner, item } of ownedItems(input)) if (!dismissed(snapshot, item)) add(owner, item);
   const out = new Map<string, OwnerDigest>();
   for (const key of [...byOwner.keys()].sort()) {
     const { login, items } = byOwner.get(key) as { login: string; items: Item[] };

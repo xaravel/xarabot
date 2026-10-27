@@ -1,14 +1,16 @@
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../sanitize.ts";
 import { isUnitId, unitKind, type UnitRecord } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../schemas/retro-gates.ts";
-import type { Snapshot } from "../schemas/snapshot.ts";
+import type { Snapshot, SnapshotManifest } from "../schemas/snapshot.ts";
+import { storyKey } from "../story-id.ts";
 
 /**
  * The owners' rulings (Story 4.5, FR9, AR29, AD-28): a comment on an inbox
  * issue that reads `/xarabot <verb> <unit-id>`. This module parses one
  * (`parseRuling`), judges it against one snapshot (`judgeRuling`: who may
  * rule it, then whether it applies) and words the 🤖 reply (`rulingReply`).
- * It applies nothing: each verb's effect is Story 4.6's. Pure.
+ * It applies nothing: each verb's effect is built in `effects.ts` (Story
+ * 4.6). Pure.
  *
  * Authority (logins compared case-insensitively): `go`, `approve`, `block`,
  * `unblock`, `done` and `defer` count only from the Maintainer
@@ -110,7 +112,14 @@ function parkedOwner(snapshot: Snapshot, r: UnitRecord): string | null {
 const recordOf = (snapshot: Snapshot, unit: string): UnitRecord | undefined => snapshot.ledger.units.find((r) => r.unit === unit);
 
 /** The part of a unit id after its kind. */
-const bodyOf = (unit: string): string => unit.slice(unit.indexOf(":") + 1);
+export const bodyOf = (unit: string): string => unit.slice(unit.indexOf(":") + 1);
+
+/** The manifest on `main` of the Story `story:<id>` names, or `undefined` (for any other unit too). */
+export function manifestOf(snapshot: Snapshot, unit: string): SnapshotManifest | undefined {
+  if (unitKind(unit) !== "story") return undefined;
+  const key = storyKey(bodyOf(unit));
+  return snapshot.manifests.find((m) => storyKey(m.story_id) === key);
+}
 
 const isOpenItem = (status: RetroItem["status"]): boolean => status !== "done" && status !== "deferred";
 
@@ -121,7 +130,9 @@ function maintainerLists(snapshot: Snapshot, unit: string): boolean {
     case "checkpoint": {
       if (!snapshot.graph.ok || !snapshot.graph.value.checkpoints.includes(Number(body))) return false;
       const entry = snapshot.retro_gates.epics[body];
-      return entry?.retro !== undefined && entry.checkpoint === undefined;
+      // A bootstrapped Epic counts as retro done, as renderDigest has it.
+      const retroDone = entry?.retro !== undefined || snapshot.config.bootstrapped_epics.includes(Number(body));
+      return retroDone && entry?.checkpoint === undefined;
     }
     case "retro": {
       const retro = snapshot.retro_gates.epics[body]?.retro;
@@ -195,6 +206,7 @@ function target(snapshot: Snapshot, verb: RulingVerb, unit: string): Target {
     case "approve":
       if (r === undefined) return fail(`${unit} has no ledger record`);
       if (r.state !== "parked" || r.park?.kind !== "needs-approval") return fail(`${unit} is not parked needs-approval`);
+      if (manifestOf(snapshot, unit) === undefined) return fail(`${unit} has no manifest on main`);
       return { ok: true, owner: maintainer };
     case "block":
     case "unblock": {

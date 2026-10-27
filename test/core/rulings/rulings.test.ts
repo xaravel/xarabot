@@ -299,6 +299,19 @@ describe("judgeRuling: targets (as the Maintainer)", () => {
     expect(judge(M, `/xarabot ${ruling}`)).toMatchObject({ kind: "valid", owner });
   });
 
+  test("approve needs the Story's manifest on main (Story 4.6)", () => {
+    const noManifest = snapshotOf({ epics: { 1: [], 2: ["2"] }, bootstrapped: [1], manifests: [], records: [parked("2.2", { kind: "needs-approval", reason: null, inbox_owner: "alice" })] });
+    expect(reasonOf(judge(M, "/xarabot approve story:2.2", noManifest))).toBe("story:2.2 has no manifest on main");
+    expect(judge(M, "/xarabot approve story:2.2").kind).toBe("valid");
+  });
+
+  test("a bootstrapped checkpoint Epic with no retro is listed, as renderDigest lists it: dismiss applies", () => {
+    const boot = snapshotOf({ epics: { 1: ["1"], 2: ["1"] }, bootstrapped: [1], epicsYaml: "version: 1\nepics:\n  1:\n    checkpoint: true\n" });
+    expect(inboxOwner(boot, "checkpoint:1")).toBe(M);
+    expect(judge(M, "/xarabot dismiss checkpoint:1", boot)).toMatchObject({ kind: "valid", owner: M });
+    expect(renderDigest({ snapshot: boot, files: {}, repoUrl: "https://github.com/o/r" }).get(M)?.body).toContain("[checkpoint:1]");
+  });
+
   test("go on a checkpoint when the graph does not resolve", () => {
     const broken = snapshotOf({ epics: { 1: [], 2: [] }, epicsYaml: "version: 1\nepics:\n  1:\n    depends_on: [2]\n  2:\n    depends_on: [1]\n" });
     expect(broken.graph.ok).toBe(false);

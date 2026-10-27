@@ -2,11 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { ruleCommand } from "../../src/cli/rule.ts";
-import { parseLedger } from "../../src/core/ledger/codec.ts";
+import { RULE_USAGE, ruleCommand } from "../../src/cli/rule.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
-import type { Park, UnitRecord } from "../../src/core/schemas/ledger.ts";
+import type { CoordinatorRecord, Park, UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { rec, tip } from "../core/ledger/fixtures.ts";
+import { input as worldInput, itemId, type World } from "../core/next/fixtures.ts";
 import { cleanup, HOST_ID, world } from "./lane-fixture.ts";
 
 const dirs: string[] = [];
@@ -40,14 +41,25 @@ type Ran = {
 
 async function ruleWith(
   args: readonly string[],
-  o: { readonly host?: string | null; readonly records?: readonly UnitRecord[]; readonly openPr?: boolean; readonly forgeFails?: string; readonly noHome?: boolean; readonly closeFails?: boolean } = {},
+  o: {
+    readonly host?: string | null;
+    readonly records?: readonly UnitRecord[];
+    readonly openPr?: boolean;
+    readonly forgeFails?: string;
+    readonly noHome?: boolean;
+    readonly closeFails?: boolean;
+    /** `main`'s files (Story 4.6's verbs assemble a snapshot). */
+    readonly main?: Readonly<Record<string, string>>;
+    /** `coordinator.json`, seeded with the records. */
+    readonly coordinator?: CoordinatorRecord;
+  } = {},
 ): Promise<Ran> {
   const w = world(dirs);
   if (o.host !== null) {
     mkdirSync(dirname(w.hostYaml), { recursive: true });
     writeFileSync(w.hostYaml, o.host ?? hostYaml([{ name: "builder-1" }]));
   }
-  const fake = createFakeForge({ now: "2026-10-24T12:00:00Z", firstPrNumber: 7 });
+  const fake = createFakeForge({ now: "2026-10-24T12:00:00Z", firstPrNumber: 7, ...(o.main !== undefined ? { main: o.main } : {}) });
   if (o.openPr === true) {
     const sha = fake.control.makeCommit();
     const pushed = await fake.forge.pushBranch({ branch: "story/2.6", expected_sha: null, sha }, opts());
@@ -55,7 +67,10 @@ async function ruleWith(
     const pr = await fake.forge.openPr({ branch: "story/2.6", base: "main", title: "t", body: "b" }, opts());
     if (!pr.ok) throw new Error(pr.error.message);
   }
-  if (o.records !== undefined) fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip(o.records), deletes: [] });
+  if (o.records !== undefined || o.coordinator !== undefined) {
+    const extra: Record<string, string> = o.coordinator === undefined ? {} : { [COORDINATOR_PATH]: serializeCoordinator(o.coordinator) };
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip(o.records ?? [], extra), deletes: [] });
+  }
   if (o.closeFails === true) fake.control.injectError("closePr", { kind: "transient", message: "502" });
   const out: string[] = [];
   const err: string[] = [];
@@ -87,17 +102,17 @@ async function ruleWith(
 }
 
 describe("xarabot rule: arguments", () => {
-  test.each([
-    [["approve", "story:2.6"], "approve"],
-    [["go", "checkpoint:2"], "go"],
-    [["reject", "nonsense"], "reject"],
-  ])("%j: exit 1 naming Story 4.6, before any file or forge access", async (args, verb) => {
+  test.each([[["reject", "nonsense"], "reject"], [["GO", "checkpoint:2"], "GO"]])("%j: an unknown verb, exit 1 before any file or forge access", async (args, verb) => {
     // No HOME and no host.yaml: the refusal comes first.
     const r = await ruleWith(args, { noHome: true, host: null });
     expect(r.code).toBe(1);
-    expect(r.err).toEqual([`xarabot rule: ${verb}: not before Story 4.6`]);
+    expect(r.err).toEqual([`xarabot rule: ${verb} is not a verb; usage: ${RULE_USAGE}`]);
     expect(r.forLanes).toEqual([]);
     expect(r.out).toEqual([]);
+  });
+
+  test("the usage lists all nine verbs", () => {
+    expect(RULE_USAGE).toBe("xarabot rule go|approve|block|unblock|done|defer|rebuild|release|dismiss <unit-id> [--repo <owner>/<name>]");
   });
 
   test.each([[[]], [["release"]], [["release", "story:x"]], [["release", "2.6"]], [["release", U, "--repo"]], [["release", U, "extra"]], [["--repo", REPO]]])(
@@ -252,3 +267,85 @@ describe("xarabot rule: the matrix", () => {
   });
 });
 
+
+describe("xarabot rule: every verb (Story 4.6)", () => {
+  const NOW = "2026-10-24T12:00:00Z";
+  const ITEM = `retro-item:${itemId(2, 1)}`;
+  /** Epic 2's retro rejected with a Maintainer item; Epic 3 a checkpoint whose go waits; Story 2.1 an Infrastructure Story. */
+  const WORLD: World = {
+    epics: { 1: ["1"], 2: ["1"], 3: ["1"] },
+    manifests: [{ id: "1.1" }, { id: "2.1", infra: true }, { id: "3.1" }],
+    epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [2]\n    checkpoint: true\n",
+    retro: { 2: "rejected", 3: "accepted" },
+    items: { 2: [{ seq: 1, blocking: false, status: "waiting", route: "maintainer" }] },
+  };
+  const MAIN = worldInput(WORLD).files;
+  const WITH_COORDINATOR = hostYaml([{ name: "builder-1" }, { name: "coordinator", role: "coordinator", owner: "carol" }]);
+  const CLAIM: CoordinatorRecord = { schema_version: 6, owner: "carol", host: HOST_ID, lane: "coordinator", generation: 1, heartbeat_at: NOW, digest_posted_at: null, rulings_cursor: "9" };
+  const needs = rec({ unit: "story:2.1", state: "parked", park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } });
+  const coordinatorOf = async (r: Ran) => {
+    const s = await r.fake.forge.snapshot(opts());
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  };
+
+  test.each([
+    ["go", "checkpoint:3"],
+    ["go", "retro:2"],
+    ["block", ITEM],
+    ["unblock", `retro-item:${itemId(2, 1)}`],
+    ["done", ITEM],
+    ["defer", ITEM],
+  ] as const)("%s %s with the coordinator lane: exit 0, the pending entry written as the coordinator, the cursor kept", async (verb, unit) => {
+    const isBlocked = verb === "unblock";
+    const main = isBlocked ? worldInput({ ...WORLD, items: { 2: [{ seq: 1, blocking: true, status: "waiting", route: "maintainer" }] } }).files : MAIN;
+    const r = await ruleWith([verb, unit], { host: WITH_COORDINATOR, main, coordinator: CLAIM, records: [needs] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([`recorded ${verb} ${unit} as pending: the next reconcile PR writes it to retro-gates.yaml`]);
+    expect(r.forLanes.map((l) => l.role)).toEqual(["coordinator"]);
+    const c = await coordinatorOf(r);
+    expect(c?.pending_rulings).toEqual([{ verb, unit, by: "edanisko", at: NOW, ruling: "xarabot-rule" }]);
+    expect(c?.rulings_cursor).toBe("9");
+  });
+
+  test("dismiss with the coordinator lane: exit 0, the dismissal written", async () => {
+    const r = await ruleWith(["dismiss", "checkpoint:3"], { host: WITH_COORDINATOR, main: MAIN, coordinator: CLAIM });
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual(["dismissed checkpoint:3 from the inbox"]);
+    expect((await coordinatorOf(r))?.dismissals).toEqual([{ unit: "checkpoint:3", subject: "Epic 3's retro is recorded (accepted)", since: "2026-10-20T00:00:00Z" }]);
+  });
+
+  test("approve with builders only: exit 0, released with the Maintainer's approval of the manifest's sha", async () => {
+    const r = await ruleWith(["approve", "story:2.1"], { main: MAIN, records: [needs] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const snap = await r.fake.forge.snapshot({ ...opts(), read: () => true });
+    const sha = snap.ok ? snap.value.main.blob_shas["stories/2.1.md"] : undefined;
+    expect(r.out).toEqual([`approved story:2.1 (manifest ${sha}): released`]);
+    expect(await r.record("story:2.1")).toMatchObject({ state: "released", approval: { by: "edanisko", manifest_sha: sha }, lane: "builder-1" });
+  });
+
+  test.each(["go", "block", "unblock", "done", "defer", "dismiss"])("%s with no coordinator lane on the host: exit 1 before any forge access", async (verb) => {
+    const unit = verb === "go" || verb === "dismiss" ? "checkpoint:3" : ITEM;
+    const r = await ruleWith([verb, unit], { main: MAIN, coordinator: CLAIM });
+    expect(r.code).toBe(1);
+    expect(r.err.join("\n")).toContain(`${verb} writes coordinator.json, so it is written as the repo's coordinator lane`);
+    expect(r.forLanes).toEqual([]);
+  });
+
+  test("a refused target: exit 1 with the reason, nothing written", async () => {
+    const r = await ruleWith(["go", "retro:3"], { host: WITH_COORDINATOR, main: MAIN, coordinator: CLAIM });
+    expect(r.code).toBe(1);
+    expect(r.err).toEqual(["xarabot rule: retro:3's verdict is accepted, not rejected"]);
+    expect((await coordinatorOf(r))?.pending_rulings).toBeUndefined();
+  });
+
+  test("approve with no manifest on main: exit 1 with the reason", async () => {
+    const r = await ruleWith(["approve", "story:2.6"], { main: MAIN, records: [rec({ unit: "story:2.6", state: "parked", park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } })] });
+    expect(r.code).toBe(1);
+    expect(r.err).toEqual(["xarabot rule: story:2.6 has no manifest on main"]);
+  });
+});

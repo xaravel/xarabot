@@ -32,7 +32,7 @@ describe("xarabot bin", () => {
     [["lane", "run", "x/y", "b"], "xarabot lane run: HOME is not set\n"],
     [["lane", "install", "builder-1", "--repo", "x/y", "--role", "builder", "--owner", "alice", "--agent", "claude"], "xarabot lane install: HOME is not set\n"],
     [["rule", "release", "story:2.6"], "xarabot rule: HOME is not set\n"],
-    [["rule", "approve", "story:2.6"], "xarabot rule: approve: not before Story 4.6\n"],
+    [["rule", "approve", "story:2.6"], "xarabot rule: HOME is not set\n"],
   ])("%j reaches its subcommand", (args, stderr) => {
     // A scrubbed environment with no HOME, so the subcommand stops before touching anything.
     const r = run(args, { PATH: "/usr/bin:/bin" });
