@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-14-globs-cover-tests-and-wiring",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -16,7 +16,7 @@
     "test/core/prompt/**",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T05:19:26.985Z",
+  "heartbeat_at": "2026-10-27T05:23:17.170Z",
   "pr": 259,
   "pr_owner": "edanisko",
   "base_sha": "7a9f1bc1b7435884be23b9df25d4d2407deb6770",
@@ -30,7 +30,12 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "escalation",
+    "inbox_owner": "edanisko",
+    "globs_held": []
+  },
   "attempts": 0,
   "loopbacks": 1,
   "ci_fixes": 0,
