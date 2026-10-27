@@ -16,7 +16,7 @@
     "test/core/prompt/**",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T05:16:45.684Z",
+  "heartbeat_at": "2026-10-27T05:16:51.572Z",
   "pr": 259,
   "pr_owner": "edanisko",
   "base_sha": "7a9f1bc1b7435884be23b9df25d4d2407deb6770",
@@ -32,7 +32,7 @@
   ],
   "park": null,
   "attempts": 0,
-  "loopbacks": 0,
+  "loopbacks": 1,
   "ci_fixes": 0,
   "approval": null
 }
