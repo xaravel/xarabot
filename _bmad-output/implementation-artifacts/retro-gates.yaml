@@ -240,7 +240,7 @@ epics:
         text: "Reap every session's processes and isolate review passes: when a session ends, is aborted or lingers past its result, kill all its descendants (e.g. its own process group), not only the sandbox-exec PID; give each review pass its own temp folder, result path and vendor home, sharing no writable root with builder sessions; tests that a session's grandchild is gone after the run and that the review profile shares no writable root with the builder profile (C1)"
         route: lane
         blocking: true
-        globs: ["src/sandbox/macos.ts", "src/sandbox/vendor-home.ts", "src/lane/review-step.ts", "src/lane/lane-store.ts", "src/lane/session.ts", "test/sandbox/macos.test.ts", "test/sandbox/vendor-home.test.ts", "test/lane/review-step.test.ts", "test/lane/lane-store.test.ts", "test/lane/session.test.ts"]
+        globs: ["src/sandbox/macos.ts", "src/sandbox/vendor-home.ts", "src/lane/review-step.ts", "src/lane/lane-store.ts", "src/lane/session.ts", "test/sandbox/macos.test.ts", "test/sandbox/vendor-home.test.ts", "test/lane/review-step.test.ts", "test/lane/lane-store.test.ts", "test/lane/session.test.ts", "test/no-pkill.test.ts", "src/ports/sandbox.ts"]
         status: open
       - id: "epic-3-retro-item-2-finish-the-codex-live-evidence"
         text: "Finish Story 3.6's live evidence: after item 35 is in a runner tag, re-run XARABOT_LIVE=1 bun test test/adapters/agent/codex/codex-live.test.ts and record it in docs/maintainer/evidence/epic-3.md with the printed outcome-mapping and resume output (and the resumed run's model); name 2606:4700:440b::ac40:9034 and decide the four denied sdmntpr*.oaiusercontent.com hosts (A2, A3)"

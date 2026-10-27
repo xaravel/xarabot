@@ -2131,6 +2131,7 @@ So that I can lift the every-path approval rule and the 1-builder limit with evi
 - **Q5:** the macOS CI job (the 2026-10-24 decision, Epic 1 item 13) is still wanted. The Maintainer adds it in a `.github/` PR.
 - **Q6:** PRs #21 and #23–#28 used the admin bypass as intended during the bootstrap.
 - **Item 6:** the follow-up reviews of Stories 3.4 and 3.5 were done by the Maintainer's walkthrough of #157 and #168 on 2026-10-26. It covered the passed gate (with its clean-merge rule), the review checkout, loopbacks and the cap, the v5 ledger and allowances. Run 2 of the live evidence then exercised the composed `lane run` path end to end. No loopback ran live, so it remains covered by the case tables only.
+- **Item 1, how a session's processes are reaped (2026-10-27, its escalation, option a):** the runner may kill the process group that the sandbox itself created for a session with `setsid`, by signalling that group's id. The id is the session's exact PID, so the kill reaches only that session's descendants and never matches processes by command line the way `pkill -f` does. "Kill by exact PID" (AR3, AR44) still holds everywhere else. `test/no-pkill.test.ts` exempts only `src/sandbox/macos.ts`'s group kill, and the Sandbox port doc (`src/ports/sandbox.ts`) says abort signals go to that exact group.
 
 ## Epic 4: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
 
@@ -2282,6 +2283,8 @@ So that independent Epics keep running while I review a checkpoint (FR5, AR12, A
 **When** they run
 **Then** dependents at distance 1 and 2, a sibling not depending on C, an in-flight Epic and a late-added checkpoint each have a case
 **And** the digest cases cover C's retro done with no go, and C with its go recorded.
+
+**Maintainer decision (2026-10-27, from Story 4.4's review):** a hold that exists only because of a wait on the Maintainer counts as a Maintainer cause, through the dependency chain. An Epic's `dependency-epic` hold on an Epic that is itself held only by Maintainer causes (a checkpoint with its retro done and no go, a rejected retro with no go, or a Maintainer-routed retro item) is a Maintainer cause too. So a builder idle only behind a checkpoint go records `waiting-on-maintainer:` however deep the chain is. This applies Story 4.2's every-reason rule; it does not loosen it. A lane cause anywhere in the chain still keeps the prefix off.
 
 ### Story 4.5: Rulings: grammar, authority and cursor
 
