@@ -20,7 +20,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/vendor-home.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T02:55:48.210Z",
+  "heartbeat_at": "2026-10-27T02:57:09.020Z",
   "pr": 248,
   "pr_owner": "edanisko",
   "base_sha": "2a2fdda1143906302c598a0c3d771e1595867f5f",
