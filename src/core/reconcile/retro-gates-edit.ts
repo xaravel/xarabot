@@ -7,10 +7,13 @@ import type { Go, RetroGates, RetroGatesEntry, RetroItem, RetroRecordResult } fr
  * `reconcile`'s write of retro verdicts and items to `retro-gates.yaml`
  * (Story 2.9, AR4, AR13): the only writer of those records. Applying a
  * merged retro's result sets the Epic's `retro` and appends each item not
- * already listed with `status: open`; a merged retro item's unit sets its
- * item `status: done` (Story 2.10); the file is then rewritten whole, in a
- * fixed, deterministic form. Comments in a hand-edited file are not kept; its
- * data, a hand-recorded `go` included, is. Pure.
+ * already listed, with `status: open` when `route: lane` and `status:
+ * waiting` when `route: maintainer` (Story 4.3: a routed item waits on the
+ * Maintainer's ruling); a merged retro item's unit sets its item `status:
+ * done` (Story 2.10), and a ruled `done` or `defer` sets its item `done` or
+ * `deferred` (Story 4.3; Story 4.6 parses the ruling); the file is then
+ * rewritten whole, in a fixed, deterministic form. Comments in a hand-edited
+ * file are not kept; its data, a hand-recorded `go` included, is. Pure.
  */
 
 /** One merged retro record's result to record. */
@@ -30,35 +33,59 @@ export type RetroItemDone = {
   readonly id: string;
 };
 
+/** A status a ruling sets on a retro item: `/xarabot done` or `/xarabot defer`. */
+export type RuledItemStatus = "done" | "deferred";
+
+/** One retro item whose status a ruling sets (Story 4.3; Story 4.6 parses the ruling). */
+export type RetroItemStatusChange = {
+  readonly epic: number;
+  /** The item's id. */
+  readonly id: string;
+  readonly status: RuledItemStatus;
+};
+
 /**
- * `gates` with each listed item of `done` that is not `done` yet set to
- * `status: done`; an item not listed is left out. One line per change is
- * returned as the summary: `epics.<N>.items: <id> <old> -> done`.
+ * `gates` with each listed item of `changes` that is not `done` yet set to
+ * its `status`, so `deferred` -> `done` is allowed and a `done` item stays
+ * `done`; an item already at its status, an unknown id and an unknown Epic
+ * are left out. One line per change is returned as the summary:
+ * `epics.<N>.items: <id> <old> -> <new>`.
  */
-export function applyItemsDone(gates: RetroGates, done: readonly RetroItemDone[]): { readonly gates: RetroGates; readonly summary: string[] } {
+export function applyItemStatuses(gates: RetroGates, changes: readonly RetroItemStatusChange[]): { readonly gates: RetroGates; readonly summary: string[] } {
   const epics: Record<string, RetroGatesEntry> = { ...gates.epics };
   const summary: string[] = [];
-  const sorted = [...done].sort((a, b) => a.epic - b.epic);
-  for (const d of sorted) {
-    const key = String(d.epic);
+  const sorted = [...changes].sort((a, b) => a.epic - b.epic);
+  for (const c of sorted) {
+    const key = String(c.epic);
     const entry = epics[key];
     const items = entry?.items;
     if (entry === undefined || items === undefined) continue;
-    const i = items.findIndex((x) => x.id === d.id);
+    const i = items.findIndex((x) => x.id === c.id);
     const item = items[i];
-    if (item === undefined || item.status === "done") continue;
-    epics[key] = { ...entry, items: items.map((x, j) => (j === i ? { ...x, status: "done" as const } : x)) };
-    summary.push(`epics.${key}.items: ${d.id} ${item.status} -> done`);
+    if (item === undefined || item.status === "done" || item.status === c.status) continue;
+    epics[key] = { ...entry, items: items.map((x, j) => (j === i ? { ...x, status: c.status } : x)) };
+    summary.push(`epics.${key}.items: ${c.id} ${item.status} -> ${c.status}`);
   }
   return { gates: { schema_version: gates.schema_version, epics }, summary };
+}
+
+/** `applyItemStatuses` with `done` for each item of `done` (Story 2.10). */
+export function applyItemsDone(gates: RetroGates, done: readonly RetroItemDone[]): { readonly gates: RetroGates; readonly summary: string[] } {
+  return applyItemStatuses(
+    gates,
+    done.map((d) => ({ epic: d.epic, id: d.id, status: "done" as const })),
+  );
 }
 
 /**
  * `gates` with each addition applied: `epics.<N>.retro` = {`verdict`,
  * `unit`, `recorded_at`}, then each result item whose id the Epic does not
- * list yet appended with its globs normalized and `status: open`. An Epic
- * whose `retro` is already recorded is left as it is. One line per change
- * is returned as the summary.
+ * list yet appended with its globs normalized, with `status: open` when
+ * `route: lane` and `status: waiting` when `route: maintainer`; an item
+ * already listed keeps its status. An Epic whose `retro` is already
+ * recorded is left as it is. One line per change is returned as the
+ * summary: the retro, then `epics.<N>.items: <id> added as <status>` per
+ * item.
  */
 export function applyRetroResults(gates: RetroGates, additions: readonly RetroGatesAddition[]): { readonly gates: RetroGates; readonly summary: string[] } {
   const epics: Record<string, RetroGatesEntry> = { ...gates.epics };
@@ -69,7 +96,7 @@ export function applyRetroResults(gates: RetroGates, additions: readonly RetroGa
     if (entry.retro !== undefined) continue;
     const items: RetroItem[] = [...(entry.items ?? [])];
     const listed = new Set(items.map((i) => i.id));
-    const added: string[] = [];
+    const added: RetroItem[] = [];
     for (const i of a.result.items) {
       if (listed.has(i.id)) continue;
       listed.add(i.id);
@@ -77,12 +104,13 @@ export function applyRetroResults(gates: RetroGates, additions: readonly RetroGa
         const n = normalizeGlob(g);
         return n.ok ? n.value : g;
       });
-      items.push({ id: i.id, text: i.text, route: i.route, blocking: i.blocking, globs, status: "open" });
-      added.push(i.id);
+      const item: RetroItem = { id: i.id, text: i.text, route: i.route, blocking: i.blocking, globs, status: i.route === "maintainer" ? "waiting" : "open" };
+      items.push(item);
+      added.push(item);
     }
     epics[key] = { ...entry, retro: { verdict: a.result.verdict, unit: a.unit, recorded_at: a.recorded_at }, ...(items.length > 0 || entry.items !== undefined ? { items } : {}) };
     summary.push(`epics.${key}.retro: ${a.result.verdict} (${a.unit})`);
-    for (const id of added) summary.push(`epics.${key}.items: ${id} added as open`);
+    for (const i of added) summary.push(`epics.${key}.items: ${i.id} added as ${i.status}`);
   }
   return { gates: { schema_version: gates.schema_version, epics }, summary };
 }
@@ -150,16 +178,18 @@ export type RetroGatesEdit = { readonly text: string; readonly summary: readonly
 
 /**
  * The new `retro-gates.yaml` text for `additions`, then the items `done`
- * (Story 2.10), over `text` (`null` when the file is absent, read as
- * `{schema_version: 1, epics: {}}`), or why it cannot be written: the
- * current text does not parse, or the new text does not parse back
- * (`parseRetroGates`) to the value it was made from.
+ * (Story 2.10), then the ruled item `statuses` (Story 4.3, applied last),
+ * over `text` (`null` when the file is absent, read as `{schema_version:
+ * 1, epics: {}}`), or why it cannot be written: the current text does not
+ * parse, or the new text does not parse back (`parseRetroGates`) to the
+ * value it was made from.
  */
 export function editRetroGates(
   path: string,
   text: string | null,
   additions: readonly RetroGatesAddition[],
   done: readonly RetroItemDone[] = [],
+  statuses: readonly RetroItemStatusChange[] = [],
 ): Result<RetroGatesEdit, "invalid"> {
   let current = emptyRetroGates();
   if (text !== null) {
@@ -169,8 +199,9 @@ export function editRetroGates(
   }
   const added = applyRetroResults(current, additions);
   const finished = applyItemsDone(added.gates, done);
-  const gates = finished.gates;
-  const summary = [...added.summary, ...finished.summary];
+  const ruled = applyItemStatuses(finished.gates, statuses);
+  const gates = ruled.gates;
+  const summary = [...added.summary, ...finished.summary, ...ruled.summary];
   const out = serializeRetroGates(gates);
   const back = parseRetroGates(path, out);
   if (!back.ok) return err("invalid", `the new text does not parse: ${back.error.message}`);

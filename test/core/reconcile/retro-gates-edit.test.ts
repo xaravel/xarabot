@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseRetroGates } from "../../../src/core/graph/retro-gates.ts";
-import { applyItemsDone, applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
-import type { RetroGates } from "../../../src/core/schemas/retro-gates.ts";
+import { applyItemStatuses, applyItemsDone, applyRetroResults, editRetroGates, serializeRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
+import type { RetroGates, RetroItem } from "../../../src/core/schemas/retro-gates.ts";
 
 const PATH = "_bmad-output/implementation-artifacts/retro-gates.yaml";
 const AT = "2026-10-25T10:00:00Z";
@@ -162,5 +162,109 @@ describe("applyItemsDone and editRetroGates: retro items done (Story 2.10)", () 
     // Deterministic: the same input writes the same text.
     const again = editRetroGates(PATH, text, [add(4, "accepted", ["epic-4-retro-item-1-n"])], [{ epic: 2, id: "epic-2-retro-item-1-a" }]);
     expect(again.ok && again.value.text).toBe(r.value.text);
+  });
+});
+
+describe("applyRetroResults: Maintainer-routed items are written waiting (Story 4.3)", () => {
+  const LANE = "epic-2-retro-item-1-a";
+  const MAINT = "epic-2-retro-item-2-b";
+  const result = {
+    verdict: "accepted-with-open-items" as const,
+    items: [
+      { id: LANE, text: "Lane work", route: "lane" as const, blocking: false, globs: ["src/**"] },
+      { id: MAINT, text: "Ask the Maintainer", route: "maintainer" as const, blocking: true, globs: [] },
+    ],
+  };
+  const addition = { epic: 2, unit: "retro:2", recorded_at: AT, result };
+
+  const cases: readonly { readonly name: string; readonly start: RetroGates; readonly statuses: readonly [RetroItem["status"], RetroItem["status"]]; readonly summary: readonly string[] }[] = [
+    {
+      name: "a mixed retro: the lane item open, the Maintainer item waiting",
+      start: { schema_version: 1, epics: {} },
+      statuses: ["open", "waiting"],
+      summary: ["epics.2.retro: accepted-with-open-items (retro:2)", `epics.2.items: ${LANE} added as open`, `epics.2.items: ${MAINT} added as waiting`],
+    },
+    {
+      name: "a Maintainer item already listed open keeps open, and is not added again",
+      start: { schema_version: 1, epics: { "2": { items: [{ id: MAINT, text: "Ask the Maintainer", route: "maintainer", blocking: true, globs: [], status: "open" }] } } },
+      statuses: ["open", "open"],
+      summary: ["epics.2.retro: accepted-with-open-items (retro:2)", `epics.2.items: ${LANE} added as open`],
+    },
+  ];
+
+  for (const c of cases) {
+    test(c.name, () => {
+      const { gates, summary } = applyRetroResults(c.start, [addition]);
+      const items = gates.epics["2"]?.items ?? [];
+      expect(Object.fromEntries(items.map((i) => [i.id, i.status]))).toEqual({ [LANE]: c.statuses[0], [MAINT]: c.statuses[1] });
+      expect(gates.epics["2"]?.retro).toEqual({ verdict: "accepted-with-open-items", unit: "retro:2", recorded_at: AT });
+      expect(summary).toEqual([...c.summary]);
+    });
+  }
+
+  test("the item order of the file is kept: listed items first, then the result's new items in result order", () => {
+    const start: RetroGates = { schema_version: 1, epics: { "2": { items: [{ id: MAINT, text: "Ask the Maintainer", route: "maintainer", blocking: true, globs: [], status: "open" }] } } };
+    expect(applyRetroResults(start, [addition]).gates.epics["2"]?.items?.map((i) => i.id)).toEqual([MAINT, LANE]);
+    expect(applyRetroResults({ schema_version: 1, epics: {} }, [addition]).gates.epics["2"]?.items?.map((i) => i.id)).toEqual([LANE, MAINT]);
+  });
+});
+
+describe("applyItemStatuses and editRetroGates: ruled done and defer (Story 4.3)", () => {
+  type Status = "open" | "in-progress" | "waiting" | "deferred" | "done";
+  const item = (id: string, status: Status) => ({ id, text: `Do ${id}`, route: "maintainer" as const, blocking: false, globs: [], status });
+  const B = "epic-2-retro-item-2-b";
+  const C = "epic-2-retro-item-3-c";
+  const D = "epic-2-retro-item-4-d";
+  const START: RetroGates = {
+    schema_version: 1,
+    epics: { "2": { retro: { verdict: "accepted-with-open-items", unit: "retro:2", recorded_at: AT }, items: [item(B, "waiting"), item(C, "done"), item(D, "deferred")] } },
+  };
+
+  const cases: readonly { readonly name: string; readonly change: { readonly epic: number; readonly id: string; readonly status: "done" | "deferred" }; readonly after: Readonly<Record<string, Status>>; readonly summary: readonly string[] }[] = [
+    { name: "ruled done on a waiting item", change: { epic: 2, id: B, status: "done" }, after: { [B]: "done", [C]: "done", [D]: "deferred" }, summary: [`epics.2.items: ${B} waiting -> done`] },
+    { name: "ruled defer on a waiting item", change: { epic: 2, id: B, status: "deferred" }, after: { [B]: "deferred", [C]: "done", [D]: "deferred" }, summary: [`epics.2.items: ${B} waiting -> deferred`] },
+    { name: "deferred -> done is allowed", change: { epic: 2, id: D, status: "done" }, after: { [B]: "waiting", [C]: "done", [D]: "done" }, summary: [`epics.2.items: ${D} deferred -> done`] },
+    { name: "a done item stays done", change: { epic: 2, id: C, status: "deferred" }, after: { [B]: "waiting", [C]: "done", [D]: "deferred" }, summary: [] },
+    { name: "an item already at its status is unchanged", change: { epic: 2, id: D, status: "deferred" }, after: { [B]: "waiting", [C]: "done", [D]: "deferred" }, summary: [] },
+    { name: "an unknown id is unchanged", change: { epic: 2, id: "epic-2-retro-item-9-x", status: "done" }, after: { [B]: "waiting", [C]: "done", [D]: "deferred" }, summary: [] },
+    { name: "an unknown Epic is unchanged", change: { epic: 7, id: B, status: "done" }, after: { [B]: "waiting", [C]: "done", [D]: "deferred" }, summary: [] },
+  ];
+
+  for (const c of cases) {
+    test(c.name, () => {
+      const { gates, summary } = applyItemStatuses(START, [c.change]);
+      expect(Object.fromEntries((gates.epics["2"]?.items ?? []).map((i) => [i.id, i.status]))).toEqual({ ...c.after });
+      expect(gates.epics["2"]?.retro).toEqual(START.epics["2"]?.retro);
+      expect(Object.keys(gates.epics)).toEqual(["2"]);
+      expect(summary).toEqual([...c.summary]);
+      if (summary.length === 0) expect(gates).toEqual(START);
+    });
+  }
+
+  test("applyItemsDone is applyItemStatuses with done", () => {
+    const done = [{ epic: 2, id: B }, { epic: 2, id: D }];
+    expect(applyItemsDone(START, done)).toEqual(applyItemStatuses(START, done.map((d) => ({ ...d, status: "done" as const }))));
+  });
+
+  test("editRetroGates applies the ruled statuses last, after the additions and the items done", () => {
+    const text = serializeRetroGates(START);
+    const r = editRetroGates(PATH, text, [add(4, "accepted", ["epic-4-retro-item-1-n"])], [{ epic: 2, id: D }], [{ epic: 2, id: B, status: "deferred" }, { epic: 2, id: D, status: "deferred" }]);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.summary).toEqual([
+      "epics.4.retro: accepted (retro:4)",
+      "epics.4.items: epic-4-retro-item-1-n added as open",
+      `epics.2.items: ${D} deferred -> done`,
+      `epics.2.items: ${B} waiting -> deferred`,
+    ]);
+    const back = parseRetroGates(PATH, r.value.text);
+    if (!back.ok) throw new Error(back.error.message);
+    expect(back.value.epics["2"]?.items?.map((i) => i.status)).toEqual(["deferred", "done", "done"]);
+    expect(serializeRetroGates(back.value)).toBe(r.value.text);
+  });
+
+  test("editRetroGates with only ruled statuses, no additions", () => {
+    const r = editRetroGates(PATH, serializeRetroGates(START), [], [], [{ epic: 2, id: B, status: "done" }]);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.summary).toEqual([`epics.2.items: ${B} waiting -> done`]);
   });
 });

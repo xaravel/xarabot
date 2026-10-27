@@ -145,7 +145,7 @@ describe("renderDigest: who gets what", () => {
     expect(itemLines(d)["edanisko"]).toEqual([
       `- [checkpoint:2](${gates}) · Epic 2's retro is recorded (accepted) · 1d · \`/xarabot go checkpoint:2\``,
       `- [retro:1](${gates}) · rejected, no go · 3d · \`/xarabot go retro:1\``,
-      `- [retro-item:epic-1-retro-item-1-fix-the-gate](${gates}) · open, blocking: Fix the gate for bob,. · 3d · \`/xarabot done|defer retro-item:epic-1-retro-item-1-fix-the-gate\``,
+      `- [retro-item:epic-1-retro-item-1-fix-the-gate](${gates}) · Epic 1 · open, blocking: Fix the gate for bob,. · 3d · \`/xarabot done|defer retro-item:epic-1-retro-item-1-fix-the-gate\``,
       `- [story:4.2](${REPO}/blob/main/_bmad-output/planning-artifacts/epics.md#L31) · Epic 4's heading has no manifest`,
       `- [story:5.1](${REPO}/blob/main/_bmad-output/planning-artifacts/epics.md#L37) · Epic 5's heading has no manifest`,
       `- [4.1-d2](${REPO}/blob/main/${SPEC41}) · deferred: Second item. · 3d`,
@@ -153,6 +153,39 @@ describe("renderDigest: who gets what", () => {
     const body = d.get("edanisko")?.body ?? "";
     expect(body).toContain("  - course correction: retro-item:epic-1-retro-item-1-fix-the-gate");
     expect(d.get("edanisko")?.count).toBe(6);
+  });
+
+  test.each(["waiting", "in-progress", "open"] as const)("a %s Maintainer-routed item: one line with its Epic, status, text, age and the done|defer verb (Story 4.3)", (status) => {
+    const gates = ["schema_version: 1", "epics:", '  "2":', "    retro:", "      verdict: accepted-with-open-items", '      unit: "retro:2"', `      recorded_at: ${DAY(3)}`, "    items:", "      - id: epic-2-retro-item-2-b", "        text: Ask the Maintainer.", "        route: maintainer", "        blocking: false", "        globs: []", `        status: ${status}`, ""].join("\n");
+    const d = digest(world({ files: { [RETRO]: gates } }));
+    const url = `${REPO}/blob/main/_bmad-output/implementation-artifacts/retro-gates.yaml`;
+    expect(itemLines(d)).toEqual({ edanisko: [`- [retro-item:epic-2-retro-item-2-b](${url}) · Epic 2 · ${status}: Ask the Maintainer. · 3d · \`/xarabot done|defer retro-item:epic-2-retro-item-2-b\``] });
+    expect(d.get("edanisko")?.count).toBe(1);
+  });
+
+  test("a routed item of an Epic with no retro record has no age; done and deferred items are not listed (Story 4.3)", () => {
+    const item = (id: string, status: string) => [`      - id: ${id}`, "        text: Ask.", "        route: maintainer", "        blocking: true", "        globs: []", `        status: ${status}`];
+    const gates = ["schema_version: 1", "epics:", '  "3":', "    items:", ...item("epic-3-retro-item-1-a", "waiting"), ...item("epic-3-retro-item-2-b", "done"), ...item("epic-3-retro-item-3-c", "deferred"), ""].join("\n");
+    const d = digest(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }, { id: "3.1" }], files: { [RETRO]: gates } }));
+    const url = `${REPO}/blob/main/_bmad-output/implementation-artifacts/retro-gates.yaml`;
+    expect(itemLines(d)).toEqual({ edanisko: [`- [retro-item:epic-3-retro-item-1-a](${url}) · Epic 3 · waiting, blocking: Ask. · \`/xarabot done|defer retro-item:epic-3-retro-item-1-a\``] });
+    expect(d.get("edanisko")?.count).toBe(1);
+  });
+
+  test("a rejected retro with no go and a waiting Maintainer item: the retro and the item once each, the item a course correction under the retro (Story 4.3)", () => {
+    const gates = ["schema_version: 1", "epics:", '  "2":', "    retro:", "      verdict: rejected", '      unit: "retro:2"', `      recorded_at: ${DAY(3)}`, "    items:", "      - id: epic-2-retro-item-1-a", "        text: Ask.", "        route: maintainer", "        blocking: true", "        globs: []", "        status: waiting", ""].join("\n");
+    const d = digest(world({ files: { [RETRO]: gates } }));
+    const url = `${REPO}/blob/main/_bmad-output/implementation-artifacts/retro-gates.yaml`;
+    expect(itemLines(d)).toEqual({
+      edanisko: [
+        `- [retro:2](${url}) · rejected, no go · 3d · \`/xarabot go retro:2\``,
+        `- [retro-item:epic-2-retro-item-1-a](${url}) · Epic 2 · waiting, blocking: Ask. · 3d · \`/xarabot done|defer retro-item:epic-2-retro-item-1-a\``,
+      ],
+    });
+    const body = d.get("edanisko")?.body ?? "";
+    expect(body.split("\n").filter((l) => l.startsWith("- [retro-item:"))).toHaveLength(1);
+    expect(body).toContain(`- [retro:2](${url}) · rejected, no go · 3d · \`/xarabot go retro:2\`\n  - course correction: retro-item:epic-2-retro-item-1-a\n`);
+    expect(d.get("edanisko")?.count).toBe(2);
   });
 
   test("an unmanifested heading of a bootstrapped Epic is not listed", () => {
