@@ -20,7 +20,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/vendor-home.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T02:36:44Z",
+  "heartbeat_at": "2026-10-27T02:41:48.236Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "cfdd7ea9cfc655b286f4ef364d0ec04f8f230225",
