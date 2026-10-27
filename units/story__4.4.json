@@ -18,7 +18,7 @@
     "test/core/reconcile/**",
     "test/lane/**"
   ],
-  "heartbeat_at": "2026-10-27T01:20:15.330Z",
+  "heartbeat_at": "2026-10-27T01:20:59.921Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "deeddb71448314d9fefde540813ac8707c0d2ef3",
@@ -29,7 +29,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
