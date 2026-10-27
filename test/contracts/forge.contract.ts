@@ -161,7 +161,7 @@ export function forgeContract(harness: ForgeHarness): void {
     scenario("offers exactly the port's operations and no approve or merge", [], [], async (fx) => {
       for (const op of FORGE_OPERATIONS) expect(typeof fx.forge[op]).toBe("function");
       const extra = fx.forge as unknown as Record<string, unknown>;
-      for (const banned of ["approve", "approvePr", "merge", "mergePr", "adminMerge", "autoMerge", "deleteBranch"]) {
+      for (const banned of ["approve", "approvePr", "merge", "mergePr", "adminMerge", "autoMerge"]) {
         expect(extra[banned]).toBeUndefined();
       }
     });
@@ -346,6 +346,7 @@ export function forgeContract(harness: ForgeHarness): void {
         ledgerSwap: () => f.ledgerSwap(sha, { message: "m", writes: {}, deletes: [] }, aborted()),
         pushBranch: () => f.pushBranch({ branch: "story/9.9", expected_sha: null, sha }, aborted()),
         branchHead: () => f.branchHead("story/9.9", aborted()),
+        deleteBranch: () => f.deleteBranch("story/9.9", aborted()),
         openPr: () => f.openPr({ branch: "story/9.9", base: "main", title: "t", body: "b" }, aborted()),
         updatePr: () => f.updatePr(1, { title: "t" }, aborted()),
         closePr: () => f.closePr(1, aborted()),
@@ -470,6 +471,35 @@ export function forgeContract(harness: ForgeHarness): void {
     scenario("branchHead with an aborted signal is transient", ["branchHead"], [], async (fx) => {
       expect(kind(await fx.forge.branchHead("story/7.7", aborted()))).toBe("transient");
     });
+
+    // ------------------------------------------------------------ deleteBranch
+
+    scenario("deleteBranch removes a pushed branch; a missing one is deleted: false", ["pushBranch", "branchHead", "deleteBranch"], ["makeCommit"], async (fx) => {
+      const sha = await need(fx, "makeCommit")();
+      value(await fx.forge.pushBranch({ branch: "xarabot/reconcile-7", expected_sha: null, sha }, live()));
+      expect(value(await fx.forge.deleteBranch("xarabot/reconcile-7", live()))).toEqual({ deleted: true });
+      expect(value(await fx.forge.branchHead("xarabot/reconcile-7", live()))).toBeNull();
+      expect(value(await fx.forge.deleteBranch("xarabot/reconcile-7", live()))).toEqual({ deleted: false });
+      expect(value(await fx.forge.deleteBranch("xarabot/reconcile-none", live()))).toEqual({ deleted: false });
+    });
+
+    scenario(
+      "deleteBranch of a branch an open PR uses conflicts and keeps it; once the PR is closed it is deleted and the PR keeps its head",
+      [...OPEN_PR, "branchHead", "closePr", "listPrsByBranch", "deleteBranch"],
+      ["makeCommit"],
+      async (fx) => {
+        const pr = await openOn(fx, "xarabot/reconcile-8");
+        expect(kind(await fx.forge.deleteBranch("xarabot/reconcile-8", live()))).toBe("conflict");
+        expect(value(await fx.forge.branchHead("xarabot/reconcile-8", live()))).toBe(pr.head_sha);
+        expect(value(await fx.forge.listPrsByBranch("xarabot/reconcile-8", live())).map((p) => p.state)).toEqual(["open"]);
+        value(await fx.forge.closePr(pr.number, live()));
+        expect(value(await fx.forge.deleteBranch("xarabot/reconcile-8", live()))).toEqual({ deleted: true });
+        expect(value(await fx.forge.branchHead("xarabot/reconcile-8", live()))).toBeNull();
+        expect(value(await fx.forge.listPrsByBranch("xarabot/reconcile-8", live())).map((p) => [p.number, p.state, p.head_sha])).toEqual([
+          [pr.number, "closed", pr.head_sha],
+        ]);
+      },
+    );
 
     scenario("a push a rule refuses is rejected and moves nothing", OPEN_PR, ["makeCommit", "refusePushes"], async (fx) => {
       const mk = need(fx, "makeCommit");

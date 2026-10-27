@@ -76,8 +76,8 @@ import {
  *   A status PR skips that gate (its diff holds no graph input) and parks
  *   only when policy gates a path, else it is
  *   fenced, written `merging` and enqueued at its head, and is disposable
- *   like `reconcile`'s (a conflicting enqueue closes it and releases the
- *   record).
+ *   like `reconcile`'s (a conflicting enqueue closes it, releases the
+ *   record and deletes its branch).
  * - After CI and the PR checks on fresh `main` (Story 3.5): the passed gate
  *   at the head; a head no review passed gets one review round (the normal
  *   pass), and a blocking round parks `blocked` `review-findings` for the
@@ -224,8 +224,11 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
 
     /**
      * A conflicting enqueue of a disposable status PR: the PR closed, the
-     * record released with no attempt. A failed close is a failed attempt, so
-     * a PR left open is never resumed round after round with none counted.
+     * record released with no attempt, then its branch deleted (Epic 2 retro
+     * item 21; the next claim leases from `branchHead`, so a missing branch
+     * is a fresh push). A failed close is a failed attempt, so a PR left open
+     * is never resumed round after round with none counted. A failed delete
+     * is noted and leaves the branch for reconcile's `deleteReleased`.
      */
     const dispose = async (pr: number, e: ForgeError): Promise<never> => {
       note(`enqueue conflict: ${e.message}`);
@@ -234,6 +237,13 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       if (!closed.ok) return await failed(`enqueue PR #${pr} ${describeError(e)}; closePr PR #${pr} ${describeError(closed.error)}`);
       reasons.push(`enqueue PR #${pr} ${describeError(e)}: closed, released`);
       await held("releaseDisposable", releaseDisposable({ unit, by: identity, now: forgeNow(), generation }));
+      const deleted = await call("deleteBranch", (o) => forge.deleteBranch(branch, o));
+      if (deleted.ok) {
+        if (deleted.value.deleted) note(`deleted branch ${branch}`);
+      } else {
+        reasons.push(`deleteBranch ${branch} ${describeError(deleted.error)}; the branch is left`);
+        note(`deleteBranch ${branch} failed: ${describeError(deleted.error)}`);
+      }
       throw end("progress", kit.record.state);
     };
 

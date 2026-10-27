@@ -478,6 +478,7 @@ describe("every operation", () => {
       ledgerSwap: () => f.ledgerSwap(sha, { message: "m", writes: {}, deletes: [] }, o),
       pushBranch: () => f.pushBranch({ branch: "story/9.9", expected_sha: null, sha }, o),
       branchHead: () => f.branchHead("story/9.9", o),
+      deleteBranch: () => f.deleteBranch("story/9.9", o),
       openPr: () => f.openPr({ branch: "story/9.9", base: "main", title: "t", body: "b" }, o),
       updatePr: () => f.updatePr(1, { title: "t" }, o),
       closePr: () => f.closePr(1, o),

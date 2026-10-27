@@ -213,6 +213,56 @@ describe("listPrsByBranch", () => {
   });
 });
 
+describe("deleteBranch", () => {
+  test("lists the branch's open PRs, then DELETEs its ref; a missing branch is deleted: false", async () => {
+    const { gh, forge } = setup();
+    gh.control.setBranch("xarabot/reconcile-1", H1);
+    expect(value(await forge.deleteBranch("xarabot/reconcile-1", live()))).toEqual({ deleted: true });
+    expect(gh.control.ref("xarabot/reconcile-1")).toBeUndefined();
+    expect(calls(gh)).toEqual([
+      "GET /pulls?head=acme%3Axarabot%2Freconcile-1&state=open&per_page=100&page=1",
+      "DELETE /git/refs/heads/xarabot/reconcile-1",
+    ]);
+    expect(value(await forge.deleteBranch("xarabot/reconcile-1", live()))).toEqual({ deleted: false });
+    gh.control.inject("DELETE", /\/git\/refs\/heads\//, { status: 404, body: { message: "Not Found" } });
+    expect(value(await forge.deleteBranch("xarabot/reconcile-2", live()))).toEqual({ deleted: false });
+  });
+
+  test("a branch with an open PR is conflict and is not deleted; a closed PR's branch is", async () => {
+    const { gh, forge } = setup();
+    gh.control.setBranch("xarabot/reconcile-3", H1);
+    const pr = value(await forge.openPr({ branch: "xarabot/reconcile-3", base: "main", title: "T", body: "B" }, live()));
+    gh.control.clearLog();
+    expect(await forge.deleteBranch("xarabot/reconcile-3", live())).toEqual({
+      ok: false,
+      error: { kind: "conflict", message: `deleteBranch: xarabot/reconcile-3 has open PR #${pr.number}` },
+    });
+    expect(calls(gh).some((c) => c.startsWith("DELETE"))).toBe(false);
+    expect(gh.control.ref("xarabot/reconcile-3")).toBe(H1);
+    value(await forge.closePr(pr.number, live()));
+    expect(value(await forge.deleteBranch("xarabot/reconcile-3", live()))).toEqual({ deleted: true });
+    expect(value(await forge.listPrsByBranch("xarabot/reconcile-3", live())).map((p) => [p.state, p.head_sha])).toEqual([["closed", H1]]);
+  });
+
+  test("main and the ledger branch are forbidden with no request", async () => {
+    const { gh, forge } = setup();
+    expect(kind(await forge.deleteBranch("main", live()))).toBe("forbidden");
+    expect(kind(await forge.deleteBranch("xarabot/claims", live()))).toBe("forbidden");
+    expect(calls(gh)).toEqual([]);
+  });
+
+  test("another refusal goes through mapHttpError: a rule's 422 is rejected, a 403 forbidden", async () => {
+    const { gh, forge } = setup();
+    gh.control.setBranch("xarabot/reconcile-4", H1);
+    gh.control.inject("DELETE", /\/git\/refs\/heads\//, { status: 422, body: { message: "Repository rule violations found" } });
+    expect(kind(await forge.deleteBranch("xarabot/reconcile-4", live()))).toBe("rejected");
+    gh.control.inject("DELETE", /\/git\/refs\/heads\//, { status: 403, body: { message: "Resource not accessible by integration" } });
+    const r = await forge.deleteBranch("xarabot/reconcile-4", live());
+    expect(r.ok ? "ok" : r.error.message).toBe("deleteRef: 403 Resource not accessible by integration (needs contents: write)");
+    expect(gh.control.ref("xarabot/reconcile-4")).toBe(H1);
+  });
+});
+
 describe("reviews", () => {
   test("maps author, lowercased state, commit SHA and submitted time, paging 100 at a time in order", async () => {
     const { gh, forge } = setup();

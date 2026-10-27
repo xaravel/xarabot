@@ -367,6 +367,15 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
 
     branchHead: (branch, opts) => call("branchHead", opts, () => forgeOk(branches.get(branch) ?? null)),
 
+    deleteBranch: (branch, opts) =>
+      call("deleteBranch", opts, () => {
+        if (RESERVED_BRANCHES.includes(branch)) return forgeErr("forbidden", `deleteBranch: ${branch} is protected`);
+        for (const p of prs.values()) {
+          if (p.branch === branch && p.state === "open") return forgeErr("conflict", `deleteBranch: ${branch} has open PR #${p.number}`);
+        }
+        return forgeOk({ deleted: branches.delete(branch) });
+      }),
+
     openPr: (request, opts) =>
       call("openPr", opts, () => {
         const head = branches.get(request.branch);

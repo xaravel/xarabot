@@ -7,6 +7,7 @@ import {
   fenced,
   finishRecurring,
   heartbeat,
+  isDisposable,
   markMerged,
   park,
   releaseDeadReconcile,
@@ -54,6 +55,11 @@ import { allowanceReason, callPassedGate, describeError, message, stepKit, stepO
  * deleted. An ungated status planning PR (`approved_sha` `null`, Story 2.7)
  * is disposable like a `reconcile` PR, and a `released` planning record
  * whose PR is not open is deleted the same way (`deleteReleasedRecurring`).
+ * Once a disposable record is released or deleted, its branch is deleted too
+ * (`Forge.deleteBranch`, Epic 2 retro item 21); a failed delete is noted and
+ * leaves the branch. A `reconcile` PR an owner approved that the runner took
+ * and failed to enqueue is closed and replaced like any other, never enqueued
+ * again (Q4).
  *
  * Approval-gated PRs (Story 2.6, FR13, AR8, AR17, AD-14): a `parked`
  * `awaiting-approval` record whose PR is open at the parked head is taken
@@ -130,9 +136,11 @@ import { allowanceReason, callPassedGate, describeError, message, stepKit, stepO
  * skipped (`retroItemsMissing`). Once that PR merges, the record is done on
  * `main` and a later run deletes it.
  *
- * With no status or retro-gates change, or another `reconcile` PR
- * open that the ledger work did not close or settle, the run finishes `merged` with no PR and the older `merged`
- * `reconcile` records are deleted. Otherwise it commits the changed files onto
+ * With no status or retro-gates change, another `reconcile` PR open that
+ * the ledger work did not close or settle, or a branch whose open PRs the
+ * ledger work failed to list or close (2.5 F1: one may be an orphan no
+ * record carries), the run finishes `merged` with no PR and the older
+ * `merged` `reconcile` records are deleted. Otherwise it commits the changed files onto
  * the snapshot's `main`, pushes `<branches.xarabot>reconcile-<n>` as a new
  * branch, opens the PR, polls its checks, re-checks the Standing Authority on
  * fresh `main`, keeps the protected-path gate (the PR is exempt from
@@ -332,11 +340,39 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     };
 
     /**
+     * Epic 2 retro item 21: the branch of `of`, a disposable record (a
+     * `reconcile` one, or an ungated status planning one) this run just
+     * released or deleted, so no open PR of its own is left on it. Called
+     * right after that swap, which fenced the run's own record. Hygiene only:
+     * a failure, or an open PR still on the branch (`conflict`), is noted and
+     * leaves the branch, and a later run's `deleteReleased` tries again while
+     * the record is `released`.
+     */
+    const dropBranch = async (of: string): Promise<void> => {
+      const branch = unitBranch(snapshot.config.branches.xarabot, of);
+      aborted();
+      const r = await call("deleteBranch", (o) => forge.deleteBranch(branch, o));
+      if (r.ok) {
+        if (r.value.deleted) note(`${of}: deleted branch ${branch}`);
+        return;
+      }
+      reasons.push(`${of}: deleteBranch ${branch} ${describeError(r.error)}; the branch is left`);
+      note(`${of}: deleteBranch ${branch} failed: ${describeError(r.error)}`);
+    };
+
+    /** Whether `of`'s record, as the round's snapshot shows it, is disposable (`isDisposable`). */
+    const disposable = (of: string): boolean => {
+      const rec = snapshot.ledger.units.find((r) => r.unit === of);
+      return rec === undefined ? unitKind(of) === "reconcile" : isDisposable(rec);
+    };
+
+    /**
      * Before a dead or released record is released or deleted: every open PR
      * on its branch closed, each by a fenced PR change, plus the record's own
      * PR when the snapshot shows it open and the listing missed it. A unit
      * whose open PRs were all closed joins `settled`. `false` (a listing failure or a
-     * failed close) leaves the record for a later run.
+     * failed close) leaves the record for a later run, and ends this run with
+     * no new PR (2.5 F1): a PR left open on the branch would be a second one.
      */
     const closeBranchPrs = async (t: PlanTarget, settled: Set<string>): Promise<boolean> => {
       const branch = unitBranch(snapshot.config.branches.xarabot, t.unit);
@@ -359,13 +395,22 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     const release = (t: PlanTarget): Promise<boolean> =>
       item(`releaseDisposable ${t.unit}`, releaseDisposable({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
 
-    /** 2. An earlier run's `merging` record: left while queued at its head, else closed and released; either ending joins `settled`. */
+    /**
+     * 2. An earlier run's `merging` record: left while queued at its head,
+     * else closed and released, and its branch deleted; either ending joins
+     * `settled`. This holds for a `reconcile` PR the runner took on an
+     * approval and never enqueued (Q4, 2026-10-25): it is closed and
+     * replaced, never taken or enqueued again, since a `reconcile` PR needs no
+     * owner's approval.
+     */
     const checkQueue = async (t: PlanTarget, settled: Set<string>): Promise<void> => {
       const pr = t.pr;
-      if (pr === null) {
-        if (await release(t)) settled.add(t.unit);
-        return;
-      }
+      const released = async (): Promise<void> => {
+        if (!(await release(t))) return;
+        settled.add(t.unit);
+        await dropBranch(t.unit);
+      };
+      if (pr === null) return await released();
       const q = await call("queueState", (o) => forge.queueState(pr, o));
       if (!q.ok) {
         if (q.error.kind !== "not-found") {
@@ -389,7 +434,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           settled.add(t.unit);
         }
       }
-      if (await release(t)) settled.add(t.unit);
+      await released();
     };
 
     /**
@@ -731,8 +776,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
             if (!(await prChange(t.unit, "closePr", pr, (o) => forge.closePr(pr, o)))) return;
             settled.add(t.unit);
             const released = await item(`releaseDisposable ${t.unit}`, releaseDisposable({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2 }));
-            if (released) reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}: closed, released`);
-            return;
+            if (!released) return;
+            reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}: closed, released`);
+            return await dropBranch(t.unit);
           }
           return await repark(takenTarget, `enqueue ${describeError(r.error)}`, "conflict");
         }
@@ -887,10 +933,11 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     /**
      * The ledger work. Returns the settled units: those whose PR it closed or
      * whose record it released or deleted, whose open PR no longer stops a new
-     * one.
+     * one; and the unclosed ones, whose `closeBranchPrs` failed.
      */
-    const ledgerWork = async (plan: ReconcilePlan): Promise<ReadonlySet<string>> => {
+    const ledgerWork = async (plan: ReconcilePlan): Promise<{ readonly settled: ReadonlySet<string>; readonly unclosed: readonly string[] }> => {
       const settled = new Set<string>();
+      const unclosed: string[] = [];
       for (const u of plan.markMerged) await item(`markMerged ${u}`, markMerged({ unit: u, by: identity, now: forgeNow() }));
       for (const t of plan.checkQueue) await checkQueue(t, settled);
       // A taken record the runner never enqueued joins this run's takes, on its standing approval.
@@ -902,17 +949,27 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       for (const t of plan.checkUngated) await checkUngated(t);
       await takeApprovedWork([...plan.takeApproved, ...untaken], settled);
       for (const t of plan.releaseDead) {
-        if (!(await closeBranchPrs(t, settled))) continue;
+        if (!(await closeBranchPrs(t, settled))) {
+          unclosed.push(t.unit);
+          continue;
+        }
         const done = await item(`releaseDeadReconcile ${t.unit}`, releaseDeadReconcile({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
-        if (done) settled.add(t.unit);
+        if (!done) continue;
+        settled.add(t.unit);
+        await dropBranch(t.unit);
       }
       for (const t of plan.deleteReleased) {
-        if (!(await closeBranchPrs(t, settled))) continue;
+        if (!(await closeBranchPrs(t, settled))) {
+          unclosed.push(t.unit);
+          continue;
+        }
         const done = await item(`deleteReleasedRecurring ${t.unit}`, deleteReleasedRecurring({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
-        if (done) settled.add(t.unit);
+        if (!done) continue;
+        settled.add(t.unit);
+        if (disposable(t.unit)) await dropBranch(t.unit);
       }
       for (const u of plan.deleteMerged) await item(`deleteMerged ${u}`, deleteMerged({ unit: u, by: identity, now: forgeNow() }));
-      return settled;
+      return { settled, unclosed };
     };
 
     // ------------------------------------------------------------ rulings
@@ -1123,6 +1180,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           const closed = await call("closePr", (o) => forge.closePr(pr, o));
           if (!closed.ok) reasons.push(`closePr PR #${pr} ${describeError(closed.error)}`);
           await held("releaseDisposable", releaseDisposable({ unit, by: identity, now: forgeNow(), generation }));
+          if (closed.ok) await dropBranch(unit);
           throw end("progress", kit.record.state);
         }
         if (!isBackoffKind(r.error.kind) || n + 1 >= ENQUEUE_TRIES) return await failed(`enqueue ${describeError(r.error)}`);
@@ -1152,10 +1210,15 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         reasons.push(`${u} merged but its item is not listed: skipped`);
         note(`${u} merged but ${snapshot.config.retro_gates_path} does not list its item: nothing to set done, skipped`);
       }
-      const settled = await ledgerWork(plan);
+      const { settled, unclosed } = await ledgerWork(plan);
       await rulings();
       await inboxes();
 
+      // 2.5 F1: a failed close may leave a PR open that no record carries, so this run opens none.
+      if (unclosed.length > 0) {
+        const branches = unclosed.map((u) => unitBranch(snapshot.config.branches.xarabot, u));
+        return await finish(plan, `not every open PR on ${branches.join(", ")} was closed: no new reconcile PR this run`);
+      }
       // A PR the ledger work closed, or whose record it released or deleted, no longer stops a new one.
       const open = plan.openPrs.find((o) => !settled.has(o.unit));
       if (open !== undefined) return await finish(plan, `${open.unit}'s PR #${open.pr} is open: no new reconcile PR this run`);

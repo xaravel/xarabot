@@ -9,9 +9,11 @@ import type { PrState } from "../core/schemas/snapshot.ts";
  * `ForgeResult`. Every call takes an `AbortSignal` deadline as its last
  * argument; a call whose signal is aborted before it completes returns
  * `transient` and changes nothing. There is deliberately no approve, merge,
- * admin-merge, auto-merge or branch-delete operation: a review the runner
- * posts (`postReview`) is a comment-only review, never an approval or a
- * change request.
+ * admin-merge or auto-merge operation: a review the runner posts
+ * (`postReview`) is a comment-only review, never an approval or a change
+ * request. The one delete, `deleteBranch` (Epic 2 retro item 21), removes the
+ * branch of a closed `reconcile` or disposable planning PR, and refuses a
+ * branch an open PR still uses.
  *
  * Error kinds: `auth`, `forbidden` and `uninstalled` stop the lane;
  * `rate-limited` and `transient` are backed off and retried; `rejected` (the
@@ -217,6 +219,13 @@ export type Forge = {
   pushBranch(lease: PushLease, opts: CallOpts): Promise<ForgeResult<{ readonly sha: GitSha }>>;
   /** The remote head of `branch`, or `null` when the branch does not exist: a push lease's `expected_sha`. Read-only. */
   branchHead(branch: string, opts: CallOpts): Promise<ForgeResult<GitSha | null>>;
+  /**
+   * Deletes `branch` (Epic 2 retro item 21): `deleted` is `false` when it did
+   * not exist. A branch an open PR uses is `conflict` and stays; `main` and
+   * the ledger branch are `forbidden`. A closed or merged PR on it keeps its
+   * head.
+   */
+  deleteBranch(branch: string, opts: CallOpts): Promise<ForgeResult<{ readonly deleted: boolean }>>;
   /** A missing branch is `not-found`; a second open PR on one branch is `conflict`. */
   openPr(request: OpenPrRequest, opts: CallOpts): Promise<ForgeResult<ForgePr>>;
   /** Updating a merged PR is `conflict`. */
@@ -276,6 +285,7 @@ export const FORGE_OPERATIONS = [
   "ledgerSwap",
   "pushBranch",
   "branchHead",
+  "deleteBranch",
   "openPr",
   "updatePr",
   "closePr",

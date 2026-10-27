@@ -55,6 +55,8 @@ export const GITHUB_OPERATIONS = {
   createCommit: { name: "createCommit", method: "POST", permission: "contents: write" },
   createRef: { name: "createRef", method: "POST", permission: "contents: write", conflictOn: 422 },
   updateRef: { name: "updateRef", method: "PATCH", permission: "contents: write", conflictOn: SWAP_CONFLICT_STATUS },
+  /** The branch of a closed `reconcile` or disposable planning PR (Epic 2 retro item 21); never `main` or the ledger. */
+  deleteRef: { name: "deleteRef", method: "DELETE", permission: "contents: write" },
   getPull: { name: "getPull", method: "GET", permission: "pull_requests: write" },
   listPulls: { name: "listPulls", method: "GET", permission: "pull_requests: write" },
   listReviews: { name: "listReviews", method: "GET", permission: "pull_requests: write" },

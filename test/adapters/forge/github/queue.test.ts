@@ -238,15 +238,19 @@ describe("queueState", () => {
 });
 
 describe("the adapter source", () => {
-  test("has no merge, auto-merge, admin, branch-delete or DELETE path", () => {
+  test("has no merge, auto-merge, admin or delete-branch path, and its one DELETE is deleteRef", () => {
     const dir = join(import.meta.dir, "../../../../src/adapters/forge/github");
     const hits: string[] = [];
+    const deletes: string[] = [];
     for (const file of readdirSync(dir)) {
       const lines = readFileSync(join(dir, file), "utf8").split("\n");
       lines.forEach((line, i) => {
-        if (/mergePullRequest|enablePullRequestAutoMerge|auto[-_]?merge|--admin|delete-branch|method: "DELETE"|\/merge\b/i.test(line)) hits.push(`${file}:${i + 1}: ${line.trim()}`);
+        if (/mergePullRequest|enablePullRequestAutoMerge|auto[-_]?merge|--admin|delete-branch|\/merge\b/i.test(line)) hits.push(`${file}:${i + 1}: ${line.trim()}`);
+        if (/method: "DELETE"/.test(line)) deletes.push(`${file}: ${line.trim()}`);
       });
     }
     expect(hits).toEqual([]);
+    // Epic 2 retro item 21: the branch of a closed reconcile or disposable planning PR.
+    expect(deletes).toEqual(['http.ts: deleteRef: { name: "deleteRef", method: "DELETE", permission: "contents: write" },']);
   });
 });

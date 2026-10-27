@@ -635,6 +635,19 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       refs.set(branch, sha);
       return json(200, { ref: `refs/heads/${branch}`, object: { sha, type: "commit" } });
     }
+    if (method === "DELETE" && (m = /^\/git\/refs\/heads\/(.+)$/.exec(rest)) !== null) {
+      // GitHub closes an open PR whose head branch is deleted, keeping its last head.
+      const branch = (m[1] as string).split("/").map(decodeURIComponent).join("/");
+      if (!refs.has(branch)) return unprocessable("Reference does not exist");
+      for (const p of pulls.values()) {
+        if (p.branch === branch && p.state === "open") {
+          p.head_sha = headOf(p);
+          p.state = "closed";
+        }
+      }
+      refs.delete(branch);
+      return { status: 204, body: undefined, headers: {} };
+    }
     if (method === "GET" && (m = /^\/pulls\/(\d+)$/.exec(rest)) !== null) {
       const n = Number(m[1]);
       const p = pulls.get(n);
@@ -856,7 +869,8 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       const h: Record<string, string> = { "content-type": "application/json; charset=utf-8", ...r.headers };
       if (withDate) h["date"] = date;
       if (r.body === undefined) delete h["content-type"];
-      return new Response(r.body === undefined ? "" : JSON.stringify(r.body), { status: r.status, headers: h });
+      // A 204 carries no body at all.
+      return new Response(r.status === 204 ? null : r.body === undefined ? "" : JSON.stringify(r.body), { status: r.status, headers: h });
     };
 
     const injected = takeMatch(injections, method, path);

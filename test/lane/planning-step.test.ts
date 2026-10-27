@@ -363,6 +363,13 @@ function harness(o: HarnessOpts = {}): Harness {
 
 const swaps = (events: readonly string[]) => events.filter((e) => e.startsWith("ledgerSwap ")).map((e) => e.slice("ledgerSwap ".length));
 
+/** `branch`'s head on the forge, or `null` once it is deleted. */
+async function branchHead(h: Harness, branch: string) {
+  const r = await h.fake.forge.branchHead(branch, opts());
+  if (!r.ok) throw new Error(r.error.message);
+  return r.value;
+}
+
 async function prOnBranch(h: Harness, branch: string) {
   const r = await h.fake.forge.listPrsByBranch(branch, opts());
   if (!r.ok) throw new Error(r.error.message);
@@ -799,6 +806,20 @@ describe("createPlanningStep: done", () => {
     expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "released", attempts: 0 });
     expect((await prOnBranch(h, "xarabot/planning-status.1"))?.state).toBe("closed");
     expect(swaps(h.events)).toContain("releaseDisposable planning:status.1");
+    // Epic 2 retro item 21: its branch is deleted once the record is released.
+    expect(h.events.slice(-2)).toEqual(["ledgerSwap releaseDisposable planning:status.1", "deleteBranch"]);
+    expect(await branchHead(h, "xarabot/planning-status.1")).toBeNull();
+  });
+
+  test("an enqueue conflict whose branch delete fails: still released with no attempt; the branch is left, the reason naming the delete", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("done"))] });
+    h.fake.control.injectError("enqueue", { kind: "conflict", message: "not mergeable" });
+    h.fake.control.injectError("deleteBranch", { kind: "transient", message: "502" });
+    const out = await h.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "released"]);
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({ state: "released", attempts: 0 });
+    expect(out.reason).toContain("deleteBranch xarabot/planning-status.1 transient: 502; the branch is left");
+    expect(await branchHead(h, "xarabot/planning-status.1")).not.toBeNull();
   });
 
   test("an enqueue conflict whose closePr fails: a failed attempt, released with attempts 1, the reason naming the close", async () => {

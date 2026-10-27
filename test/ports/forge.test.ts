@@ -24,6 +24,7 @@ type Operations =
   | "ledgerSwap"
   | "pushBranch"
   | "branchHead"
+  | "deleteBranch"
   | "openPr"
   | "updatePr"
   | "closePr"
@@ -77,6 +78,7 @@ describe("Forge port", () => {
         "checks",
         "closePr",
         "comment",
+        "deleteBranch",
         "dequeue",
         "enqueue",
         "inboxComment",
