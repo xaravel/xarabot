@@ -26,10 +26,12 @@ import {
   Abandon,
   addReason,
   checkStop,
+  fenceForge,
   forgeClock,
   forgeOps,
   Halt,
   journalUnit,
+  ledgerFenceOf,
   MarkerStop,
   MAX_CLAIM_ROUNDS,
   message,
@@ -50,8 +52,12 @@ import type { Workspace } from "./workspace.ts";
  * like the builder's. `lane run` claims `coordinator.json` as its last start
  * check (`claimCoordinatorRecord`); the process then writes `lane.pid` and
  * starts a `coordinator.json` keeper at once, which beats every 5 minutes
- * through the round and the trailing wait and never releases. A lost or
- * lapsed claim aborts its signal and the run ends `failed`.
+ * through the round and the trailing wait and never releases. Its lapse
+ * window counts from the start snapshot that stamped the claim. A lost or
+ * lapsed claim aborts its signal, the unit's keeper stops, and the run ends
+ * `failed`. Every unit edit, the unit keeper's included, is fenced on
+ * `coordinator.json`'s holder and generation at the tip (Q5), so a lost
+ * claim writes nothing more even before the keeper's next beat sees it.
  *
  * After the STOP check and the snapshot (`role: coordinator`), `next` picks a
  * coordinator unit. Each unit kind's work is an injected step; a kind with
@@ -170,6 +176,13 @@ export type CoordinatorDeps = {
   readonly lane: Lane;
   /** The `coordinator.json` record the start check wrote. */
   readonly claim: CoordinatorRecord;
+  /**
+   * The host time (as `now` reads it) of the start snapshot whose forge
+   * `now` stamped the claim: the forge clock's seed and the coordinator
+   * keeper's first good beat, so a slow start never stretches its lapse
+   * window. `lane run` passes it; default `now()` at the process start.
+   */
+  readonly claimSeenMs?: number;
   /** The step per unit kind; `lane run` wires `reconcile` (Story 2.5), `planning` (Story 2.7), `retro` (Story 2.9) and `retro-item` (Story 2.10). */
   readonly steps: CoordinatorSteps;
   /** The PID `lane.pid` records; default `process.pid`. */
@@ -233,16 +246,19 @@ export async function claimCoordinatorRecord(p: ClaimCoordinatorParams): Promise
 }
 
 export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<LaneProcessResult> {
-  const { forge, store, identity, lane, agent } = deps;
+  const { store, identity, lane, agent } = deps;
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const layout = laneLayout(deps.laneDir);
   const iso = (ms: number) => new Date(ms).toISOString();
   const generation = deps.claim.generation;
+  const claimSeenMs = deps.claimSeenMs ?? clock();
+  // Every unit edit is fenced on this claim (Q5); the claim's own keeper checks it itself.
+  const forge = fenceForge(deps.forge, { by: identity, generation });
 
   let mainSha: string | null = null;
-  // The claim's stamp is the last forge time seen.
-  const fc = forgeClock(clock, deps.claim.heartbeat_at);
+  // The claim's stamp is the last forge time seen, at the start snapshot's host time.
+  const fc = forgeClock(clock, deps.claim.heartbeat_at, claimSeenMs);
 
   let track: UnitTrack | null = null;
   const log = (text: string): void => {
@@ -305,7 +321,7 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
   const body = async (): Promise<LaneOutcome> => {
     const pid = store.writePid("lane", deps.pid ?? process.pid, deps.command ?? basename(process.execPath));
     if (!pid.ok) throw new Halt("failed", `lane.pid: ${pid.error.message}`);
-    coordinatorKeeper = startCoordinatorHeartbeat({ ...keeperOpts, forge, identity, generation, claimedMs: fc.seenAt() });
+    coordinatorKeeper = startCoordinatorHeartbeat({ ...keeperOpts, forge: deps.forge, identity, generation, claimedMs: claimSeenMs });
 
     for (let round = 1; round <= MAX_CLAIM_ROUNDS; round += 1) {
       track = null;
@@ -396,7 +412,17 @@ export async function runCoordinatorProcess(deps: CoordinatorDeps): Promise<Lane
         return "progress";
       }
 
-      unitKeeper = startHeartbeat({ ...keeperOpts, forge, identity, unit: u.unit, generation: record.generation, claimedMs: claimNowAt });
+      // The unit keeper's beats are fenced on the claim, and it stops once the claim's keeper ends.
+      unitKeeper = startHeartbeat({
+        ...keeperOpts,
+        forge,
+        identity,
+        unit: u.unit,
+        generation: record.generation,
+        claimedMs: claimNowAt,
+        fence: ledgerFenceOf(forge),
+        until: coordinatorKeeper.signal,
+      });
       await checkClaim();
       const signal = AbortSignal.any([unitKeeper.signal, coordinatorKeeper.signal]);
       let out: PrStepOutput;

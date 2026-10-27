@@ -14,7 +14,7 @@ import type { Agent } from "../../src/ports/agent.ts";
 import type { Forge, ForgeCheck, ForgeReview } from "../../src/ports/forge.ts";
 import { runCoordinatorProcess, type CoordinatorStepInput } from "../../src/lane/coordinator-process.ts";
 import { readsPath, type PrStepOutput } from "../../src/lane/lane-process.ts";
-import { newTrack } from "../../src/lane/session.ts";
+import { fenceForge, newTrack } from "../../src/lane/session.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { ReconcileCommit, ReconcileCommitRequest, ReconcileCommitter } from "../../src/lane/reconcile-commit.ts";
 import { createReconcileStep, reconcileBranch, reconcilePrText, reparkComment, type ReconcileStepDeps } from "../../src/lane/reconcile-step.ts";
@@ -2867,6 +2867,28 @@ describe("createReconcileStep: a retro-item PR parked awaiting approval takes St
 });
 
 // ------------------------------------------------------------------ Story 4.2
+
+describe("createReconcileStep: through a forge fenced on the coordinator claim (Q5)", () => {
+  test("the claim's holder and generation at the tip: the run goes as before", async () => {
+    const f = await setup({ coordinator: { digest_posted_at: "2026-10-22T08:00:00Z" } });
+    const out = await f.run({ forge: fenceForge(spied(f.fake, f.events), { by: COORD, generation: 1 }) });
+    expect(out.state).toBe("merged");
+    expect(f.messages()).toContain(`ledger: finishRecurring ${U} [skip ci]`);
+    expect(f.messages()).toContain("ledger: stampDigest coordinator [skip ci]");
+  });
+
+  test.each([
+    ["taken over by another identity", { owner: "dave", host: "44444444-4444-4444-8444-444444444444", generation: 2 }],
+    ["at another generation", { generation: 2 }],
+  ] as const)("coordinator.json %s since the claim: no unit edit lands and nothing is stamped", async (_name, coordinator) => {
+    const f = await setup({ coordinator: { ...coordinator, digest_posted_at: "2026-10-22T08:00:00Z" } });
+    const before = f.messages();
+    const out = await f.run({ forge: fenceForge(spied(f.fake, f.events), { by: COORD, generation: 1 }) });
+    expect(out.outcome).toBe("failed");
+    expect(f.messages()).toEqual(before);
+    expect(await stateOf(f, U)).toBe("claimed");
+  });
+});
 
 describe("createReconcileStep: owners' inboxes and the daily digest (Story 4.2)", () => {
   const REPO_URL = "https://github.com/xaravel/xarabot";

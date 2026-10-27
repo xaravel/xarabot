@@ -1110,6 +1110,30 @@ export function allOf(edits: readonly LedgerEdit[]): LedgerEdit {
   };
 }
 
+/** Wraps a ledger edit before its swap, as `coordinatorFenced` does. */
+export type LedgerFence = (edit: LedgerEdit) => LedgerEdit;
+
+/** The `coordinator.json` holder and generation every edit of a coordinator lane is fenced on (Q5). */
+export type CoordinatorFence = { readonly by: LaneIdentity; readonly generation: number };
+
+/**
+ * `edit` fenced on the coordinator claim (AD-8, Q5): it applies only while
+ * `coordinator.json` at the tip is still held by `fence.by` at
+ * `fence.generation`. The check is part of the same pure edit, so it costs
+ * no forge call, and a coordinator that lost its claim writes nothing more,
+ * even before its keeper's next beat sees the loss. A missing record,
+ * another holder or another generation is a precondition error.
+ */
+export function coordinatorFenced(fence: CoordinatorFence, edit: LedgerEdit): LedgerEdit {
+  return (files) => {
+    const ledger = parseLedger(files);
+    if (!ledger.ok) return ledger;
+    const held = requireCoordinatorHeld(ledger.value.coordinator, fence.by, fence.generation);
+    if (!held.ok) return held;
+    return edit(files);
+  };
+}
+
 // ---------------------------------------------------------------- coordinator.json
 
 /** A `coordinator.json` edit's writer and time. `now` is the forge's server time. */
@@ -1130,6 +1154,14 @@ function sameHolder(rec: CoordinatorRecord, by: LaneIdentity): boolean {
 }
 
 const holderOf = (rec: CoordinatorRecord) => `${rec.owner}/${rec.host}/${rec.lane}`;
+
+/** `coordinator.json` as `by` holds it at `generation`; a missing record, another holder or another generation is a lost claim. */
+function requireCoordinatorHeld(rec: CoordinatorRecord | null, by: LaneIdentity, generation: number): Step<CoordinatorRecord> {
+  if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
+  if (!sameHolder(rec, by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
+  if (rec.generation !== generation) return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${generation}: the coordinator claim is lost`);
+  return ok(rec);
+}
 
 /** An edit of `coordinator.json` by the coordinator lane: the record to write, `null` to write nothing, or an error. */
 function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx: CoordinatorCtx) => Step<CoordinatorRecord | null>): LedgerEdit {
@@ -1193,13 +1225,9 @@ export function keepCoordinator(p: KeepCoordinatorParams): LedgerEdit {
   return makeCoordinatorEdit("keepCoordinator", p, (ctx) => {
     const g = check("keepCoordinator generation", Generation, p.generation);
     if (!g.ok) return g;
-    const rec = ctx.current;
-    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
-    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
-    if (rec.generation !== g.value) {
-      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
-    }
-    return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, heartbeat_at: ctx.now });
+    const held = requireCoordinatorHeld(ctx.current, ctx.by, g.value);
+    if (!held.ok) return held;
+    return ok({ ...held.value, schema_version: LEDGER_SCHEMA_VERSION, heartbeat_at: ctx.now });
   });
 }
 
@@ -1222,12 +1250,9 @@ export function stampDigest(p: StampDigestParams): LedgerEdit {
     if (!g.ok) return g;
     const slot = check("stampDigest slot", IsoDateTime, p.slot);
     if (!slot.ok) return slot;
-    const rec = ctx.current;
-    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
-    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
-    if (rec.generation !== g.value) {
-      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
-    }
+    const held = requireCoordinatorHeld(ctx.current, ctx.by, g.value);
+    if (!held.ok) return held;
+    const rec = held.value;
     if (rec.digest_posted_at !== null && Date.parse(rec.digest_posted_at) >= Date.parse(slot.value)) {
       return pre(`${COORDINATOR_PATH}: the digest was already posted at ${rec.digest_posted_at}, at or after today's slot ${slot.value}`);
     }
@@ -1260,12 +1285,9 @@ export function advanceRulingsCursor(p: AdvanceRulingsCursorParams): LedgerEdit 
     if (!from.ok) return from;
     const to = check("advanceRulingsCursor to", NonEmpty, p.to);
     if (!to.ok) return to;
-    const rec = ctx.current;
-    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
-    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
-    if (rec.generation !== g.value) {
-      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
-    }
+    const held = requireCoordinatorHeld(ctx.current, ctx.by, g.value);
+    if (!held.ok) return held;
+    const rec = held.value;
     if (rec.rulings_cursor !== from.value) {
       return pre(`${COORDINATOR_PATH}: rulings_cursor is ${JSON.stringify(rec.rulings_cursor)}, not ${JSON.stringify(from.value)}: another run read these rulings`);
     }
@@ -1346,12 +1368,9 @@ export function recordRulings(p: RecordRulingsParams): LedgerEdit {
       const c = check(`recordRulings ${label}`, label.endsWith("pending") ? PendingList : DismissalList, list);
       if (!c.ok) return c;
     }
-    const rec = ctx.current;
-    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
-    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
-    if (rec.generation !== g.value) {
-      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
-    }
+    const held = requireCoordinatorHeld(ctx.current, ctx.by, g.value);
+    if (!held.ok) return held;
+    const rec = held.value;
     if (p.cursor !== undefined && rec.rulings_cursor !== from) {
       return pre(`${COORDINATOR_PATH}: rulings_cursor is ${JSON.stringify(rec.rulings_cursor)}, not ${JSON.stringify(from)}: another run read these rulings`);
     }

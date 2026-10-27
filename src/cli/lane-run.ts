@@ -37,7 +37,7 @@ import { createPsProcessTable, type ProcessTable } from "../lane/processes.ts";
 import { createGitReconcileCommitter } from "../lane/reconcile-commit.ts";
 import { createReconcileStep } from "../lane/reconcile-step.ts";
 import { installRunner as defaultInstallRunner, type InstallRunner } from "../lane/runner-install.ts";
-import { message } from "../lane/session.ts";
+import { fenceForge, message } from "../lane/session.ts";
 import { writeStop } from "../lane/stop.ts";
 import { createSleepWaiter } from "../lane/wait.ts";
 import { createGitWorkspace } from "../lane/workspace.ts";
@@ -72,8 +72,10 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * lane's own agent, or the adapter with its CLI checked and its credential
  * read; any other one whose adapter, CLI or credential fails is left out,
  * with a line on stderr.
- * Both roles get the same review step and passed gate: the builder's review
- * gate and merge step, and the coordinator's session steps and `reconcile`.
+ * Both roles get the same passed gate and a review step built alike: the
+ * builder's review gate and merge step, and the coordinator's session steps
+ * and `reconcile`. A coordinator's steps, its review step included, get the
+ * forge fenced on its `coordinator.json` claim (Q5).
  * Every refusal or failure after the STOP check, apart from a version
  * switch, a held lock and the role and lane-name check (a static `host.yaml`
  * error), is a failed start (an I/O error on the lock included), and so is
@@ -117,6 +119,8 @@ export type LaneRunDeps = {
   readonly startCoordinator?: (deps: CoordinatorDeps) => Promise<LaneProcessResult>;
   readonly callTimeoutMs?: number;
   readonly installTimeoutMs?: number;
+  /** The host clock in epoch ms, the coordinator process's too; default `Date.now`. */
+  readonly now?: () => number;
   readonly out?: (line: string) => void;
   readonly errOut?: (line: string) => void;
   /** The lane lock's owner and process table; default this process, its runtime's basename and start, and `ps`. */
@@ -436,6 +440,8 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       return failedStart(`snapshot: ${snapped.error.kind}: ${snapped.error.message}`);
     }
     const snap: ForgeSnapshot = snapped.value;
+    // The host time the snapshot's forge `now` was seen: a coordinator claim stamped with it counts its lapse from here.
+    const snapSeenMs = (deps.now ?? Date.now)();
     mainSha = snap.main.sha;
     const config = pinnedConfig(snap);
     if (!config.ok) return failedStart(config.error.message);
@@ -565,25 +571,29 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     if (!composed.ok) return failedStart(composed.error.message);
     const { reviewers } = composed.value;
     const secrets = [...credentialSecrets(credential.value), ...composed.value.credentials.flatMap((t) => credentialSecrets(t))];
-    // One review step and one passed gate for both roles.
+    // One passed gate for both roles, and one review step for the role this run takes, on that role's forge.
     const passed = createGitPassedGate({ gitDir: runnerGit, fetch });
-    const review = createReviewStep({
-      forge,
-      sandbox,
-      store,
-      waiter,
-      laneDir,
-      lane,
-      identity,
-      reviewers,
-      checkout: createGitReviewCheckout({ gitDir: runnerGit, laneDir, fetch }),
-      secrets,
-    });
+    const reviewOn = (reviewForge: Forge) =>
+      createReviewStep({
+        forge: reviewForge,
+        sandbox,
+        store,
+        waiter,
+        laneDir,
+        lane,
+        identity,
+        reviewers,
+        checkout: createGitReviewCheckout({ gitDir: runnerGit, laneDir, fetch }),
+        secrets,
+      });
     if (claimed !== null) {
+      // Every coordinator step's ledger edits are fenced on the claim (Q5), the review a retro item runs included.
+      const fencedForge = fenceForge(forge, { by: identity, generation: claimed.generation });
+      const review = reviewOn(fencedForge);
       // Story 2.5 wires the reconcile step, Story 2.7 the planning step, Story 2.9 the retro step and Story 2.10 the retro-item step.
-      const session: SessionStepDeps = { forge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, provider, secrets, review, passed };
+      const session: SessionStepDeps = { forge: fencedForge, agent, sandbox, store, workspace, waiter, laneDir, lane, committer, diffPaths, identity, provider, secrets, review, passed };
       const reconcile = createReconcileStep({
-        forge,
+        forge: fencedForge,
         committer: createGitReconcileCommitter({ gitDir: runnerGit, bot: bot.value, fetch }),
         graphTrees,
         identity,
@@ -595,19 +605,22 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
       const retro = createRetroStep({ ...session, treeFiles: createGitTreeFiles({ gitDir: runnerGit, fetch }) });
       const retroItem = createRetroItemStep({ ...session, merger, graphTrees });
       const coordinatorDeps: CoordinatorDeps = {
-        forge,
+        forge: fencedForge,
         agent,
         store,
         laneDir,
         identity,
         lane,
         claim: claimed,
+        claimSeenMs: snapSeenMs,
+        ...(deps.now !== undefined ? { now: deps.now } : {}),
         steps: { reconcile, planning, retro, "retro-item": retroItem },
         waiter,
       };
       return afterRun(await (deps.startCoordinator ?? runCoordinatorProcess)(coordinatorDeps));
     }
 
+    const review = reviewOn(forge);
     const laneDeps: LaneDeps = {
       forge,
       agent,
