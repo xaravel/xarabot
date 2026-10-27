@@ -7,7 +7,7 @@
   "lane": "coordinator",
   "generation": 1,
   "globs": [],
-  "heartbeat_at": "2026-10-27T03:20:05Z",
+  "heartbeat_at": "2026-10-27T03:20:05.024Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "4d1c0b2a51d1060f41e0f36cc002cd023597c3b3",
