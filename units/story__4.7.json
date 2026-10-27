@@ -11,7 +11,7 @@
     "test/e2e/**",
     "test/fixtures/**"
   ],
-  "heartbeat_at": "2026-10-27T05:45:46.623Z",
+  "heartbeat_at": "2026-10-27T05:49:33.002Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "7a9f1bc1b7435884be23b9df25d4d2407deb6770",
@@ -22,7 +22,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
