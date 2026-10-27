@@ -11,7 +11,7 @@ import type { UnitRecord } from "../../src/core/schemas/ledger.ts";
 import type { Agent, AgentLaunchSpec, AgentSettings, AgentUnit } from "../../src/ports/agent.ts";
 import type { Forge, ForgeError } from "../../src/ports/forge.ts";
 import type { Sandbox, SandboxProfile } from "../../src/ports/sandbox.ts";
-import { createFsLaneStore, laneLayout } from "../../src/lane/lane-store.ts";
+import { createFsLaneStore, laneLayout, reviewPassPaths } from "../../src/lane/lane-store.ts";
 import type { ReviewCheckout, ReviewCheckoutRequest } from "../../src/lane/review-checkout.ts";
 import { createReviewStep, type ReviewStepDeps, type ReviewStepInput, type ReviewStepOutput } from "../../src/lane/review-step.ts";
 import { MarkerStop, newTrack } from "../../src/lane/session.ts";
@@ -293,7 +293,8 @@ describe("createReviewStep: a clean round", () => {
     expect(h.profiles).toHaveLength(1);
     expect(h.profiles[0]?.clone).toBe(layout.review);
     expect(h.profiles[0]?.clone).not.toBe(layout.clone);
-    expect(h.profiles[0]).toMatchObject({ vendorHome: layout.vendorHome, tempDir: layout.tmp, runnerGit: layout.runnerGit, resultPath: layout.resultPath });
+    const own = reviewPassPaths(layout, "normal");
+    expect(h.profiles[0]).toMatchObject({ vendorHome: own.vendorHome, tempDir: own.tmp, runnerGit: layout.runnerGit, resultPath: own.resultPath });
     expect(h.checkouts.map((c) => [c.head, c.main])).toEqual([[h.head, h.main]]);
     // The prompt passed: the unit, the head, main and the spec.
     const prompt = h.prompts[0] as string;
@@ -472,6 +473,59 @@ describe("createReviewStep: the follow-up pass", () => {
 });
 
 // ------------------------------------------------------------------ failures
+
+describe("createReviewStep: each pass's own writable roots (Epic 3 retro item 1)", () => {
+  /** True when one path is the other or lies inside it. */
+  const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  const roots = (p: SandboxProfile): string[] => [p.clone, p.vendorHome, p.tempDir];
+
+  test("the review profile shares no writable root with the builder profile, nor one pass with the other", async () => {
+    const h = await harness({ specs: { [SPEC]: spec("done", true) }, behaviors: [reviewResult(), reviewResult()] });
+    const out = await h.run();
+    expect(out.review?.passes).toBe(2);
+    const layout = laneLayout(h.laneDir);
+    // The builder's profile, as the lane process builds it.
+    const builder: SandboxProfile = { clone: layout.clone, vendorHome: layout.vendorHome, tempDir: layout.tmp, runnerGit: layout.runnerGit, resultPath: layout.resultPath };
+    expect(h.profiles).toHaveLength(2);
+    const [normal, followup] = h.profiles as [SandboxProfile, SandboxProfile];
+    for (const review of [normal, followup]) {
+      expect(review.resultPath.startsWith(`${review.tempDir}/`)).toBe(true);
+      for (const r of roots(review)) for (const b of roots(builder)) expect({ r, b, overlaps: overlaps(r, b) }).toEqual({ r, b, overlaps: false });
+      expect(overlaps(review.resultPath, builder.tempDir)).toBe(false);
+    }
+    expect(overlaps(normal.vendorHome, followup.vendorHome)).toBe(false);
+    expect(overlaps(normal.tempDir, followup.tempDir)).toBe(false);
+    expect([normal, followup].map((p) => [p.vendorHome, p.tempDir, p.resultPath])).toEqual(
+      (["normal", "followup"] as const).map((pass) => {
+        const own = reviewPassPaths(layout, pass);
+        return [own.vendorHome, own.tmp, own.resultPath];
+      }),
+    );
+  });
+
+  test("a pass written into the builder's result path while the review runs is never read: no review, passed_sha unset", async () => {
+    const h = await harness();
+    const layout = laneLayout(h.laneDir);
+    const launched: string[][] = [];
+    // A process a builder session left behind: it writes a passing review where the builder's sessions write theirs.
+    const forger: Sandbox = {
+      async run(spec) {
+        launched.push([...spec.argv]);
+        mkdirSync(layout.tmp, { recursive: true });
+        writeFileSync(layout.resultPath, reviewResult()(h.head));
+        return ok({ pid: 999, exitCode: 0, signal: null, startedAt: 0, endedAt: 1, durationMs: 1, stdout: "", stderr: "" });
+      },
+    };
+    const out = await h.run({}, { sandbox: forger });
+    const own = reviewPassPaths(layout, "normal");
+    // The launch and the prompt name the pass's own result path, never the builder's.
+    expect(launched.map((a) => a.at(-1))).toEqual([own.resultPath]);
+    expect(out.outcome).toBe("failed");
+    expect(h.logs.join("")).toContain(`no result at ${own.resultPath}`);
+    expect(await reviewsOf(h)).toEqual([]);
+    expect((await h.record()).passed_sha).toBeNull();
+  });
+});
 
 describe("createReviewStep: the allowance before each pass (Story 3.5)", () => {
   /** The fake forge whose `main` turns to a policy allowing only `adapters` just before the second snapshot: the session's allowance check, after the set-up's. */

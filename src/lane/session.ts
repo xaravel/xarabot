@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { unattendedRefusal } from "../core/lane/runner.ts";
@@ -1130,7 +1130,8 @@ export type SessionRunnerDeps = {
   readonly workspace: Workspace;
   /** Runs the usage-limit sleeps. */
   readonly waiter: Waiter;
-  readonly layout: LaneLayout;
+  /** The temp folder the runner empties and the result path it reads: the session profile's own `tempDir` and `resultPath`. */
+  readonly layout: Pick<LaneLayout, "tmp" | "resultPath">;
   readonly settings: AgentSettings;
   readonly limits?: SessionLimits;
   /** The host clock in epoch ms. */
@@ -1183,7 +1184,7 @@ export type SandboxedRun = { readonly run: SandboxResult<SandboxRun>; readonly t
 export type SessionRunner = {
   /** The limits in force, defaults filled in. */
   readonly limits: Required<SessionLimits>;
-  /** Empties `tmp` and prepares the clone at `at`; the failure's reason, else `null`. */
+  /** Checks the profile's `tempDir` and `resultPath` are the runner's, empties `tmp` and prepares the clone at `at`; the failure's reason, else `null`. */
   prepare(ctx: SessionContext, at: string): Promise<string | null>;
   /**
    * One sandboxed run under one signal: the unit budget, the session limit,
@@ -1221,6 +1222,11 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     );
 
   const prepare = async (ctx: SessionContext, at: string): Promise<string | null> => {
+    // The runner empties and reads only the profile's own folder: a result anywhere else is never this session's.
+    const { tempDir, resultPath } = ctx.profile;
+    if (resolve(tempDir) !== resolve(layout.tmp) || resolve(resultPath) !== resolve(layout.resultPath)) {
+      return `profile: tempDir ${tempDir} and resultPath ${resultPath} are not the runner's ${layout.tmp} and ${layout.resultPath}`;
+    }
     try {
       emptyDir(layout.tmp);
     } catch (e) {

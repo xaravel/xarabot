@@ -30,13 +30,16 @@ import {
  * never a GitHub host. Every check fails closed and refuses the session;
  * nothing runs unsandboxed and the profile never touches the disk. The run
  * reports every request the proxy decided on and, for a `homeFile`
- * credential, whether the session rewrote the seeded file.
+ * credential, whether the session rewrote the seeded file. The session leads
+ * its own process group (`setsid`); an abort signals that group, and once the
+ * session ends the group gets SIGKILL, so no descendant outlives the run. A
+ * reaper kills the group should the lane end first, however it ends.
  */
 
 export const DEFAULT_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /** How long after SIGTERM an aborted session gets SIGKILL. */
 export const KILL_GRACE_MS = 10_000;
-/** How long after exit the output pipes may stay open (a lingering grandchild) before the run returns. */
+/** How long after exit the output pipes may stay open (a descendant that left the session's group) before the run returns. */
 const DRAIN_GRACE_MS = 5_000;
 
 /** The `.gitconfig` of the session's fresh `HOME`: no credential helper. */
@@ -52,6 +55,8 @@ export type MacSandboxOpts = {
   readonly now?: () => number;
   /** Passed through to `startProxy`; for tests. */
   readonly proxy?: Pick<ProxyOpts, "ports" | "dial">;
+  /** Starts and signals the session's processes; default `HOST_PROCESSES`. For tests. */
+  readonly processes?: SessionProcesses;
 };
 
 type Refused = { readonly ok: false; readonly error: { readonly kind: "refused"; readonly message: string } };
@@ -219,10 +224,181 @@ export function recordProxyRequest(requests: ProxyRequest[], line: string, decis
   else if (requests.length === MAX_PROXY_REQUESTS) requests.push(PROXY_REQUESTS_MARKER);
 }
 
+/** The signals a session's process group gets. */
+export type GroupSignal = "SIGTERM" | "SIGKILL";
+
+/** What `superviseSession` passes to `SessionProcesses.spawn`. */
+export type SessionSpawnOptions = {
+  /** Always `true`: `setsid()`, so the process leads its own group, whose id is its PID. */
+  readonly detached: true;
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+  readonly stdin: "ignore" | "pipe" | Blob;
+  readonly stdout: "ignore" | "pipe";
+  readonly stderr: "ignore" | "pipe";
+};
+
+/** The parts of a spawned process `superviseSession` uses. */
+export type SpawnedProcess = {
+  readonly pid: number;
+  readonly exited: Promise<number>;
+  readonly exitCode: number | null;
+  readonly signalCode: string | number | null;
+  /** The output pipes, when spawned with `"pipe"`. */
+  readonly stdout?: ReadableStream<Uint8Array> | number | null;
+  readonly stderr?: ReadableStream<Uint8Array> | number | null;
+  /** The write end of the input pipe, when spawned with `"pipe"`. */
+  readonly stdin?: { end(): unknown } | number | null;
+  /** Signals this exact PID. */
+  kill(sig: GroupSignal): void;
+};
+
+/** How a session's processes are started and signalled; `HOST_PROCESSES` outside tests. */
+export type SessionProcesses = {
+  readonly spawn: (argv: string[], options: SessionSpawnOptions) => SpawnedProcess;
+  /** Signals the process group whose id is `pid`. */
+  readonly signalGroup: (pid: number, sig: GroupSignal) => void;
+};
+
+export const HOST_PROCESSES: SessionProcesses = {
+  spawn: (argv, options) => Bun.spawn(argv, options) as SpawnedProcess,
+  /*
+   * Signals the session's own process group, by its id: the session's exact
+   * PID, so it reaches the session and its descendants and nothing else
+   * (Epic 3 retro item 1, the only group kill in `src/` besides the reaper's).
+   */
+  signalGroup: (pid, sig) => process.kill(-pid, sig),
+};
+
+/**
+ * The reaper's script, run by `/bin/sh` with the session's PID as `$1`: it
+ * waits, with shell builtins only, until its input pipe closes, then SIGKILLs
+ * the session's group. Only the lane holds that pipe's write end, and the
+ * kernel closes it however the lane ends, so a lane that is stopped, crashes
+ * or gets SIGKILL leaves no session process behind. The reaper leads its own
+ * group too, so launchd's kill of the lane's group does not take it first.
+ */
+export const REAPER_SCRIPT = 'while read -r _; do :; done; kill -s KILL -- "-$1" 2>/dev/null; exit 0';
+
+/** What one supervised session printed and how it ended. */
+export type SupervisedRun = Omit<SandboxRun, "proxyRequests" | "credentialRewritten">;
+
+/**
+ * Starts `argv` as the leader of its own process group and a reaper for that
+ * group, and waits for the session. An abort sends the group SIGTERM and,
+ * `KILL_GRACE_MS` later, SIGKILL. Once the session exits the group gets
+ * SIGKILL, so no descendant outlives the run, and the reaper is killed by its
+ * exact PID. Should the lane itself end first, the reaper kills the group.
+ */
+export async function superviseSession(
+  argv: string[],
+  options: { readonly cwd: string; readonly env: Record<string, string>; readonly stdin?: string },
+  signal: AbortSignal,
+  hooks: SandboxHooks | undefined,
+  deps: { readonly processes: SessionProcesses; readonly now: () => number },
+): Promise<SandboxResult<SupervisedRun>> {
+  const { processes, now } = deps;
+  const startedAt = now();
+  let child: SpawnedProcess;
+  try {
+    child = processes.spawn(argv, {
+      detached: true,
+      cwd: options.cwd,
+      env: options.env,
+      stdin: options.stdin === undefined ? "ignore" : new Blob([options.stdin]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (e) {
+    return refused(`sandbox: cannot start the session: ${message(e)}`);
+  }
+  const pid = child.pid;
+  const kill = (sig: GroupSignal): void => {
+    try {
+      processes.signalGroup(pid, sig);
+    } catch {
+      // Already gone.
+    }
+  };
+  let reaper: SpawnedProcess;
+  try {
+    reaper = processes.spawn(["/bin/sh", "-c", REAPER_SCRIPT, "xarabot-reaper", String(pid)], {
+      detached: true,
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch (e) {
+    // Fail closed: a session nothing would reap after the lane ends does not run.
+    kill("SIGKILL");
+    await child.exited;
+    return refused(`sandbox: cannot start the session's reaper: ${message(e)}`);
+  }
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const onAbort = (): void => {
+    kill("SIGTERM");
+    killTimer ??= setTimeout(() => kill("SIGKILL"), KILL_GRACE_MS);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    hooks?.onSpawn?.(pid);
+  } catch {
+    // A hook's failure must not orphan the session.
+  }
+  if (signal.aborted) onAbort();
+
+  const out: Uint8Array[] = [];
+  const errOut: Uint8Array[] = [];
+  const readerOf = (s: SpawnedProcess["stdout"]) => (s instanceof ReadableStream ? s.getReader() : null);
+  const readers = [readerOf(child.stdout), readerOf(child.stderr)] as const;
+  const drained = Promise.all([drain(readers[0] ?? EMPTY, out), drain(readers[1] ?? EMPTY, errOut)]);
+  try {
+    await child.exited;
+  } finally {
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    signal.removeEventListener("abort", onAbort);
+    // Whatever the session left running dies with it: no descendant outlives the run.
+    kill("SIGKILL");
+    try {
+      reaper.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    await reaper.exited;
+    try {
+      if (typeof reaper.stdin === "object" && reaper.stdin !== null) reaper.stdin.end();
+    } catch {
+      // The pipe is already closed.
+    }
+  }
+  const endedAt = now();
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([drained, new Promise<void>((r) => (graceTimer = setTimeout(r, DRAIN_GRACE_MS)))]);
+  if (graceTimer !== undefined) clearTimeout(graceTimer);
+  // A descendant that left the group may still hold the pipes: stop reading them.
+  for (const reader of readers) reader?.cancel().catch(() => {});
+
+  const sig = child.signalCode;
+  return sandboxOk({
+    pid,
+    exitCode: sig === null ? child.exitCode : null,
+    signal: signalName(sig),
+    startedAt,
+    endedAt,
+    durationMs: endedAt - startedAt,
+    stdout: text(out),
+    stderr: text(errOut),
+  });
+}
+
+/** A reader with nothing to read. */
+const EMPTY = { read: (): Promise<{ done: boolean }> => Promise.resolve({ done: true }) };
+
 export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
   const sandboxExec = opts.sandboxExec ?? DEFAULT_SANDBOX_EXEC;
   const platform = opts.platform ?? process.platform;
   const now = opts.now ?? (() => Date.now());
+  const processes = opts.processes ?? HOST_PROCESSES;
 
   async function run(spec: LaunchSpec, profile: SandboxProfile, signal: AbortSignal, hooks?: SandboxHooks): Promise<SandboxResult<SandboxRun>> {
     const launching: LaunchingEnv = opts.launchingEnv ?? process.env;
@@ -369,71 +545,11 @@ export function createMacSandbox(opts: MacSandboxOpts = {}): Sandbox {
 
     if (signal.aborted) return refused("sandbox: aborted before the session started");
     const argv = [sandboxExec, "-p", rendered.value, join(dirs.bin, cmd), ...spec.argv.slice(1)];
-    const startedAt = now();
-    let child;
-    try {
-      child = Bun.spawn(argv, {
-        cwd: roots.clone,
-        env: env.value,
-        stdin: spec.stdin === undefined ? "ignore" : new Blob([spec.stdin]),
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-    } catch (e) {
-      return refused(`sandbox: cannot start the session: ${message(e)}`);
-    }
-    const pid = child.pid;
-    let exited = false;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    const kill = (sig: "SIGTERM" | "SIGKILL"): void => {
-      if (exited) return;
-      try {
-        process.kill(pid, sig);
-      } catch {
-        // Already gone.
-      }
-    };
-    const onAbort = (): void => {
-      kill("SIGTERM");
-      killTimer ??= setTimeout(() => kill("SIGKILL"), KILL_GRACE_MS);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      hooks?.onSpawn?.(pid);
-    } catch {
-      // A hook's failure must not orphan the session.
-    }
-    if (signal.aborted) onAbort();
-
-    const out: Uint8Array[] = [];
-    const errOut: Uint8Array[] = [];
-    const readers = [child.stdout.getReader(), child.stderr.getReader()] as const;
-    const drained = Promise.all([drain(readers[0], out), drain(readers[1], errOut)]);
-    try {
-      await child.exited;
-    } finally {
-      exited = true;
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      signal.removeEventListener("abort", onAbort);
-    }
-    const endedAt = now();
-    let graceTimer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([drained, new Promise<void>((r) => (graceTimer = setTimeout(r, DRAIN_GRACE_MS)))]);
-    if (graceTimer !== undefined) clearTimeout(graceTimer);
-    // A lingering grandchild may still hold the pipes: stop reading them.
-    for (const reader of readers) reader.cancel().catch(() => {});
-
-    const sig = child.signalCode;
+    const supervised = await superviseSession(argv, { cwd: roots.clone, env: env.value, stdin: spec.stdin }, signal, hooks, { processes, now });
+    if (!supervised.ok) return supervised;
     const home = seeded.value.homeFile;
     return sandboxOk({
-      pid,
-      exitCode: sig === null ? child.exitCode : null,
-      signal: signalName(sig),
-      startedAt,
-      endedAt,
-      durationMs: endedAt - startedAt,
-      stdout: text(out),
-      stderr: text(errOut),
+      ...supervised.value,
       proxyRequests: [...requests],
       ...(home === undefined ? {} : { credentialRewritten: homeFileChanged(home) }),
     });
