@@ -135,7 +135,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/ports/forge.ts", "src/adapters/forge/**", "src/lane/reconcile-step.ts", "src/lane/planning-step.ts", "test/contracts/forge.contract.ts", "test/adapters/forge/**", "test/lane/reconcile-step.test.ts", "test/lane/planning-step.test.ts", "test/ports/forge.test.ts", "test/support/live-github.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-22-coordinator-claim-timing-and-fencing"
         text: "Fix the coordinator claim's timing and fencing (Story 2.4 follow-up review F1, F2; Maintainer decision Q5, 2026-10-25): seed the coordinator keeper's clock and claimedMs from the start snapshot's forge time, not process start (2.4 F1); end the unit keeper when the coordinator keeper signals a lost coordinator claim (2.4 F2); fence every coordinator-unit ledger edit also on coordinator.json's holder and generation being unchanged at the tip, in the same pure edit, with no extra forge call (Q5); tests for each"
         route: lane
