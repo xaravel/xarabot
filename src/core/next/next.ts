@@ -71,8 +71,9 @@ function stop(reason: string): { readonly kind: "stop"; readonly reason: string 
  * as a `take_over`), an Infrastructure Story without a current approval as
  * `park`, `idle` with the reasons nothing is eligible (its reason prefixed
  * `waiting-on-maintainer: ` when every one is a Maintainer cause, Story
- * 4.2), or `stop`. An Epic hold (dependency, retro-rejected, retro-item) bars new claims but not a
- * takeover; an unloadable Epic context bars both.
+ * 4.2), or `stop`. An Epic hold (dependency, retro-rejected, retro-item,
+ * checkpoint) bars new claims but not a takeover; an unloadable Epic context
+ * bars both.
  *
  * The coordinator gets a `coordinator` unit in AD-13's order
  * (`nextCoordinator`), `idle`, or `stop`; never a Story.

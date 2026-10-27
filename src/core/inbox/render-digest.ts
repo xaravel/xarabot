@@ -10,8 +10,11 @@ import { openDeferred } from "./deferred.ts";
  * - A record parked `awaiting-approval` or `blocked` goes to its
  *   `park.inbox_owner`; every `needs-approval` record and every `blocked`
  *   `human-live-step` record goes to the Maintainer (`config.maintainer`).
- * - The Maintainer's inbox also lists the waiting checkpoint gos (an Epic in
- *   `graph.checkpoints` whose retro is recorded, with no `checkpoint.go`),
+ * - The Maintainer's inbox also lists the waiting checkpoint gos: each Epic
+ *   in `graph.checkpoints` whose retro is done and which has no
+ *   `checkpoint.go`. A bootstrapped Epic counts as retro done (Story 4.4).
+ *   When such an Epic has no retro record, its item reads
+ *   `Epic <N> is bootstrapped` and has no age. The inbox also lists
  *   the rejected retros with no go (each naming its open Maintainer-routed
  *   items as its course-correction items), the open (`open`, `in-progress`
  *   or `waiting`) retro items routed to the Maintainer, each once, naming
@@ -159,18 +162,21 @@ function maintainerItems(input: RenderDigestInput): Item[] {
     .map(([key, entry]) => ({ epic: Number(key), entry }))
     .sort((a, b) => a.epic - b.epic);
   const open = (status: string) => status !== "done" && status !== "deferred";
+  const bootstrapped = new Set(config.bootstrapped_epics);
 
   if (snapshot.graph.ok) {
     for (const n of snapshot.graph.value.checkpoints) {
       const entry = snapshot.retro_gates.epics[String(n)];
-      if (entry?.retro === undefined || entry.checkpoint !== undefined) continue;
+      const retro = entry?.retro;
+      // The go is due once the retro is done: recorded, or the Epic bootstrapped (AD-12).
+      if ((retro === undefined && !bootstrapped.has(n)) || entry?.checkpoint !== undefined) continue;
       items.push({
         section: "checkpoint",
         key: `checkpoint:${n}`,
         label: `checkpoint:${n}`,
         url: gatesUrl,
-        what: `Epic ${n}'s retro is recorded (${entry.retro.verdict})`,
-        since: entry.retro.recorded_at,
+        what: retro === undefined ? `Epic ${n} is bootstrapped` : `Epic ${n}'s retro is recorded (${retro.verdict})`,
+        since: retro?.recorded_at ?? null,
         verb: `/xarabot go checkpoint:${n}`,
         under: [],
       });
@@ -207,7 +213,6 @@ function maintainerItems(input: RenderDigestInput): Item[] {
   }
 
   if (snapshot.graph.ok) {
-    const bootstrapped = new Set(config.bootstrapped_epics);
     for (const u of snapshot.graph.value.unmanifested) {
       if (bootstrapped.has(u.epic)) continue;
       items.push({
