@@ -4,7 +4,20 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { LaunchSpec, ProxyRequest, SandboxProfile, SandboxRun } from "../../src/ports/sandbox.ts";
 import { CODEX_API_HOSTS, CODEX_API_KEY_HOST } from "../../src/adapters/agent/codex/codex-agent.ts";
-import { createMacSandbox, MAX_PROXY_REQUESTS, PROXY_REQUESTS_MARKER, proxyRequest, recordProxyRequest, type MacSandboxOpts } from "../../src/sandbox/macos.ts";
+import {
+  createMacSandbox,
+  HOST_PROCESSES,
+  MAX_PROXY_REQUESTS,
+  PROXY_REQUESTS_MARKER,
+  proxyRequest,
+  REAPER_SCRIPT,
+  recordProxyRequest,
+  superviseSession,
+  type GroupSignal,
+  type MacSandboxOpts,
+  type SessionProcesses,
+  type SessionSpawnOptions,
+} from "../../src/sandbox/macos.ts";
 import { uvPythonDir, which } from "../../src/sandbox/tools.ts";
 import { canSandbox, liveSandboxTest, sandboxTest } from "../support/sandbox.ts";
 
@@ -818,22 +831,62 @@ describe("host tools", () => {
   });
 });
 
+/** True while `pid` exists. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Waits up to `ms` for `pid` to be gone (reaped, once its parent died); whether it is. */
+async function gone(pid: number, ms = 3_000): Promise<boolean> {
+  for (const until = Date.now() + ms; Date.now() < until; await Bun.sleep(50)) if (!alive(pid)) return true;
+  return !alive(pid);
+}
+
+/** The grandchild PID a script echoed to stderr, killed here should the case fail. */
+function leftoverOf(r: SandboxRun): number {
+  const pid = Number.parseInt(r.stderr.trim(), 10);
+  expect(Number.isInteger(pid) && pid > 1).toBe(true);
+  return pid;
+}
+
+function killLeftover(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
 describe("process", () => {
-  sandboxTest("a grandchild holding the pipes does not hold the run past the grace", async () => {
+  sandboxTest("a grandchild left running is gone after the run, and does not hold it past the grace (Epic 3 retro item 1)", async () => {
     const started = Date.now();
     const r = await sh("sleep 30 & echo $! >&2; echo hi");
     const elapsed = Date.now() - started;
-    const leftover = Number.parseInt(r.stderr.trim(), 10);
-    if (Number.isInteger(leftover) && leftover > 0) {
-      try {
-        process.kill(leftover, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
+    const leftover = leftoverOf(r);
+    try {
+      expect(r.stdout).toBe("hi\n");
+      expect(r.exitCode).toBe(0);
+      expect(elapsed).toBeLessThan(7_500);
+      expect(await gone(leftover)).toBe(true);
+    } finally {
+      killLeftover(leftover);
     }
-    expect(r.stdout).toBe("hi\n");
-    expect(r.exitCode).toBe(0);
-    expect(elapsed).toBeLessThan(7_500);
+  }, 15_000);
+
+  sandboxTest("a grandchild in a subshell that outlives its parent is gone after the run", async () => {
+    const r = await sh("(sleep 30 & echo $! >&2) ; echo hi");
+    const leftover = leftoverOf(r);
+    try {
+      expect(r.stdout).toBe("hi\n");
+      expect(await gone(leftover)).toBe(true);
+    } finally {
+      killLeftover(leftover);
+    }
   }, 15_000);
 
   sandboxTest("a throwing onSpawn hook keeps the run ok", async () => {
@@ -866,7 +919,7 @@ describe("XDG_CONFIG_HOME", () => {
 });
 
 describe("abort", () => {
-  sandboxTest("an abort sends SIGTERM to the agent's PID", async () => {
+  sandboxTest("an abort sends SIGTERM to the agent's process group, led by its PID", async () => {
     const ac = new AbortController();
     const spawned: number[] = [];
     const sandbox = createMacSandbox({ launchingEnv: launching });
@@ -881,6 +934,23 @@ describe("abort", () => {
     expect(r.value).toMatchObject({ exitCode: null, signal: "SIGTERM", pid: spawned[0] });
     expect(r.value.durationMs).toBeLessThan(10_000);
   });
+
+  sandboxTest("an abort reaches the session's grandchild too: it is gone after the run", async () => {
+    const ac = new AbortController();
+    const sandbox = createMacSandbox({ launchingEnv: launching });
+    const r = await sandbox.run(spec(["sh", "-c", "sleep 30 & echo $! >&2; wait"]), profile, ac.signal, {
+      onSpawn: () => void setTimeout(() => ac.abort(), 300),
+    });
+    if (!r.ok) throw new Error(r.error.message);
+    const leftover = leftoverOf(r.value);
+    try {
+      expect(r.value).toMatchObject({ exitCode: null, signal: "SIGTERM" });
+      expect(r.value.durationMs).toBeLessThan(10_000);
+      expect(await gone(leftover)).toBe(true);
+    } finally {
+      killLeftover(leftover);
+    }
+  }, 15_000);
 
   sandboxTest(
     "an agent that ignores SIGTERM gets SIGKILL 10 s later",
@@ -906,6 +976,209 @@ describe("abort", () => {
     expect(r.ok).toBe(false);
     expect(spawned).toEqual([]);
   });
+});
+
+/** Session processes that run nothing: every spawn, group signal and exact-PID kill is recorded, and the test ends the session. */
+function fakeProcesses(opts: { readonly reaperFails?: boolean; readonly sessionFails?: boolean } = {}) {
+  const spawns: { argv: string[]; options: SessionSpawnOptions; pid: number }[] = [];
+  const groupSignals: [number, GroupSignal][] = [];
+  const pidKills: [number, GroupSignal][] = [];
+  const ends = new Map<number, (exitCode: number | null, signal: string | null) => void>();
+  const closed = (chunk?: string): ReadableStream<Uint8Array> =>
+    new ReadableStream({
+      start(c) {
+        if (chunk !== undefined) c.enqueue(new TextEncoder().encode(chunk));
+        c.close();
+      },
+    });
+  const processes: SessionProcesses = {
+    spawn: (argv, options) => {
+      if (spawns.length === 0 && opts.sessionFails === true) throw new Error("no sandbox-exec");
+      if (spawns.length === 1 && opts.reaperFails === true) throw new Error("no sh");
+      const pid = 4242 + spawns.length;
+      spawns.push({ argv, options, pid });
+      let resolve: (code: number) => void = () => {};
+      const exited = new Promise<number>((r) => (resolve = r));
+      const proc = {
+        pid,
+        exited,
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        stdout: options.stdout === "pipe" ? closed("out\n") : null,
+        stderr: options.stderr === "pipe" ? closed() : null,
+        stdin: { end: () => {} },
+        kill: (sig: GroupSignal) => {
+          pidKills.push([pid, sig]);
+          ends.get(pid)?.(null, sig);
+        },
+      };
+      ends.set(pid, (exitCode, signal) => {
+        if (!ends.has(pid)) return;
+        ends.delete(pid);
+        proc.exitCode = exitCode;
+        proc.signalCode = signal;
+        resolve(exitCode ?? 1);
+      });
+      return proc;
+    },
+    signalGroup: (pid, sig) => {
+      groupSignals.push([pid, sig]);
+      ends.get(pid)?.(null, sig);
+    },
+  };
+  return { processes, spawns, groupSignals, pidKills, exit: (pid: number, code: number) => ends.get(pid)?.(code, null) };
+}
+
+const ARGV = ["/usr/bin/sandbox-exec", "-p", "(version 1)", "/lane/tmp/bin/claude", "-p"];
+const SESSION_OPTS = { cwd: "/lane/clone", env: { PATH: "/usr/bin:/bin" }, stdin: "the prompt" };
+
+describe("process groups (any host)", () => {
+  test("the session leads its own group and its reaper its own; on exit the group gets SIGKILL and the reaper its exact-PID kill", async () => {
+    const f = fakeProcesses();
+    const spawned: number[] = [];
+    const pending = superviseSession(ARGV, SESSION_OPTS, new AbortController().signal, { onSpawn: (p) => spawned.push(p) }, { processes: f.processes, now: () => 7 });
+    const [session, reaper] = f.spawns;
+    if (session === undefined || reaper === undefined) throw new Error("not spawned");
+    expect(session.argv).toEqual(ARGV);
+    expect(session.options).toMatchObject({ detached: true, cwd: "/lane/clone", env: { PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" });
+    expect(session.options.stdin).toBeInstanceOf(Blob);
+    expect(reaper.argv).toEqual(["/bin/sh", "-c", REAPER_SCRIPT, "xarabot-reaper", String(session.pid)]);
+    expect(reaper.options).toEqual({ detached: true, stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+    expect(spawned).toEqual([session.pid]);
+    expect(f.groupSignals).toEqual([]);
+    f.exit(session.pid, 0);
+    const r = await pending;
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toMatchObject({ pid: session.pid, exitCode: 0, signal: null, stdout: "out\n", stderr: "" });
+    expect(f.groupSignals).toEqual([[session.pid, "SIGKILL"]]);
+    expect(f.pidKills).toEqual([[reaper.pid, "SIGKILL"]]);
+  });
+
+  test("an abort sends the session's group SIGTERM, and its exit SIGKILL", async () => {
+    const f = fakeProcesses();
+    const ac = new AbortController();
+    const pending = superviseSession(ARGV, SESSION_OPTS, ac.signal, undefined, { processes: f.processes, now: () => 7 });
+    const [session, reaper] = f.spawns;
+    if (session === undefined || reaper === undefined) throw new Error("not spawned");
+    ac.abort();
+    const r = await pending;
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toMatchObject({ exitCode: null, signal: "SIGTERM" });
+    expect(f.groupSignals).toEqual([
+      [session.pid, "SIGTERM"],
+      [session.pid, "SIGKILL"],
+    ]);
+    expect(f.pidKills).toEqual([[reaper.pid, "SIGKILL"]]);
+  });
+
+  test("a reaper that cannot start refuses the session, whose group gets SIGKILL before the hook sees it", async () => {
+    const f = fakeProcesses({ reaperFails: true });
+    const spawned: number[] = [];
+    const r = await superviseSession(ARGV, SESSION_OPTS, new AbortController().signal, { onSpawn: (p) => spawned.push(p) }, { processes: f.processes, now: () => 7 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe("sandbox: cannot start the session's reaper: no sh");
+    expect(f.groupSignals).toEqual([[4242, "SIGKILL"]]);
+    expect(spawned).toEqual([]);
+  });
+
+  test("a session that cannot start refuses, starting no reaper", async () => {
+    const f = fakeProcesses({ sessionFails: true });
+    const r = await superviseSession(ARGV, SESSION_OPTS, new AbortController().signal, undefined, { processes: f.processes, now: () => 7 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe("sandbox: cannot start the session: no sandbox-exec");
+    expect(f.spawns).toEqual([]);
+  });
+});
+
+/** The host's processes, each spawned PID recorded. */
+function recordingProcesses(): { processes: SessionProcesses; pids: number[] } {
+  const pids: number[] = [];
+  return {
+    pids,
+    processes: {
+      spawn: (argv, options) => {
+        const p = HOST_PROCESSES.spawn(argv, options);
+        pids.push(p.pid);
+        return p;
+      },
+      signalGroup: HOST_PROCESSES.signalGroup,
+    },
+  };
+}
+
+function killGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * A lane in its own process: it supervises `script` with the host's
+ * processes, prints the session's PID and waits, so the case can end it as
+ * `stop --now` (SIGTERM) or a crash (SIGKILL) would.
+ */
+async function laneWithSession(script: string): Promise<{ lane: ReturnType<typeof Bun.spawn>; session: number; dir: string }> {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "xarabot-lane-")));
+  const main = join(dir, "lane.ts");
+  const macos = join(import.meta.dir, "..", "..", "src", "sandbox", "macos.ts");
+  writeFileSync(
+    main,
+    `import { HOST_PROCESSES, superviseSession } from ${JSON.stringify(macos)};
+await superviseSession(["/bin/sh", "-c", ${JSON.stringify(script)}], { cwd: ${JSON.stringify(dir)}, env: { PATH: "/usr/bin:/bin" } }, new AbortController().signal,
+  { onSpawn: (pid) => console.log(pid) }, { processes: HOST_PROCESSES, now: Date.now });
+`,
+  );
+  const lane = Bun.spawn([process.execPath, main], { cwd: dir, stdout: "pipe", stderr: "inherit" });
+  const reader = lane.stdout.getReader();
+  let line = "";
+  while (!line.includes("\n")) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    line += new TextDecoder().decode(value);
+  }
+  reader.releaseLock();
+  const session = Number.parseInt(line, 10);
+  expect(Number.isInteger(session) && session > 1).toBe(true);
+  return { lane, session, dir };
+}
+
+describe("reaping with real processes (any host)", () => {
+  test("a grandchild left running is gone after the run, and so is the reaper", async () => {
+    const rec = recordingProcesses();
+    const r = await superviseSession(["/bin/sh", "-c", "sleep 30 & echo $! >&2; echo hi"], { cwd: tmpdir(), env: { PATH: "/usr/bin:/bin" } }, new AbortController().signal, undefined, {
+      processes: rec.processes,
+      now: Date.now,
+    });
+    if (!r.ok) throw new Error(r.error.message);
+    const leftover = leftoverOf(r.value);
+    try {
+      expect(r.value.stdout).toBe("hi\n");
+      expect(rec.pids).toHaveLength(2);
+      expect(await gone(leftover)).toBe(true);
+      for (const pid of rec.pids) expect(await gone(pid)).toBe(true);
+    } finally {
+      killLeftover(leftover);
+      for (const pid of rec.pids) killLeftover(pid);
+    }
+  }, 15_000);
+
+  for (const sig of ["SIGTERM", "SIGKILL"] as const) {
+    test(`a lane that gets ${sig} mid-session leaves none of the session's processes: its reaper kills the group`, async () => {
+      const { lane, session, dir } = await laneWithSession("sleep 30 & sleep 30 & wait");
+      try {
+        expect(alive(-session)).toBe(true);
+        lane.kill(sig);
+        await lane.exited;
+        expect(await gone(-session)).toBe(true);
+      } finally {
+        lane.kill("SIGKILL");
+        killGroup(session);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 15_000);
+  }
 });
 
 describe("proxyRequest (any host)", () => {

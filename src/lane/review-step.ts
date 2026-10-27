@@ -14,7 +14,7 @@ import type { Agent, AgentSettings } from "../ports/agent.ts";
 import type { Forge } from "../ports/forge.ts";
 import type { LaneStore } from "../ports/lane-store.ts";
 import type { Sandbox, SandboxProfile } from "../ports/sandbox.ts";
-import { laneLayout } from "./lane-store.ts";
+import { laneLayout, reviewPassPaths, type SessionPaths } from "./lane-store.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, type Sleep } from "./ledger-cas.ts";
 import { checkoutFiles, reviewWorkspace, type ReviewCheckout } from "./review-checkout.ts";
 import {
@@ -57,7 +57,10 @@ import type { Waiter } from "./wait.ts";
  *   effort; any other with its adapter's default model and effort `high`.
  *   Each pass is its own session, through its own `SessionRunner`, in
  *   `<lane>/review`: a checkout of the head with `main`'s agent config and
- *   hooks off, written fresh for every pass, never the agent's clone.
+ *   hooks off, written fresh for every pass, never the agent's clone. Each
+ *   pass has its own vendor home, temp folder and result path
+ *   (`reviewPassPaths`), so it shares no writable root with the builder's
+ *   sessions (Epic 3 retro item 1).
  * - A Story's spec is read from the first pass's checkout: exactly one
  *   `done` match of `story_spec_path` (`pickSpec`), else a failed attempt.
  *   `followup_review_recommended: true` adds a follow-up pass. A unit with
@@ -240,18 +243,18 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
     const budget = AbortSignal.any([input.signal, AbortSignal.timeout(round.budgetHours * HOUR_MS)]);
     /** Set when a STOP ended a usage-limit sleep and the unit was released. */
     let limitStopped = false;
-    const profile: SandboxProfile = {
+    /** A pass's profile: the review checkout, and the pass's own vendor home, temp folder and result path, none a builder session's. */
+    const profileOf = (paths: SessionPaths): SandboxProfile => ({
       clone: layout.review,
-      vendorHome: layout.vendorHome,
-      tempDir: layout.tmp,
+      vendorHome: paths.vendorHome,
+      tempDir: paths.tmp,
       runnerGit: layout.runnerGit,
-      resultPath: layout.resultPath,
+      resultPath: paths.resultPath,
       repoHosts: round.proxyHosts,
-    };
-    /** Each pass's session context takes the pass's own track. */
-    const ctx: Omit<SessionContext, "track"> = {
+    });
+    /** Each pass's session context takes the pass's own track and profile. */
+    const ctx: Omit<SessionContext, "track" | "profile"> = {
       branch: "review",
-      profile,
       budget,
       overBudget: () => (input.signal.aborted ? "the unit budget passed or the unit was lost during the review" : `review budget of ${round.budgetHours} h passed`),
       signals: () => [input.signal],
@@ -273,28 +276,30 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
         callTimeoutMs,
       }),
     };
-    const runner = createSessionRunner({
-      agent,
-      sandbox: deps.sandbox,
-      store: deps.store,
-      workspace: reviewWorkspace(deps.checkout, main),
-      waiter: deps.waiter,
-      layout,
-      settings,
-      ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
-      clock,
-      note: (text) => note(text),
-      log: (text) => {
-        try {
-          deps.store.appendLog(input.track.logName, text);
-        } catch {
-          // A log that cannot be written never ends the step.
-        }
-      },
-      reportStore: (r, what) => {
-        if (!r.ok && r.error !== undefined) note(`lane store: ${what}: ${r.error.kind}: ${r.error.message}`);
-      },
-    });
+    /** A pass's runner, which empties and reads only the pass's own temp folder. */
+    const runnerOf = (paths: SessionPaths) =>
+      createSessionRunner({
+        agent,
+        sandbox: deps.sandbox,
+        store: deps.store,
+        workspace: reviewWorkspace(deps.checkout, main),
+        waiter: deps.waiter,
+        layout: paths,
+        settings,
+        ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
+        clock,
+        note: (text) => note(text),
+        log: (text) => {
+          try {
+            deps.store.appendLog(input.track.logName, text);
+          } catch {
+            // A log that cannot be written never ends the step.
+          }
+        },
+        reportStore: (r, what) => {
+          if (!r.ok && r.error !== undefined) note(`lane store: ${what}: ${r.error.kind}: ${r.error.message}`);
+        },
+      });
 
     /** The Story's spec in the first pass's checkout: one `done` match (AR11), and its follow-up flag. */
     const readSpec = (): SpecRead => {
@@ -347,6 +352,7 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
 
     for (let i = 0; i < passes.length; i += 1) {
       const pass = passes[i] as ReviewPass;
+      const paths = reviewPassPaths(layout, pass);
       /** After `prepare` wrote the checkout: on the first pass of a Story, its spec; then the prompt. */
       const prompt = (): PromptOutcome => {
         if (pass === "normal" && input.storyId !== null) {
@@ -361,7 +367,7 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
           template: PACKAGE_TEMPLATE,
           unit: { id: unit, head_sha: head, main_sha: main, spec_path: specPath },
           pass,
-          result_path: layout.resultPath,
+          result_path: paths.resultPath,
         });
         return built.ok ? { ok: true, value: built.value } : { ok: false, reason: `prompt ${built.error.kind}: ${built.error.message}` };
       };
@@ -372,7 +378,7 @@ export function createReviewStep(deps: ReviewStepDeps): ReviewStep {
       // The session runs outside `kit.run`: a `Halt` reaches the caller.
       let ran: SessionOutcome<"review">;
       try {
-        ran = await runner.session({ ...ctx, track }, { at: head, kind: "review", prompt });
+        ran = await runnerOf(paths).session({ ...ctx, track, profile: profileOf(paths) }, { at: head, kind: "review", prompt });
       } catch (e) {
         if (e instanceof End) return e.out;
         if (e instanceof Halt) throw e;

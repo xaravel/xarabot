@@ -109,9 +109,14 @@ export type SandboxHooks = {
 
 export type Sandbox = {
   /**
-   * Runs one session. When `signal` aborts, the process gets SIGTERM and,
-   * 10 s later, SIGKILL, both by its exact PID; the run then resolves with
-   * whatever it printed.
+   * Runs one session in its own process group, created with `setsid`, whose
+   * id is the session's exact PID. When `signal` aborts, that exact group
+   * gets SIGTERM and, 10 s later, SIGKILL; once the session ends, however it
+   * ends, the group gets SIGKILL, so none of its descendants outlives the
+   * run. Should the runner's own process end first, however it ends (a
+   * `stop --now`, a crash, SIGKILL), the group gets SIGKILL too. The run then
+   * resolves with whatever it printed. The group kill is the one exception
+   * to "kill by exact PID" (AR3, AR44).
    */
   run(spec: LaunchSpec, profile: SandboxProfile, signal: AbortSignal, hooks?: SandboxHooks): Promise<SandboxResult<SandboxRun>>;
 };

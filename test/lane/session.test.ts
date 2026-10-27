@@ -689,6 +689,22 @@ describe("createSessionRunner: session()", () => {
     expect(w.track.sessions).toBe(0);
   });
 
+  test.each([
+    ["another tempDir", { tempDir: "/elsewhere/tmp", resultPath: "/elsewhere/tmp/result.json" }],
+    ["the runner's tempDir, another resultPath", { resultPath: "/elsewhere/result.json" }],
+  ] as const)("a profile whose %s is not the runner's (Epic 3 retro item 1): no prepare, no sandbox run", async (_name, patch) => {
+    const w = runnerWorld(() => ({ ok: true, value: "Plan." }));
+    const ctx: SessionContext = { ...w.ctx, profile: { ...w.ctx.profile, ...patch } };
+    const r = await w.runner.session(ctx, { at: w.at, kind: "planning", prompt: w.prompt });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toStartWith("profile: tempDir ");
+    expect(r.reason).toContain("are not the runner's");
+    expect(w.prepared).toEqual([]);
+    expect(w.runs).toEqual([]);
+    expect(w.track.sessions).toBe(0);
+  });
+
   test("an allowance refusal (Story 3.5): no prepare, no sandbox run, the session fails with the reason", async () => {
     const w = runnerWorld(() => ({ ok: true, value: "Plan." }));
     let asked = 0;

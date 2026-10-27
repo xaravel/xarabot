@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { LANE_LOCK_FILE } from "../core/lane/lane-lock.ts";
+import type { ReviewPass } from "../core/prompt/build-prompt.ts";
 import { err, ok } from "../core/result.ts";
 import { describeIssues } from "../core/schemas/common.ts";
 import { JournalRecordSchema, LaneOutcome } from "../core/schemas/journal.ts";
@@ -12,8 +13,8 @@ import { unitFileId } from "./clone.ts";
  * folder holds `lane.lock` (the lane process's exclusive lock, AR3),
  * `lane.pid`, `agent.pid`, `wait.pid`, `journal.jsonl`, `outcome`, `STOP`,
  * `bot-user.json` and `logs/`, plus the session folders `laneLayout` names (the agent's clone,
- * the review checkout, `runner.git`, the vendor home, `tmp`). Each write creates
- * its parent folder.
+ * the review checkout, `runner.git`, the vendor home, `tmp`, and each review
+ * pass's own vendor home and temp folder). Each write creates its parent folder.
  */
 
 export type LaneLayout = {
@@ -27,6 +28,10 @@ export type LaneLayout = {
   readonly tmp: string;
   /** Where the session writes its result; inside `tmp`. */
   readonly resultPath: string;
+  /** Holds each review pass's own vendor home, `<reviewVendor>/<pass>`; never a builder session's root. */
+  readonly reviewVendor: string;
+  /** Holds each review pass's own temp folder, `<reviewTmp>/<pass>`; never a builder session's root. */
+  readonly reviewTmp: string;
   readonly logs: string;
   readonly journal: string;
   readonly outcome: string;
@@ -36,6 +41,8 @@ export type LaneLayout = {
   /** The bot account's cached user id (`readBotUserCache`). */
   readonly botUser: string;
 };
+
+const RESULT_FILE = "result.json";
 
 /** The absolute paths inside a lane folder. */
 export function laneLayout(laneDirIn: string): LaneLayout {
@@ -48,7 +55,9 @@ export function laneLayout(laneDirIn: string): LaneLayout {
     runnerGit: join(laneDir, "runner.git"),
     vendorHome: join(laneDir, "vendor"),
     tmp,
-    resultPath: join(tmp, "result.json"),
+    resultPath: join(tmp, RESULT_FILE),
+    reviewVendor: join(laneDir, "review-vendor"),
+    reviewTmp: join(laneDir, "review-tmp"),
     logs: join(laneDir, "logs"),
     journal: join(laneDir, "journal.jsonl"),
     outcome: join(laneDir, "outcome"),
@@ -56,6 +65,22 @@ export function laneLayout(laneDirIn: string): LaneLayout {
     lock: join(laneDir, LANE_LOCK_FILE),
     botUser: join(laneDir, "bot-user.json"),
   };
+}
+
+/** A session's own vendor home and temp folder, and the result path inside that folder. */
+export type SessionPaths = { readonly vendorHome: string; readonly tmp: string; readonly resultPath: string };
+
+/**
+ * A review pass's own vendor home, temp folder and result path (Epic 3 retro
+ * item 1): `<lane>/review-vendor/<pass>` and `<lane>/review-tmp/<pass>`, so a
+ * pass shares no writable root with the builder's sessions (`clone`,
+ * `vendorHome`, `tmp`) or with the other pass. A process a builder session
+ * left behind can then neither write a review's result nor configure its
+ * reviewer: the builder's sandbox profile never lets it write there.
+ */
+export function reviewPassPaths(layout: LaneLayout, pass: ReviewPass): SessionPaths {
+  const tmp = join(layout.reviewTmp, pass);
+  return { vendorHome: join(layout.reviewVendor, pass), tmp, resultPath: join(tmp, RESULT_FILE) };
 }
 
 /** A unit's log file name: `<unit-file-id>-<start>.log`, the start in ISO form with `:` as `-` and no milliseconds. */

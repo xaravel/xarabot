@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JournalRecord } from "../../src/core/schemas/journal.ts";
-import { createFsLaneStore, laneLayout, logFileName, readBotUserCache, writeBotUserCache } from "../../src/lane/lane-store.ts";
+import { createFsLaneStore, laneLayout, logFileName, readBotUserCache, reviewPassPaths, writeBotUserCache } from "../../src/lane/lane-store.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -38,12 +38,28 @@ describe("laneLayout", () => {
       vendorHome: "/x/lane/vendor",
       tmp: "/x/lane/tmp",
       resultPath: "/x/lane/tmp/result.json",
+      reviewVendor: "/x/lane/review-vendor",
+      reviewTmp: "/x/lane/review-tmp",
       logs: "/x/lane/logs",
       journal: "/x/lane/journal.jsonl",
       outcome: "/x/lane/outcome",
       stop: "/x/lane/STOP",
       lock: "/x/lane/lane.lock",
       botUser: "/x/lane/bot-user.json",
+    });
+  });
+
+  test("each review pass has its own vendor home, temp folder and result path, none inside a builder session's root", () => {
+    const l = laneLayout("/x/lane");
+    expect(reviewPassPaths(l, "normal")).toEqual({
+      vendorHome: "/x/lane/review-vendor/normal",
+      tmp: "/x/lane/review-tmp/normal",
+      resultPath: "/x/lane/review-tmp/normal/result.json",
+    });
+    expect(reviewPassPaths(l, "followup")).toEqual({
+      vendorHome: "/x/lane/review-vendor/followup",
+      tmp: "/x/lane/review-tmp/followup",
+      resultPath: "/x/lane/review-tmp/followup/result.json",
     });
   });
 
