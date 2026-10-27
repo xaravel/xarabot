@@ -1,5 +1,5 @@
 # Epic 4 Context: Epics run in parallel behind retro and checkpoint gates, ruled from one inbox
-<!-- source: sha256:03402af7056b7fd7d8be1c4fbfc1f6d1fd70233f3d81ff832ad45005f00d6deb -->
+<!-- source: sha256:8769d8383df38cf4a8e55179c2a55a257f41a6d75dfb1a62f491a48605a0923b -->
 
 <!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
 
@@ -35,7 +35,7 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
 
   Open Escalations are not listed here; they arrive with the consumer prerequisite checks (Story 7.6).
 - **Notices:** there is one daily digest mention per inbox and no other per-item notice. The only exception is the immediate alert for a condition that newly stops every lane. An empty inbox gets no mention. Mentions are at-most-once: the post time is stamped before posting, so a failed post loses that day's mention and never re-posts to every inbox.
-- **Journal:** a lane idle only because of something the Maintainer must do records the existing `idle` span with a reason starting `waiting-on-maintainer:`; there is no new span value. Maintainer causes are a checkpoint go, a parked approval, a rejected retro, a Maintainer-routed item or an Epic's live evidence, and the reason applies only when every reason the lane idles for is one of them.
+- **Journal:** a lane idle only because of something the Maintainer must do records the existing `idle` span with a reason starting `waiting-on-maintainer:`; there is no new span value. Maintainer causes are a checkpoint go, a parked approval, a rejected retro, a Maintainer-routed item or an Epic's live evidence, and the reason applies only when every reason the lane idles for is one of them. A `dependency-epic` hold on an Epic that is itself held only by Maintainer causes counts as a Maintainer cause, however deep the chain, so a builder idle only behind a checkpoint go records `waiting-on-maintainer:`. A lane cause anywhere in the chain keeps the prefix off.
 - **No agent session** routes items, renders the digest or applies a ruling. The write check still refuses any agent diff that changes a verdict, an item or a go.
 - **Tests:** core logic uses case tables with no mocks, including the FR10 table, the due-rule table, ruling verbs × author classes × malformed forms, and the checkpoint shapes. Forge behaviour passes the contract suite on both the fake and the GitHub adapters. Live cases need `XARABOT_LIVE=1`, and inside a sandboxed session they report skipped, never passed.
 
@@ -71,8 +71,8 @@ Epics start as soon as the dependency graph allows, not strictly in sequence. Re
 
 - 4.1 and 4.2 build on the retro-item units (Story 2.10). 4.3 and 4.4 need both. 4.5 needs 4.2. 4.6 needs 4.3, 4.4 and 4.5. 4.7 comes last.
 - Story 4.7 records its live command and the expected scratch-repo results in `docs/maintainer/self-host.md`. The Maintainer runs them on the host before Epic 4's retro. From Epic 4 on, `live_evidence_checks` in `.xarabot/config.yaml` lists those commands, so a failed live row holds the retro.
-- Epic 3's retro was rejected and the Maintainer's go is recorded, so Epic 4 may start. Its item 1 (reap session processes, isolate review passes) is still open and `blocking`. Story 4.1 is merged; once its gates take effect, item 1 holds Epic 3's dependents, Epic 4 included, until it closes. Item 2 (codex live re-run) is done. The switch after Epic 3 waits for item 1 to merge in a runner tag.
+- Epic 3's retro was rejected and the Maintainer's go is recorded, so Epic 4 may start. Its item 1 (reap session processes, isolate review passes) is still open and `blocking`; it may kill the process group the sandbox created for a session with `setsid`, signalled by that group's id (the session's exact PID), and kill by exact PID still holds everywhere else. Stories 4.1 to 4.3 are merged; once its gates take effect, item 1 holds Epic 3's dependents, Epic 4 included, until it closes. Item 2 (codex live re-run) is done. The switch after Epic 3 waits for item 1 to merge in a runner tag.
 - Until the switch after Epic 3, there is one builder, and every path needs the Maintainer's approving review except `reconcile` PRs.
 - Epic 3's Maintainer-routed items 7 (correct course for Epic 3 drift) and 10 (trackers, macOS CI and evidence gates) are open and not blocking, so they hold Epics two or more steps from Epic 3. Until Story 4.6's `done`/`defer` rulings exist, nothing closes them.
-- Open lane retro items touch nearby code: `reconcile` PR hygiene, coordinator claim timing and fencing, planning attempts across runs, session process reaping and review isolation, and a passing round after the review cap. Check `retro-gates.yaml` for their globs.
+- Open lane retro items touch nearby code: `reconcile` PR hygiene, coordinator claim timing and fencing, planning attempts across runs, and session process reaping and review isolation. Check `retro-gates.yaml` for their globs.
 - Merged code takes effect only after the Maintainer advances `runner_version`.
