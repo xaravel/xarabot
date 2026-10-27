@@ -183,6 +183,32 @@ export type InboxIssue = {
   readonly url: string;
 };
 
+/**
+ * One comment on an open inbox issue (Story 4.5), as `readRulings` returns
+ * it: `id` is the forge's comment id, `issue` the inbox issue's number,
+ * `author` the commenter's login (`null` for a deleted account), `body` the
+ * text verbatim (`""` for an empty one), `created_at` its ISO time and `url`
+ * its web link.
+ */
+export type InboxComment = {
+  readonly id: string;
+  readonly issue: number;
+  readonly author: string | null;
+  readonly body: string;
+  readonly created_at: string;
+  readonly url: string;
+};
+
+/**
+ * What `readRulings` read: the comments after the cursor, oldest first, and
+ * the cursor past the last of them (the given one, unchanged, when there are
+ * none). A cursor is opaque: only the forge that issued it reads it.
+ */
+export type RulingsRead = {
+  readonly comments: readonly InboxComment[];
+  readonly cursor: string | null;
+};
+
 export type Forge = {
   snapshot(opts: SnapshotOpts): Promise<ForgeResult<ForgeSnapshot>>;
   /** Fast-forward only: the tip must still be `oldSha`, else `conflict`. One new commit. */
@@ -233,6 +259,13 @@ export type Forge = {
   setInboxBody(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<InboxIssue>>;
   /** Posts `body` verbatim as one comment on inbox issue `issue`. A missing issue is `not-found`. */
   inboxComment(issue: number, body: string, opts: CallOpts): Promise<ForgeResult<{ readonly id: string }>>;
+  /**
+   * The comments on every open inbox issue posted after `cursor` (Story
+   * 4.5), oldest first, with the cursor past the last one returned; `null`
+   * reads every comment. A cursor this forge cannot have issued is
+   * `rejected`. Read-only.
+   */
+  readRulings(cursor: string | null, opts: CallOpts): Promise<ForgeResult<RulingsRead>>;
 };
 
 export type ForgeOperation = keyof Forge;
@@ -260,6 +293,7 @@ export const FORGE_OPERATIONS = [
   "openInbox",
   "setInboxBody",
   "inboxComment",
+  "readRulings",
 ] as const satisfies readonly ForgeOperation[];
 
 /* Compile-time check: `FORGE_OPERATIONS` lists every key of `Forge`. */

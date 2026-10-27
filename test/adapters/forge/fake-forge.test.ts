@@ -339,3 +339,49 @@ describe("fake forge inboxes (Story 4.2)", () => {
     expect(control.inboxComments(999)).toEqual([]);
   });
 });
+
+describe("fake forge readRulings (Story 4.5)", () => {
+  test("open inboxes' comments, oldest first, with their author, time and link; the cursor is the last id; a closed inbox is skipped", async () => {
+    const { forge, control } = createFakeForge({ now: "2026-10-26T09:00:00Z", repoUrl: "https://github.com/o/r" });
+    const a = value(await forge.openInbox("alice", live())).number;
+    const b = value(await forge.openInbox("bob", live())).number;
+    const shut = value(await forge.openInbox("carol", live())).number;
+    const c1 = control.addInboxComment(b, "edanisko", "/xarabot go retro:2");
+    const posted = value(await forge.inboxComment(a, "🤖 digest", live())).id;
+    control.setNow("2026-10-26T09:05:00Z");
+    const c3 = control.addInboxComment(a, "alice", "thanks");
+    control.addInboxComment(shut, "carol", "/xarabot dismiss story:1.1");
+    control.closeInbox(shut);
+    const r = value(await forge.readRulings(null, live()));
+    expect(r.comments).toEqual([
+      { id: c1, issue: b, author: "edanisko", body: "/xarabot go retro:2", created_at: "2026-10-26T09:00:00Z", url: `https://github.com/o/r/issues/${b}#issuecomment-${c1}` },
+      { id: posted, issue: a, author: FAKE_BOT_LOGIN, body: "🤖 digest", created_at: "2026-10-26T09:00:00Z", url: `https://github.com/o/r/issues/${a}#issuecomment-${posted}` },
+      { id: c3, issue: a, author: "alice", body: "thanks", created_at: "2026-10-26T09:05:00Z", url: `https://github.com/o/r/issues/${a}#issuecomment-${c3}` },
+    ]);
+    expect(r.cursor).toBe(c3);
+    expect(control.inboxComments(a)).toEqual(["🤖 digest", "thanks"]);
+    // From the cursor: only later comments, and with none the cursor stays.
+    expect(value(await forge.readRulings(r.cursor, live()))).toEqual({ comments: [], cursor: c3 });
+    const c4 = control.addInboxComment(b, "bob", "later");
+    expect(value(await forge.readRulings(c1, live())).comments.map((c) => c.id)).toEqual([posted, c3, c4]);
+  });
+
+  test("a non-numeric cursor, or one above every id issued, is rejected; addInboxComment needs an existing issue; an injected error changes nothing", async () => {
+    const { forge, control } = createFakeForge();
+    expect((await forge.readRulings("2026-01-01T00:00:00Z|5", live())).ok).toBe(false);
+    const r = await forge.readRulings("abc", live());
+    expect(r.ok ? "ok" : r.error.kind).toBe("rejected");
+    // A numeric cursor at or above the next comment id was never issued.
+    const above = await forge.readRulings("999999", live());
+    expect(above.ok ? "ok" : above.error.kind).toBe("rejected");
+    const inbox = value(await forge.openInbox("alice", live())).number;
+    const id = control.addInboxComment(inbox, "alice", "hi");
+    const next = await forge.readRulings(String(Number(id) + 1), live());
+    expect(next.ok ? "ok" : next.error.kind).toBe("rejected");
+    expect(value(await forge.readRulings(id, live()))).toEqual({ comments: [], cursor: id });
+    expect(() => control.addInboxComment(4242, "alice", "x")).toThrow("no issue #4242");
+    control.injectError("readRulings", { kind: "transient", message: "502" });
+    expect((await forge.readRulings(null, live())).ok).toBe(false);
+    expect(value(await forge.readRulings(null, live())).cursor).toBe(id);
+  });
+});

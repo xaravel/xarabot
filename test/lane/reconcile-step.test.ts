@@ -92,10 +92,10 @@ const editName = (message: string) => /^ledger: (\S+ \S+)/.exec(message)?.[1] ??
  * The fake forge, recording each call in order; a ledger swap is
  * `ledgerSwap <edit> <unit>`. A snapshot reading `main` files (the fresh-main
  * re-check, not a swap's tip read) is recorded only when `mainReads`. The
- * inbox step's calls (Story 4.2) are recorded only when `inboxCalls`: its
- * own cases cover them.
+ * inbox step's calls (Story 4.2) and the rulings step's read (Story 4.5) are
+ * recorded only when `inboxCalls`: their own cases cover them.
  */
-const INBOX_CALLS: readonly string[] = ["inboxes", "openInbox", "setInboxBody", "inboxComment"];
+const INBOX_CALLS: readonly string[] = ["inboxes", "openInbox", "setInboxBody", "inboxComment", "readRulings"];
 function spied(fake: FakeForge, events: string[], mainReads = false, inboxCalls = false): Forge {
   const out = {} as Record<string, unknown>;
   for (const [name, fn] of Object.entries(fake.forge)) {
@@ -2893,5 +2893,109 @@ describe("createReconcileStep: owners' inboxes and the daily digest (Story 4.2)"
     await f.run();
     expect(f.logs.some((l) => l.includes(`deferred entries: ${bad}`) && l.includes("skipped"))).toBe(true);
     expect(inboxOf(f, "edanisko")?.body).toContain(`- [1.1-d1](${REPO_URL}/blob/main/${good}) · deferred: Left for later. · 1d`);
+  });
+});
+
+// ------------------------------------------------------------------ Story 4.5
+
+describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
+  const ALICE_ID: LaneIdentity = { owner: "alice", host: "11111111-1111-4111-8111-111111111111", lane: "builder-1" };
+  /** Story 1.1 parked needs-approval: the Maintainer's to approve. */
+  const NEEDS = rec({ ...ALICE_ID, unit: "story:1.1", state: "parked", globs: ["src/a/**"], heartbeat_at: FORGE_NOW, park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } });
+
+  type Seeded = { inbox: number; ruling: string; thanks: string };
+  /** The Maintainer's inbox with their approve ruling and a plain comment on it. */
+  const seeded = (out: Partial<Seeded>) => async (fake: FakeForge): Promise<readonly UnitRecord[]> => {
+    const opened = await fake.forge.openInbox("edanisko", opts());
+    if (!opened.ok) throw new Error(opened.error.message);
+    out.inbox = opened.value.number;
+    out.ruling = fake.control.addInboxComment(opened.value.number, "edanisko", "/xarabot approve story:1.1");
+    out.thanks = fake.control.addInboxComment(opened.value.number, "bob", "thanks");
+    return [NEEDS];
+  };
+
+  const reclaim = (f: Fake) => f.fake.control.writeForeignLedger({ message: "next run [skip ci]", writes: tip([OWN]), deletes: [] });
+  const coordinatorRecord = async (f: Fake) => {
+    const s = await f.fake.forge.snapshot(opts());
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  };
+  const RULING_EVENTS = ["readRulings", "ledgerSwap advanceRulingsCursor coordinator", "inboxComment", "inboxes"];
+
+  test("the Maintainer's ruling: one fenced swap advances coordinator.json's cursor, then one ack is posted; a second run posts nothing new", async () => {
+    const s: Partial<Seeded> = {};
+    const f = await setup({}, seeded(s));
+    const inbox = s.inbox as number;
+    const spy = spied(f.fake, f.events, false, true);
+    const sent: { message: string; writes: Readonly<Record<string, string>> }[] = [];
+    const out = await f.run({ forge: { ...spy, ledgerSwap: (old, commit, o) => (sent.push(commit), spy.ledgerSwap(old, commit, o)) } });
+    expect(out.state).toBe("merged");
+    // Right after the ledger work, before the inbox step: read, swap, reply.
+    expect(f.events.filter((e) => RULING_EVENTS.includes(e))).toEqual(["readRulings", "ledgerSwap advanceRulingsCursor coordinator", "inboxComment", "inboxes"]);
+    expect((await coordinatorRecord(f))?.rulings_cursor).toBe(s.thanks as string);
+    // The swap is fenced on the run's own record: one commit carries both.
+    const swap = sent.find((c) => c.message === "ledger: advanceRulingsCursor coordinator [skip ci]");
+    expect(Object.keys(swap?.writes ?? {}).sort()).toEqual([COORDINATOR_PATH, unitPath(U)].sort());
+    expect(f.fake.control.ledgerLog().some((c) => c.message === swap?.message)).toBe(true);
+    const comments = f.fake.control.inboxComments(inbox);
+    expect(comments).toEqual([
+      "/xarabot approve story:1.1",
+      "thanks",
+      `🤖 Ruling acknowledged: \`/xarabot approve story:1.1\` from edanisko ([comment](https://github.com/fake/repo/issues/${inbox}#issuecomment-${s.ruling})).`,
+    ]);
+    // No verb effect yet (Story 4.6): the record is still parked needs-approval.
+    expect((await f.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "needs-approval" } });
+
+    // The second run reads only the bot's own ack, which is no ruling: the cursor moves past it, and nothing is posted.
+    reclaim(f);
+    f.events.length = 0;
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(f.events.filter((e) => e === "inboxComment")).toEqual([]);
+    expect(f.fake.control.inboxComments(inbox)).toHaveLength(3);
+    const cursor = (await coordinatorRecord(f))?.rulings_cursor;
+    expect(Number(cursor)).toBeGreaterThan(Number(s.thanks));
+
+    // A third run finds no new comment: no swap, no reply.
+    reclaim(f);
+    f.events.length = 0;
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(f.events.filter((e) => RULING_EVENTS.includes(e))).toEqual(["readRulings", "inboxes"]);
+    expect((await coordinatorRecord(f))?.rulings_cursor).toBe(cursor as string);
+  });
+
+  test("a refused swap (another coordinator holds coordinator.json): no reply, logged, and the run still finishes", async () => {
+    const s: Partial<Seeded> = {};
+    const f = await setup({ coordinator: { owner: "dave", host: "44444444-4444-4444-8444-444444444444" } }, seeded(s));
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.fake.control.inboxComments(s.inbox as number)).toHaveLength(2);
+    expect((await coordinatorRecord(f))?.rulings_cursor).toBeNull();
+    expect(f.logs.some((l) => l.includes("rulings: advanceRulingsCursor refused or failed"))).toBe(true);
+    expect(f.logs.some((l) => l.includes("rulings step: rulings_cursor not advanced"))).toBe(true);
+  });
+
+  test("a read error is logged and nothing is written; the run goes on to the inbox step", async () => {
+    const s: Partial<Seeded> = {};
+    const f = await setup({}, seeded(s));
+    f.fake.control.injectError("readRulings", { kind: "forbidden", message: "no issues: write" });
+    const out = await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(out.outcome).toBe("progress");
+    expect(out.state).toBe("merged");
+    expect(swaps(f.events).filter((e) => e.includes("advanceRulingsCursor"))).toEqual([]);
+    expect(f.events).toContain("inboxes");
+    expect(f.fake.control.inboxComments(s.inbox as number)).toHaveLength(2);
+    expect(f.logs.some((l) => l.includes("rulings step: readRulings failed: forbidden"))).toBe(true);
+  });
+
+  test("with no coordinator.json the step is skipped and logged", async () => {
+    const s: Partial<Seeded> = {};
+    const f = await setup({}, seeded(s));
+    f.fake.control.writeForeignLedger({ message: "drop the claim [skip ci]", writes: {}, deletes: [COORDINATOR_PATH] });
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(f.events).not.toContain("readRulings");
+    expect(f.fake.control.inboxComments(s.inbox as number)).toHaveLength(2);
+    expect(f.logs.some((l) => l.includes("rulings step: no coordinator.json in the snapshot; skipped"))).toBe(true);
   });
 });

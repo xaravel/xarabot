@@ -40,7 +40,8 @@ type Operations =
   | "inboxes"
   | "openInbox"
   | "setInboxBody"
-  | "inboxComment";
+  | "inboxComment"
+  | "readRulings";
 
 type AR33Kinds = "conflict" | "not-fast-forward" | "auth" | "forbidden" | "rate-limited" | "not-found" | "uninstalled" | "transient" | "rejected";
 
@@ -88,6 +89,7 @@ describe("Forge port", () => {
         "prefetch",
         "pushBranch",
         "queueState",
+        "readRulings",
         "reviews",
         "setInboxBody",
         "snapshot",

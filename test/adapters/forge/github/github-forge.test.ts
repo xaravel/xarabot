@@ -495,6 +495,7 @@ describe("every operation", () => {
       openInbox: () => f.openInbox("alice", o),
       setInboxBody: () => f.setInboxBody(1, "b", o),
       inboxComment: () => f.inboxComment(1, "b", o),
+      readRulings: () => f.readRulings(null, o),
     };
   };
 

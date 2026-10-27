@@ -56,6 +56,8 @@ export type ForgeContractControls = {
   inboxes(): MaybePromise<readonly ContractInbox[]>;
   /** Comment bodies on inbox issue `issue`, oldest first. */
   inboxComments(issue: number): MaybePromise<string[]>;
+  /** Adds a comment by `author` on inbox issue `issue`, as that user posting it would (Story 4.5). */
+  addInboxComment(issue: number, author: string, body: string): MaybePromise<unknown>;
 };
 
 /** An inbox issue as the `inboxes` control reports it. */
@@ -361,6 +363,7 @@ export function forgeContract(harness: ForgeHarness): void {
         openInbox: () => f.openInbox("alice", aborted()),
         setInboxBody: () => f.setInboxBody(1, "b", aborted()),
         inboxComment: () => f.inboxComment(1, "b", aborted()),
+        readRulings: () => f.readRulings(null, aborted()),
       };
       for (const op of FORGE_OPERATIONS.filter((o) => offers.has(o))) expect([op, kind(await calls[op]())]).toEqual([op, "transient"]);
     });
@@ -776,6 +779,51 @@ export function forgeContract(harness: ForgeHarness): void {
       const listed = value(await fx.forge.inboxes(live()));
       for (const [who, d] of render()) expect(listed.find((i) => i.owner === who)?.body).toBe(d.body);
       expect((await need(fx, "inboxes")()).map((i) => i.owner)).toEqual(["dave", "erin"]);
+    });
+
+    // ------------------------------------------------------------ rulings (Story 4.5)
+
+    // Bot-authored comments only, so it needs no control and runs live too.
+    scenario("readRulings from no cursor returns the inbox comments oldest first, the newest last, and from the returned cursor none of them", ["openInbox", "inboxComment", "readRulings"], [], async (fx) => {
+      const inbox = value(await fx.forge.openInbox(owner, live()));
+      const bodies = ["🤖 first reply", "🤖 second reply", "🤖 third reply"];
+      const ids: string[] = [];
+      for (const b of bodies) ids.push(value(await fx.forge.inboxComment(inbox.number, b, live())).id);
+      const first = value(await fx.forge.readRulings(null, live()));
+      const times = first.comments.map((c) => Date.parse(c.created_at));
+      expect(times.every((t, i) => Number.isFinite(t) && (i === 0 || t >= (times[i - 1] as number)))).toBe(true);
+      const tail = first.comments.slice(-bodies.length);
+      expect(tail.map((c) => [c.id, c.issue, c.body])).toEqual(bodies.map((b, i) => [ids[i] as string, inbox.number, b]));
+      for (const c of tail) {
+        expect(c.author).not.toBeNull();
+        expect(c.author).toMatch(/\[bot\]$/);
+        expect(c.url).toMatch(new RegExp(`/issues/${inbox.number}#issuecomment-${c.id}$`));
+      }
+      expect(first.cursor).not.toBeNull();
+      const again = value(await fx.forge.readRulings(first.cursor, live()));
+      expect(again.comments.filter((c) => ids.includes(c.id))).toEqual([]);
+    });
+
+    scenario("a comment added after the cursor is returned once, with its author", ["openInbox", "inboxComment", "readRulings"], ["addInboxComment"], async (fx) => {
+      const add = need(fx, "addInboxComment");
+      const inbox = value(await fx.forge.openInbox(owner, live()));
+      await add(inbox.number, "carol", "first");
+      const r1 = value(await fx.forge.readRulings(null, live()));
+      expect(r1.comments.map((c) => c.body)).toEqual(["first"]);
+      await add(inbox.number, "dave", "/xarabot release story:1.1");
+      value(await fx.forge.inboxComment(inbox.number, "🤖 a reply", live()));
+      const r2 = value(await fx.forge.readRulings(r1.cursor, live()));
+      expect(r2.comments.map((c) => c.body)).toEqual(["/xarabot release story:1.1", "🤖 a reply"]);
+      expect(r2.comments[0]?.author).toBe("dave");
+      // The runner's own reply is by the bot account.
+      expect(r2.comments[1]?.author).toMatch(/\[bot\]$/);
+      expect(r2.cursor).not.toBe(r1.cursor);
+      expect(value(await fx.forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+    });
+
+    scenario("a cursor the forge did not issue is rejected", ["readRulings"], [], async (fx) => {
+      expect(kind(await fx.forge.readRulings("not-a-cursor", live()))).toBe("rejected");
+      expect(kind(await fx.forge.readRulings("", live()))).toBe("rejected");
     });
 
     // ------------------------------------------------------------ prefetch

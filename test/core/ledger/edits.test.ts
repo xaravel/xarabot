@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { COORDINATOR_PATH, serializeCoordinator, serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
 import {
+  advanceRulingsCursor,
   applyRuling,
   ATTEMPTS_CAP,
   ciFix,
@@ -717,6 +718,52 @@ describe("stampDigest (Story 4.2)", () => {
     const ok = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 1 }), stamp)(files);
     expect(ok.ok && ok.value !== null ? Object.keys(ok.value.writes).sort() : []).toEqual([COORDINATOR_PATH, "units/reconcile__5.json"]);
     const lost = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 2 }), stamp)(files);
+    expect(lost.ok ? "ok" : lost.error.kind).toBe("precondition");
+  });
+});
+
+describe("advanceRulingsCursor (Story 4.5)", () => {
+  const kept = { generation: 2, digest_posted_at: "2026-10-22T08:00:00Z" };
+  test.each([
+    ["advances null to a cursor, keeping every other field (heartbeat_at, digest time)", COORD, 2, null, coordRec(COORD, T0, kept), coordRec(COORD, T0, { ...kept, rulings_cursor: "17" })],
+    ["advances one cursor to the next", COORD, 2, "17", coordRec(COORD, T0, { ...kept, rulings_cursor: "17" }), coordRec(COORD, T0, { ...kept, rulings_cursor: "2026-10-22T10:00:00Z|42" })],
+    ["a wrong from (another run moved it): refused", COORD, 2, null, coordRec(COORD, T0, { ...kept, rulings_cursor: "9" }), "precondition"],
+    ["a cursor another run already moved to the same place: refused", COORD, 2, "9", coordRec(COORD, T0, { ...kept, rulings_cursor: "2026-10-22T10:00:00Z|42" }), "precondition"],
+    ["a wrong generation: refused", COORD, 1, null, coordRec(COORD, T0, kept), "precondition"],
+    ["another holder: refused", COORD, 2, null, coordRec(COORD_2, T0, kept), "precondition"],
+    ["a missing record: refused", COORD, 2, null, null, "precondition"],
+    ["a builder lane: refused", ALICE, 2, null, coordRec(COORD, T0, kept), "precondition"],
+    ["generation 0: invalid", COORD, 0, null, coordRec(COORD, T0, kept), "invalid"],
+    ["an empty from: invalid", COORD, 2, "", coordRec(COORD, T0, kept), "invalid"],
+  ] as const)("%s", (_name, who, generation, from, current, want) => {
+    const to = typeof want === "string" || want.rulings_cursor === null ? "2026-10-22T10:00:00Z|42" : want.rulings_cursor;
+    expectCoordinator(advanceRulingsCursor({ by: who, now: NOW, generation, from, to }), coordTip(current), want, "advanceRulingsCursor");
+  });
+
+  test("an empty to is invalid", () => {
+    const r = advanceRulingsCursor({ by: COORD, now: NOW, generation: 1, from: null, to: "" })(coordTip(coordRec(COORD, T0)));
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+
+  test("an older record is written at the current schema_version", () => {
+    expectCoordinator(
+      advanceRulingsCursor({ by: COORD, now: NOW, generation: 1, from: null, to: "5" }),
+      coordTip(coordRec(COORD, T0, { schema_version: 2 })),
+      coordRec(COORD, T0, { rulings_cursor: "5" }),
+      "advanceRulingsCursor",
+    );
+  });
+
+  test("fenced on the run's own record: one commit with both, and a lost unit refuses the cursor", () => {
+    const own = by(COORD, T0, { unit: "reconcile:5", globs: [] });
+    const files = coordTip(coordRec(COORD, T0), [own]);
+    const advance = advanceRulingsCursor({ by: COORD, now: NOW, generation: 1, from: null, to: "5" });
+    const landed = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 1 }), advance)(files);
+    expect(landed.ok && landed.value !== null ? [landed.value.message, Object.keys(landed.value.writes).sort()] : []).toEqual([
+      "ledger: advanceRulingsCursor coordinator [skip ci]",
+      [COORDINATOR_PATH, "units/reconcile__5.json"],
+    ]);
+    const lost = fenced(heartbeat({ unit: "reconcile:5", by: COORD, now: NOW, generation: 2 }), advance)(files);
     expect(lost.ok ? "ok" : lost.error.kind).toBe("precondition");
   });
 });

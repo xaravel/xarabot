@@ -137,3 +137,105 @@ describe("the inbox operations (Story 4.2)", () => {
     expect(value(await forge.openInbox("alice", live())).number).toBe(inbox?.number as number);
   });
 });
+
+describe("readRulings (Story 4.5)", () => {
+  const T = "2026-01-01T00:00:00Z";
+  const commentsCalls = (gh: FakeGitHub) => calls(gh).filter((c) => c.includes("/comments"));
+
+  test("reads each open inbox's comments, oldest first by (created_at, id), and writes its cursor as <created_at>|<id>", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    const b = issue(gh, ["bob"]);
+    gh.control.addComment(b, "/xarabot go retro:2", "edanisko");
+    gh.control.addComment(a, "thanks", "alice");
+    gh.control.advance(1000);
+    gh.control.addComment(a, "later", "carol");
+    const r = value(await forge.readRulings(null, live()));
+    const ids = [...gh.control.commentRecords(b), ...gh.control.commentRecords(a)].map((c) => String(c.id)) as [string, string, string];
+    expect(r.comments).toEqual([
+      { id: ids[0], issue: b, author: "edanisko", body: "/xarabot go retro:2", created_at: T, url: `https://github.com/acme/widgets/issues/${b}#issuecomment-${ids[0]}` },
+      { id: ids[1], issue: a, author: "alice", body: "thanks", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[1]}` },
+      { id: ids[2], issue: a, author: "carol", body: "later", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[2]}` },
+    ]);
+    expect(r.cursor).toBe(`2026-01-01T00:00:01Z|${ids[2]}`);
+    // From no cursor, no `since`.
+    expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?per_page=100&page=1`, `GET /issues/${b}/comments?per_page=100&page=1`]);
+  });
+
+  test("the since query is sent from a cursor, and a same-second comment after it is told apart by id", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    gh.control.addComment(a, "first", "carol");
+    const r1 = value(await forge.readRulings(null, live()));
+    gh.control.addComment(a, "/xarabot release story:1.1", "dave");
+    gh.control.clearLog();
+    const r2 = value(await forge.readRulings(r1.cursor, live()));
+    expect(r2.comments.map((c) => [c.author, c.body])).toEqual([["dave", "/xarabot release story:1.1"]]);
+    expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?since=${encodeURIComponent(T)}&per_page=100&page=1`]);
+    expect(r2.cursor).toBe(`${T}|${gh.control.commentRecords(a)[1]?.id}`);
+    expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+  });
+
+  test("a closed inbox's comments are skipped: its comments are never listed", async () => {
+    const { gh, forge } = setup();
+    const open = issue(gh, ["alice"]);
+    const closed = issue(gh, ["bob"], { state: "closed" });
+    gh.control.addComment(closed, "/xarabot go retro:2", "edanisko");
+    gh.control.addComment(open, "hello", "alice");
+    expect(value(await forge.readRulings(null, live())).comments.map((c) => c.issue)).toEqual([open]);
+    expect(commentsCalls(gh)).toEqual([`GET /issues/${open}/comments?per_page=100&page=1`]);
+  });
+
+  test("comments are paged", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    for (let i = 0; i < 150; i += 1) gh.control.addComment(a, `c${i}`, "alice");
+    const r = value(await forge.readRulings(null, live()));
+    expect(r.comments.map((c) => c.body)).toEqual(Array.from({ length: 150 }, (_, i) => `c${i}`));
+    expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?per_page=100&page=1`, `GET /issues/${a}/comments?per_page=100&page=2`]);
+  });
+
+  test("a comment edited after the cursor but posted before it is not returned again; a missing html_url links under the issue", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    const cursor = `${T}|500`;
+    gh.control.inject("GET", /\/comments\?/, {
+      status: 200,
+      body: [
+        { id: 400, body: "old, edited", user: { login: "alice" }, created_at: "2025-12-31T23:59:59Z", updated_at: "2026-01-01T00:00:05Z" },
+        { id: 499, body: "same second, lower id", user: { login: "alice" }, created_at: T },
+        { id: 501, body: "new", user: { login: "bob" }, created_at: T },
+        { id: 502, body: null, user: null, created_at: "2026-01-01T00:00:01Z" },
+      ],
+    });
+    const r = value(await forge.readRulings(cursor, live()));
+    expect(r.comments).toEqual([
+      { id: "501", issue: a, author: "bob", body: "new", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-501` },
+      { id: "502", issue: a, author: null, body: "", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-502` },
+    ]);
+    expect(r.cursor).toBe("2026-01-01T00:00:01Z|502");
+  });
+
+  test.each(["nope", "", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z|", "2026-01-01T00:00:00Z|x", "yesterday|5", "2026-01-01T00:00:00Z|05"])(
+    "the cursor %p is rejected before any request",
+    async (cursor) => {
+      const { gh, forge } = setup();
+      expect(kind(await forge.readRulings(cursor, live()))).toBe("rejected");
+      expect(calls(gh)).toEqual([]);
+    },
+  );
+
+  test("a malformed comment is transient; a failed list is its error", async () => {
+    const { gh, forge } = setup();
+    issue(gh, ["alice"]);
+    gh.control.inject("GET", /\/comments\?/, { status: 200, body: [{ id: "x", body: "b", created_at: T }] });
+    expect(kind(await forge.readRulings(null, live()))).toBe("transient");
+    gh.control.inject("GET", /\/comments\?/, { status: 200, body: [{ id: 7, body: "b", created_at: "soon" }] });
+    expect(kind(await forge.readRulings(null, live()))).toBe("transient");
+    // A time Date.parse takes but that is not ISO 8601 would end a cursor readRulings then rejects: malformed.
+    gh.control.inject("GET", /\/comments\?/, { status: 200, body: [{ id: 8, body: "b", created_at: "Thu, 01 Jan 2026 00:00:00 GMT" }] });
+    expect(kind(await forge.readRulings(null, live()))).toBe("transient");
+    gh.control.inject("GET", /^\/repos\/acme\/widgets\/issues\?/, { status: 403, body: { message: "Resource not accessible by integration" } });
+    expect(kind(await forge.readRulings(null, live()))).toBe("forbidden");
+  });
+});

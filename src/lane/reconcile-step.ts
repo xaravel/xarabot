@@ -1,6 +1,7 @@
 import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import {
+  advanceRulingsCursor,
   deleteMerged,
   deleteReleasedRecurring,
   fenced,
@@ -24,6 +25,7 @@ import { renderDigest } from "../core/inbox/render-digest.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
+import { judgeRuling } from "../core/rulings/rulings.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
 import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
@@ -32,6 +34,7 @@ import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-proces
 import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
 import type { GraphTrees } from "./graph-trees.ts";
 import { syncInboxes } from "./inbox-step.ts";
+import { answerRulings } from "./rulings-step.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
@@ -148,6 +151,19 @@ import { allowanceReason, callPassedGate, describeError, message, stepKit, stepO
  * snapshot's coordinator generation) before one mention per non-empty inbox
  * is posted. Its forge errors are logged and skipped: they never fail or
  * stop the run.
+ *
+ * Story 4.5: right after the ledger work and before the inbox step, the
+ * rulings step (`answerRulings`) reads the inbox comments posted after the
+ * snapshot's `coordinator.json` `rulings_cursor` (`Forge.readRulings`). When
+ * the forge's cursor moved, one swap writes `fenced(heartbeat(run record),
+ * advanceRulingsCursor(...))`, held at the snapshot's coordinator generation
+ * and refused once another run moved the cursor; only after it lands is each
+ * ruling, judged against the run's snapshot (`judgeRuling`), answered with
+ * one 🤖 reply on its own inbox, at most once. No ruling is applied yet
+ * (Story 4.6 composes its ledger effects, approve, release and rebuild,
+ * into that swap). With no
+ * `coordinator.json` the step is skipped; its read, swap and reply errors are
+ * logged and skipped: they never fail or stop the run.
  */
 
 export type ReconcileStepDeps = {
@@ -899,6 +915,46 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       return settled;
     };
 
+    // ------------------------------------------------------------ rulings
+
+    /**
+     * Story 4.5: the inbox comments after `rulings_cursor`, the fenced
+     * cursor swap, then one reply per ruling. Never fails the run.
+     */
+    const rulings = async (): Promise<void> => {
+      aborted();
+      const coordinator = snapshot.ledger.coordinator;
+      if (coordinator === null) {
+        note("rulings step: no coordinator.json in the snapshot; skipped");
+        return;
+      }
+      const advance = async (from: string | null, to: string): Promise<boolean> => {
+        const edit = fenced(
+          heartbeat({ unit, by: identity, now: forgeNow(), generation }),
+          advanceRulingsCursor({ by: identity, now: forgeNow(), generation: coordinator.generation, from, to }),
+        );
+        const r = await swapLedger({
+          forge,
+          edit,
+          signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+          sleep,
+          ...(deps.random !== undefined ? { random: deps.random } : {}),
+        });
+        if (r.ok) return true;
+        note(`rulings: advanceRulingsCursor refused or failed: ${r.error.message}`);
+        return false;
+      };
+      await answerRulings({
+        forge,
+        cursor: coordinator.rulings_cursor,
+        judge: (c) => judgeRuling(snapshot, c),
+        advance,
+        log: note,
+        signal: input.signal,
+        callTimeoutMs,
+      });
+    };
+
     // ------------------------------------------------------------ inboxes
 
     /**
@@ -1097,6 +1153,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         note(`${u} merged but ${snapshot.config.retro_gates_path} does not list its item: nothing to set done, skipped`);
       }
       const settled = await ledgerWork(plan);
+      await rulings();
       await inboxes();
 
       // A PR the ledger work closed, or whose record it released or deleted, no longer stops a new one.
