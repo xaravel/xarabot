@@ -11,6 +11,7 @@ export type ReasonCode =
   | "dependency-epic"
   | "retro-rejected"
   | "retro-item"
+  | "checkpoint"
   | "epic-context"
   | "record-state"
   | "depends-on"

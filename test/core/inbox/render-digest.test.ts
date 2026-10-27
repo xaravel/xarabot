@@ -188,6 +188,15 @@ describe("renderDigest: who gets what", () => {
     expect(d.get("edanisko")?.count).toBe(2);
   });
 
+  test.each([
+    ["no retro record: listed as bootstrapped, with no age", "", [`- [checkpoint:1](${REPO}/blob/main/${RETRO}) · Epic 1 is bootstrapped · \`/xarabot go checkpoint:1\``]],
+    ["a go recorded: nothing listed", '  "1":\n    checkpoint:\n      go:\n        by: edanisko\n        at: 2026-10-21T00:00:00Z\n        ruling: maintainer-pr\n', []],
+  ] as const)("a bootstrapped checkpoint Epic, %s (Story 4.4)", (_name, entries, want) => {
+    const gates = `schema_version: 1\nepics:${entries === "" ? " {}" : ""}\n${entries}`;
+    const d = digest(world({ epicsYaml: "version: 1\nepics:\n  1:\n    checkpoint: true\n", files: { [RETRO]: gates } }));
+    expect(itemLines(d)).toEqual(want.length === 0 ? {} : { edanisko: [...want] });
+  });
+
   test("an unmanifested heading of a bootstrapped Epic is not listed", () => {
     const d = digest(world({ epics: { 1: ["1"], 2: ["1"] }, bootstrapped: [1], manifests: [{ id: "2.1" }] }));
     expect(d.size).toBe(0);

@@ -52,6 +52,8 @@ export type World = {
   readonly retro?: Record<number, Verdict>;
   /** Epic → its retro items in `retro-gates.yaml`, alongside any verdict; default none. */
   readonly items?: Record<number, readonly ItemSpec[]>;
+  /** Epics whose checkpoint go is recorded (`checkpoint: go: {by, at, ruling: maintainer-pr}`); default none. */
+  readonly checkpointGo?: readonly number[];
   /** Story id → status (sprint key `k-<id>`); an `epic-<N>` key is written as it is. */
   readonly status?: Record<string, string>;
   /** Epic → context text, `null` to leave it out. Default a valid file, with its source line, for every Epic. */
@@ -124,9 +126,9 @@ function config(w: World): string {
   return `${lines.join("\n")}\n`;
 }
 
-function retroGates(retro: Record<number, Verdict>, items: Record<number, readonly ItemSpec[]>): string {
+function retroGates(retro: Record<number, Verdict>, items: Record<number, readonly ItemSpec[]>, checkpointGo: readonly number[]): string {
   const lines = ["schema_version: 1", "epics:"];
-  const keys = [...new Set([...Object.keys(retro), ...Object.keys(items)])].sort((a, b) => Number(a) - Number(b));
+  const keys = [...new Set([...Object.keys(retro), ...Object.keys(items), ...checkpointGo.map(String)])].sort((a, b) => Number(a) - Number(b));
   for (const n of keys) {
     lines.push(`  "${n}":`);
     const v = retro[Number(n)];
@@ -148,6 +150,9 @@ function retroGates(retro: Record<number, Verdict>, items: Record<number, readon
           `        status: ${it.status}`,
         );
       }
+    }
+    if (checkpointGo.includes(Number(n))) {
+      lines.push("    checkpoint:", "      go:", "        by: edanisko", "        at: 2026-10-21T00:00:00Z", "        ruling: maintainer-pr");
     }
   }
   return `${lines.join("\n")}\n`;
@@ -178,7 +183,7 @@ export function input(w: World): AssembleInput {
     [STATUS]: sprintStatus(w.status ?? {}),
   };
   if (w.epicsYaml !== undefined) files[".xarabot/epics.yaml"] = w.epicsYaml;
-  if (w.retro !== undefined || w.items !== undefined) files[RETRO] = retroGates(w.retro ?? {}, w.items ?? {});
+  if (w.retro !== undefined || w.items !== undefined || w.checkpointGo !== undefined) files[RETRO] = retroGates(w.retro ?? {}, w.items ?? {}, w.checkpointGo ?? []);
   for (const n of Object.keys(w.epics).map(Number)) files[contextPath(n)] = validContext(n, files[EPICS_MD] as string);
   for (const [n, text] of Object.entries(w.contexts ?? {})) files[contextPath(Number(n))] = text;
   for (const m of specs) files[manifestPath(m.id)] = manifest(m);
