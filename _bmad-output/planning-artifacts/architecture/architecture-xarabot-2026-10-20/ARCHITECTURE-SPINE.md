@@ -650,7 +650,7 @@ No attempt is counted either way.
     - `release` and `rebuild` reset `attempts`, `loopbacks` and `ci_fixes` to 0.
     - `rebuild` also closes the PR (AD-9) and clears `builder_providers[]`, because the diff starts again from `main`.
     - `release` keeps `builder_providers[]`, because the existing diff carries over.
-    - `dismiss` removes only the inbox item and leaves the ledger unchanged.
+    - `dismiss` removes only the inbox item. It changes no unit record or retro gate. The dismissal is kept in `coordinator.json`'s dismissal list and expires once the item comes back as a new instance, meaning its subject or start time changes (Maintainer decision 2026-10-27, Story 4.6).
     - `done` and `defer` set the retro item's `status` in `retro-gates.yaml` to `done` or `deferred`, written by `reconcile`'s runner code.
   - **Applying it.** Rulings, the checkpoint go included, are applied by `reconcile`'s runner code, never by an agent session. The coordinator's `reconcile` unit reads new comments from a cursor kept in `coordinator.json`. It applies each ruling with a ledger or `retro-gates.yaml` edit, then replies with a 🤖 acknowledgement.
   - **`xarabot rule <verb> <unit-id>`**, run by the Maintainer on the Xarabot host, applies `release` and `rebuild` with the same ledger edit from 0.x (Story 2.5b); the other verbs follow Story 4.6, and local-only mode (v1) uses it for all.

@@ -2369,6 +2369,11 @@ So that a ruling clears what it names and nothing else (FR5, FR9, FR10, FR13, AR
 **When** it is applied
 **Then** no agent session runs, and the write check still refuses any agent diff that changes a verdict, an item or a go (Story 2.3).
 
+**The Maintainer's decisions of 2026-10-27 (this Story's intent gap, from its draft spec's open questions):**
+1. **A `retro-gates.yaml` ruling waits in a pending list until `main` shows it.** `go`, `block`, `unblock`, `done` and `defer` are written by `reconcile`'s PR. Each acknowledged one goes into a pending list in `coordinator.json`, in the same ledger swap that moves the rulings cursor. `reconcile` re-applies every pending ruling on each run until `main`'s `retro-gates.yaml` shows it, then drops it. So a ruling survives a PR that never opens, is closed or fails CI, and a run that dies in between. `xarabot rule` writes the same pending entry.
+   - The new `coordinator.json` fields ride Story 4.2's ledger `schema_version` 6, because no runner tag has shipped 6 yet. There is no bump to 7, and every lane's runner pin still advances together at the tag that carries 6.
+2. **`dismiss` is kept in `coordinator.json` too.** Each dismissal names the item's id and the instance it dismissed: its subject and its start time. The digest leaves out an item matching a stored dismissal. The dismissal expires, and is dropped, once that item comes back as a new instance, meaning its subject or start time changes, so a fresh problem is never hidden. It changes no unit record or retro gate; the spine's `dismiss` line says so.
+
 ### Story 4.7: Parallel Epics and gates verification
 
 As the Maintainer,
