@@ -1,26 +1,24 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-1-reap-session-processes-isolate-reviews",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 2,
+  "generation": 3,
   "globs": [
     "src/lane/lane-store.ts",
     "src/lane/review-step.ts",
     "src/lane/session.ts",
     "src/ports/sandbox.ts",
     "src/sandbox/macos.ts",
-    "src/sandbox/vendor-home.ts",
     "test/lane/lane-store.test.ts",
     "test/lane/review-step.test.ts",
     "test/lane/session.test.ts",
     "test/no-pkill.test.ts",
-    "test/sandbox/macos.test.ts",
-    "test/sandbox/vendor-home.test.ts"
+    "test/sandbox/macos.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T03:13:37.175Z",
+  "heartbeat_at": "2026-10-27T03:15:06.134Z",
   "pr": 248,
   "pr_owner": "edanisko",
   "base_sha": "ef0394b09000e9069c081275ef49f3e454cd5cf3",
@@ -28,29 +26,13 @@
   "reviewed_sha": "af5bdcb44b428347f6ddef35169a83d5a4b45fe2",
   "passed_sha": "af5bdcb44b428347f6ddef35169a83d5a4b45fe2",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "af5bdcb44b428347f6ddef35169a83d5a4b45fe2",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/lane/lane-store.ts",
-      "src/lane/review-step.ts",
-      "src/lane/session.ts",
-      "src/ports/sandbox.ts",
-      "src/sandbox/macos.ts",
-      "test/lane/lane-store.test.ts",
-      "test/lane/review-step.test.ts",
-      "test/lane/session.test.ts",
-      "test/no-pkill.test.ts",
-      "test/sandbox/macos.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 1,
   "ci_fixes": 0,
