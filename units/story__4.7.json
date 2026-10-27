@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "story:4.7",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -11,7 +11,7 @@
     "test/e2e/**",
     "test/fixtures/**"
   ],
-  "heartbeat_at": "2026-10-27T06:01:50.766Z",
+  "heartbeat_at": "2026-10-27T06:02:00.214Z",
   "pr": 262,
   "pr_owner": "edanisko",
   "base_sha": "507cc1df0407e7377ace5fc0353779e3c2a95988",
@@ -25,7 +25,17 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-4-7-parallel-epics-and-gates-verification.md",
+      "docs/maintainer/self-host.md",
+      "test/e2e/parallel-epics-harness.ts",
+      "test/e2e/parallel-epics.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
