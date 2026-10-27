@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.3",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-4-3-batch-routing-of-maintainer-only-retro-items.md",
@@ -18,7 +18,7 @@
     "test/core/reconcile/retro-gates-edit.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T00:57:04.573Z",
+  "heartbeat_at": "2026-10-27T00:59:45Z",
   "pr": 240,
   "pr_owner": "edanisko",
   "base_sha": "f2eaf11831e23e26d1cd568bcae4b185dd2feda3",
