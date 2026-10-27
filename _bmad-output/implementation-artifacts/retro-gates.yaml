@@ -226,6 +226,12 @@ epics:
         blocking: false
         globs: ["src/sandbox/profile.ts", "test/sandbox/profile.test.ts", "test/sandbox/macos.test.ts"]
         status: done
+      - id: "epic-2-retro-item-37-delete-only-the-runners-branches"
+        text: "Item 21's follow-up (PR #253's review; Maintainer decision Q4, 2026-10-25: the runner deletes only the branches of closed reconcile and disposable planning PRs). Forge.deleteBranch refuses only main and the ledger branch, so a wrong caller could delete a Story branch or a human's branch. In the GitHub adapter (src/adapters/forge/github/github-forge.ts) and the fake (src/adapters/forge/fake/fake-forge.ts), refuse with forbidden, and with no request, any branch outside the runner's own unit-branch namespace (config branches.xarabot, `xarabot/` by default); add a contract case in test/contracts/forge.contract.ts. In docs/maintainer/app-permissions.md, list deleteRef in the contents: write row, and have test/adapters/forge/github/http.test.ts check that every operation name appears in its permission's row. In src/lane/reconcile-step.ts's deleteReleased path, delete the branch before the record, so a failed delete leaves the released record for a later run to retry; tests in test/lane/reconcile-step.test.ts"
+        route: lane
+        blocking: false
+        globs: ["src/adapters/forge/github/github-forge.ts", "src/adapters/forge/fake/fake-forge.ts", "test/contracts/forge.contract.ts", "test/adapters/forge/**", "docs/maintainer/app-permissions.md", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts"]
+        status: open
   "3":
     retro:
       verdict: rejected
