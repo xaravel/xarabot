@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-21-reconcile-pr-hygiene",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 3,
   "globs": [
     "src/adapters/forge/fake/fake-forge.ts",
@@ -25,7 +25,7 @@
     "test/ports/forge.test.ts",
     "test/support/live-github.ts"
   ],
-  "heartbeat_at": "2026-10-27T03:50:06.409Z",
+  "heartbeat_at": "2026-10-27T03:52:22Z",
   "pr": 253,
   "pr_owner": "edanisko",
   "base_sha": "2a50a8975c3180544f82edfaadabb3d07e4350ec",
