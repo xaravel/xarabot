@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.6",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 3,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-4-6-rulings-what-each-verb-does.md",
@@ -34,7 +34,7 @@
     "test/lane/rule.test.ts",
     "test/lane/rulings-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T04:57:40.307Z",
+  "heartbeat_at": "2026-10-27T04:59:56Z",
   "pr": 258,
   "pr_owner": "edanisko",
   "base_sha": "2b8027d808d0269ed905eda7b2994f5a212a48eb",
