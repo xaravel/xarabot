@@ -1,7 +1,7 @@
 import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import {
-  advanceRulingsCursor,
+  changeRulingLists,
   deleteMerged,
   deleteReleasedRecurring,
   fenced,
@@ -10,10 +10,12 @@ import {
   isDisposable,
   markMerged,
   park,
+  recordRulings,
   releaseDeadReconcile,
   reparkGraph,
   releaseDisposable,
   releaseEjected,
+  rulingListsOf,
   stampDigest,
   startMerging,
   takeApproved,
@@ -26,10 +28,12 @@ import { renderDigest } from "../core/inbox/render-digest.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
 import { standingApproval } from "../core/reconcile/approval.ts";
 import { planReconcile, type ApprovalTarget, type GatedTarget, type PlanTarget, type ReconcilePlan } from "../core/reconcile/plan.ts";
-import { judgeRuling } from "../core/rulings/rulings.ts";
+import { judgeRulings, rulingAdds, rulingsDrops, rulingsEdit, rulingsView, withPending, type JudgedRuling } from "../core/rulings/effects.ts";
+import type { PendingRuling } from "../core/schemas/ledger.ts";
+import type { Snapshot } from "../core/schemas/snapshot.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { GRAPH_PSEUDO_GLOB, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
-import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot } from "../ports/forge.ts";
+import { isBackoffKind, type CallOpts, type Forge, type ForgeResult, type ForgeSnapshot, type InboxComment } from "../ports/forge.ts";
 import { graphDeltaComment, graphRefusalComment, type GraphDelta } from "../core/graph/graph-gate.ts";
 import type { CoordinatorStep, CoordinatorStepInput } from "./coordinator-process.ts";
 import { gateGraph, type GraphGateOutcome } from "./graph-gate.ts";
@@ -163,15 +167,26 @@ import { allowanceReason, callPassedGate, describeError, message, stepKit, stepO
  * Story 4.5: right after the ledger work and before the inbox step, the
  * rulings step (`answerRulings`) reads the inbox comments posted after the
  * snapshot's `coordinator.json` `rulings_cursor` (`Forge.readRulings`). When
- * the forge's cursor moved, one swap writes `fenced(heartbeat(run record),
- * advanceRulingsCursor(...))`, held at the snapshot's coordinator generation
- * and refused once another run moved the cursor; only after it lands is each
- * ruling, judged against the run's snapshot (`judgeRuling`), answered with
- * one 🤖 reply on its own inbox, at most once. No ruling is applied yet
- * (Story 4.6 composes its ledger effects, approve, release and rebuild,
- * into that swap). With no
+ * the forge's cursor moved, the batch is judged in order (`judgeRulings`,
+ * Story 4.6), each valid `rebuild`'s open PR closed, and one swap writes
+ * `fenced(heartbeat(run record), allOf(recordRulings(...), ...applyRuling
+ * edits))`, held at the snapshot's coordinator generation and refused once
+ * another run moved the cursor: `recordRulings` moves the cursor, adds the
+ * batch's pending `retro-gates.yaml` rulings and dismissals, and drops the
+ * pending rulings `main` shows and the dismissals whose item came back as a
+ * new instance. Only after it lands is each ruling answered with one 🤖
+ * reply on its own inbox, at most once. With nothing new to read but
+ * something to drop, the swap holds only `recordRulings`. With no
  * `coordinator.json` the step is skipped; its read, swap and reply errors are
  * logged and skipped: they never fail or stop the run.
+ *
+ * Story 4.6: after the rulings step, `retro_gates_path` is planned again
+ * with the pending rulings as they now stand, so this run's PR carries the
+ * batch's `go`, `block`, `unblock`, `done` and `defer` (each pending ruling
+ * is written again on every run until `main` shows it), and the inboxes
+ * render from the final view: pending rulings applied, released records out
+ * and dismissed items left out. A swap that did not land leaves the
+ * snapshot's view.
  */
 
 export type ReconcileStepDeps = {
@@ -974,58 +989,88 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
 
     // ------------------------------------------------------------ rulings
 
+    /** The view the inboxes render from, and the pending rulings this run's `retro-gates.yaml` edit carries. */
+    type RulingsOutcome = { readonly view: Snapshot; readonly pending: readonly PendingRuling[] };
+
+    /** One `coordinator.json` swap (`edit` fenced on the run's own record unless `bare`); `true` once it landed. */
+    const coordinatorSwap = async (what: string, edit: LedgerEdit, bare = false): Promise<boolean> => {
+      const r = await swapLedger({
+        forge,
+        edit: bare ? edit : fenced(heartbeat({ unit, by: identity, now: forgeNow(), generation }), edit),
+        signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
+        sleep,
+        ...(deps.random !== undefined ? { random: deps.random } : {}),
+      });
+      if (r.ok) return true;
+      note(`rulings: ${what} refused or failed: ${r.error.message}`);
+      return false;
+    };
+
     /**
-     * Story 4.5: the inbox comments after `rulings_cursor`, the fenced
-     * cursor swap, then one reply per ruling. Never fails the run.
+     * Stories 4.5 and 4.6: the inbox comments after `rulings_cursor`, judged
+     * as a batch; the rebuild closes; one fenced swap with the cursor and
+     * every effect; then one reply per ruling. Never fails the run.
      */
-    const rulings = async (): Promise<void> => {
+    const rulings = async (): Promise<RulingsOutcome> => {
       aborted();
       const coordinator = snapshot.ledger.coordinator;
+      const unchanged: RulingsOutcome = { view: withPending(snapshot), pending: rulingListsOf(coordinator).pending };
       if (coordinator === null) {
         note("rulings step: no coordinator.json in the snapshot; skipped");
-        return;
+        return unchanged;
       }
-      const advance = async (from: string | null, to: string): Promise<boolean> => {
-        const edit = fenced(
-          heartbeat({ unit, by: identity, now: forgeNow(), generation }),
-          advanceRulingsCursor({ by: identity, now: forgeNow(), generation: coordinator.generation, from, to }),
-        );
-        const r = await swapLedger({
-          forge,
-          edit,
-          signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
-          sleep,
-          ...(deps.random !== undefined ? { random: deps.random } : {}),
-        });
-        if (r.ok) return true;
-        note(`rulings: advanceRulingsCursor refused or failed: ${r.error.message}`);
-        return false;
+      /** The final view and pending list once the swap of `judged` with `drops` landed. */
+      const landed = (judged: readonly JudgedRuling[], drops: ReturnType<typeof rulingsDrops>): RulingsOutcome => ({
+        view: rulingsView(snapshot, judged, drops),
+        pending: changeRulingLists(rulingListsOf(coordinator), drops, rulingAdds(judged)).pending,
+      });
+      let outcome = unchanged;
+      const commit = async (from: string | null, to: string, judged: readonly JudgedRuling<InboxComment>[]): Promise<boolean> => {
+        const drops = rulingsDrops(rulingsView(snapshot, judged), snapshot);
+        const edit = rulingsEdit({ by: identity, now: forgeNow(), coordinatorGeneration: coordinator.generation, cursor: { from, to }, judged, drops });
+        const ok = await coordinatorSwap("recordRulings", edit);
+        if (ok) outcome = landed(judged, drops);
+        return ok;
       };
-      await answerRulings({
+      const r = await answerRulings({
         forge,
         cursor: coordinator.rulings_cursor,
-        judge: (c) => judgeRuling(snapshot, c),
-        advance,
+        judge: (comments) => judgeRulings(snapshot, comments, "comment").judged,
+        commit,
         log: note,
         signal: input.signal,
         callTimeoutMs,
       });
+      if (r.tried) return outcome;
+      // No batch this run: still drop what main shows, and the dismissals of items come back as new instances.
+      const drops = rulingsDrops(unchanged.view, snapshot);
+      if (drops.pending.length === 0 && drops.dismissals.length === 0) return outcome;
+      aborted();
+      const dropped = await coordinatorSwap(
+        "recordRulings (drops only)",
+        recordRulings({ by: identity, now: forgeNow(), generation: coordinator.generation, drop: drops }),
+        true,
+      );
+      if (!dropped) return outcome;
+      note(`rulings: dropped ${drops.pending.length} pending ruling(s) main shows and ${drops.dismissals.length} expired dismissal(s)`);
+      return landed([], drops);
     };
 
     // ------------------------------------------------------------ inboxes
 
     /**
-     * Story 4.2: the owners' inboxes from the run's snapshot, then, when
-     * the digest is due, the stamp and the mentions. Never fails the run.
+     * Story 4.2: the owners' inboxes from `view` (Story 4.6: the rulings
+     * step's final view of the run's snapshot), then, when the digest is
+     * due, the stamp and the mentions. Never fails the run.
      */
-    const inboxes = async (): Promise<void> => {
+    const inboxes = async (view: Snapshot): Promise<void> => {
       aborted();
       const config = snapshot.config;
       const coordinator = snapshot.ledger.coordinator;
       let digests: ReturnType<typeof renderDigest>;
       try {
         for (const s of openDeferred(config.story_spec_path, Object.keys(input.files), input.files).skipped) note(`deferred entries: ${s.message}; skipped`);
-        digests = renderDigest({ snapshot, files: input.files, repoUrl: `https://github.com/${deps.repo}` });
+        digests = renderDigest({ snapshot: view, files: input.files, repoUrl: `https://github.com/${deps.repo}` });
       } catch (e) {
         // Pure code, so never expected; still, the inboxes never fail the run.
         note(`inbox step: rendering threw: ${message(e)}; no inbox rewritten this run`);
@@ -1211,8 +1256,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         note(`${u} merged but ${snapshot.config.retro_gates_path} does not list its item: nothing to set done, skipped`);
       }
       const { settled, unclosed } = await ledgerWork(plan);
-      await rulings();
-      await inboxes();
+      const ruled = await rulings();
+      await inboxes(ruled.view);
 
       // 2.5 F1: a failed close may leave a PR open that no record carries, so this run opens none.
       if (unclosed.length > 0) {
@@ -1223,7 +1268,9 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const open = plan.openPrs.find((o) => !settled.has(o.unit));
       if (open !== undefined) return await finish(plan, `${open.unit}'s PR #${open.pr} is open: no new reconcile PR this run`);
       const status = plan.status;
-      const gates = plan.retroGates;
+      // Story 4.6: the gates edit carries the pending rulings as the rulings step left them.
+      const gates = planReconcile(snapshot, unit, statusText, gatesText, ruled.pending).retroGates;
+      note(`retro gates after the rulings step: ${gates.kind}`);
       if (status.kind === "invalid") return await failed(`${plan.path} cannot be edited: ${status.message}`);
       if (gates.kind === "invalid") return await failed(`${plan.retroGatesPath} cannot be written: ${gates.message}`);
       const changes: ReconcileFileChange[] = [];

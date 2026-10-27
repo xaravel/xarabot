@@ -82,6 +82,12 @@ const CLAUDE_CASES: readonly Case[] = [
   { name: "epics.md deleted", covers: ["coordinator-file"], changes: [p(EPICS)], refused: [no(EPICS, "coordinator-file")] },
   { name: "retro-gates.yaml (any verdict, item or go change; see the git cases)", covers: ["coordinator-file"], changes: [p(RETRO)], refused: [no(RETRO, "coordinator-file")] },
   {
+    name: "Story 4.6: a builder adding a checkpoint go or flipping blocking in retro-gates.yaml",
+    covers: ["coordinator-file"],
+    changes: [{ path: RETRO, retroGates: { before: "schema_version: 1\nepics: {}\n", after: 'schema_version: 1\nepics:\n  "3":\n    checkpoint:\n      go:\n        by: edanisko\n        at: "2026-10-27T09:00:00Z"\n        ruling: "1234567"\n' } }],
+    refused: [no(RETRO, "coordinator-file")],
+  },
+  {
     name: "case-folded sprint status",
     covers: ["coordinator-file"],
     changes: [p("_BMAD-output/implementation-artifacts/Sprint-Status.yaml")],
@@ -784,6 +790,10 @@ const COORD_CASES: readonly CoordCase[] = [
   { name: "retro-go: a go removed", unit: RETRO_UNIT, changes: [gates(GATES_2, GATES_2.replace(GO, ""))], refused: [[RETRO, "retro-go"]] },
   { name: "retro-go: only the go changed is not retro-verdict", unit: RETRO_UNIT, changes: [gates(GATES_2, GATES_2.replace("by: edanisko", "by: alice"))], refused: [[RETRO, "retro-go"]] },
   { name: "checkpoint-go: a checkpoint go added", unit: RETRO_UNIT, changes: [gates(GATES_2, `${GATES_2}${CHECKPOINT_3}`)], refused: [[RETRO, "checkpoint-go"]] },
+  // Story 4.6: only reconcile's runner code writes a ruling's go or tag; an agent diff that does is still refused.
+  { name: "Story 4.6: an agent adding a checkpoint go to an Epic's entry: checkpoint-go", unit: ANY_UNIT, changes: [gates(GATES_2, GATES_2.replace("    items:", `    checkpoint:\n${GO.trimEnd()}\n    items:`))], refused: [[RETRO, "checkpoint-go"]] },
+  { name: "Story 4.6: an agent flipping an item's blocking: retro-item", unit: ANY_UNIT, changes: [gates(GATES_2, GATES_2.replace("blocking: true", "blocking: false"))], refused: [[RETRO, "retro-item"]] },
+  { name: "Story 4.6: an agent adding a rejected retro's go: retro-go", unit: STATUS_UNIT, changes: [gates(GATES_2.replace(GO, ""), GATES_2)], refused: [[RETRO, "retro-go"]] },
   { name: "retro-gates-invalid: the after side does not parse", unit: RETRO_UNIT, changes: [gates(GATES_2, "schema_version: 1\nepics: [\n")], refused: [[RETRO, "retro-gates-invalid"]] },
   { name: "retro-gates-invalid: the before side breaks the schema", unit: RETRO_UNIT, changes: [gates("schema_version: 2\nepics: {}\n", EMPTY_GATES)], refused: [[RETRO, "retro-gates-invalid"]] },
   { name: "retro-gates-invalid: a change with no texts", unit: RETRO_UNIT, changes: [{ path: RETRO, mode: "100644" }], refused: [[RETRO, "retro-gates-invalid"]] },

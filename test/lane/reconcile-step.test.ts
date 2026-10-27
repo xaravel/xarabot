@@ -3026,9 +3026,9 @@ describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
     if (!l.ok) throw new Error(l.error.message);
     return l.value.coordinator;
   };
-  const RULING_EVENTS = ["readRulings", "ledgerSwap advanceRulingsCursor coordinator", "inboxComment", "inboxes"];
+  const RULING_EVENTS = ["readRulings", "ledgerSwap recordRulings coordinator", "inboxComment", "inboxes"];
 
-  test("the Maintainer's ruling: one fenced swap advances coordinator.json's cursor, then one ack is posted; a second run posts nothing new", async () => {
+  test("the Maintainer's ruling: one fenced swap advances coordinator.json's cursor and applies it, then one ack is posted; a second run posts nothing new", async () => {
     const s: Partial<Seeded> = {};
     const f = await setup({}, seeded(s));
     const inbox = s.inbox as number;
@@ -3037,11 +3037,11 @@ describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
     const out = await f.run({ forge: { ...spy, ledgerSwap: (old, commit, o) => (sent.push(commit), spy.ledgerSwap(old, commit, o)) } });
     expect(out.state).toBe("merged");
     // Right after the ledger work, before the inbox step: read, swap, reply.
-    expect(f.events.filter((e) => RULING_EVENTS.includes(e))).toEqual(["readRulings", "ledgerSwap advanceRulingsCursor coordinator", "inboxComment", "inboxes"]);
+    expect(f.events.filter((e) => RULING_EVENTS.includes(e))).toEqual(["readRulings", "ledgerSwap recordRulings coordinator", "inboxComment", "inboxes"]);
     expect((await coordinatorRecord(f))?.rulings_cursor).toBe(s.thanks as string);
-    // The swap is fenced on the run's own record: one commit carries both.
-    const swap = sent.find((c) => c.message === "ledger: advanceRulingsCursor coordinator [skip ci]");
-    expect(Object.keys(swap?.writes ?? {}).sort()).toEqual([COORDINATOR_PATH, unitPath(U)].sort());
+    // The swap is fenced on the run's own record: one commit carries the cursor, the fence and the approval (Story 4.6).
+    const swap = sent.find((c) => c.message === "ledger: recordRulings coordinator [skip ci]");
+    expect(Object.keys(swap?.writes ?? {}).sort()).toEqual([COORDINATOR_PATH, unitPath(U), unitPath("story:1.1")].sort());
     expect(f.fake.control.ledgerLog().some((c) => c.message === swap?.message)).toBe(true);
     const comments = f.fake.control.inboxComments(inbox);
     expect(comments).toEqual([
@@ -3049,8 +3049,9 @@ describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
       "thanks",
       `🤖 Ruling acknowledged: \`/xarabot approve story:1.1\` from edanisko ([comment](https://github.com/fake/repo/issues/${inbox}#issuecomment-${s.ruling})).`,
     ]);
-    // No verb effect yet (Story 4.6): the record is still parked needs-approval.
-    expect((await f.ledger()).get("story:1.1")).toMatchObject({ state: "parked", park: { kind: "needs-approval" } });
+    // Story 4.6: the approval is applied in that swap, with the manifest's sha on main.
+    const manifestSha = (await f.input()).snapshot.manifests.find((m) => m.story_id === "1.1")?.sha;
+    expect((await f.ledger()).get("story:1.1")).toMatchObject({ state: "released", park: null, approval: { by: "edanisko", manifest_sha: manifestSha } });
 
     // The second run reads only the bot's own ack, which is no ruling: the cursor moves past it, and nothing is posted.
     reclaim(f);
@@ -3076,7 +3077,7 @@ describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
     expect(out.state).toBe("merged");
     expect(f.fake.control.inboxComments(s.inbox as number)).toHaveLength(2);
     expect((await coordinatorRecord(f))?.rulings_cursor).toBeNull();
-    expect(f.logs.some((l) => l.includes("rulings: advanceRulingsCursor refused or failed"))).toBe(true);
+    expect(f.logs.some((l) => l.includes("rulings: recordRulings refused or failed"))).toBe(true);
     expect(f.logs.some((l) => l.includes("rulings step: rulings_cursor not advanced"))).toBe(true);
   });
 
@@ -3101,5 +3102,296 @@ describe("createReconcileStep: rulings on the inboxes (Story 4.5)", () => {
     expect(f.events).not.toContain("readRulings");
     expect(f.fake.control.inboxComments(s.inbox as number)).toHaveLength(2);
     expect(f.logs.some((l) => l.includes("rulings step: no coordinator.json in the snapshot; skipped"))).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------ Story 4.6
+
+describe("createReconcileStep: what each verb does (Story 4.6)", () => {
+  const GATES = "_bmad-output/implementation-artifacts/retro-gates.yaml";
+  const A = "epic-1-retro-item-1-a";
+  const B = "epic-1-retro-item-2-b";
+  const RECORDED = "2026-10-20T00:00:00Z";
+  const itemLines = (id: string, text: string, blocking: boolean, status: string) => [
+    `      - id: "${id}"`,
+    `        text: "${text}"`,
+    "        route: maintainer",
+    `        blocking: ${blocking}`,
+    "        globs: []",
+    `        status: ${status}`,
+  ];
+  /** Epic 1: a checkpoint whose retro is rejected with no go; item A waiting and not blocking, item B open and blocking, both the Maintainer's. */
+  const gatesText = (checkpointGo = false) =>
+    [
+      "schema_version: 1",
+      "epics:",
+      '  "1":',
+      "    retro:",
+      "      verdict: rejected",
+      '      unit: "retro:1"',
+      `      recorded_at: "${RECORDED}"`,
+      "    items:",
+      ...itemLines(A, "Do A.", false, "waiting"),
+      ...itemLines(B, "Do B.", true, "open"),
+      ...(checkpointGo ? ["    checkpoint:", "      go:", '        by: "edanisko"', `        at: "${FORGE_NOW}"`, '        ruling: "77"'] : []),
+      "",
+    ].join("\n");
+  const world = (checkpointGo = false): MainOpts => ({ extra: { [GATES]: gatesText(checkpointGo), ".xarabot/epics.yaml": "version: 1\nepics:\n  1:\n    checkpoint: true\n" } });
+
+  type Ruled = { inbox: number; ids: string[] };
+  /** The Maintainer's inbox with `bodies` posted on it by `author`, after `records` are seeded. */
+  const ruling =
+    (bodies: readonly string[], out: Partial<Ruled>, records: (fake: FakeForge) => Promise<readonly UnitRecord[]> = async () => [], author = "edanisko") =>
+    async (fake: FakeForge): Promise<readonly UnitRecord[]> => {
+      const seeded = await records(fake);
+      const opened = await fake.forge.openInbox("edanisko", opts());
+      if (!opened.ok) throw new Error(opened.error.message);
+      out.inbox = opened.value.number;
+      out.ids = bodies.map((b) => fake.control.addInboxComment(opened.value.number, author, b));
+      return seeded;
+    };
+  const coordinatorRecord = async (f: Fake) => {
+    const s = await f.fake.forge.snapshot(opts());
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  };
+  const gatesOf = (f: Fake, i = 0) => {
+    const text = f.commits[i]?.files[GATES];
+    if (text === undefined) throw new Error("no retro-gates.yaml in the commit");
+    const parsed = parseRetroGates(GATES, text);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    return parsed.value.epics["1"];
+  };
+  const inboxBody = (f: Fake) => f.fake.control.inboxes().find((i) => i.owner === "edanisko")?.body ?? "";
+  const go = (id: string) => ({ by: "edanisko", at: FORGE_NOW, ruling: id });
+  const reclaim = (f: Fake) => f.fake.control.writeForeignLedger({ message: "next run [skip ci]", writes: tip([OWN]), deletes: [] });
+
+  test("go checkpoint: a pending go in coordinator.json; this run's PR sets epics.1.checkpoint.go; the item leaves the inbox", async () => {
+    const r: Partial<Ruled> = {};
+    const f = await setup(world(), ruling(["/xarabot go checkpoint:1"], r));
+    const id = r.ids?.[0] as string;
+    const out = await f.run();
+    expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    expect((await coordinatorRecord(f))?.pending_rulings).toEqual([{ verb: "go", unit: "checkpoint:1", ...go(id) }]);
+    expect(Object.keys(f.commits[0]?.files ?? {})).toEqual([GATES]);
+    expect(gatesOf(f)?.checkpoint).toEqual({ go: go(id) });
+    const pr = await prOnBranch(f, BRANCH);
+    expect(pr?.title).toBe("reconcile:5: retro gates for merged units");
+    expect(pr?.body).toContain(`- epics.1.checkpoint: go by edanisko (${id})`);
+    expect(inboxBody(f)).not.toContain("[checkpoint:1]");
+    expect(inboxBody(f)).toContain("[retro:1]");
+    expect(f.fake.control.inboxComments(r.inbox as number).at(-1)).toContain("Ruling acknowledged: `/xarabot go checkpoint:1`");
+  });
+
+  test("go on a rejected retro: the PR sets epics.1.retro.go, and the rejected-retro item leaves the inbox", async () => {
+    const r: Partial<Ruled> = {};
+    const f = await setup(world(), ruling(["/xarabot go retro:1"], r));
+    const id = r.ids?.[0] as string;
+    await f.run();
+    expect(gatesOf(f)?.retro).toEqual({ verdict: "rejected", unit: "retro:1", recorded_at: RECORDED, go: go(id) });
+    expect(inboxBody(f)).not.toContain("[retro:1]");
+    expect(inboxBody(f)).toContain(`[retro-item:${A}]`);
+  });
+
+  test("block and unblock: both pending; the PR flips each item's blocking", async () => {
+    const r: Partial<Ruled> = {};
+    const f = await setup(world(), ruling([`/xarabot block retro-item:${A}`, `/xarabot unblock retro-item:${B}`], r));
+    await f.run();
+    expect((await coordinatorRecord(f))?.pending_rulings?.map((e) => `${e.verb} ${e.unit}`)).toEqual([`block retro-item:${A}`, `unblock retro-item:${B}`]);
+    expect(gatesOf(f)?.items?.map((i) => [i.id, i.blocking])).toEqual([
+      [A, true],
+      [B, false],
+    ]);
+  });
+
+  test("done and defer: the PR sets each item's status, and both leave the inbox", async () => {
+    const r: Partial<Ruled> = {};
+    const f = await setup(world(), ruling([`/xarabot done retro-item:${A}`, `/xarabot defer retro-item:${B}`], r));
+    await f.run();
+    expect(gatesOf(f)?.items?.map((i) => [i.id, i.status])).toEqual([
+      [A, "done"],
+      [B, "deferred"],
+    ]);
+    expect(inboxBody(f)).not.toContain("[retro-item:");
+  });
+
+  test("dismiss: the dismissal is stored and the item is gone from the inbox; no PR, and the ledger records are unchanged", async () => {
+    const r: Partial<Ruled> = {};
+    const parked = rec({ unit: "story:1.1", state: "parked", globs: ["src/a/**"], heartbeat_at: FORGE_NOW, park: { kind: "blocked", reason: "intent-gap", inbox_owner: "edanisko", globs_held: [] } });
+    const f = await setup(world(), ruling([`/xarabot dismiss retro-item:${A}`], r, async () => [parked]));
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(f.commits).toEqual([]);
+    expect((await coordinatorRecord(f))?.dismissals).toEqual([{ unit: `retro-item:${A}`, subject: "Epic 1 · waiting: Do A.", since: RECORDED }]);
+    expect((await coordinatorRecord(f))?.pending_rulings).toBeUndefined();
+    expect(inboxBody(f)).not.toContain(`[retro-item:${A}]`);
+    expect(inboxBody(f)).toContain(`[retro-item:${B}]`);
+    expect((await f.ledger()).get("story:1.1")).toEqual(parked);
+  });
+
+  test("dismissal expiry: an item listed again as a new instance drops its dismissal and shows; an unlisted item keeps its own", async () => {
+    const stale = { unit: `retro-item:${A}`, subject: "Epic 1 · waiting: An older text.", since: RECORDED };
+    const unlisted = { unit: "retro-item:epic-1-retro-item-9-z", subject: "Epic 1 · open: Gone.", since: RECORDED };
+    const kept = { unit: `retro-item:${B}`, subject: "Epic 1 · open, blocking: Do B.", since: RECORDED };
+    const f = await setup({ ...world(), coordinator: { dismissals: [stale, unlisted, kept] } });
+    const out = await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(out.state).toBe("merged");
+    expect(swaps(f.events)).toContain("recordRulings coordinator");
+    expect((await coordinatorRecord(f))?.dismissals).toEqual([unlisted, kept]);
+    expect(inboxBody(f)).toContain(`[retro-item:${A}]`);
+    expect(inboxBody(f)).not.toContain(`[retro-item:${B}]`);
+  });
+
+  test("a pending ruling survives a run with no PR: the next run writes it again", async () => {
+    const r: Partial<Ruled> = {};
+    let calls = 0;
+    const f = await setup({ ...world(), committer: (c) => (calls++ === 0 ? err("transient", "disk full") : ok({ head_sha: f.head, base_sha: c.ontoSha })) }, ruling(["/xarabot go checkpoint:1"], r));
+    const id = r.ids?.[0] as string;
+    const first = await f.run();
+    expect(first.outcome).toBe("failed");
+    expect((await coordinatorRecord(f))?.pending_rulings).toEqual([{ verb: "go", unit: "checkpoint:1", ...go(id) }]);
+    reclaim(f);
+    const second = await f.run();
+    expect(second.state).toBe("merging");
+    expect(gatesOf(f, 1)?.checkpoint).toEqual({ go: go(id) });
+    // The ruling was answered once, by the first run.
+    expect(f.fake.control.inboxComments(r.inbox as number).filter((c) => c.startsWith("🤖"))).toHaveLength(1);
+  });
+
+  test("shown on main: the pending entry is dropped (a swap holding only recordRulings), and no PR is opened", async () => {
+    const pending = [{ verb: "go" as const, unit: "checkpoint:1", by: "edanisko", at: FORGE_NOW, ruling: "77" }];
+    const f = await setup({ ...world(true), coordinator: { pending_rulings: pending } });
+    const out = await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(out.state).toBe("merged");
+    expect(f.commits).toEqual([]);
+    expect(swaps(f.events)).toContain("recordRulings coordinator");
+    expect((await coordinatorRecord(f))?.pending_rulings).toBeUndefined();
+  });
+
+  test("a pending go seeded and no new comment: the item is not in the Maintainer's inbox", async () => {
+    const pending = [{ verb: "go" as const, unit: "checkpoint:1", by: "edanisko", at: FORGE_NOW, ruling: "79" }];
+    const f = await setup({ ...world(), coordinator: { pending_rulings: pending } });
+    await f.run();
+    const body = inboxBody(f);
+    expect(body).toContain("[retro:1]");
+    expect(body).not.toContain("[checkpoint:1]");
+    expect(gatesOf(f)?.checkpoint).toEqual({ go: { by: "edanisko", at: FORGE_NOW, ruling: "79" } });
+  });
+
+  test("the batch swap drops a seeded entry main already shows, alongside a new ruling", async () => {
+    const shown = { verb: "go" as const, unit: "checkpoint:1", by: "edanisko", at: FORGE_NOW, ruling: "77" };
+    const r: Partial<Ruled> = {};
+    const f = await setup({ ...world(true), coordinator: { pending_rulings: [shown] } }, ruling([`/xarabot block retro-item:${A}`], r));
+    await f.run();
+    const id = r.ids?.[0] as string;
+    expect((await coordinatorRecord(f))?.pending_rulings).toEqual([{ verb: "block", unit: `retro-item:${A}`, ...go(id) }]);
+    expect((await coordinatorRecord(f))?.rulings_cursor).toBe(id);
+  });
+
+  test("main's graph does not resolve: a pending ruling is kept, not dropped", async () => {
+    const pending = [{ verb: "block" as const, unit: `retro-item:${A}`, by: "edanisko", at: FORGE_NOW, ruling: "80" }];
+    const broken = { extra: { ...world().extra, ".xarabot/epics.yaml": "version: 1\nepics:\n  1:\n    depends_on: [2]\n  2:\n    depends_on: [1]\n" } };
+    const f = await setup({ ...broken, coordinator: { pending_rulings: pending } });
+    expect((await f.input()).snapshot.graph.ok).toBe(false);
+    await f.run({ forge: spied(f.fake, f.events, false, true) });
+    expect(swaps(f.events)).not.toContain("recordRulings coordinator");
+    expect((await coordinatorRecord(f))?.pending_rulings).toEqual(pending);
+  });
+
+  test("a pending ruling main does not show yet is written again even with no new comment", async () => {
+    const pending = [{ verb: "block" as const, unit: `retro-item:${A}`, by: "edanisko", at: FORGE_NOW, ruling: "78" }];
+    const f = await setup({ ...world(), coordinator: { pending_rulings: pending } });
+    const out = await f.run();
+    expect(out.state).toBe("merging");
+    expect(gatesOf(f)?.items?.find((i) => i.id === A)?.blocking).toBe(true);
+    expect((await coordinatorRecord(f))?.pending_rulings).toEqual(pending);
+  });
+
+  describe("release and rebuild", () => {
+    const parkedOn =
+      (out: { pr?: number }) =>
+      async (fake: FakeForge): Promise<readonly UnitRecord[]> => {
+        const pr = await prOn(fake, "story/1.1");
+        out.pr = pr.number;
+        return [
+          rec({
+            unit: "story:1.1",
+            state: "parked",
+            globs: ["src/a/**"],
+            generation: 2,
+            heartbeat_at: FORGE_NOW,
+            pr: pr.number,
+            pr_owner: "alice",
+            head_sha: pr.head,
+            reviewed_sha: pr.head,
+            passed_sha: pr.head,
+            builder_providers: ["anthropic"],
+            attempts: 2,
+            loopbacks: 1,
+            ci_fixes: 1,
+            park: { kind: "blocked", reason: "attempts-cap", inbox_owner: "alice", globs_held: [] },
+          }),
+        ];
+      };
+
+    test("release: released, counters 0, providers kept, the PR left open", async () => {
+      const r: Partial<Ruled> = {};
+      const p: { pr?: number } = {};
+      const f = await setup({}, ruling(["/xarabot release story:1.1"], r, parkedOn(p)));
+      await f.run();
+      expect((await f.ledger()).get("story:1.1")).toMatchObject({ state: "released", park: null, attempts: 0, loopbacks: 0, ci_fixes: 0, builder_providers: ["anthropic"], generation: 2 });
+      const prs = await f.fake.forge.listPrsByBranch("story/1.1", opts());
+      expect(prs.ok && prs.value.map((x) => x.state)).toEqual(["open"]);
+    });
+
+    test("rebuild: the PR is closed, then released with the SHAs and providers cleared; a second rebuild in the batch is refused", async () => {
+      const r: Partial<Ruled> = {};
+      const p: { pr?: number } = {};
+      const f = await setup({}, ruling(["/xarabot rebuild story:1.1", "/xarabot rebuild story:1.1"], r, parkedOn(p)));
+      await f.run();
+      expect((await f.ledger()).get("story:1.1")).toMatchObject({ state: "released", reviewed_sha: null, passed_sha: null, builder_providers: [], attempts: 0, pr: p.pr });
+      const prs = await f.fake.forge.listPrsByBranch("story/1.1", opts());
+      expect(prs.ok && prs.value.map((x) => x.state)).toEqual(["closed"]);
+      expect(f.fake.control.inboxComments(r.inbox as number).at(-1)).toContain("story:1.1 is released, not parked. Nothing changed.");
+    });
+
+    test("rebuild whose close fails: refused with the reason, the record unchanged", async () => {
+      const r: Partial<Ruled> = {};
+      const p: { pr?: number } = {};
+      const f = await setup({}, ruling(["/xarabot rebuild story:1.1"], r, parkedOn(p)));
+      const before = (await f.ledger()).get("story:1.1");
+      f.fake.control.injectError("closePr", { kind: "transient", message: "502" });
+      await f.run();
+      expect((await f.ledger()).get("story:1.1")).toEqual(before);
+      expect(f.fake.control.inboxComments(r.inbox as number).at(-1)).toContain(`closing PR #${p.pr} failed: transient: 502. Nothing changed.`);
+    });
+  });
+
+  test("a refused swap (another run moved the cursor): no ruling applied, no reply, the cursor kept", async () => {
+    const r: Partial<Ruled> = {};
+    const f = await setup(world(), ruling(["/xarabot go checkpoint:1"], r));
+    const spy = spied(f.fake, f.events, false, true);
+    let moved = false;
+    const out = await f.run({
+      forge: {
+        ...spy,
+        ledgerSwap: async (old, commit, o) => {
+          // Another run moves the cursor just before this run's rulings swap: the swap re-reads the tip and refuses.
+          if (!moved && commit.message.startsWith("ledger: recordRulings")) {
+            moved = true;
+            f.fake.control.writeForeignLedger({ message: "another run [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(claimRec({ rulings_cursor: "999" })) }, deletes: [] });
+          }
+          return spy.ledgerSwap(old, commit, o);
+        },
+      },
+    });
+    expect(out.outcome).toBe("progress");
+    expect((await coordinatorRecord(f))?.rulings_cursor).toBe("999");
+    expect((await coordinatorRecord(f))?.pending_rulings).toBeUndefined();
+    expect(f.commits).toEqual([]);
+    expect(f.fake.control.inboxComments(r.inbox as number)).toHaveLength(1);
+    expect(f.logs.some((l) => l.includes("rulings: recordRulings refused or failed"))).toBe(true);
   });
 });

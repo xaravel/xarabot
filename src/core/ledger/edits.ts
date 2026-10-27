@@ -4,6 +4,7 @@ import { err, ok, type Result } from "../result.ts";
 import { describeIssues, GitHubLogin, IsoDateTime, NonEmpty } from "../schemas/common.ts";
 import {
   CoordinatorRecordSchema,
+  DismissalSchema,
   GitSha,
   GRAPH_PSEUDO_GLOB,
   GraphHash,
@@ -12,12 +13,16 @@ import {
   PARK_TEXT_MAX,
   ParkReason,
   ParkSchema,
+  pendingKey,
+  PendingRulingSchema,
   planningKindOf,
   unitKind,
   unitPath,
   UnitRecordSchema,
   type CoordinatorRecord,
+  type Dismissal,
   type Park,
+  type PendingRuling,
   type UnitRecord,
   type UnitState,
 } from "../schemas/ledger.ts";
@@ -852,6 +857,8 @@ export type ApplyRulingParams = EditBase & {
   readonly ruling: Ruling;
   /** The approved manifest's SHA; required for `approve`. */
   readonly manifestSha?: string;
+  /** Who approved, for `approve`'s `approval.by` (Story 4.6: the ruling's author); default the writer's owner. */
+  readonly approver?: string;
 };
 
 /**
@@ -859,17 +866,25 @@ export type ApplyRulingParams = EditBase & {
  * comment rulings (4.6) or the Maintainer's `xarabot rule`. The record must be
  * `parked` at `generation`; `release` and `rebuild` zero the counters, and
  * `rebuild` also clears the providers, the reviewed, passed, enqueued and approved SHAs,
- * `approved_graph` and `retro_result`.
+ * `approved_graph` and `retro_result`. `approve` needs a `needs-approval`
+ * park and records `approval` = {`approver` (default the writer's owner),
+ * `manifestSha`}.
  */
 export function applyRuling(p: ApplyRulingParams): LedgerEdit {
   return makeEdit("applyRuling", p, (ctx) => {
     const ruling = check("applyRuling ruling", z.enum(["release", "rebuild", "approve"]), p.ruling);
     if (!ruling.ok) return ruling;
     let manifestSha: string | null = null;
+    let approver = ctx.by.owner;
     if (ruling.value === "approve") {
       const m = check("applyRuling manifestSha", GitSha, p.manifestSha);
       if (!m.ok) return m;
       manifestSha = m.value;
+      if (p.approver !== undefined) {
+        const a = check("applyRuling approver", GitHubLogin, p.approver);
+        if (!a.ok) return a;
+        approver = a.value;
+      }
     }
     const rec = requireRecord(ctx);
     if (!rec.ok) return rec;
@@ -902,7 +917,7 @@ export function applyRuling(p: ApplyRulingParams): LedgerEdit {
     if (rec.value.park?.kind !== "needs-approval") return pre(`${ctx.unit} is not parked needs-approval`);
     return to(
       "released",
-      stamp(ctx, rec.value, { ...base, approval: { by: ctx.by.owner, manifest_sha: manifestSha as string } }),
+      stamp(ctx, rec.value, { ...base, approval: { by: approver, manifest_sha: manifestSha as string } }),
     );
   });
 }
@@ -1064,6 +1079,37 @@ export function fenced(fence: LedgerEdit, edit: LedgerEdit): LedgerEdit {
   };
 }
 
+/** `commit`'s changes on top of `acc`'s: a later write or delete of a path wins. */
+function merged(acc: LedgerCommit, commit: LedgerCommit): LedgerCommit {
+  const writes: Record<string, string> = { ...acc.writes };
+  for (const path of commit.deletes) delete writes[path];
+  Object.assign(writes, commit.writes);
+  const deletes = [...new Set([...acc.deletes.filter((d) => !Object.hasOwn(commit.writes, d)), ...commit.deletes])];
+  return { message: acc.message, writes, deletes };
+}
+
+/**
+ * `edits` as one commit (Story 4.6): each applies, in order, to the files
+ * the earlier ones left; their writes and deletes merge, an edit that finds
+ * its target already held (`null`) adds nothing, and the first error is the
+ * result. The commit carries the first change's message; with no change at
+ * all, nothing is written.
+ */
+export function allOf(edits: readonly LedgerEdit[]): LedgerEdit {
+  return (files) => {
+    let current: LedgerFiles = files;
+    let acc: LedgerCommit | null = null;
+    for (const edit of edits) {
+      const r = edit(current);
+      if (!r.ok) return r;
+      if (r.value === null) continue;
+      current = applied(current, r.value);
+      acc = acc === null ? r.value : merged(acc, r.value);
+    }
+    return ok(acc);
+  };
+}
+
 // ---------------------------------------------------------------- coordinator.json
 
 /** A `coordinator.json` edit's writer and time. `now` is the forge's server time. */
@@ -1085,8 +1131,8 @@ function sameHolder(rec: CoordinatorRecord, by: LaneIdentity): boolean {
 
 const holderOf = (rec: CoordinatorRecord) => `${rec.owner}/${rec.host}/${rec.lane}`;
 
-/** An edit of `coordinator.json` by the coordinator lane: the record to write, or an error. */
-function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx: CoordinatorCtx) => Step<CoordinatorRecord>): LedgerEdit {
+/** An edit of `coordinator.json` by the coordinator lane: the record to write, `null` to write nothing, or an error. */
+function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx: CoordinatorCtx) => Step<CoordinatorRecord | null>): LedgerEdit {
   return (files) => {
     const ledger = parseLedger(files);
     if (!ledger.ok) return ledger;
@@ -1095,14 +1141,20 @@ function makeCoordinatorEdit(name: string, base: CoordinatorEditBase, body: (ctx
     if (params.value.by.lane !== "coordinator") return pre(`${name}: only the coordinator lane may write ${COORDINATOR_PATH}`);
     const next = body({ current: ledger.value.coordinator, by: params.value.by, now: params.value.now });
     if (!next.ok) return next;
+    if (next.value === null) return ok(null);
     const record = check(`${name} result`, CoordinatorRecordSchema, next.value);
     if (!record.ok) return record;
     return ok({ message: `ledger: ${name} coordinator [skip ci]`, writes: { [COORDINATOR_PATH]: serializeCoordinator(record.value) }, deletes: [] });
   };
 }
 
-/** The writer's record at `generation`, stamped `now`, keeping the current record's digest time and rulings cursor. */
+/**
+ * The writer's record at `generation`, stamped `now`, keeping the current
+ * record's digest time, rulings cursor, pending rulings and dismissals.
+ */
 function coordinatorStamp(ctx: CoordinatorCtx, generation: number): CoordinatorRecord {
+  const pending = ctx.current?.pending_rulings;
+  const dismissals = ctx.current?.dismissals;
   return {
     schema_version: LEDGER_SCHEMA_VERSION,
     owner: ctx.by.owner,
@@ -1112,6 +1164,8 @@ function coordinatorStamp(ctx: CoordinatorCtx, generation: number): CoordinatorR
     heartbeat_at: ctx.now,
     digest_posted_at: ctx.current?.digest_posted_at ?? null,
     rulings_cursor: ctx.current?.rulings_cursor ?? null,
+    ...(pending === undefined ? {} : { pending_rulings: pending }),
+    ...(dismissals === undefined ? {} : { dismissals }),
   };
 }
 
@@ -1194,8 +1248,9 @@ export type AdvanceRulingsCursorParams = CoordinatorEditBase & {
  * while the writer holds `coordinator.json` at `generation` and its cursor
  * is still `from`, keeping every other field. A cursor another run moved
  * (even to `to` itself) refuses, so two runs that read the same comments
- * never both answer them. Story 4.6 composes its ledger effects (approve,
- * release, rebuild) into the same fenced swap.
+ * never both answer them. Since Story 4.6 the rulings step writes
+ * `recordRulings`, which moves the cursor the same way alongside the
+ * batch's effects.
  */
 export function advanceRulingsCursor(p: AdvanceRulingsCursorParams): LedgerEdit {
   return makeCoordinatorEdit("advanceRulingsCursor", p, (ctx) => {
@@ -1215,6 +1270,103 @@ export function advanceRulingsCursor(p: AdvanceRulingsCursorParams): LedgerEdit 
       return pre(`${COORDINATOR_PATH}: rulings_cursor is ${JSON.stringify(rec.rulings_cursor)}, not ${JSON.stringify(from.value)}: another run read these rulings`);
     }
     return ok({ ...rec, schema_version: LEDGER_SCHEMA_VERSION, rulings_cursor: to.value });
+  });
+}
+
+/** `coordinator.json`'s two Story 4.6 lists. */
+export type RulingLists = { readonly pending: readonly PendingRuling[]; readonly dismissals: readonly Dismissal[] };
+
+/** Entries to drop from, or add to, the two lists; a list left out is empty. */
+export type RulingListsChange = { readonly pending?: readonly PendingRuling[]; readonly dismissals?: readonly Dismissal[] };
+
+const samePending = (a: PendingRuling, b: PendingRuling): boolean => a.verb === b.verb && a.unit === b.unit && a.by === b.by && a.at === b.at && a.ruling === b.ruling;
+const sameDismissal = (a: Dismissal, b: Dismissal): boolean => a.unit === b.unit && a.subject === b.subject && a.since === b.since;
+
+/**
+ * The lists with `drop`'s entries removed (each matched whole), then
+ * `add`'s appended in order: a pending entry replaces any entry with the
+ * same unit and family (`pendingKey`), a dismissal any dismissal of the
+ * same unit. Pure.
+ */
+export function changeRulingLists(current: RulingLists, drop: RulingListsChange = {}, add: RulingListsChange = {}): RulingLists {
+  let pending = current.pending.filter((e) => !(drop.pending ?? []).some((d) => samePending(d, e)));
+  let dismissals = current.dismissals.filter((e) => !(drop.dismissals ?? []).some((d) => sameDismissal(d, e)));
+  for (const e of add.pending ?? []) pending = [...pending.filter((x) => pendingKey(x) !== pendingKey(e)), e];
+  for (const d of add.dismissals ?? []) dismissals = [...dismissals.filter((x) => x.unit !== d.unit), d];
+  return { pending, dismissals };
+}
+
+/** A record's two lists, empty when absent. */
+export function rulingListsOf(rec: CoordinatorRecord | null): RulingLists {
+  return { pending: rec?.pending_rulings ?? [], dismissals: rec?.dismissals ?? [] };
+}
+
+export type RecordRulingsParams = CoordinatorEditBase & {
+  readonly generation: number;
+  /** Moves `rulings_cursor` from `from` (refused unless it is still there) to `to`; absent leaves it. */
+  readonly cursor?: { readonly from: string | null; readonly to: string };
+  /** Entries to drop, each matched whole. */
+  readonly drop?: RulingListsChange;
+  /** Entries to add, superseding as `changeRulingLists` does. */
+  readonly add?: RulingListsChange;
+};
+
+const PendingList = z.array(PendingRulingSchema);
+const DismissalList = z.array(DismissalSchema);
+
+/**
+ * The rulings' `coordinator.json` write (Story 4.6, AD-28): only while the
+ * writer holds `coordinator.json` at `generation`, it moves `rulings_cursor`
+ * when `cursor` is given (refused unless the cursor is still `from`), drops
+ * the listed entries and adds the new ones (`changeRulingLists`), keeping
+ * every other field. It writes nothing when nothing changes.
+ */
+export function recordRulings(p: RecordRulingsParams): LedgerEdit {
+  return makeCoordinatorEdit("recordRulings", p, (ctx) => {
+    const g = check("recordRulings generation", Generation, p.generation);
+    if (!g.ok) return g;
+    let to: string | null = null;
+    let from: string | null = null;
+    if (p.cursor !== undefined) {
+      const f = check("recordRulings cursor.from", NonEmpty.nullable(), p.cursor.from);
+      if (!f.ok) return f;
+      const t = check("recordRulings cursor.to", NonEmpty, p.cursor.to);
+      if (!t.ok) return t;
+      from = f.value;
+      to = t.value;
+    }
+    const lists: Record<string, readonly unknown[] | undefined> = {
+      "drop.pending": p.drop?.pending,
+      "drop.dismissals": p.drop?.dismissals,
+      "add.pending": p.add?.pending,
+      "add.dismissals": p.add?.dismissals,
+    };
+    for (const [label, list] of Object.entries(lists)) {
+      if (list === undefined) continue;
+      const c = check(`recordRulings ${label}`, label.endsWith("pending") ? PendingList : DismissalList, list);
+      if (!c.ok) return c;
+    }
+    const rec = ctx.current;
+    if (rec === null) return pre(`${COORDINATOR_PATH} is missing: the coordinator claim is lost`);
+    if (!sameHolder(rec, ctx.by)) return pre(`${COORDINATOR_PATH} is held by ${holderOf(rec)}, not the writer: the coordinator claim is lost`);
+    if (rec.generation !== g.value) {
+      return pre(`${COORDINATOR_PATH} is at generation ${rec.generation}, expected ${g.value}: the coordinator claim is lost`);
+    }
+    if (p.cursor !== undefined && rec.rulings_cursor !== from) {
+      return pre(`${COORDINATOR_PATH}: rulings_cursor is ${JSON.stringify(rec.rulings_cursor)}, not ${JSON.stringify(from)}: another run read these rulings`);
+    }
+    const before = rulingListsOf(rec);
+    const after = changeRulingLists(before, p.drop, p.add);
+    const cursor = to ?? rec.rulings_cursor;
+    if (cursor === rec.rulings_cursor && Bun.deepEquals(after, before, true)) return ok(null);
+    const { pending_rulings: _p, dismissals: _d, ...rest } = rec;
+    return ok({
+      ...rest,
+      schema_version: LEDGER_SCHEMA_VERSION,
+      rulings_cursor: cursor,
+      ...(after.pending.length === 0 ? {} : { pending_rulings: [...after.pending] }),
+      ...(after.dismissals.length === 0 ? {} : { dismissals: [...after.dismissals] }),
+    });
   });
 }
 

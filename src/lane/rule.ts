@@ -1,9 +1,13 @@
 import { applyRuling } from "../core/ledger/edits.ts";
 import { parseLedger } from "../core/ledger/codec.ts";
+import { assembleSnapshot } from "../core/next/snapshot.ts";
 import { err, ok, type Result } from "../core/result.ts";
+import { HOST_RULING_ID, judgeRulings, rulingsEdit, type RulingEffect } from "../core/rulings/effects.ts";
+import type { RulingVerb } from "../core/rulings/rulings.ts";
 import type { LaneIdentity, Park } from "../core/schemas/ledger.ts";
 import type { Forge } from "../ports/forge.ts";
 import { swapLedger, type Sleep } from "./ledger-cas.ts";
+import { readsPath } from "./session.ts";
 import { DEFAULT_CALL_TIMEOUT_MS } from "./stop.ts";
 
 /**
@@ -14,9 +18,16 @@ import { DEFAULT_CALL_TIMEOUT_MS } from "./stop.ts";
  * record's generation: the edit re-checks the state and generation on every
  * re-fetched tip, so a record that moved on is refused and nothing is written.
  * Each forge call and the swap has its own deadline.
+ *
+ * Story 4.6: every other verb (`applyHostVerb`) is judged as the Maintainer
+ * (`config.maintainer`) against one assembled snapshot, with the comment
+ * rulings' rules (`judgeRulings`, source `host`), and swaps the same
+ * `applyRuling` or `recordRulings` edit (`rulingsEdit`) without moving the
+ * rulings cursor. A pending entry from the host is the Maintainer's, at the
+ * snapshot's `now`, with `ruling` `xarabot-rule`.
  */
 
-/** The verbs a host ruling takes before Story 4.6. */
+/** The verbs a host ruling takes on Story 2.5b's path. */
 export type HostRuling = "release" | "rebuild";
 
 export type HostRulingParams = {
@@ -75,4 +86,84 @@ export async function applyHostRuling(p: HostRulingParams): Promise<Result<HostR
     return err("ledger", `applyRuling ${e.kind}${e.kind === "edit" ? ` ${e.edit}` : ""}: ${e.message}${closedNote}`);
   }
   return ok({ unit: p.unit, generation: rec.generation, park: rec.park, closedPr });
+}
+
+/** The verbs `applyHostVerb` takes: every ruling verb but Story 2.5b's two. */
+export type HostVerb = Exclude<RulingVerb, HostRuling>;
+
+export type HostVerbParams = {
+  readonly forge: Forge;
+  /** The writer of the edit: the repo's coordinator lane for the verbs that write `coordinator.json`. */
+  readonly identity: LaneIdentity;
+  /** The repo slug, for the snapshot's config. */
+  readonly repo: string;
+  readonly unit: string;
+  readonly verb: HostVerb;
+  /** The snapshot's and the swap's deadline; default 60 000 ms. */
+  readonly callTimeoutMs?: number;
+  readonly sleep?: Sleep;
+  readonly random?: () => number;
+};
+
+export type HostVerbReport = {
+  readonly unit: string;
+  readonly verb: HostVerb;
+  /** What the ruling wrote. */
+  readonly effect: RulingEffect;
+};
+
+/**
+ * A host ruling of any verb but `release` and `rebuild` (Story 4.6): one
+ * snapshot, assembled; the ruling judged as the Maintainer, so a refusal
+ * names the comment ruling's reason; then one swap of its edit. The edit
+ * re-checks its preconditions on every re-fetched tip.
+ */
+export async function applyHostVerb(p: HostVerbParams): Promise<Result<HostVerbReport, HostRulingErrorKind>> {
+  const timeout = p.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  const snap = await p.forge.snapshot({ signal: AbortSignal.timeout(timeout), read: readsPath });
+  if (!snap.ok) return err("forge", `snapshot ${snap.error.kind}: ${snap.error.message}`);
+  const s = snap.value;
+  const assembled = assembleSnapshot({
+    repo: p.repo,
+    now: s.now,
+    tree: [...s.main.tree],
+    files: { ...s.main.files },
+    main_sha: s.main.sha,
+    blob_shas: s.main.blob_shas,
+    ledger_tip: s.ledger.tip,
+    ledger_files: s.ledger.files,
+    prs: s.prs,
+    escalations: null,
+    lane: p.identity,
+    role: p.identity.lane === "coordinator" ? "coordinator" : "builder",
+  });
+  if (!assembled.ok) return err("ledger", `snapshot ${assembled.error.kind}: ${assembled.error.message}`);
+  const view = assembled.value;
+  const maintainer = view.config.maintainer;
+  const { judged } = judgeRulings(view, [{ author: maintainer, body: `/xarabot ${p.verb} ${p.unit}`, id: HOST_RULING_ID, created_at: view.now }], "host");
+  const one = judged[0];
+  if (one === undefined || one.judgement.kind === "ignored") return err("refused", `${p.verb} ${p.unit} is not a ruling`);
+  if (one.judgement.kind === "refused" || one.effect === null) {
+    return err("refused", one.judgement.kind === "refused" ? one.judgement.reason : `${p.verb} ${p.unit} has no effect`);
+  }
+  const effect = one.effect;
+  const swapped = await swapLedger({
+    forge: p.forge,
+    edit: rulingsEdit({
+      by: p.identity,
+      now: view.now,
+      coordinatorGeneration: view.ledger.coordinator?.generation ?? null,
+      cursor: null,
+      judged,
+      drops: { pending: [], dismissals: [] },
+    }),
+    signal: AbortSignal.timeout(timeout),
+    ...(p.sleep !== undefined ? { sleep: p.sleep } : {}),
+    ...(p.random !== undefined ? { random: p.random } : {}),
+  });
+  if (!swapped.ok) {
+    const e = swapped.error;
+    return err("ledger", `${effect.kind === "ledger" ? "applyRuling" : "recordRulings"} ${e.kind}${e.kind === "edit" ? ` ${e.edit}` : ""}: ${e.message}`);
+  }
+  return ok({ unit: p.unit, verb: p.verb, effect });
 }

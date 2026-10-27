@@ -172,7 +172,7 @@ export function serializeUnitRecord(r: UnitRecord): string {
   return text(ordered);
 }
 
-/** `coordinator.json` as file text, in the same style. */
+/** `coordinator.json` as file text, in the same style; `pending_rulings` and `dismissals` follow `rulings_cursor`, each only when non-empty. */
 export function serializeCoordinator(c: CoordinatorRecord): string {
   const ordered: CoordinatorRecord = {
     schema_version: c.schema_version,
@@ -183,6 +183,12 @@ export function serializeCoordinator(c: CoordinatorRecord): string {
     heartbeat_at: c.heartbeat_at,
     digest_posted_at: c.digest_posted_at,
     rulings_cursor: c.rulings_cursor,
+    ...(c.pending_rulings === undefined || c.pending_rulings.length === 0
+      ? {}
+      : { pending_rulings: c.pending_rulings.map((e) => ({ verb: e.verb, unit: e.unit, by: e.by, at: e.at, ruling: e.ruling })) }),
+    ...(c.dismissals === undefined || c.dismissals.length === 0
+      ? {}
+      : { dismissals: c.dismissals.map((d) => ({ unit: d.unit, subject: d.subject, since: d.since })) }),
   };
   return text(ordered);
 }

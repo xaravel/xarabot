@@ -1,26 +1,57 @@
 import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import type { Lane } from "../core/schemas/host.ts";
-import { isUnitId, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
+import { isUnitId, PENDING_RULING_VERBS, unitKind, type LaneIdentity } from "../core/schemas/ledger.ts";
 import type { Forge } from "../ports/forge.ts";
-import { applyHostRuling, type HostRuling } from "../lane/rule.ts";
+import { RULING_VERBS } from "../core/rulings/rulings.ts";
+import { applyHostRuling, applyHostVerb, type HostRuling, type HostVerb, type HostVerbReport } from "../lane/rule.ts";
 import { COORDINATOR_LANE } from "./lane-install.ts";
 import { githubForge } from "./lane-commands.ts";
 import { hostPaths, readHostConfig } from "./host-paths.ts";
 
 /**
- * `xarabot rule release|rebuild <unit-id> [--repo <owner>/<name>]` (Story
- * 2.5b): the Maintainer's host ruling on a `parked` unit, one fenced ledger
- * edit. The repo is `--repo`, or the only repo among `host.yaml`'s lanes. The
- * edit is written as `<lane owner>/<host_id>/<lane>`: the repo's coordinator
- * lane when the host has one, else its lowest-numbered `builder-<n>`. Other
- * verbs wait for Story 4.6's rulings and are refused before any file or forge
- * access.
+ * `xarabot rule <verb> <unit-id> [--repo <owner>/<name>]` (Stories 2.5b and
+ * 4.6): the Maintainer's host ruling, with the same edit as the comment
+ * ruling. `release` and `rebuild` keep Story 2.5b's path: one fenced ledger
+ * edit on a `parked` unit. Every other verb is judged as the Maintainer
+ * against one assembled snapshot (a refusal exits 1 with the reason) and
+ * swaps the same `applyRuling` or `recordRulings` edit, without moving the
+ * rulings cursor. The repo is `--repo`, or the only repo among `host.yaml`'s
+ * lanes. The edit is written as `<lane owner>/<host_id>/<lane>`: the repo's
+ * coordinator lane when the host has one, else its lowest-numbered
+ * `builder-<n>`. `go`, `block`, `unblock`, `done`, `defer` and `dismiss`
+ * write `coordinator.json`, so they need the repo's coordinator lane on the
+ * host. An unknown verb is refused before any file or forge access.
  */
 
-export const RULE_USAGE = "xarabot rule release|rebuild <unit-id> [--repo <owner>/<name>]";
+export const RULE_USAGE = `xarabot rule ${RULING_VERBS.join("|")} <unit-id> [--repo <owner>/<name>]`;
 
-const VERBS: readonly HostRuling[] = ["release", "rebuild"];
+const VERBS: readonly string[] = RULING_VERBS;
+/** Story 2.5b's verbs, on its own path. */
+const HOST_RULINGS: readonly HostRuling[] = ["release", "rebuild"];
+/** The verbs that write `coordinator.json`: only its coordinator lane may. */
+const COORDINATOR_VERBS: readonly string[] = [...PENDING_RULING_VERBS, "dismiss"];
+
 const BUILDER = /^builder-([1-9][0-9]*)$/;
+
+/** What a host verb did, as one line. */
+function reported(r: HostVerbReport): string {
+  const e = r.effect;
+  switch (e.kind) {
+    case "ledger":
+      // Only `approve` takes this path: `release` and `rebuild` keep Story 2.5b's.
+      switch (e.verb) {
+        case "approve":
+          return `approved ${r.unit} (manifest ${e.approval?.manifest_sha}): released`;
+        case "release":
+        case "rebuild":
+          return `${e.verb === "release" ? "released" : "rebuilt"} ${r.unit}`;
+      }
+    case "pending":
+      return `recorded ${e.entry.verb} ${r.unit} as pending: the next reconcile PR writes it to retro-gates.yaml`;
+    case "dismissal":
+      return `dismissed ${r.unit} from the inbox`;
+  }
+}
 
 export type RuleDeps = {
   readonly env: CredentialEnv;
@@ -58,9 +89,8 @@ export async function ruleCommand(args: readonly string[], deps: RuleDeps): Prom
 
   const [verb, unit, ...rest] = args;
   if (verb === undefined || verb.startsWith("-")) return fail(`usage: ${RULE_USAGE}`);
-  // Before any file or forge access: other verbs are Story 4.6's.
-  if (!(VERBS as readonly string[]).includes(verb)) return fail(`${verb}: not before Story 4.6`);
-  const ruling = verb as HostRuling;
+  // Before any file or forge access.
+  if (!VERBS.includes(verb)) return fail(`${verb} is not a verb; usage: ${RULE_USAGE}`);
   if (unit === undefined || !isUnitId(unit)) {
     return fail(`${unit === undefined ? "no unit id" : `${JSON.stringify(unit)} is not a unit id`}; usage: ${RULE_USAGE}`);
   }
@@ -92,6 +122,9 @@ export async function ruleCommand(args: readonly string[], deps: RuleDeps): Prom
   const writer = writerLane(host.value.lanes, repo);
   if (writer === null) return fail(`no coordinator or builder-<n> lane in ${paths.hostYaml} is for ${repo}`);
   const kind = unitKind(unit);
+  if (COORDINATOR_VERBS.includes(verb) && !writer.coordinator) {
+    return fail(`${verb} writes coordinator.json, so it is written as the repo's coordinator lane, and ${paths.hostYaml} has none for ${repo}`);
+  }
   // `next` counts coordinator PRs only on records whose lane is `coordinator`: a coordinator unit is ruled on as one.
   if (kind !== "story" && !writer.coordinator) {
     return fail(`${unit} is a ${kind ?? "unknown"} unit: a ruling on it is written as the coordinator lane, and ${paths.hostYaml} has none for ${repo}`);
@@ -100,6 +133,20 @@ export async function ruleCommand(args: readonly string[], deps: RuleDeps): Prom
 
   const made = await (deps.forge ?? ((l: Lane) => githubForge(deps.env, l)))(writer.lane);
   if (!made.ok) return fail(made.message);
+  if (!(HOST_RULINGS as readonly string[]).includes(verb)) {
+    const v = await applyHostVerb({
+      forge: made.forge,
+      identity,
+      repo,
+      unit,
+      verb: verb as HostVerb,
+      ...(deps.callTimeoutMs !== undefined ? { callTimeoutMs: deps.callTimeoutMs } : {}),
+    });
+    if (!v.ok) return fail(v.error.message);
+    out(reported(v.value));
+    return 0;
+  }
+  const ruling = verb as HostRuling;
   const r = await applyHostRuling({
     forge: made.forge,
     identity,

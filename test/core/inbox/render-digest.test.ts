@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { ageText, EMPTY_INBOX_BODY, renderDigest } from "../../../src/core/inbox/render-digest.ts";
+import { ageText, EMPTY_INBOX_BODY, inboxInstance, renderDigest } from "../../../src/core/inbox/render-digest.ts";
 import { FORGE_TEXT_LIMITS } from "../../../src/core/sanitize.ts";
-import type { Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
+import type { CoordinatorRecord, Dismissal, Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { Snapshot } from "../../../src/core/schemas/snapshot.ts";
 import { RETRO, snapshotOf, storyRec, type World } from "../next/fixtures.ts";
 
@@ -263,5 +263,60 @@ describe("ageText", () => {
     ["2026-10-23T00:00:00Z", "<1d"],
   ] as const)("since %s: %s", (since, want) => {
     expect(ageText("2026-10-22T10:10:00Z", since)).toBe(want);
+  });
+});
+
+describe("dismissals (Story 4.6)", () => {
+  const blocked = parked("2.1", { kind: "blocked", reason: "intent-gap", inbox_owner: "alice" });
+  const claim = (dismissals: readonly Dismissal[]): CoordinatorRecord => ({
+    schema_version: 6,
+    owner: "carol",
+    host: "33333333-3333-4333-8333-333333333333",
+    lane: "coordinator",
+    generation: 1,
+    heartbeat_at: DAY(0),
+    digest_posted_at: null,
+    rulings_cursor: null,
+    dismissals: [...dismissals],
+  });
+  const gates = { [RETRO]: RETRO_GATES };
+  const ITEM = "retro-item:epic-1-retro-item-1-fix-the-gate";
+
+  test("inboxInstance gives an item's text and start time as the digest shows them, or null when no inbox lists it", () => {
+    const snapshot = snapshotOf(world({ records: [blocked], files: gates }));
+    expect(inboxInstance(snapshot, "story:2.1")).toEqual({ subject: "blocked `intent-gap`", since: DAY(2) });
+    expect(inboxInstance(snapshot, ITEM)).toEqual({ subject: "Epic 1 · open, blocking: Fix the gate for bob,.", since: DAY(3) });
+    expect(inboxInstance(snapshot, "retro:1")).toEqual({ subject: "rejected, no go", since: DAY(3) });
+    expect(inboxInstance(snapshot, "story:2.2")).toBeNull();
+    expect(inboxInstance(snapshot, "retro-item:epic-1-retro-item-3-done")).toBeNull();
+  });
+
+  test("a dismissed item is left out of its owner's inbox, and an owner left with none gets no body", () => {
+    const base = world({ records: [blocked], files: gates });
+    const before = digest(base);
+    expect(itemLines(before)["alice"]).toHaveLength(1);
+    const snapshot = snapshotOf(base);
+    const d = digest({ ...base, coordinator: claim([{ unit: "story:2.1", ...(inboxInstance(snapshot, "story:2.1") as { subject: string; since: string }) }, { unit: ITEM, ...(inboxInstance(snapshot, ITEM) as { subject: string; since: string }) }]) });
+    expect(d.has("alice")).toBe(false);
+    const maintainer = itemLines(d)["edanisko"] ?? [];
+    expect(maintainer.some((l) => l.includes(ITEM))).toBe(false);
+    expect(maintainer.some((l) => l.includes("[retro:1]"))).toBe(true);
+    expect(d.get("edanisko")?.count).toBe((before.get("edanisko")?.count ?? 0) - 1);
+  });
+
+  test("the same unit as a new instance (another text or start time) lists again", () => {
+    const base = world({ records: [blocked], files: gates });
+    const otherText = digest({ ...base, coordinator: claim([{ unit: "story:2.1", subject: "blocked `other`", since: DAY(2) }]) });
+    expect(itemLines(otherText)["alice"]).toHaveLength(1);
+    const otherStart = digest({ ...base, coordinator: claim([{ unit: "story:2.1", subject: "blocked `intent-gap`", since: DAY(5) }]) });
+    expect(itemLines(otherStart)["alice"]).toHaveLength(1);
+  });
+
+  test("an undated item matches a dismissal with since null", () => {
+    const w = world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }] });
+    const snapshot = snapshotOf(w);
+    expect(inboxInstance(snapshot, "story:3.1")).toEqual({ subject: "Epic 3's heading has no manifest", since: null });
+    const d = digest({ ...w, coordinator: claim([{ unit: "story:3.1", subject: "Epic 3's heading has no manifest", since: null }]) });
+    expect((itemLines(d)["edanisko"] ?? []).some((l) => l.includes("story:3.1"))).toBe(false);
   });
 });

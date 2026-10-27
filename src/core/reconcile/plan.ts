@@ -1,7 +1,7 @@
 import { isDisposable, isStale, isUngatedRetro } from "../ledger/edits.ts";
 import { RETRO_ITEM_ID_PATTERN, RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
 import { approvalParkedAt, doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
-import { unitKind, type UnitRecord } from "../schemas/ledger.ts";
+import { unitKind, type PendingRuling, type UnitRecord } from "../schemas/ledger.ts";
 import type { PrState, Snapshot } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import { editRetroGates, type RetroGatesAddition, type RetroItemDone } from "./retro-gates-edit.ts";
@@ -93,9 +93,9 @@ export type StatusPlan =
   /** The new text, and one line per change. */
   | { readonly kind: "edit"; readonly changes: StatusChanges; readonly text: string; readonly summary: readonly string[] };
 
-/** The `retro-gates.yaml` write for merged retro (Story 2.9) and retro-item (Story 2.10) records. */
+/** The `retro-gates.yaml` write for merged retro (Story 2.9) and retro-item (Story 2.10) records, and pending rulings (Story 4.6). */
 export type RetroGatesPlan =
-  /** No merged retro result to record and no merged item to set `done`. */
+  /** No merged retro result to record, no merged item to set `done` and no pending ruling `main` does not show: nothing changes. */
   | { readonly kind: "none" }
   /** The new text, and one line per change. */
   | { readonly kind: "edit"; readonly text: string; readonly summary: readonly string[] }
@@ -156,7 +156,8 @@ export type ReconcilePlan = {
    * (the head the result was validated at), whose Epic has no `retro` entry
    * on `main`; then
    * `status: done` for the item of each `retro-item:<id>` record `merged` as
-   * of this run whose item is listed on `main` and not `done`.
+   * of this run whose item is listed on `main` and not `done`; then each
+   * pending ruling (Story 4.6) `main` does not show yet.
    */
   readonly retroGates: RetroGatesPlan;
   /** `merged` `retro:<N>` records with no `retro_result`, or whose PR the snapshot does not show merged at the record's `head_sha`: logged and skipped. */
@@ -309,11 +310,39 @@ function itemsDone(effective: Snapshot, unit: string): { readonly done: RetroIte
 }
 
 /**
+ * The `retro-gates.yaml` write over `retroGatesText` (`main`'s, `null` when
+ * absent) for `additions`, the items `done` and the `pending` rulings (Story
+ * 4.6): `none` when there is nothing to apply or the edit changes nothing
+ * (an empty summary).
+ */
+export function planRetroGates(
+  path: string,
+  retroGatesText: string | null,
+  additions: readonly RetroGatesAddition[],
+  done: readonly RetroItemDone[],
+  pending: readonly PendingRuling[],
+): RetroGatesPlan {
+  if (additions.length === 0 && done.length === 0 && pending.length === 0) return { kind: "none" };
+  const edited = editRetroGates(path, retroGatesText, additions, done, [], pending);
+  if (!edited.ok) return { kind: "invalid", message: edited.error.message };
+  if (edited.value.summary.length === 0) return { kind: "none" };
+  return { kind: "edit", text: edited.value.text, summary: edited.value.summary };
+}
+
+/**
  * The plan for `reconcile` unit `unit` from `snapshot`. `statusText` is
  * `sprint_status_path`'s text on the snapshot's `main`, and `retroGatesText`
  * `retro_gates_path`'s; each `null` when the file is absent.
+ * `pendingRulings` is the pending rulings list (Story 4.6), by default the snapshot
+ * `coordinator.json`'s.
  */
-export function planReconcile(snapshot: Snapshot, unit: string, statusText: string | null, retroGatesText: string | null = null): ReconcilePlan {
+export function planReconcile(
+  snapshot: Snapshot,
+  unit: string,
+  statusText: string | null,
+  retroGatesText: string | null = null,
+  pendingRulings: readonly PendingRuling[] = snapshot.ledger.coordinator?.pending_rulings ?? [],
+): ReconcilePlan {
   const others = snapshot.ledger.units.filter((r) => r.unit !== unit);
   const prOf = (r: UnitRecord) => snapshot.prs[r.unit];
   const isReconcile = (r: UnitRecord) => unitKind(r.unit) === "reconcile";
@@ -399,11 +428,7 @@ export function planReconcile(snapshot: Snapshot, unit: string, statusText: stri
   const retroGatesPath = snapshot.config.retro_gates_path;
   const { additions, without } = retroAdditions(effective, unit);
   const { done, missing: itemsMissing } = itemsDone(effective, unit);
-  let retroGates: RetroGatesPlan = { kind: "none" };
-  if (additions.length > 0 || done.length > 0) {
-    const edited = editRetroGates(retroGatesPath, retroGatesText, additions, done);
-    retroGates = edited.ok ? { kind: "edit", text: edited.value.text, summary: edited.value.summary } : { kind: "invalid", message: edited.error.message };
-  }
+  const retroGates = planRetroGates(retroGatesPath, retroGatesText, additions, done, pendingRulings);
 
   return {
     markMerged,

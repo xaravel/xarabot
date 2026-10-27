@@ -236,7 +236,57 @@ export const UnitRecordSchema = z
     path: ["park"],
   });
 
-/** `coordinator.json`. */
+/** The verbs whose ruling waits in `coordinator.json` until `main`'s `retro-gates.yaml` shows it (Story 4.6). */
+export const PENDING_RULING_VERBS = ["go", "block", "unblock", "done", "defer"] as const;
+export type PendingRulingVerb = (typeof PENDING_RULING_VERBS)[number];
+
+/**
+ * A `retro-gates.yaml` ruling acknowledged and not yet shown on `main`
+ * (Story 4.6, Maintainer decision 1): `go` on a `checkpoint:<N>` or
+ * `retro:<N>`, the other verbs on a `retro-item:<id>`. `by` ruled it at
+ * `at` (the comment's `created_at`, or the host's snapshot time), and
+ * `ruling` is the comment id (`xarabot-rule` from the host).
+ */
+export const PendingRulingSchema = z
+  .strictObject({
+    verb: z.enum(PENDING_RULING_VERBS),
+    unit: UnitId,
+    by: GitHubLogin,
+    at: IsoDateTime,
+    ruling: NonEmpty,
+  })
+  .refine((e) => {
+    const kind = unitKind(e.unit);
+    return e.verb === "go" ? kind === "checkpoint" || kind === "retro" : kind === "retro-item";
+  }, { message: "go takes a checkpoint:<N> or retro:<N> unit; block, unblock, done and defer take a retro-item:<id> unit", path: ["unit"] });
+
+/**
+ * A dismissed inbox item (Story 4.6, Maintainer decision 2): the unit and
+ * the instance dismissed, its inbox text (`subject`) and start time
+ * (`since`, `null` when nothing dates it).
+ */
+export const DismissalSchema = z.strictObject({
+  unit: UnitId,
+  subject: NonEmpty,
+  since: IsoDateTime.nullable(),
+});
+
+/** A pending ruling's family: a later ruling of one family replaces an earlier one on the same unit. */
+export function pendingFamily(verb: PendingRulingVerb): "go" | "block" | "done" {
+  if (verb === "go") return "go";
+  return verb === "block" || verb === "unblock" ? "block" : "done";
+}
+
+/** The supersede key of a pending ruling: its family and unit. */
+export function pendingKey(entry: { readonly verb: PendingRulingVerb; readonly unit: string }): string {
+  return `${pendingFamily(entry.verb)} ${entry.unit}`;
+}
+
+/**
+ * `coordinator.json`. `pending_rulings` and `dismissals` (Story 4.6, ledger
+ * version 6) are optional, and written only when non-empty, so an older
+ * record and its text are unchanged.
+ */
 export const CoordinatorRecordSchema = z.strictObject({
   schema_version: LedgerSchemaVersion,
   owner: GitHubLogin,
@@ -246,6 +296,8 @@ export const CoordinatorRecordSchema = z.strictObject({
   heartbeat_at: IsoDateTime,
   digest_posted_at: IsoDateTime.nullable(),
   rulings_cursor: NonEmpty.nullable(),
+  pending_rulings: z.array(PendingRulingSchema).optional(),
+  dismissals: z.array(DismissalSchema).optional(),
 });
 
 export type LaneIdentity = z.infer<typeof LaneIdentity>;
@@ -256,3 +308,5 @@ export type Park = z.infer<typeof ParkSchema>;
 export type Approval = z.infer<typeof ApprovalSchema>;
 export type UnitRecord = z.infer<typeof UnitRecordSchema>;
 export type CoordinatorRecord = z.infer<typeof CoordinatorRecordSchema>;
+export type PendingRuling = z.infer<typeof PendingRulingSchema>;
+export type Dismissal = z.infer<typeof DismissalSchema>;

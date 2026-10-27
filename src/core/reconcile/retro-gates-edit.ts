@@ -1,7 +1,9 @@
 import { emptyRetroGates, parseRetroGates } from "../graph/retro-gates.ts";
 import { normalizeGlob } from "../manifests/globs.ts";
 import { err, ok, type Result } from "../result.ts";
-import type { Go, RetroGates, RetroGatesEntry, RetroItem, RetroRecordResult } from "../schemas/retro-gates.ts";
+import { bodyOf } from "../rulings/rulings.ts";
+import type { PendingRuling } from "../schemas/ledger.ts";
+import { RETRO_ITEM_ID_PATTERN, type Go, type RetroGates, type RetroGatesEntry, type RetroItem, type RetroRecordResult } from "../schemas/retro-gates.ts";
 
 /**
  * `reconcile`'s write of retro verdicts and items to `retro-gates.yaml`
@@ -11,7 +13,8 @@ import type { Go, RetroGates, RetroGatesEntry, RetroItem, RetroRecordResult } fr
  * waiting` when `route: maintainer` (Story 4.3: a routed item waits on the
  * Maintainer's ruling); a merged retro item's unit sets its item `status:
  * done` (Story 2.10), and a ruled `done` or `defer` sets its item `done` or
- * `deferred` (Story 4.3; Story 4.6 parses the ruling); the file is then
+ * `deferred` (Story 4.3), and each pending ruling (Story 4.6: `go`,
+ * `block`, `unblock`, `done`, `defer`) is applied last; the file is then
  * rewritten whole, in a fixed, deterministic form. Comments in a hand-edited
  * file are not kept; its data, a hand-recorded `go` included, is. Pure.
  */
@@ -116,6 +119,58 @@ export function applyRetroResults(gates: RetroGates, additions: readonly RetroGa
 }
 
 /**
+ * `gates` with each pending ruling of `pending` applied in order (Story
+ * 4.6): `go checkpoint:<N>` sets `epics.<N>.checkpoint.go` = {by, at,
+ * ruling} unless one is there; `go retro:<N>` sets `epics.<N>.retro.go`
+ * only on a rejected retro with no go; `block` and `unblock` set a listed
+ * item's `blocking`; `done` and `defer` set its status through
+ * `applyItemStatuses`. A ruling that changes nothing (already there, or
+ * nothing to apply it to, such as an item no longer listed) is left out.
+ * One line per change is returned as the summary, so an entry is shown on
+ * a file when applying it alone gives none.
+ */
+export function applyPendingRulings(gates: RetroGates, pending: readonly PendingRuling[]): { readonly gates: RetroGates; readonly summary: string[] } {
+  let current = gates;
+  const summary: string[] = [];
+  for (const e of pending) {
+    const epics: Record<string, RetroGatesEntry> = { ...current.epics };
+    const go: Go = { by: e.by, at: e.at, ruling: e.ruling };
+    const body = bodyOf(e.unit);
+    if (e.verb === "go" && e.unit.startsWith("checkpoint:")) {
+      const entry = epics[body] ?? {};
+      if (entry.checkpoint !== undefined) continue;
+      epics[body] = { ...entry, checkpoint: { go } };
+      summary.push(`epics.${body}.checkpoint: go by ${e.by} (${e.ruling})`);
+    } else if (e.verb === "go" && e.unit.startsWith("retro:")) {
+      const entry = epics[body];
+      const retro = entry?.retro;
+      if (entry === undefined || retro === undefined || retro.verdict !== "rejected" || retro.go !== undefined) continue;
+      epics[body] = { ...entry, retro: { ...retro, go } };
+      summary.push(`epics.${body}.retro: go by ${e.by} (${e.ruling})`);
+    } else if (e.verb === "block" || e.verb === "unblock") {
+      const epic = RETRO_ITEM_ID_PATTERN.exec(body)?.[1];
+      const entry = epic === undefined ? undefined : epics[epic];
+      const items = entry?.items;
+      const blocking = e.verb === "block";
+      const i = items?.findIndex((x) => x.id === body) ?? -1;
+      const item = items?.[i];
+      if (entry === undefined || items === undefined || item === undefined || item.blocking === blocking) continue;
+      epics[epic as string] = { ...entry, items: items.map((x, j) => (j === i ? { ...x, blocking } : x)) };
+      summary.push(`epics.${epic as string}.items: ${body} blocking ${String(item.blocking)} -> ${String(blocking)}`);
+    } else if (e.verb === "done" || e.verb === "defer") {
+      const epic = RETRO_ITEM_ID_PATTERN.exec(body)?.[1];
+      if (epic === undefined) continue;
+      const ruled = applyItemStatuses(current, [{ epic: Number(epic), id: body, status: e.verb === "done" ? "done" : "deferred" }]);
+      current = ruled.gates;
+      summary.push(...ruled.summary);
+      continue;
+    } else continue;
+    current = { schema_version: current.schema_version, epics };
+  }
+  return { gates: current, summary };
+}
+
+/**
  * A YAML double-quoted scalar holding only printable ASCII: `"` and `\`
  * escaped, every other character outside U+0020–U+007E written as `\uXXXX`
  * (or `\UXXXXXXXX` past U+FFFF), so no line separator, control or other
@@ -178,7 +233,8 @@ export type RetroGatesEdit = { readonly text: string; readonly summary: readonly
 
 /**
  * The new `retro-gates.yaml` text for `additions`, then the items `done`
- * (Story 2.10), then the ruled item `statuses` (Story 4.3, applied last),
+ * (Story 2.10), then the ruled item `statuses` (Story 4.3), then the
+ * pending `rulings` (Story 4.6, `applyPendingRulings`, applied last),
  * over `text` (`null` when the file is absent, read as `{schema_version:
  * 1, epics: {}}`), or why it cannot be written: the current text does not
  * parse, or the new text does not parse back (`parseRetroGates`) to the
@@ -190,6 +246,7 @@ export function editRetroGates(
   additions: readonly RetroGatesAddition[],
   done: readonly RetroItemDone[] = [],
   statuses: readonly RetroItemStatusChange[] = [],
+  rulings: readonly PendingRuling[] = [],
 ): Result<RetroGatesEdit, "invalid"> {
   let current = emptyRetroGates();
   if (text !== null) {
@@ -200,8 +257,9 @@ export function editRetroGates(
   const added = applyRetroResults(current, additions);
   const finished = applyItemsDone(added.gates, done);
   const ruled = applyItemStatuses(finished.gates, statuses);
-  const gates = ruled.gates;
-  const summary = [...added.summary, ...finished.summary, ...ruled.summary];
+  const pending = applyPendingRulings(ruled.gates, rulings);
+  const gates = pending.gates;
+  const summary = [...added.summary, ...finished.summary, ...ruled.summary, ...pending.summary];
   const out = serializeRetroGates(gates);
   const back = parseRetroGates(path, out);
   if (!back.ok) return err("invalid", `the new text does not parse: ${back.error.message}`);

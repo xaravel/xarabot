@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { parseLedger } from "../../src/core/ledger/codec.ts";
-import type { Park, UnitRecord } from "../../src/core/schemas/ledger.ts";
-import { applyHostRuling, type HostRuling } from "../../src/lane/rule.ts";
-import { ALICE, BOB, rec, SHA_A, SHA_B, SHA_D, tip } from "../core/ledger/fixtures.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
+import { judgeRulings, rulingsEdit } from "../../src/core/rulings/effects.ts";
+import type { CoordinatorRecord, Park, PendingRuling, UnitRecord } from "../../src/core/schemas/ledger.ts";
+import { applyHostRuling, applyHostVerb, type HostRuling, type HostVerb } from "../../src/lane/rule.ts";
+import { ALICE, BOB, COORD, rec, SHA_A, SHA_B, SHA_D, tip } from "../core/ledger/fixtures.ts";
+import { input as worldInput, itemId, snapshotOf, storyRec, type World } from "../core/next/fixtures.ts";
 
 const U = "story:2.6";
 const NOW = "2026-10-24T12:00:00Z";
@@ -186,5 +188,132 @@ describe("applyHostRuling", () => {
     const r = await rule(fake, "release");
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.message).toBe("snapshot auth: bad token");
+  });
+});
+
+// ------------------------------------------------------------------ Story 4.6
+
+describe("applyHostVerb (Story 4.6)", () => {
+  const REPO = "xaravel/xarabot";
+  const ITEM_1 = `retro-item:${itemId(2, 1)}`;
+  const ITEM_2 = `retro-item:${itemId(2, 2)}`;
+  const needsApproval = storyRec("2.1", { state: "parked", park: { kind: "needs-approval", reason: null, inbox_owner: "alice", globs_held: [] } });
+  /** Epic 2's retro rejected with two Maintainer items; Epic 3 a checkpoint whose retro is accepted, its go waiting; Story 2.1 an Infrastructure Story parked needs-approval. */
+  const WORLD: World = {
+    epics: { 1: ["1"], 2: ["1", "2"], 3: ["1"] },
+    manifests: [{ id: "1.1" }, { id: "2.1", infra: true }, { id: "2.2" }, { id: "3.1" }],
+    epicsYaml: "version: 1\nepics:\n  3:\n    depends_on: [2]\n    checkpoint: true\n",
+    retro: { 2: "rejected", 3: "accepted" },
+    items: {
+      2: [
+        { seq: 1, blocking: false, status: "waiting", route: "maintainer" },
+        { seq: 2, blocking: true, status: "open", route: "maintainer" },
+      ],
+    },
+    records: [needsApproval],
+  };
+  const claim = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
+    schema_version: 6,
+    ...COORD,
+    lane: "coordinator",
+    generation: 1,
+    heartbeat_at: NOW,
+    digest_posted_at: null,
+    rulings_cursor: "41",
+    ...over,
+  });
+
+  async function hostWorld(coordinator: CoordinatorRecord | null = claim()): Promise<FakeForge> {
+    const fake = createFakeForge({ now: NOW, main: worldInput(WORLD).files });
+    fake.control.writeForeignLedger({ message: "seed [skip ci]", writes: tip([needsApproval], coordinator === null ? {} : { [COORDINATOR_PATH]: serializeCoordinator(coordinator) }), deletes: [] });
+    return fake;
+  }
+  async function coordinatorOf(fake: FakeForge): Promise<CoordinatorRecord | null> {
+    const s = await fake.forge.snapshot(opts());
+    if (!s.ok) throw new Error(s.error.message);
+    const l = parseLedger(s.value.ledger.files);
+    if (!l.ok) throw new Error(l.error.message);
+    return l.value.coordinator;
+  }
+  const host = (fake: FakeForge, verb: HostVerb, unit: string, identity = COORD) =>
+    applyHostVerb({ forge: fake.forge, identity, repo: REPO, unit, verb, sleep: async () => {}, random: () => 0 });
+  const pendingEntry = (verb: PendingRuling["verb"], unit: string): PendingRuling => ({ verb, unit, by: "edanisko", at: NOW, ruling: "xarabot-rule" });
+
+  test.each([
+    ["go", "checkpoint:3"],
+    ["go", "retro:2"],
+    ["block", ITEM_1],
+    ["unblock", ITEM_2],
+    ["done", ITEM_1],
+    ["defer", ITEM_2],
+  ] as const)("%s %s: the Maintainer's pending entry, at the snapshot's time, ruling xarabot-rule; the cursor kept", async (verb, unit) => {
+    const fake = await hostWorld();
+    const r = await host(fake, verb, unit);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.value.effect).toEqual({ kind: "pending", entry: pendingEntry(verb, unit) });
+    const c = await coordinatorOf(fake);
+    expect(c?.pending_rulings).toEqual([pendingEntry(verb, unit)]);
+    expect(c?.rulings_cursor).toBe("41");
+    expect(fake.control.ledgerLog().at(-1)?.message).toBe("ledger: recordRulings coordinator [skip ci]");
+  });
+
+  test("dismiss: the item's instance as the digest shows it, kept in coordinator.json", async () => {
+    const fake = await hostWorld();
+    const r = await host(fake, "dismiss", "checkpoint:3");
+    expect(r.ok).toBe(true);
+    expect((await coordinatorOf(fake))?.dismissals).toEqual([{ unit: "checkpoint:3", subject: "Epic 3's retro is recorded (accepted)", since: "2026-10-20T00:00:00Z" }]);
+  });
+
+  test("approve: released with approval {Maintainer, manifest sha}; coordinator.json untouched, so a builder lane may write it", async () => {
+    const fake = await hostWorld();
+    const before = await coordinatorOf(fake);
+    const r = await host(fake, "approve", "story:2.1", ALICE);
+    expect(r.ok).toBe(true);
+    const snap = await fake.forge.snapshot({ ...opts(), read: () => true });
+    if (!snap.ok) throw new Error(snap.error.message);
+    const sha = snap.value.main.blob_shas["stories/2.1.md"];
+    expect(await record(fake, "story:2.1")).toMatchObject({ state: "released", park: null, approval: { by: "edanisko", manifest_sha: sha }, owner: "alice", lane: "builder-1" });
+    expect(await coordinatorOf(fake)).toEqual(before);
+  });
+
+  test("the same edit as the comment ruling: the host's coordinator.json equals the comment path's with the host's by, at and ruling", async () => {
+    const fake = await hostWorld();
+    expect((await host(fake, "go", "checkpoint:3")).ok).toBe(true);
+    const viaHost = await coordinatorOf(fake);
+    const snapshot = snapshotOf({ ...WORLD, coordinator: claim() });
+    const { judged } = judgeRulings(snapshot, [{ author: "edanisko", body: "/xarabot go checkpoint:3", id: "xarabot-rule", created_at: NOW }]);
+    const files = tip([needsApproval], { [COORDINATOR_PATH]: serializeCoordinator(claim()) });
+    const viaComment = rulingsEdit({ by: COORD, now: NOW, coordinatorGeneration: 1, cursor: null, judged, drops: { pending: [], dismissals: [] } })(files);
+    expect(viaComment.ok && viaComment.value?.writes[COORDINATOR_PATH]).toBe(serializeCoordinator(viaHost as CoordinatorRecord));
+  });
+
+  test.each([
+    ["go", "retro:3", "retro:3's verdict is accepted, not rejected"],
+    ["go", "checkpoint:2", "Epic 2 is not a checkpoint"],
+    ["approve", "story:2.2", "story:2.2 has no ledger record"],
+    ["block", ITEM_2, `${ITEM_2} is already blocking`],
+    ["dismiss", "story:1.1", "no inbox lists story:1.1"],
+  ] as const)("%s %s is refused with the comment ruling's reason; nothing written", async (verb, unit, reason) => {
+    const fake = await hostWorld();
+    const before = fake.control.ledgerLog().length;
+    expect(await host(fake, verb, unit)).toEqual({ ok: false, error: { kind: "refused", message: reason } });
+    expect(fake.control.ledgerLog()).toHaveLength(before);
+  });
+
+  test("a gates verb with no coordinator.json, or held by another lane, is a ledger refusal", async () => {
+    const missing = await hostWorld(null);
+    const r = await host(missing, "go", "checkpoint:3");
+    expect(r.ok ? "ok" : r.error.kind).toBe("ledger");
+    if (!r.ok) expect(r.error.message).toContain("coordinator.json is missing");
+    const other = await hostWorld(claim({ owner: "dave", host: "44444444-4444-4444-8444-444444444444" }));
+    const o = await host(other, "go", "checkpoint:3");
+    expect(o.ok ? "ok" : o.error.kind).toBe("ledger");
+    if (!o.ok) expect(o.error.message).toContain("not the writer");
+  });
+
+  test("a second go on the same checkpoint is refused: the pending go counts", async () => {
+    const fake = await hostWorld();
+    expect((await host(fake, "go", "checkpoint:3")).ok).toBe(true);
+    expect(await host(fake, "go", "checkpoint:3")).toEqual({ ok: false, error: { kind: "refused", message: "checkpoint:3 already has a go" } });
   });
 });

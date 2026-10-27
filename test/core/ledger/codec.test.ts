@@ -66,6 +66,44 @@ describe("serializeCoordinator", () => {
   });
 });
 
+describe("coordinator.json's pending rulings and dismissals (Story 4.6, ledger v6)", () => {
+  const PENDING = [{ verb: "go" as const, unit: "checkpoint:4", by: "edanisko", at: T0, ruling: "1234567" }];
+  const DISMISSALS = [{ unit: "story:2.1", subject: "blocked `intent-gap`", since: T0 }, { unit: "story:7.1", subject: "Epic 7's heading has no manifest", since: null }];
+
+  test("written after rulings_cursor, in key order, and round-tripped byte for byte", () => {
+    const c = { ...COORDINATOR, schema_version: 6 as const, pending_rulings: PENDING, dismissals: DISMISSALS };
+    const text = serializeCoordinator(c);
+    expect(Object.keys(JSON.parse(text))).toEqual([...Object.keys(COORDINATOR), "pending_rulings", "dismissals"]);
+    expect(Object.keys(JSON.parse(text).pending_rulings[0])).toEqual(["verb", "unit", "by", "at", "ruling"]);
+    expect(Object.keys(JSON.parse(text).dismissals[0])).toEqual(["unit", "subject", "since"]);
+    const parsed = parseLedger({ [COORDINATOR_PATH]: text });
+    if (!parsed.ok || parsed.value.coordinator === null) throw new Error("expected a coordinator");
+    expect(parsed.value.coordinator).toEqual(c);
+    expect(serializeCoordinator(parsed.value.coordinator)).toBe(text);
+  });
+
+  test("empty or absent lists are not written: an older record's text is unchanged", () => {
+    const old = serializeCoordinator(COORDINATOR);
+    expect(old).not.toContain("pending_rulings");
+    expect(serializeCoordinator({ ...COORDINATOR, pending_rulings: [], dismissals: [] })).toBe(old);
+    const parsed = parseLedger({ [COORDINATOR_PATH]: old });
+    if (!parsed.ok || parsed.value.coordinator === null) throw new Error("expected a coordinator");
+    expect(serializeCoordinator(parsed.value.coordinator)).toBe(old);
+  });
+
+  test.each([
+    ["a go on a retro item", { pending_rulings: [{ ...PENDING[0], unit: "retro-item:epic-2-retro-item-1-a" }] }],
+    ["a done on a checkpoint", { pending_rulings: [{ ...PENDING[0], verb: "done" }] }],
+    ["an unknown verb", { pending_rulings: [{ ...PENDING[0], verb: "approve" }] }],
+    ["a dismissal with no subject", { dismissals: [{ unit: "story:2.1", subject: "", since: null }] }],
+    ["a dismissal of a non-unit", { dismissals: [{ unit: "1.1-d1", subject: "x", since: null }] }],
+  ])("%s is invalid", (_name, extra) => {
+    const text = JSON.stringify({ ...COORDINATOR, ...extra });
+    const r = parseLedger({ [COORDINATOR_PATH]: text });
+    expect(r.ok ? "ok" : r.error.kind).toBe("invalid");
+  });
+});
+
 describe("parseLedger", () => {
   test("round-trips units and the coordinator, ignoring other paths", () => {
     const a = rec();

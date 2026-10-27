@@ -740,3 +740,53 @@ describe("planReconcile: retro items done (Story 2.10)", () => {
     expect(statusOf(p)).toBe("done");
   });
 });
+
+describe("planReconcile: pending rulings (Story 4.6)", () => {
+  const X = "epic-2-retro-item-1-x";
+  const GATES = ["schema_version: 1", "epics:", '  "2":', "    retro:", "      verdict: rejected", '      unit: "retro:2"', "      recorded_at: 2026-10-20T00:00:00Z", "    items:", `      - id: ${X}`, "        text: Fix x", "        route: maintainer", "        blocking: false", "        globs: []", "        status: waiting", ""].join("\n");
+  const at = "2026-10-22T09:00:00Z";
+  const BLOCK = { verb: "block" as const, unit: `retro-item:${X}`, by: "edanisko", at, ruling: "5" };
+  const GO = { verb: "go" as const, unit: "retro:2", by: "edanisko", at, ruling: "6" };
+  const claim = (pending: readonly (typeof BLOCK | typeof GO)[]) => ({
+    schema_version: 6 as const,
+    owner: COORD.owner,
+    host: COORD.host,
+    lane: "coordinator" as const,
+    generation: 1,
+    heartbeat_at: NOW,
+    digest_posted_at: null,
+    rulings_cursor: null,
+    pending_rulings: [...pending],
+  });
+  const planWith = (w: Partial<World>, pending?: Parameters<typeof planReconcile>[4]) => {
+    const full = world({ files: { [RETRO]: GATES }, ...w });
+    const files = input(full).files;
+    const text = (p: string) => (Object.hasOwn(files, p) ? (files[p] as string) : null);
+    return planReconcile(snapshotOf(full), U, text(STATUS), text(RETRO), pending);
+  };
+
+  test("only pending rulings, from the snapshot's coordinator.json by default: an edit carrying each, in order", () => {
+    const p = planWith({ coordinator: claim([BLOCK, GO]) });
+    if (p.retroGates.kind !== "edit") throw new Error(p.retroGates.kind);
+    expect(p.retroGates.summary).toEqual([`epics.2.items: ${X} blocking false -> true`, "epics.2.retro: go by edanisko (6)"]);
+    const parsed = parseRetroGates(RETRO, p.retroGates.text);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.epics["2"]?.retro?.go).toEqual({ by: "edanisko", at, ruling: "6" });
+    expect(parsed.value.epics["2"]?.items?.[0]?.blocking).toBe(true);
+  });
+
+  test("a pending list passed in replaces the snapshot's", () => {
+    const p = planWith({ coordinator: claim([BLOCK]) }, [GO]);
+    expect(p.retroGates.kind === "edit" ? p.retroGates.summary : p.retroGates.kind).toEqual(["epics.2.retro: go by edanisko (6)"]);
+  });
+
+  test("only rulings main already shows: none", () => {
+    const shown = GATES.replace("blocking: false", "blocking: true");
+    expect(planWith({ files: { [RETRO]: shown }, coordinator: claim([BLOCK]) }).retroGates).toEqual({ kind: "none" });
+    expect(planWith({}, []).retroGates).toEqual({ kind: "none" });
+  });
+
+  test("a ruling with nothing to apply to (the file absent) changes nothing: none", () => {
+    expect(planWith({ files: { [RETRO]: null }, coordinator: claim([BLOCK]) }).retroGates).toEqual({ kind: "none" });
+  });
+});
