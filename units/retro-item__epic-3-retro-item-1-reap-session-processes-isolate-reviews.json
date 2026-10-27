@@ -20,7 +20,7 @@
     "test/sandbox/macos.test.ts",
     "test/sandbox/vendor-home.test.ts"
   ],
-  "heartbeat_at": "2026-10-27T02:41:48.236Z",
+  "heartbeat_at": "2026-10-27T02:46:38.577Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "cfdd7ea9cfc655b286f4ef364d0ec04f8f230225",
@@ -31,7 +31,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
