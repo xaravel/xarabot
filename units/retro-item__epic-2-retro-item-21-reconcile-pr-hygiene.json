@@ -18,7 +18,7 @@
     "test/ports/forge.test.ts",
     "test/support/live-github.ts"
   ],
-  "heartbeat_at": "2026-10-27T03:41:25.171Z",
+  "heartbeat_at": "2026-10-27T03:41:30.653Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "44c18a409c5a3d372320db75c4a53fbd0ebfab76",
