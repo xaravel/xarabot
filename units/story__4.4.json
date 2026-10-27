@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "story:4.4",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -18,7 +18,7 @@
     "test/core/reconcile/**",
     "test/lane/**"
   ],
-  "heartbeat_at": "2026-10-27T01:38:38.785Z",
+  "heartbeat_at": "2026-10-27T01:38:48.672Z",
   "pr": 242,
   "pr_owner": "edanisko",
   "base_sha": "d98a8a94a18c0c3286244bc0650ef7d117894a5a",
@@ -32,7 +32,22 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-4-4-checkpoints.md",
+      "src/core/inbox/render-digest.ts",
+      "src/core/next/coordinator.ts",
+      "src/core/next/epic-gates.ts",
+      "src/core/next/next.ts",
+      "src/core/next/reasons.ts",
+      "test/core/inbox/render-digest.test.ts",
+      "test/core/next/checkpoints.test.ts",
+      "test/core/next/fixtures.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 1,
   "ci_fixes": 0,
