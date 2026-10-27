@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "story:4.6",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -28,7 +28,7 @@
     "test/core/rulings/**",
     "test/lane/**"
   ],
-  "heartbeat_at": "2026-10-27T04:56:11.298Z",
+  "heartbeat_at": "2026-10-27T04:56:21.183Z",
   "pr": 258,
   "pr_owner": "edanisko",
   "base_sha": "2b8027d808d0269ed905eda7b2994f5a212a48eb",
@@ -42,7 +42,39 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-4-6-rulings-what-each-verb-does.md",
+      "src/cli/rule.ts",
+      "src/core/inbox/render-digest.ts",
+      "src/core/ledger/codec.ts",
+      "src/core/ledger/edits.ts",
+      "src/core/reconcile/plan.ts",
+      "src/core/reconcile/retro-gates-edit.ts",
+      "src/core/rulings/effects.ts",
+      "src/core/rulings/rulings.ts",
+      "src/core/schemas/ledger.ts",
+      "src/lane/reconcile-step.ts",
+      "src/lane/rule.ts",
+      "src/lane/rulings-step.ts",
+      "test/cli/main.test.ts",
+      "test/cli/rule.test.ts",
+      "test/core/inbox/render-digest.test.ts",
+      "test/core/lane/write-check.test.ts",
+      "test/core/ledger/codec.test.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/core/reconcile/plan.test.ts",
+      "test/core/reconcile/retro-gates-edit.test.ts",
+      "test/core/rulings/effects.test.ts",
+      "test/core/rulings/rulings.test.ts",
+      "test/lane/reconcile-step.test.ts",
+      "test/lane/rule.test.ts",
+      "test/lane/rulings-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
