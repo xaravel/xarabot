@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-2-retro-item-37-delete-only-the-runners-branches",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -23,7 +23,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/ports/forge.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T23:53:18.368Z",
+  "heartbeat_at": "2026-10-29T23:56:02.025Z",
   "pr": 273,
   "pr_owner": "edanisko",
   "base_sha": "7c3f9cc02eb6b16abeb6fbd8295d9f8309473b50",
