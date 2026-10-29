@@ -1,20 +1,20 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-15-decide-an-epics-questions-before-it-starts",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "docs/maintainer/self-host.md",
     "src/core/prompt/build-prompt.ts",
     "src/core/prompt/template.ts",
     "src/lane/planning-step.ts",
-    "test/core/prompt/**",
+    "test/core/prompt/build-prompt.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:08:24.174Z",
+  "heartbeat_at": "2026-10-29T18:09:58.103Z",
   "pr": 263,
   "pr_owner": "edanisko",
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
@@ -22,25 +22,13 @@
   "reviewed_sha": "ad2399e6ca5ce92ff7507627041f77b4da78a535",
   "passed_sha": "ad2399e6ca5ce92ff7507627041f77b4da78a535",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "ad2399e6ca5ce92ff7507627041f77b4da78a535",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "docs/maintainer/self-host.md",
-      "src/core/prompt/build-prompt.ts",
-      "src/core/prompt/template.ts",
-      "src/lane/planning-step.ts",
-      "test/core/prompt/build-prompt.test.ts",
-      "test/lane/planning-step.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
