@@ -424,6 +424,14 @@ describe("planning prompt: status", () => {
   });
 });
 
+/** The globs-cover-tests-and-wiring rule's text (Epic 3 retro item 14). */
+const COVERAGE_HEAD = "name, beside each `src/` path, that path's tests: `src/<p>.ts` with `test/<p>.test.ts`, and `src/<dir>/**` with `test/<dir>/**`.";
+const COVERAGE_WIRING = [
+  "- `src/ports/forge.ts` needs `test/ports/forge.test.ts`, `test/contracts/forge.contract.ts` and `src/adapters/forge/**`.",
+  "- `src/ports/<x>.ts` needs `test/ports/<x>.test.ts`, and `test/contracts/<x>.contract.ts` when that file exists.",
+  "- a new `src/lane/<x>-step.ts`, which `lane run` must wire in, needs `src/cli/lane-run.ts` and `test/cli/lane-run.test.ts`.",
+].join("\n");
+
 describe("planning prompt: open design questions before a first compile (Epic 3 retro item 15)", () => {
   const p = planning({ unit: FIRST_UNIT });
   const questions = p.slice(p.indexOf("# Open design questions"), p.indexOf("# Rules"));
@@ -479,6 +487,13 @@ describe("planning prompt: graph", () => {
     expect(p).toContain("write `stories/<id>.md`");
     for (const key of ["story_id", "epic", "sprint_key", "title", "globs", "depends_on"]) expect(p).toContain(`- \`${key}\`:`);
     expect(p).toContain("an earlier Story in the same Epic, or a Story in an Epic this Epic depends on");
+  });
+  test("states the globs-cover-tests-and-wiring rule for the manifests it writes, with each wiring pair (Epic 3 retro item 14)", () => {
+    expect(p).toContain(`A manifest's \`globs\`, when it lists them, ${COVERAGE_HEAD}`);
+    expect(p).toContain("They also name the wiring files each of these kinds of change needs, with the tests of each `src/` file among them:");
+    expect(p).toContain(COVERAGE_WIRING);
+    expect(p.indexOf(COVERAGE_HEAD)).toBeGreaterThan(p.indexOf("- `depends_on`:"));
+    expect(p.indexOf(COVERAGE_HEAD)).toBeLessThan(p.indexOf("Besides those manifests"));
   });
   test("a path_key config asks for the key, naming its values", () => {
     const q = planning({ unit: { ...GRAPH_UNIT, path_key: { key: "area", values: ["core", "lane"] } } });
@@ -634,6 +649,11 @@ describe("retro prompt", () => {
     for (const field of ["`verdict`", "`items`", "`id`", "`text`", "`blocking`", "`route`", "`globs`", "`denied_actions`"]) expect(p).toContain(field);
     expect(p).toContain("`epic-2-retro-item-<seq>-<slug>`");
     expect(p).toContain("the Standing Authority file, the repository's Protected Paths");
+  });
+  test("holds a lane item's globs to the globs-cover-tests-and-wiring rule (Epic 3 retro item 14)", () => {
+    const p = retro();
+    expect(p).toContain(`A \`lane\` item's \`globs\` ${COVERAGE_HEAD}`);
+    expect(p).toContain(COVERAGE_WIRING);
   });
   test("task, rules, sections, then the result step with RetroResultSchema's JSON Schema last", () => {
     const p = retro({ sections: [{ name: "b.md", text: "B section." }, { name: "a.md", text: "A section." }] });

@@ -95,7 +95,7 @@ const RECENT = coord("reconcile:4", { state: "merged", heartbeat_at: FORGE_NOW }
 
 type Item = { id: string; text: string; route: "lane" | "maintainer"; blocking: boolean; globs: string[] };
 const ITEMS: Item[] = [
-  { id: A, text: "Wire it", route: "lane", blocking: true, globs: ["src/x/**"] },
+  { id: A, text: "Wire it", route: "lane", blocking: true, globs: ["src/x/**", "test/x/**"] },
   { id: B, text: "Ask the Maintainer", route: "maintainer", blocking: false, globs: [] },
 ];
 
@@ -407,7 +407,7 @@ describe("retro PR text", () => {
     const t = retroPrText(U, { verdict: "accepted-with-open-items", items: [{ ...ITEMS[0] as Item, text: "Wire @someone sekrit" }, ITEMS[1] as Item], denied_actions: ["git push"] }, ["sekrit"]);
     expect(t.title).toBe("retro:2: Epic 2 retrospective (accepted-with-open-items)");
     expect(t.body.startsWith("🤖 retro:2: written by a `bmad-retrospective -H 2` session.")).toBe(true);
-    expect(t.body).toContain(`- \`${A}\` (lane, blocking; \`src/x/**\`): Wire someone [REDACTED]`);
+    expect(t.body).toContain(`- \`${A}\` (lane, blocking; \`src/x/**\`, \`test/x/**\`): Wire someone [REDACTED]`);
     expect(t.body).toContain(`- \`${B}\` (maintainer, not blocking; no globs): Ask the Maintainer`);
     expect(t.body).toContain("Denied actions:\n- git push");
     expect(t.message.startsWith(`${t.title}\n\nAction items:\n`)).toBe(true);
@@ -551,12 +551,12 @@ describe("createRetroStep: a valid result", () => {
   });
 
   test("each item's globs are stored normalized, on the record and in the PR text", async () => {
-    const raw = [{ ...(ITEMS[0] as Item), globs: ["./src/x/**", "././lib/*.ts"] }, ITEMS[1] as Item];
+    const raw = [{ ...(ITEMS[0] as Item), globs: ["./src/x/**", "././lib/*.ts", "./test/x/**"] }, ITEMS[1] as Item];
     const h = harness({ behaviors: [writes(retroResult({ items: raw }))] });
     await h.run();
-    expect((await h.ledger()).get(U)?.retro_result?.items[0]?.globs).toEqual(["src/x/**", "lib/*.ts"]);
+    expect((await h.ledger()).get(U)?.retro_result?.items[0]?.globs).toEqual(["src/x/**", "lib/*.ts", "test/x/**"]);
     const pr = await prOnBranch(h, BRANCH);
-    expect(pr?.body).toContain("`src/x/**`, `lib/*.ts`");
+    expect(pr?.body).toContain("`src/x/**`, `lib/*.ts`, `test/x/**`");
     expect(pr?.body).not.toContain("./src");
   });
 
@@ -839,11 +839,36 @@ describe("createRetroStep: validation", () => {
     ["a repeated item id", [ITEMS[0], ITEMS[0]], /its id repeats/],
     ["bad globs: .github/**, stories/*.md, **", [{ ...ITEMS[0], globs: [".github/**", "stories/*.md", "**"] }], /glob "\.github\/\*\*" is refused.*glob "stories\/\*\.md" is refused.*glob "\*\*" is refused/],
     ["a glob that does not normalize", [{ ...ITEMS[0], globs: ["/abs/**"] }], /must be repo-relative/],
+    // Epic 3 retro item 14: a lane item's globs name each src/ path's tests and wiring.
+    ["a lane item's src/ glob with no test glob", [{ ...ITEMS[0], globs: ["src/x/**"] }], /retro result: item epic-2-retro-item-1-wire-it: its globs miss "test\/x\/\*\*" \(for src\/x\/\*\*\)$/],
+    [
+      "a lane item changing the forge port with no wiring",
+      [{ ...ITEMS[0], globs: ["src/ports/forge.ts", "test/ports/forge.test.ts"] }],
+      /its globs miss "test\/contracts\/forge\.contract\.ts" \(for src\/ports\/forge\.ts\), "src\/adapters\/forge\/\*\*" \(for src\/ports\/forge\.ts\), "test\/adapters\/forge\/\*\*" \(for src\/adapters\/forge\/\*\*\)$/,
+    ],
+    [
+      "a lane item adding a step lane run does not wire",
+      [{ ...ITEMS[0], globs: ["src/lane/new-step.ts", "test/lane/new-step.test.ts"] }],
+      /its globs miss "src\/cli\/lane-run\.ts" \(for src\/lane\/new-step\.ts\), "test\/cli\/lane-run\.test\.ts" \(for src\/lane\/new-step\.ts\)$/,
+    ],
+    [
+      "two lane items each missing a test glob",
+      [{ ...ITEMS[0], globs: ["src/x.ts"] }, { ...ITEMS[1], route: "lane", globs: ["src/y/**", "test/x.test.ts"] }],
+      /item epic-2-retro-item-1-wire-it: its globs miss "test\/x\.test\.ts" \(for src\/x\.ts\); item epic-2-retro-item-2-ask: its globs miss "test\/y\/\*\*" \(for src\/y\/\*\*\)$/,
+    ],
   ] as const)("before the commit: %s fails the attempt, nothing committed or pushed", async (_name, items, why) => {
     const h = harness({ behaviors: [writes(retroResult({ items: items as unknown as Item[] }))] });
     const out = await h.run();
     await failedNothingPushed(h, out, why);
     expect(h.commits).toEqual([]);
+  });
+
+  test("a maintainer item's globs are not held to the test and wiring rule: the commit is made", async () => {
+    const items = [ITEMS[0] as Item, { ...(ITEMS[1] as Item), globs: ["src/y.ts"] }];
+    const h = harness({ behaviors: [writes(retroResult({ items }))] });
+    const out = await h.run();
+    expect(out.reason ?? "").not.toContain("its globs miss");
+    expect(h.commits).toHaveLength(1);
   });
 
   test("item mismatch: the result lists 1 of 2 appended ids; nothing pushed", async () => {

@@ -4,6 +4,7 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import type { RepoConfig } from "../core/config/load-repo-config.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
+import { describeMissing, missingGlobs } from "../core/manifests/coverage.ts";
 import { normalizeGlob } from "../core/manifests/globs.ts";
 import { park, release, startMerging } from "../core/ledger/edits.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
@@ -60,7 +61,9 @@ import type { TreeFiles } from "./tree-files.ts";
  *   checked against `EpicPrsSchema`. Any forge failure is a failed attempt.
  *   The session never touches GitHub.
  * - The `retro` result is checked before the commit (`checkRetroResult`:
- *   item ids, globs that normalize and are not refused) and, after the
+ *   item ids, globs that normalize and are not refused; then each lane
+ *   item's globs against fresh `main`'s tree under `missingGlobs`, so they
+ *   name each `src/` path's tests and wiring) and, after the
  *   commit and before any push, against the commit through `TreeFiles`
  *   (`checkRetroDiff`: the items are the action items the commit appends,
  *   exactly one retro document is added or changed, and its verdict is the
@@ -329,6 +332,12 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       if (pre.length > 0) return await failed(`retro result: ${pre.join("; ")}`);
       // Every glob normalized (the check passed it): the record and the PR carry what retro-gates.yaml will.
       const normalized: RetroResult = { ...result, items: result.items.map((i) => ({ ...i, globs: i.globs.map(normalizedGlob) })) };
+      // Each lane item's globs name its src/ paths' tests and wiring (Epic 3 retro item 14).
+      const uncovered = normalized.items.flatMap((i) => {
+        const missing = i.route === "lane" ? missingGlobs(i.globs, snap.main.tree) : [];
+        return missing.length === 0 ? [] : [`item ${i.id}: its globs miss ${describeMissing(missing)}`];
+      });
+      if (uncovered.length > 0) return await failed(`retro result: ${uncovered.join("; ")}`);
 
       // 3. Commit, behind the coordinator write check.
       const rules = coordinatorWriteRules({ config: repoConfig, globs: kit.record.globs, graphUnit: false });

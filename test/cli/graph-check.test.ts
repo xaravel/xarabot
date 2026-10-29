@@ -69,12 +69,45 @@ describe("xarabot graph check", () => {
         "manifests: {dir: stories}",
       ].join("\n"),
       ".xarabot/epics.yaml": "version: 1\nepics:\n  3: {depends_on: [1], checkpoint: true}\n",
-      "stories/2.1.md": '---\nstory_id: "2.1"\nepic: 2\nsprint_key: k\ntitle: T\nglobs: [src/**]\n---\n',
+      "stories/2.1.md": '---\nstory_id: "2.1"\nepic: 2\nsprint_key: k\ntitle: T\nglobs: [src/**, test/**]\n---\n',
     });
     const r = run(dir);
     expect(r.code).toBe(0);
     expect(r.stdout.trimEnd().split("\n").slice(1)).toEqual(["1 → []", "2 → [1] stories: 2.1", "3 → [1] checkpoint"]);
     expect(r.stderr).toBe("");
+  });
+
+  test("a manifest whose globs miss a test or wiring glob warns, naming each; exit 0 (Epic 3 retro item 14)", () => {
+    const manifest = (id: string, globs: string) => `---\nstory_id: "${id}"\nepic: ${id.split(".")[0]}\nsprint_key: k-${id}\ntitle: T\nglobs: ${globs}\n---\n`;
+    const dir = fixture({
+      [MD]: "# Epics\n\n## Epic 1: One\n\n### Story 1.1: A\n\n### Story 1.2: B\n\n### Story 1.3: C\n\n### Story 1.4: D\n",
+      ".xarabot/config.yaml": [...CONFIG_HEAD, "manifests: {dir: stories}"].join("\n"),
+      "src/ports/forge.ts": "export {};\n",
+      "src/lane/old-step.ts": "export {};\n",
+      "stories/1.1.md": manifest("1.1", "[src/a.ts, src/b/**]"),
+      "stories/1.2.md": manifest("1.2", "[src/ports/forge.ts, test/ports/forge.test.ts]"),
+      "stories/1.3.md": manifest("1.3", "[src/lane/new-step.ts, src/lane/old-step.ts, test/lane/**]"),
+      "stories/1.4.md": manifest("1.4", "[src/a.ts, test/a.test.ts, docs/**]"),
+    });
+    const r = run(dir);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trimEnd().split("\n").slice(1)).toEqual(["1 → [] stories: 1.1, 1.2, 1.3, 1.4"]);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([
+      'warning: stories/1.1.md (Story 1.1) misses globs its paths need: "test/a.test.ts" (for src/a.ts), "test/b/**" (for src/b/**)',
+      'warning: stories/1.2.md (Story 1.2) misses globs its paths need: "test/contracts/forge.contract.ts" (for src/ports/forge.ts), "src/adapters/forge/**" (for src/ports/forge.ts), "test/adapters/forge/**" (for src/adapters/forge/**)',
+      'warning: stories/1.3.md (Story 1.3) misses globs its paths need: "src/cli/lane-run.ts" (for src/lane/new-step.ts), "test/cli/lane-run.test.ts" (for src/lane/new-step.ts)',
+    ]);
+  });
+
+  test("a path_key manifest is checked against its path_map globs", () => {
+    const dir = fixture({
+      [MD]: "# Epics\n\n## Epic 1: One\n\n### Story 1.1: A\n",
+      ".xarabot/config.yaml": [...CONFIG_HEAD, "manifests: {dir: stories, path_key: area, path_map: {core: [src/core/**]}}"].join("\n"),
+      "stories/1.1.md": '---\nstory_id: "1.1"\nepic: 1\nsprint_key: k\ntitle: T\narea: core\n---\n',
+    });
+    const r = run(dir);
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe('warning: stories/1.1.md (Story 1.1) misses globs its paths need: "test/core/**" (for src/core/**)\n');
   });
 
   test.each([
@@ -164,6 +197,9 @@ describe("xarabot graph check", () => {
     ).length;
     const warnings = r.stderr.trimEnd().split("\n").filter((l) => /^warning: Story \S+ \(.+:\d+\) has no manifest$/.test(l));
     expect(warnings.length).toBe(expected);
+    // Any other stderr line is a manifest's coverage warning, which never fails the check.
+    const other = r.stderr.trimEnd().split("\n").filter((l) => l !== "" && !warnings.includes(l));
+    for (const l of other) expect(l).toMatch(/^warning: \S+\.md \(Story \S+\) misses globs its paths need: "/);
   });
 });
 

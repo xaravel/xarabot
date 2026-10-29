@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { CONFIG_PATH } from "../core/config/load-repo-config.ts";
 import { DEFAULT_GRAPH_CONFIG, graphInputPaths, resolveGraph, type GraphConfig } from "../core/graph/resolve-graph.ts";
 import { graphSettings } from "../core/graph/graph-gate.ts";
+import { describeMissing, missingGlobs } from "../core/manifests/coverage.ts";
+import { loadManifests, resolveManifestGlobs } from "../core/manifests/parse-manifest.ts";
 
 const PREFIX = "xarabot graph check:";
 
@@ -54,8 +56,10 @@ function graphConfig(root: string): { ok: true; config: GraphConfig } | { ok: fa
 
 /**
  * `xarabot graph check`: resolves the graph of the working tree at the git
- * top level of `cwd`, prints it to stdout and Story headings with no manifest
- * as warnings to stderr. Returns 0, or 1 on any failure.
+ * top level of `cwd`, prints it to stdout, and prints as warnings to stderr
+ * each Story heading with no manifest and each manifest whose globs miss a
+ * test or wiring glob (Epic 3 retro item 14). Returns 0, or 1 on any failure;
+ * a warning never fails it.
  */
 export function graphCheck(cwd: string, opts: GraphCheckOpts = {}): number {
   const gitOpts: GitOpts = { timeoutMs: opts.gitTimeoutMs ?? GRAPH_GIT_TIMEOUT_MS, env: opts.env ?? process.env };
@@ -97,6 +101,14 @@ export function graphCheck(cwd: string, opts: GraphCheckOpts = {}): number {
   console.log(out.join("\n"));
   for (const s of graph.value.unmanifested) {
     console.error(`warning: Story ${s.id} (${config.config.epics_path}:${s.line}) has no manifest`);
+  }
+  // resolveGraph loaded these same manifests, so this load succeeds; an unclaimable one has no globs to check.
+  const manifests = loadManifests({ tree, files }, config.config.manifests);
+  for (const m of manifests.ok ? manifests.value : []) {
+    const globs = resolveManifestGlobs(m, config.config.manifests);
+    if (!globs.ok) continue;
+    const missing = missingGlobs(globs.value, tree);
+    if (missing.length > 0) console.error(`warning: ${m.path} (Story ${m.story_id}) misses globs its paths need: ${describeMissing(missing)}`);
   }
   return 0;
 }

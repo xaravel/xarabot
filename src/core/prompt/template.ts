@@ -1,3 +1,5 @@
+import { WIRING_PAIRS } from "../manifests/coverage.ts";
+
 /**
  * The package layer of the prompt (AR21, AR30): one template per part, with
  * `{{placeholder}}` slots that `buildPrompt` and `buildPlanningPrompt` fill
@@ -132,6 +134,11 @@ Your last step: write your result as one JSON object to the file named by the en
 
 const RESULT_HEAD = resultHead("build");
 
+/** The globs-cover-tests-and-wiring rule (Epic 3 retro item 14), as `missingGlobs` checks it; `whose` names the globs. */
+const coverageRule = (whose: string): string => `${whose} name, beside each \`src/\` path, that path's tests: \`src/<p>.ts\` with \`test/<p>.test.ts\`, and \`src/<dir>/**\` with \`test/<dir>/**\`. They also name the wiring files each of these kinds of change needs, with the tests of each \`src/\` file among them:
+
+${WIRING_PAIRS.map((w) => `- ${w.text}.`).join("\n")}`;
+
 export const PACKAGE_TEMPLATE: PromptTemplate = {
   first_build: `# Task
 
@@ -233,6 +240,8 @@ For each one, write \`{{manifests_dir}}/<id>.md\`, where \`<id>\` is the Story i
 - {{manifest_paths}}
 - \`depends_on\`: the quoted ids of the Stories this one builds on: an earlier Story in the same Epic, or a Story in an Epic this Epic depends on. Set it on every Story that builds on an earlier one; \`[]\` when it builds on none.
 
+${coverageRule("A manifest's `globs`, when it lists them,")}
+
 Besides those manifests you may edit only \`{{epics_path}}\` and \`.xarabot/epics.yaml\`, and only where the manifests need it. Change no other file.
 
 \`.xarabot/epics.yaml\` holds the Epic dependencies. Its schema, with no other key at either level:
@@ -282,6 +291,8 @@ Set the fields:
   - \`route\`: \`lane\` when a build session can do the item by changing files in this repository; \`maintainer\` when it needs a person.
   - \`globs\`: quoted repo-relative globs covering every file the item's work changes; \`[]\` when it changes no file. Never list the planning artifacts, the tracking files, \`.xarabot/\`, \`.github/\`, agent configuration, the Standing Authority file, the repository's Protected Paths or the Maintainer's evidence files.
 - \`denied_actions\`: each action your permission mode refused; \`[]\` when none.
+
+${coverageRule("A `lane` item's `globs`")}
 
 Write this file last, and do nothing after it.`,
 
