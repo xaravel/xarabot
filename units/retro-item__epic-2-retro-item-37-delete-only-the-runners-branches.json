@@ -23,7 +23,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/ports/forge.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T23:43:23.801Z",
+  "heartbeat_at": "2026-10-29T23:44:05.757Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "7c3f9cc02eb6b16abeb6fbd8295d9f8309473b50",
@@ -34,7 +34,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
