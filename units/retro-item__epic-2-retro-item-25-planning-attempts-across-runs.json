@@ -18,7 +18,7 @@
     "test/lane/coordinator-process.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:46:36.621Z",
+  "heartbeat_at": "2026-10-29T18:46:46.713Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "575bd90c52eeadfafdee5d0fd8b065222ec0a6b4",
