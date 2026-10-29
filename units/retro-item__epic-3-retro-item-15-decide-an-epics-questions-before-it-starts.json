@@ -14,7 +14,7 @@
     "test/core/prompt/**",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T17:59:32.662Z",
+  "heartbeat_at": "2026-10-29T18:03:00.647Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
@@ -25,7 +25,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
