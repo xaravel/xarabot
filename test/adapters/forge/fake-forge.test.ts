@@ -192,6 +192,21 @@ describe("fake forge", () => {
     expect(value(await forge.pushBranch({ branch: "xarabot/reconcile-1", expected_sha: null, sha: next }, live()))).toEqual({ sha: next });
   });
 
+  test("Epic 2 retro item 37: deleteBranch refuses a branch outside the xarabotBranch namespace and keeps it", async () => {
+    const { forge, control } = createFakeForge({ xarabotBranch: "bot/" });
+    const sha = control.makeCommit();
+    for (const branch of ["story/1.1", "xarabot/reconcile-1", "bot/reconcile-1"]) value(await forge.pushBranch({ branch, expected_sha: null, sha }, live()));
+    for (const branch of ["story/1.1", "xarabot/reconcile-1", "bot/", "bot/../story/1.1"]) {
+      expect(await forge.deleteBranch(branch, live())).toEqual({
+        ok: false,
+        error: { kind: "forbidden", message: `deleteBranch: ${JSON.stringify(branch)} is not a runner branch under bot/` },
+      });
+    }
+    expect(value(await forge.branchHead("story/1.1", live()))).toBe(sha);
+    expect(value(await forge.branchHead("xarabot/reconcile-1", live()))).toBe(sha);
+    expect(value(await forge.deleteBranch("bot/reconcile-1", live()))).toEqual({ deleted: true });
+  });
+
   test("protected branches refuse pushes", async () => {
     const { forge, control } = createFakeForge();
     for (const branch of ["main", "xarabot/claims"]) {

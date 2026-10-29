@@ -296,6 +296,19 @@ describe("the App permission manifest", () => {
     expect(names).toEqual([...APP_PERMISSIONS]);
     for (const r of rows) expect(r).not.toMatch(/merge.?queue/i);
   });
+
+  test("docs/maintainer/app-permissions.md names every operation in its permission's row", () => {
+    const doc = readFileSync(join(import.meta.dir, "../../../../docs/maintainer/app-permissions.md"), "utf8");
+    const rowOf = new Map<string, string>();
+    for (const l of doc.split("\n")) {
+      const m = /^\|\s*`([^`]+)`\s*\|(.*)$/.exec(l);
+      if (m !== null) rowOf.set(m[1] as string, m[2] as string);
+    }
+    for (const op of ops) {
+      if (op.permission === "app-jwt" || op.permission === "none") continue;
+      expect([op.name, op.permission, (rowOf.get(op.permission) ?? "").includes(`\`${op.name}\``)]).toEqual([op.name, op.permission, true]);
+    }
+  });
 });
 
 describe("formatDate", () => {

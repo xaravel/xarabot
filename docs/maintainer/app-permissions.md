@@ -4,12 +4,13 @@ Each owner's bot App (`<login>-xarabot`) asks for exactly these repository
 permissions, and nothing else: never `workflows`, `administration` or any
 bypass right. The table is checked against `APP_PERMISSIONS` and the
 operation table in `src/adapters/forge/github/http.ts` by
-`test/adapters/forge/github/http.test.ts`.
+`test/adapters/forge/github/http.test.ts`, which also checks that each
+operation is named in its permission's row.
 
 | Permission | Operations that use it |
 |---|---|
-| `contents: write` | `getRef`, `getCommit`, `getTree`, `getBlob`, `createBlob`, `createTree`, `createCommit`, `createRef`, `updateRef`, `git push` of unit branches, `enqueuePullRequest`, `dequeuePullRequest` |
-| `pull_requests: write` | `getPull`, `listPulls`, `listReviews`, `createPull`, `updatePull`, `createComment`, `pullQueueState` |
+| `contents: write` | `getRef`, `getCommit`, `getTree`, `getBlob`, `readBlobs`, `createBlob`, `createTree`, `createCommit`, `createRef`, `updateRef`, `deleteRef` (only the runner's own unit branches, under `branches.xarabot`: never `main`, the ledger, a Story's or a human's branch), `git push` of unit branches, `enqueuePullRequest`, `dequeuePullRequest` |
+| `pull_requests: write` | `getPull`, `listPulls`, `listReviews`, `createPull`, `updatePull`, `createComment`, `createReview` (comment-only), `pullQueueState` |
 | `issues: write` | `listIssues`, `createIssue`, `updateIssue`, `listIssueComments`, `createIssueComment` (the owners' `xarabot-inbox` issues: the Maintainer's alerts, and Story 4.2's inbox bodies and daily digest mentions) |
 | `checks: read` | `listCheckRuns` |
 | `statuses: read` | `getCombinedStatus` |

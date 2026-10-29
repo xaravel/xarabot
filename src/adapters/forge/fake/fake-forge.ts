@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseLedger } from "../../../core/ledger/codec.ts";
 import type { LedgerCommit } from "../../../core/ledger/edits.ts";
+import { CONFIG_DEFAULTS } from "../../../core/schemas/config.ts";
 import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
@@ -47,6 +48,8 @@ export type FakeForgeOptions = {
   readonly firstIssueNumber?: number;
   /** The repo's web URL, for inbox issue links; default `FAKE_REPO_URL`. */
   readonly repoUrl?: string;
+  /** Config `branches.xarabot`, the only branches `deleteBranch` deletes; default `xarabot/`. */
+  readonly xarabotBranch?: string;
 };
 
 /** The repo web URL the fake's inbox issues link under, unless `repoUrl` names another. */
@@ -126,6 +129,8 @@ export type FakeForgeControl = {
 export type FakeForge = { readonly forge: Forge; readonly control: FakeForgeControl };
 
 const DEFAULT_NOW = "2026-01-01T00:00:00Z";
+/** The runner's unit-branch namespace, config `branches.xarabot`'s default. */
+const DEFAULT_XARABOT_BRANCH = CONFIG_DEFAULTS.branches.xarabot;
 /** Branches only the forge itself writes. */
 const RESERVED_BRANCHES: readonly string[] = ["main", "xarabot/claims"];
 const PASSING_CONCLUSIONS: readonly string[] = ["success", "neutral", "skipped"];
@@ -188,6 +193,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const newSha = (kind: string): GitSha => sha1(`fake-forge ${kind} ${commits++}`);
 
   let now = options.now ?? DEFAULT_NOW;
+  const xarabotBranch = options.xarabotBranch ?? DEFAULT_XARABOT_BRANCH;
 
   const rootSha = newSha("ledger");
   let ledgerTip = rootSha;
@@ -370,6 +376,9 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     deleteBranch: (branch, opts) =>
       call("deleteBranch", opts, () => {
         if (RESERVED_BRANCHES.includes(branch)) return forgeErr("forbidden", `deleteBranch: ${branch} is protected`);
+        // As the GitHub adapter's `isUnitBranch`: only a unit branch, never a Story's or a human's (Epic 2 retro item 37).
+        const unitBranch = branch.startsWith(xarabotBranch) && branch.length > xarabotBranch.length && !branch.split("/").some((s) => s === "" || s.startsWith("."));
+        if (!unitBranch) return forgeErr("forbidden", `deleteBranch: ${JSON.stringify(branch)} is not a runner branch under ${xarabotBranch}`);
         for (const p of prs.values()) {
           if (p.branch === branch && p.state === "open") return forgeErr("conflict", `deleteBranch: ${branch} has open PR #${p.number}`);
         }

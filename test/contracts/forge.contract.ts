@@ -501,6 +501,21 @@ export function forgeContract(harness: ForgeHarness): void {
       },
     );
 
+    // Epic 2 retro item 37: only the runner's unit branches (config branches.xarabot, `xarabot/` by default) are ever deleted.
+    scenario(
+      "deleteBranch of a branch outside the unit-branch namespace is forbidden and keeps it",
+      ["pushBranch", "branchHead", "deleteBranch"],
+      ["makeCommit"],
+      async (fx) => {
+        const sha = await need(fx, "makeCommit")();
+        value(await fx.forge.pushBranch({ branch: "story/9.8", expected_sha: null, sha }, live()));
+        for (const branch of ["story/9.8", "feature/x", "xarabot/", "xarabot-reconcile-9", "xarabot/../story/9.8"]) {
+          expect(kind(await fx.forge.deleteBranch(branch, live()))).toBe("forbidden");
+        }
+        expect(value(await fx.forge.branchHead("story/9.8", live()))).toBe(sha);
+      },
+    );
+
     scenario("a push a rule refuses is rejected and moves nothing", OPEN_PR, ["makeCommit", "refusePushes"], async (fx) => {
       const mk = need(fx, "makeCommit");
       await need(fx, "refusePushes")("story/2.9");

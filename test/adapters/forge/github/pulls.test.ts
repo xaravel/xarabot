@@ -12,7 +12,7 @@ const H1 = "1".repeat(40);
 const H2 = "2".repeat(40);
 const SHA = "d".repeat(40);
 
-function setup(wrap?: (fetch: FetchLike) => FetchLike): { gh: FakeGitHub; forge: Forge } {
+function setup(wrap?: (fetch: FetchLike) => FetchLike, xarabotBranch?: string): { gh: FakeGitHub; forge: Forge } {
   const { privateKey, publicKey } = testKeys();
   const gh = createFakeGitHub({ publicKey });
   const forge = createGitHubForge({
@@ -21,6 +21,7 @@ function setup(wrap?: (fetch: FetchLike) => FetchLike): { gh: FakeGitHub; forge:
     fetch: wrap === undefined ? gh.fetch : wrap(gh.fetch),
     apiUrl: gh.control.apiUrl,
     now: gh.control.clock,
+    ...(xarabotBranch !== undefined ? { xarabotBranch } : {}),
   });
   return { gh, forge };
 }
@@ -249,6 +250,31 @@ describe("deleteBranch", () => {
     expect(kind(await forge.deleteBranch("main", live()))).toBe("forbidden");
     expect(kind(await forge.deleteBranch("xarabot/claims", live()))).toBe("forbidden");
     expect(calls(gh)).toEqual([]);
+  });
+
+  test.each(["story/1.1", "feature/x", "xarabot", "xarabot/", "xarabot-reconcile-1", "xarabot//reconcile-1", "xarabot/../story/1.1", "xarabot/./reconcile-1", "xarabot/.hidden"])(
+    "Epic 2 retro item 37: %p, outside the unit-branch namespace, is forbidden with no request and kept",
+    async (branch) => {
+      const { gh, forge } = setup();
+      gh.control.setBranch("story/1.1", H1);
+      expect(await forge.deleteBranch(branch, live())).toEqual({
+        ok: false,
+        error: { kind: "forbidden", message: `deleteBranch: ${JSON.stringify(branch)} is not a runner branch under xarabot/` },
+      });
+      expect(gh.control.log()).toEqual([]);
+      expect(gh.control.ref("story/1.1")).toBe(H1);
+    },
+  );
+
+  test("Epic 2 retro item 37: the namespace is the xarabotBranch option (config branches.xarabot)", async () => {
+    const { gh, forge } = setup(undefined, "bot/");
+    gh.control.setBranch("bot/reconcile-1", H1);
+    gh.control.setBranch("xarabot/reconcile-1", H2);
+    expect(kind(await forge.deleteBranch("xarabot/reconcile-1", live()))).toBe("forbidden");
+    expect(gh.control.log()).toEqual([]);
+    expect(value(await forge.deleteBranch("bot/reconcile-1", live()))).toEqual({ deleted: true });
+    expect(gh.control.ref("bot/reconcile-1")).toBeUndefined();
+    expect(gh.control.ref("xarabot/reconcile-1")).toBe(H2);
   });
 
   test("another refusal goes through mapHttpError: a rule's 422 is rejected, a 403 forbidden", async () => {

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { parseLedger } from "../../../core/ledger/codec.ts";
 import type { LedgerCommit } from "../../../core/ledger/edits.ts";
 import { IsoDateTime } from "../../../core/schemas/common.ts";
+import { CONFIG_DEFAULTS } from "../../../core/schemas/config.ts";
 import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
@@ -54,7 +55,7 @@ import { createTokenSource } from "./tokens.ts";
  * API (`snapshot` reads blobs and each unit's PR, with its reviewers' latest
  * decisive reviews, over GraphQL); `pushBranch` runs `git push
  * --force-with-lease` from the lane's private `runner.git`, and
- * `deleteBranch` deletes a branch no open PR uses over REST; the PR
+ * `deleteBranch` deletes a unit branch no open PR uses over REST; the PR
  * operations, `comment`, `postReview` (a comment-only review: the adapter
  * never sends an `APPROVE` or `REQUEST_CHANGES` event), `checks` (check runs
  * plus the combined commit status) and the CI-log prefetch use REST; `enqueue` and
@@ -73,6 +74,8 @@ import { createTokenSource } from "./tokens.ts";
 
 export const DEFAULT_LEDGER_BRANCH = "xarabot/claims";
 export const DEFAULT_MAIN_BRANCH = "main";
+/** The runner's unit-branch namespace, config `branches.xarabot`'s default. */
+export const DEFAULT_XARABOT_BRANCH = CONFIG_DEFAULTS.branches.xarabot;
 /** git's empty tree. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const LEDGER_ROOT_MESSAGE = "xarabot ledger root [skip ci]";
@@ -157,6 +160,8 @@ export type GitHubForgeOptions = {
   readonly apiUrl?: string;
   readonly ledgerBranch?: string;
   readonly mainBranch?: string;
+  /** Config `branches.xarabot`, the runner's unit-branch namespace: the only branches `deleteBranch` deletes; default `xarabot/`. */
+  readonly xarabotBranch?: string;
   /** Fires at the start of each snapshot part. */
   readonly onRead?: (part: SnapshotPart) => void;
   /** The lane's `runner.git` (from `openRunnerGit`); `pushBranch` needs it. */
@@ -196,6 +201,16 @@ function parseTree(body: unknown): Tree | undefined {
     entries.push({ path, mode, type, sha });
   }
   return { entries, truncated: asObj(body)?.["truncated"] === true };
+}
+
+/**
+ * Whether `branch` is a unit branch under `prefix` (Epic 2 retro item 37): a
+ * name follows the prefix, and no segment is empty or starts with `.`, so a
+ * URL path never resolves a `..` out of the namespace.
+ */
+export function isUnitBranch(branch: string, prefix: string): boolean {
+  if (!branch.startsWith(prefix) || branch.length === prefix.length) return false;
+  return !branch.split("/").some((s) => s === "" || s.startsWith("."));
 }
 
 /** Encodes each segment of a branch name for a URL path. */
@@ -258,6 +273,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
   const { owner, name } = options.repo;
   const ledgerBranch = options.ledgerBranch ?? DEFAULT_LEDGER_BRANCH;
   const mainBranch = options.mainBranch ?? DEFAULT_MAIN_BRANCH;
+  const xarabotBranch = options.xarabotBranch ?? DEFAULT_XARABOT_BRANCH;
   const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
   const tokens = createTokenSource({
     credentials: options.credentials,
@@ -629,11 +645,16 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
    * `DELETE /git/refs/heads/{branch}`, after listing the branch's open PRs:
    * one is `conflict`, since GitHub would close it with its branch. A
    * missing branch (GitHub's 422 "Reference does not exist", or a 404) is
-   * `deleted: false`.
+   * `deleted: false`. `main`, the ledger branch and any branch outside the
+   * unit-branch namespace (`isUnitBranch`: a Story's or a human's) are
+   * `forbidden`, with no request (Epic 2 retro item 37).
    */
   async function deleteBranch(branch: string, opts: CallOpts): Promise<ForgeResult<{ readonly deleted: boolean }>> {
     return guarded<{ readonly deleted: boolean }>("deleteBranch", opts, async (ctx) => {
       if (branch === mainBranch || branch === ledgerBranch) return forgeErr("forbidden", `deleteBranch: ${branch} is reserved`);
+      if (!isUnitBranch(branch, xarabotBranch)) {
+        return forgeErr("forbidden", `deleteBranch: ${JSON.stringify(branch)} is not a runner branch under ${xarabotBranch}`);
+      }
       const listOp = GITHUB_OPERATIONS.listPulls;
       const head = encodeURIComponent(`${owner}:${branch}`);
       const listed = await paged(ctx, listOp, (page) => `/pulls?head=${head}&state=open&per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
