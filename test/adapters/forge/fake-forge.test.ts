@@ -192,6 +192,21 @@ describe("fake forge", () => {
     expect(value(await forge.pushBranch({ branch: "xarabot/reconcile-1", expected_sha: null, sha: next }, live()))).toEqual({ sha: next });
   });
 
+  test("deleteBranch deletes only in its unit-branch namespace, xarabot/ by default (Epic 2 retro item 37)", async () => {
+    const { forge, control } = createFakeForge({ unitBranchPrefix: "bot/" });
+    const sha = control.makeCommit();
+    for (const branch of ["bot/reconcile-1", "xarabot/reconcile-1"]) value(await forge.pushBranch({ branch, expected_sha: null, sha }, live()));
+    expect(await forge.deleteBranch("xarabot/reconcile-1", live())).toEqual({
+      ok: false,
+      error: { kind: "forbidden", message: `deleteBranch: "xarabot/reconcile-1" is outside the runner's branches "bot/"` },
+    });
+    expect(value(await forge.branchHead("xarabot/reconcile-1", live()))).toBe(sha);
+    expect(value(await forge.deleteBranch("bot/reconcile-1", live()))).toEqual({ deleted: true });
+    const plain = createFakeForge().forge;
+    expect((await plain.deleteBranch("bot/reconcile-1", live())).ok ? "ok" : "refused").toBe("refused");
+    expect(value(await plain.deleteBranch("xarabot/reconcile-1", live()))).toEqual({ deleted: false });
+  });
+
   test("protected branches refuse pushes", async () => {
     const { forge, control } = createFakeForge();
     for (const branch of ["main", "xarabot/claims"]) {

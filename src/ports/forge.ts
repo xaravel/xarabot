@@ -1,6 +1,7 @@
 import type { LedgerCommit } from "../core/ledger/edits.ts";
 import type { AssembleInput } from "../core/next/snapshot.ts";
 import { ok } from "../core/result.ts";
+import { CONFIG_DEFAULTS } from "../core/schemas/config.ts";
 import type { PrState } from "../core/schemas/snapshot.ts";
 
 /**
@@ -12,8 +13,9 @@ import type { PrState } from "../core/schemas/snapshot.ts";
  * admin-merge or auto-merge operation: a review the runner posts
  * (`postReview`) is a comment-only review, never an approval or a change
  * request. The one delete, `deleteBranch` (Epic 2 retro item 21), removes the
- * branch of a closed `reconcile` or disposable planning PR, and refuses a
- * branch an open PR still uses.
+ * branch of a closed `reconcile` or disposable planning PR, refuses a branch
+ * an open PR still uses, and refuses any branch outside the runner's own
+ * unit-branch namespace (`inBranchNamespace`, Epic 2 retro item 37).
  *
  * Error kinds: `auth`, `forbidden` and `uninstalled` stop the lane;
  * `rate-limited` and `transient` are backed off and retried; `rejected` (the
@@ -70,6 +72,20 @@ export function rateLimited(retryAfter: number, message: string): ForgeFailure {
 /** The `transient` failure of a call whose deadline passed. */
 export function deadlinePassed(operation: string): ForgeFailure {
   return forgeErr("transient", `${operation}: deadline passed`);
+}
+
+/** The runner's own unit-branch namespace by default: config `branches.xarabot`'s default. */
+export const DEFAULT_UNIT_BRANCH_PREFIX: string = CONFIG_DEFAULTS.branches.xarabot;
+
+/**
+ * Whether `branch` lies in the runner's own unit-branch namespace (Epic 2
+ * retro item 37): it starts with `prefix` (config `branches.xarabot`), is
+ * longer than it, and has no empty, `.` or `..` path segment, so no name
+ * under the prefix resolves to a branch outside it.
+ */
+export function inBranchNamespace(prefix: string, branch: string): boolean {
+  if (prefix === "" || branch.length <= prefix.length || !branch.startsWith(prefix)) return false;
+  return branch.split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
 export function isLaneStopKind(kind: ForgeErrorKind): kind is LaneStopKind {
@@ -221,9 +237,10 @@ export type Forge = {
   branchHead(branch: string, opts: CallOpts): Promise<ForgeResult<GitSha | null>>;
   /**
    * Deletes `branch` (Epic 2 retro item 21): `deleted` is `false` when it did
-   * not exist. A branch an open PR uses is `conflict` and stays; `main` and
-   * the ledger branch are `forbidden`. A closed or merged PR on it keeps its
-   * head.
+   * not exist. A branch an open PR uses is `conflict` and stays; `main`, the
+   * ledger branch and any branch outside the runner's unit-branch namespace
+   * (`inBranchNamespace`, Epic 2 retro item 37) are `forbidden`, with no
+   * request. A closed or merged PR on it keeps its head.
    */
   deleteBranch(branch: string, opts: CallOpts): Promise<ForgeResult<{ readonly deleted: boolean }>>;
   /** A missing branch is `not-found`; a second open PR on one branch is `conflict`. */

@@ -5,6 +5,7 @@ import type { LedgerCommit } from "../../../core/ledger/edits.ts";
 import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
+  DEFAULT_UNIT_BRANCH_PREFIX,
   forgeErr,
   forgeOk,
   type CallOpts,
@@ -16,6 +17,7 @@ import {
   type ForgeResult,
   type ForgeReview,
   type GitSha,
+  inBranchNamespace,
   type InboxComment,
   type InboxIssue,
 } from "../../../ports/forge.ts";
@@ -47,6 +49,8 @@ export type FakeForgeOptions = {
   readonly firstIssueNumber?: number;
   /** The repo's web URL, for inbox issue links; default `FAKE_REPO_URL`. */
   readonly repoUrl?: string;
+  /** The runner's unit-branch namespace, the only one `deleteBranch` deletes in; default `xarabot/`. */
+  readonly unitBranchPrefix?: string;
 };
 
 /** The repo web URL the fake's inbox issues link under, unless `repoUrl` names another. */
@@ -212,6 +216,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const inboxes = new Map<number, InboxRecord>();
   let nextIssue = options.firstIssueNumber ?? 1001;
   const repoUrl = options.repoUrl ?? FAKE_REPO_URL;
+  const unitBranchPrefix = options.unitBranchPrefix ?? DEFAULT_UNIT_BRANCH_PREFIX;
   const inboxView = (i: InboxRecord): InboxIssue => ({ number: i.number, owner: i.owner, body: i.body, url: `${repoUrl}/issues/${i.number}` });
   const commentView = (i: InboxRecord, c: InboxCommentRecord): InboxComment => ({
     id: String(c.id),
@@ -370,6 +375,9 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
     deleteBranch: (branch, opts) =>
       call("deleteBranch", opts, () => {
         if (RESERVED_BRANCHES.includes(branch)) return forgeErr("forbidden", `deleteBranch: ${branch} is protected`);
+        if (!inBranchNamespace(unitBranchPrefix, branch)) {
+          return forgeErr("forbidden", `deleteBranch: ${JSON.stringify(branch)} is outside the runner's branches ${JSON.stringify(unitBranchPrefix)}`);
+        }
         for (const p of prs.values()) {
           if (p.branch === branch && p.state === "open") return forgeErr("conflict", `deleteBranch: ${branch} has open PR #${p.number}`);
         }

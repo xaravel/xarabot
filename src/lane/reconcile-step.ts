@@ -59,11 +59,13 @@ import { allowanceReason, callPassedGate, describeError, ledgerFenceOf, message,
  * deleted. An ungated status planning PR (`approved_sha` `null`, Story 2.7)
  * is disposable like a `reconcile` PR, and a `released` planning record
  * whose PR is not open is deleted the same way (`deleteReleasedRecurring`).
- * Once a disposable record is released or deleted, its branch is deleted too
+ * Once a disposable record is released, its branch is deleted too
  * (`Forge.deleteBranch`, Epic 2 retro item 21); a failed delete is noted and
- * leaves the branch. A `reconcile` PR an owner approved that the runner took
- * and failed to enqueue is closed and replaced like any other, never enqueued
- * again (Q4).
+ * leaves the branch. A released disposable record's branch is deleted before
+ * the record (Epic 2 retro item 37), so a failed delete also leaves the
+ * record `released` for a later run to retry. A `reconcile` PR an owner
+ * approved that the runner took and failed to enqueue is closed and replaced
+ * like any other, never enqueued again (Q4).
  *
  * Approval-gated PRs (Story 2.6, FR13, AR8, AR17, AD-14): a `parked`
  * `awaiting-approval` record whose PR is open at the parked head is taken
@@ -358,23 +360,25 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
 
     /**
      * Epic 2 retro item 21: the branch of `of`, a disposable record (a
-     * `reconcile` one, or an ungated status planning one) this run just
-     * released or deleted, so no open PR of its own is left on it. Called
-     * right after that swap, which fenced the run's own record. Hygiene only:
-     * a failure, or an open PR still on the branch (`conflict`), is noted and
-     * leaves the branch, and a later run's `deleteReleased` tries again while
-     * the record is `released`.
+     * `reconcile` one, or an ungated status planning one) whose open PRs are
+     * closed: just released (called right after that swap, which fenced the
+     * run's own record), or `released` and about to be deleted
+     * (`deleteReleased`, which fences first). Hygiene only: a failure, or an
+     * open PR still on the branch (`conflict`), is noted and leaves the
+     * branch; `false` then, and `deleteReleased` leaves the record `released`
+     * so a later run tries again.
      */
-    const dropBranch = async (of: string): Promise<void> => {
+    const dropBranch = async (of: string): Promise<boolean> => {
       const branch = unitBranch(snapshot.config.branches.xarabot, of);
       aborted();
       const r = await call("deleteBranch", (o) => forge.deleteBranch(branch, o));
       if (r.ok) {
         if (r.value.deleted) note(`${of}: deleted branch ${branch}`);
-        return;
+        return true;
       }
       reasons.push(`${of}: deleteBranch ${branch} ${describeError(r.error)}; the branch is left`);
       note(`${of}: deleteBranch ${branch} failed: ${describeError(r.error)}`);
+      return false;
     };
 
     /** Whether `of`'s record, as the round's snapshot shows it, is disposable (`isDisposable`). */
@@ -795,7 +799,8 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
             const released = await item(`releaseDisposable ${t.unit}`, releaseDisposable({ unit: t.unit, by: identity, now: forgeNow(), generation: generation2 }));
             if (!released) return;
             reasons.push(`${t.unit}: enqueue PR #${pr} ${describeError(r.error)}: closed, released`);
-            return await dropBranch(t.unit);
+            await dropBranch(t.unit);
+            return;
           }
           return await repark(takenTarget, `enqueue ${describeError(r.error)}`, "conflict");
         }
@@ -980,10 +985,14 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           unclosed.push(t.unit);
           continue;
         }
+        // The branch before the record (Epic 2 retro item 37): a failed delete leaves the `released` record for a later run to retry.
+        if (disposable(t.unit)) {
+          await beat("fence");
+          if (!(await dropBranch(t.unit))) continue;
+        }
         const done = await item(`deleteReleasedRecurring ${t.unit}`, deleteReleasedRecurring({ unit: t.unit, by: identity, now: forgeNow(), generation: t.generation }));
         if (!done) continue;
         settled.add(t.unit);
-        if (disposable(t.unit)) await dropBranch(t.unit);
       }
       for (const u of plan.deleteMerged) await item(`deleteMerged ${u}`, deleteMerged({ unit: u, by: identity, now: forgeNow() }));
       return { settled, unclosed };

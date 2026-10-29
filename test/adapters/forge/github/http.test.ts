@@ -286,15 +286,29 @@ describe("the App permission manifest", () => {
     expect(GITHUB_OPERATIONS.dequeuePullRequest.permission).toBe("contents: write");
   });
 
-  test("docs/maintainer/app-permissions.md has one table row per entry and no merge-queue row", () => {
+  /** The doc's table rows below the header, as their permission → the row. */
+  const docRows = (): Map<string, string> => {
     const doc = readFileSync(join(import.meta.dir, "../../../../docs/maintainer/app-permissions.md"), "utf8");
     const rows = doc
       .split("\n")
       .filter((l) => l.startsWith("|") && !/^\|\s*-/.test(l))
       .slice(1);
-    const names = rows.map((r) => (/^\|\s*`([^`]+)`\s*\|/.exec(r) ?? [])[1] ?? r);
-    expect(names).toEqual([...APP_PERMISSIONS]);
-    for (const r of rows) expect(r).not.toMatch(/merge.?queue/i);
+    return new Map(rows.map((r) => [(/^\|\s*`([^`]+)`\s*\|/.exec(r) ?? [])[1] ?? r, r]));
+  };
+
+  test("docs/maintainer/app-permissions.md has one table row per entry and no merge-queue row", () => {
+    const rows = docRows();
+    expect([...rows.keys()]).toEqual([...APP_PERMISSIONS]);
+    for (const r of rows.values()) expect(r).not.toMatch(/merge.?queue/i);
+  });
+
+  test("docs/maintainer/app-permissions.md lists every operation in its permission's row", () => {
+    const rows = docRows();
+    for (const op of ops) {
+      if (op.permission === "app-jwt" || op.permission === "none") continue;
+      const cells = (rows.get(op.permission) ?? "").split("|")[2] ?? "";
+      expect([op.name, op.permission, cells.includes(`\`${op.name}\``)]).toEqual([op.name, op.permission, true]);
+    }
   });
 });
 

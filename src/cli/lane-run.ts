@@ -534,7 +534,8 @@ export async function laneRun(args: readonly string[], deps: LaneRunDeps): Promi
     if (!bot.ok) return failedStart(bot.error.message);
 
     const runnerGit = gitDir.value;
-    const forge = connection.forge({ runnerGit, maintainer });
+    // `deleteBranch` deletes only in the pinned config's unit-branch namespace (Epic 2 retro item 37).
+    const forge = connection.forge({ runnerGit, maintainer, unitBranchPrefix: config.value.branches.xarabot });
     const identity = { owner: lane.owner, host: hostId, lane: name };
 
     // A coordinator's last start check: the claim on coordinator.json (AD-8).

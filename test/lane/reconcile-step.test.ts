@@ -532,6 +532,10 @@ describe("createReconcileStep: the matrix", () => {
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
     expect(swaps(f.events)).toContain("deleteReleasedRecurring reconcile:3");
     expect(f.events.includes("closePr")).toBe(keepOpen);
+    // The branch goes first, fenced, then the record (Epic 2 retro item 37).
+    const at = f.events.indexOf("deleteBranch");
+    expect(f.events.slice(at - 1, at + 2)).toEqual(["ledgerSwap heartbeat reconcile:5", "deleteBranch", "ledgerSwap deleteReleasedRecurring reconcile:3"]);
+    expect(await branchHead(f, "xarabot/reconcile-3")).toBeNull();
   });
 
   test("Dead run: a stale claimed reconcile record is released with attempts + 1; its open PR closed", async () => {
@@ -546,9 +550,10 @@ describe("createReconcileStep: the matrix", () => {
   });
 
   test.each([
-    ["a released record", "released", "deleteReleasedRecurring"],
-    ["a dead run's record", "claimed", "releaseDeadReconcile"],
-  ] as const)("Orphan PR: %s with no pr, a PR open on its branch: found by listing the branch, closed, then the record acted on", async (_name, state, edit) => {
+    // A released record's branch is deleted, fenced, before the record (Epic 2 retro item 37); a dead run's after its release.
+    ["a released record", "released", ["ledgerSwap heartbeat reconcile:5", "deleteBranch", "ledgerSwap deleteReleasedRecurring reconcile:3"]],
+    ["a dead run's record", "claimed", ["ledgerSwap releaseDeadReconcile reconcile:3", "deleteBranch"]],
+  ] as const)("Orphan PR: %s with no pr, a PR open on its branch: found by listing the branch, closed, then the record acted on", async (_name, state, after) => {
     let orphan = 0;
     const f = await setup({ status: STATUS_DONE }, async (fake) => {
       orphan = (await prOn(fake, "xarabot/reconcile-3")).number;
@@ -556,7 +561,7 @@ describe("createReconcileStep: the matrix", () => {
     });
     await f.run();
     expect((await prOnBranch(f, "xarabot/reconcile-3"))).toMatchObject({ number: orphan, state: "closed" });
-    expect(f.events.slice(0, 5)).toEqual(["listPrsByBranch", "ledgerSwap heartbeat reconcile:5", "closePr", `ledgerSwap ${edit} reconcile:3`, "deleteBranch"]);
+    expect(f.events.slice(0, 3 + after.length)).toEqual(["listPrsByBranch", "ledgerSwap heartbeat reconcile:5", "closePr", ...after]);
     expect(await branchHead(f, "xarabot/reconcile-3")).toBeNull();
     if (state === "released") expect((await f.ledger()).has("reconcile:3")).toBe(false);
     else expect((await f.ledger()).get("reconcile:3")).toMatchObject({ state: "released", attempts: 1 });
@@ -658,20 +663,39 @@ describe("createReconcileStep: the matrix", () => {
     expect(f.events).not.toContain("deleteBranch");
   });
 
-  test("a failed branch delete is noted and leaves the branch; the record is still deleted and the run still opens its own PR", async () => {
+  test.each([
+    ["transient", "502"],
+    ["conflict", "an open PR on it"],
+  ] as const)("a failed branch delete (%s) is noted and leaves the branch and the released record for a later run; the run still opens its own PR", async (kind, message) => {
     const f = await setup({}, async (fake) => {
       const story = (await prOn(fake, "story/1.1", true)).number;
       const r3 = (await prOn(fake, "xarabot/reconcile-3")).number;
       return [rec({ unit: "story:1.1", globs: [], state: "released", pr: story }), coord("reconcile:3", { state: "released", pr: r3 })];
     });
-    f.fake.control.injectError("deleteBranch", { kind: "transient", message: "502" });
+    const before = (await f.ledger()).get("reconcile:3");
+    f.fake.control.injectError("deleteBranch", { kind, message });
     const out = await f.run();
     expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
-    expect(out.reason).toContain("reconcile:3: deleteBranch xarabot/reconcile-3 transient: 502; the branch is left");
-    expect((await f.ledger()).has("reconcile:3")).toBe(false);
+    expect(out.reason).toContain(`reconcile:3: deleteBranch xarabot/reconcile-3 ${kind}: ${message}; the branch is left`);
+    expect((await f.ledger()).get("reconcile:3")).toEqual(before);
+    expect(swaps(f.events)).not.toContain("deleteReleasedRecurring reconcile:3");
     expect((await prOnBranch(f, "xarabot/reconcile-3"))?.state).toBe("closed");
     expect(await branchHead(f, "xarabot/reconcile-3")).not.toBeNull();
     expect(await prOnBranch(f, BRANCH)).toMatchObject({ state: "open" });
+  });
+
+  test("a released record a failed delete left, its PR closed and its branch still there: a later run deletes the branch, then the record", async () => {
+    const f = await setup({ status: STATUS_DONE }, async (fake) => {
+      const r3 = (await prOn(fake, "xarabot/reconcile-3")).number;
+      expect((await fake.forge.closePr(r3, opts())).ok).toBe(true);
+      return [coord("reconcile:3", { state: "released", pr: r3 })];
+    });
+    expect(await branchHead(f, "xarabot/reconcile-3")).not.toBeNull();
+    const out = await f.run();
+    expect(out.state).toBe("merged");
+    expect(await branchHead(f, "xarabot/reconcile-3")).toBeNull();
+    expect((await f.ledger()).has("reconcile:3")).toBe(false);
+    expect(f.events.indexOf("deleteBranch")).toBeLessThan(f.events.indexOf("ledgerSwap deleteReleasedRecurring reconcile:3"));
   });
 
   test("a released record whose orphan PR the run closed no longer stops this run's own PR", async () => {

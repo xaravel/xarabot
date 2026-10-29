@@ -6,6 +6,7 @@ import { IsoDateTime } from "../../../core/schemas/common.ts";
 import { PR_REVIEW_DECISIONS, type PrReview, type PrState } from "../../../core/schemas/snapshot.ts";
 import {
   deadlinePassed,
+  DEFAULT_UNIT_BRANCH_PREFIX,
   forgeErr,
   forgeOk,
   type CallOpts,
@@ -19,6 +20,7 @@ import {
   type ForgeReview,
   type ForgeSnapshot,
   type GitSha,
+  inBranchNamespace,
   type InboxComment,
   type InboxIssue,
   type PostReviewRequest,
@@ -54,7 +56,8 @@ import { createTokenSource } from "./tokens.ts";
  * API (`snapshot` reads blobs and each unit's PR, with its reviewers' latest
  * decisive reviews, over GraphQL); `pushBranch` runs `git push
  * --force-with-lease` from the lane's private `runner.git`, and
- * `deleteBranch` deletes a branch no open PR uses over REST; the PR
+ * `deleteBranch` deletes a branch of the runner's own unit-branch namespace
+ * that no open PR uses over REST; the PR
  * operations, `comment`, `postReview` (a comment-only review: the adapter
  * never sends an `APPROVE` or `REQUEST_CHANGES` event), `checks` (check runs
  * plus the combined commit status) and the CI-log prefetch use REST; `enqueue` and
@@ -157,6 +160,8 @@ export type GitHubForgeOptions = {
   readonly apiUrl?: string;
   readonly ledgerBranch?: string;
   readonly mainBranch?: string;
+  /** The runner's unit-branch namespace (config `branches.xarabot`), the only one `deleteBranch` deletes in; default `xarabot/`. */
+  readonly unitBranchPrefix?: string;
   /** Fires at the start of each snapshot part. */
   readonly onRead?: (part: SnapshotPart) => void;
   /** The lane's `runner.git` (from `openRunnerGit`); `pushBranch` needs it. */
@@ -258,6 +263,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
   const { owner, name } = options.repo;
   const ledgerBranch = options.ledgerBranch ?? DEFAULT_LEDGER_BRANCH;
   const mainBranch = options.mainBranch ?? DEFAULT_MAIN_BRANCH;
+  const unitBranchPrefix = options.unitBranchPrefix ?? DEFAULT_UNIT_BRANCH_PREFIX;
   const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
   const tokens = createTokenSource({
     credentials: options.credentials,
@@ -629,11 +635,16 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
    * `DELETE /git/refs/heads/{branch}`, after listing the branch's open PRs:
    * one is `conflict`, since GitHub would close it with its branch. A
    * missing branch (GitHub's 422 "Reference does not exist", or a 404) is
-   * `deleted: false`.
+   * `deleted: false`. `main`, the ledger branch and a branch outside
+   * `unitBranchPrefix` (Epic 2 retro item 37) are `forbidden` before any
+   * request.
    */
   async function deleteBranch(branch: string, opts: CallOpts): Promise<ForgeResult<{ readonly deleted: boolean }>> {
     return guarded<{ readonly deleted: boolean }>("deleteBranch", opts, async (ctx) => {
       if (branch === mainBranch || branch === ledgerBranch) return forgeErr("forbidden", `deleteBranch: ${branch} is reserved`);
+      if (!inBranchNamespace(unitBranchPrefix, branch)) {
+        return forgeErr("forbidden", `deleteBranch: ${JSON.stringify(branch)} is outside the runner's branches ${JSON.stringify(unitBranchPrefix)}`);
+      }
       const listOp = GITHUB_OPERATIONS.listPulls;
       const head = encodeURIComponent(`${owner}:${branch}`);
       const listed = await paged(ctx, listOp, (page) => `/pulls?head=${head}&state=open&per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));

@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   BACKOFF_KINDS,
   deadlinePassed,
+  DEFAULT_UNIT_BRANCH_PREFIX,
   FORGE_ERROR_KINDS,
   FORGE_OPERATIONS,
   forgeErr,
   forgeOk,
+  inBranchNamespace,
   isBackoffKind,
   isLaneStopKind,
   LANE_STOP_KINDS,
@@ -130,5 +132,26 @@ describe("Forge port", () => {
     expect(forgeOk(1)).toEqual({ ok: true, value: 1 });
     expect(forgeErr("conflict", "m")).toEqual({ ok: false, error: { kind: "conflict", message: "m" } });
     expect(deadlinePassed("checks")).toEqual({ ok: false, error: { kind: "transient", message: "checks: deadline passed" } });
+  });
+
+  test.each([
+    ["xarabot/", "xarabot/reconcile-3", true],
+    ["xarabot/", "xarabot/planning-status.1", true],
+    ["bot-", "bot-reconcile-3", true],
+    ["xarabot/", "story/1.1", false],
+    ["xarabot/", "alice/topic", false],
+    ["xarabot/", "xarabot-reconcile-3", false],
+    ["xarabot/", "xarabot/", false],
+    ["xarabot/", "xarabot/../main", false],
+    ["xarabot/", "xarabot/./reconcile-3", false],
+    ["xarabot/", "xarabot//reconcile-3", false],
+    ["xarabot/", "xarabot/reconcile-3/", false],
+    ["", "main", false],
+  ] as const)("inBranchNamespace(%p, %p) is %p (Epic 2 retro item 37)", (prefix, branch, inside) => {
+    expect(inBranchNamespace(prefix, branch)).toBe(inside);
+  });
+
+  test("the default unit-branch namespace is config branches.xarabot's default", () => {
+    expect(DEFAULT_UNIT_BRANCH_PREFIX).toBe("xarabot/");
   });
 });
