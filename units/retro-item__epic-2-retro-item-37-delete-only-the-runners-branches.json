@@ -15,7 +15,7 @@
     "test/contracts/forge.contract.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T19:18:32.508Z",
+  "heartbeat_at": "2026-10-29T19:18:38.566Z",
   "pr": 269,
   "pr_owner": "edanisko",
   "base_sha": "157f74059ac6d5f2adb04ac1d7eb38b75ce4e45a",
@@ -31,7 +31,7 @@
   ],
   "park": null,
   "attempts": 0,
-  "loopbacks": 0,
+  "loopbacks": 1,
   "ci_fixes": 0,
   "approval": null
 }
