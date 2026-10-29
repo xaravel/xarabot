@@ -14,7 +14,7 @@
     "test/core/prompt/build-prompt.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:09:58.103Z",
+  "heartbeat_at": "2026-10-29T18:10:04.578Z",
   "pr": 263,
   "pr_owner": "edanisko",
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
