@@ -4,7 +4,18 @@ import { classifyChecks, pollDelayMs } from "../core/ci/checks.ts";
 import { loadRepoConfig, type RepoConfig } from "../core/config/load-repo-config.ts";
 import { unattendedRefusal } from "../core/lane/runner.ts";
 import { RESULT_LINGER_MS, RESULT_POLL_MS, SESSION_MS, usageLimitSleepMs } from "../core/lane/waits.ts";
-import { failAttempt, failClaimed, heartbeat, park, parkText, type HeartbeatSet, type LedgerEdit } from "../core/ledger/edits.ts";
+import {
+  coordinatorFenced,
+  failAttempt,
+  failClaimed,
+  heartbeat,
+  park,
+  parkText,
+  type CoordinatorFence,
+  type HeartbeatSet,
+  type LedgerEdit,
+  type LedgerFence,
+} from "../core/ledger/edits.ts";
 import type { NextStory } from "../core/next/next.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { allowanceRefusal } from "../core/review/allowance.ts";
@@ -306,10 +317,13 @@ export type ForgeClock = {
   seenAt(): number;
 };
 
-/** The forge's time as last seen, advanced by the host clock; `seed` is a forge time seen now. */
-export function forgeClock(clock: () => number, seed?: string): ForgeClock {
+/**
+ * The forge's time as last seen, advanced by the host clock; `seed` is a
+ * forge time seen at host time `seedAt`, default now.
+ */
+export function forgeClock(clock: () => number, seed?: string, seedAt?: number): ForgeClock {
   let last: string | null = seed ?? null;
-  let at = seed === undefined ? 0 : clock();
+  let at = seed === undefined ? 0 : (seedAt ?? clock());
   const forgeAt = (hostMs: number): string =>
     last === null ? new Date(hostMs).toISOString() : new Date(Date.parse(last) + Math.max(0, hostMs - at)).toISOString();
   const forgeNow = (): string => forgeAt(clock());
@@ -325,6 +339,26 @@ export function forgeClock(clock: () => number, seed?: string): ForgeClock {
 }
 
 // ------------------------------------------------------------ forge calls
+
+/**
+ * A coordinator lane's forge (Q5): every swap `forgeOps` makes through it,
+ * and so every step kit's, first applies `ledgerFence` to its edit. `lane
+ * run` and the coordinator process hand it to everything that writes the
+ * ledger for the coordinator, the CI, review and merge steps a retro item
+ * runs included.
+ */
+export type FencedForge = Forge & { readonly ledgerFence: LedgerFence };
+
+/** `forge` with its ledger edits fenced on `coordinator.json`'s holder and generation (`coordinatorFenced`); an earlier fence is replaced. */
+export function fenceForge(forge: Forge, fence: CoordinatorFence): FencedForge {
+  return { ...forge, ledgerFence: (edit) => coordinatorFenced(fence, edit) };
+}
+
+/** The fence of a `FencedForge`; for any other forge, the edit as it is. */
+export function ledgerFenceOf(forge: Forge): LedgerFence {
+  const fence = (forge as Partial<FencedForge>).ledgerFence;
+  return fence ?? ((edit) => edit);
+}
 
 /** A ledger swap's outcome: the record it wrote for the unit (or `null`), else lost or failed. */
 export type Swapped =
@@ -348,7 +382,7 @@ export type ForgeOpsParams = {
 export type ForgeOps = {
   /** One forge call under its own deadline; a throw is `transient`, a lane-stop kind stops the lane. */
   call<T>(operation: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<ForgeResult<T>>;
-  /** One ledger edit through the CAS loop under its own deadline; a ledger or forge stop stops the lane. */
+  /** One ledger edit, behind a `FencedForge`'s fence, through the CAS loop under its own deadline; a ledger or forge stop stops the lane. */
   swap(edit: LedgerEdit, unit: string): Promise<Swapped>;
   /** Posts the alert (its failure ignored), then `stop`. */
   laneStop(condition: string, why: string): Promise<never>;
@@ -358,6 +392,7 @@ export type ForgeOps = {
 
 export function forgeOps(p: ForgeOpsParams): ForgeOps {
   const { forge, callTimeoutMs } = p;
+  const fence = ledgerFenceOf(forge);
   const deadline = (): CallOpts => ({ signal: AbortSignal.timeout(callTimeoutMs) });
 
   const laneStop = async (condition: string, why: string): Promise<never> => {
@@ -383,7 +418,7 @@ export function forgeOps(p: ForgeOpsParams): ForgeOps {
   const swap = async (edit: LedgerEdit, unit: string): Promise<Swapped> => {
     const r = await swapLedger({
       forge,
-      edit,
+      edit: fence(edit),
       signal: AbortSignal.timeout(callTimeoutMs),
       ...(p.sleep !== undefined ? { sleep: p.sleep } : {}),
       ...(p.random !== undefined ? { random: p.random } : {}),

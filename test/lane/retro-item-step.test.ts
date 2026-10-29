@@ -23,7 +23,7 @@ import type { DiffPathsRequest } from "../../src/lane/diff-paths.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import type { MergeOutcome, MergeRequest, Merger } from "../../src/lane/merger.ts";
 import { createRetroItemStep, findRetroItem, retroItemPrText, type RetroItemStepDeps } from "../../src/lane/retro-item-step.ts";
-import { CI_FIX_LOG, LIMIT_STOP_REASON, MarkerStop, newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.ts";
+import { CI_FIX_LOG, fenceForge, LIMIT_STOP_REASON, MarkerStop, newTrack, readsPath, type PrStepOutput } from "../../src/lane/session.ts";
 import type { WaitEnd } from "../../src/lane/wait.ts";
 import type { PrepareParams, Workspace } from "../../src/lane/workspace.ts";
 import { COORD, rec, tip } from "../core/ledger/fixtures.ts";
@@ -899,6 +899,34 @@ function watchChecks(forge: Forge, fake: FakeForge, unit: string, seen: (readonl
     },
   };
 }
+
+describe("createRetroItemStep: the review on a fenced forge (Epic 2 retro item 22, Q5)", () => {
+  test.each([
+    ["taken over by another identity", { owner: "dave", host: "44444444-4444-4444-8444-444444444444", generation: 2 }],
+    ["at another generation", { generation: 2 }],
+  ] as const)("coordinator.json %s during the review: the review's writes are refused, no passed_sha, no enqueue", async (_name, over) => {
+    const h = harness({ behaviors: [writes(built())] });
+    h.fake.control.setMain(bothReviewers(mainFiles()));
+    const forge = fenceForge(h.deps().forge, { by: COORD, generation: claimRec().generation });
+    const lost = { ...claimRec(), ...over };
+    const stub = reviewStub({
+      forge: fenceForge(h.fake.forge, { by: COORD, generation: claimRec().generation }),
+      laneDir: h.laneDir,
+      hostStop: join(h.laneDir, "..", "STOP"),
+      lane: LANE,
+      identity: COORD,
+      results: [],
+      onRun: () => h.fake.control.writeForeignLedger({ message: "lost claim [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(lost) }, deletes: [] }),
+    });
+    const out = await h.run(undefined, { forge, review: stub.review });
+    expect(stub.prompts).toHaveLength(1);
+    expect(out.outcome).not.toBe("progress");
+    expect(out.reason).toContain("the coordinator claim is lost");
+    expect(h.fake.control.ledgerLog().at(-1)?.message).toBe("lost claim [skip ci]");
+    expect(h.fake.control.queue()).toEqual([]);
+    expect((await h.ledger()).get(U)).toMatchObject({ passed_sha: null, enqueued_sha: null });
+  });
+});
 
 describe("createRetroItemStep: an adopted PR", () => {
   /** Opens the item's PR at a fresh head whose CI passes, and writes the record adopting it, built by `built`; the PR number. */

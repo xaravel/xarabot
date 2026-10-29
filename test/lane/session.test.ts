@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createCodexAgent } from "../../src/adapters/agent/codex/codex-agent.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
-import { parseLedger, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
-import { park } from "../../src/core/ledger/edits.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { keepAlive, park } from "../../src/core/ledger/edits.ts";
 import { err, ok, type Result } from "../../src/core/result.ts";
 import type { Lane } from "../../src/core/schemas/host.ts";
 import type { JournalRecord, UnitJournalRecord } from "../../src/core/schemas/journal.ts";
-import { unitPath, type UnitRecord } from "../../src/core/schemas/ledger.ts";
+import { unitPath, type CoordinatorRecord, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { runLaneProcess } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore, laneLayout } from "../../src/lane/lane-store.ts";
 import {
@@ -18,10 +18,12 @@ import {
   callPassedGate,
   createSessionRunner,
   End,
+  fenceForge,
   forgeClock,
   forgeOps,
   Halt,
   haveCommits,
+  ledgerFenceOf,
   newTrack,
   passedGate,
   sessionAllowance,
@@ -40,7 +42,7 @@ import type { Forge, ForgeCheck } from "../../src/ports/forge.ts";
 import type { Sandbox, SandboxRun } from "../../src/ports/sandbox.ts";
 import type { BuildResult } from "../../src/core/schemas/session-result.ts";
 import type { FetchShas } from "../../src/lane/workspace.ts";
-import { ALICE, BOB, rec, tip } from "../core/ledger/fixtures.ts";
+import { ALICE, BOB, COORD, rec, tip } from "../core/ledger/fixtures.ts";
 import { cleanup, commit, rg, setup } from "./git-fixture.ts";
 
 const UNIT = "story:1.1";
@@ -436,6 +438,73 @@ describe("forgeClock", () => {
     expect(fc.seenAt()).toBe(1_000_000);
     host -= 5_000;
     expect(fc.forgeNow()).toBe("2026-10-23T10:00:00.000Z");
+  });
+
+  test("a seed seen at an earlier host time counts from then, not from creation (Epic 2 retro item 22)", () => {
+    const host = 1_000_000;
+    const fc = forgeClock(() => host, FORGE_NOW, host - 90_000);
+    expect(fc.seenAt()).toBe(host - 90_000);
+    expect(fc.forgeNow()).toBe("2026-10-23T10:01:30.000Z");
+    fc.see("2026-10-23T11:00:00Z");
+    expect(fc.seenAt()).toBe(host);
+  });
+});
+
+describe("a fenced forge (Q5)", () => {
+  const claim = (over: Partial<CoordinatorRecord> = {}): CoordinatorRecord => ({
+    schema_version: 6,
+    owner: COORD.owner,
+    host: COORD.host,
+    lane: "coordinator",
+    generation: 2,
+    heartbeat_at: FORGE_NOW,
+    digest_posted_at: null,
+    rulings_cursor: null,
+    ...over,
+  });
+  const seedClaim = (w: KitWorld, c: CoordinatorRecord) =>
+    w.fake.control.writeForeignLedger({ message: "claim [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(c) }, deletes: [] });
+
+  test("a plain forge has no fence: the edit as it is", () => {
+    const fake = createFakeForge({ now: FORGE_NOW });
+    const edit = keepAlive({ unit: UNIT, by: ALICE, now: FORGE_NOW, generation: 1 });
+    expect(ledgerFenceOf(fake.forge)(edit)).toBe(edit);
+  });
+
+  test("fenceForge keeps every forge call and replaces an earlier fence", () => {
+    const fake = createFakeForge({ now: FORGE_NOW });
+    const once = fenceForge(fake.forge, { by: COORD, generation: 1 });
+    const twice = fenceForge(once, { by: COORD, generation: 2 });
+    expect(twice.snapshot).toBe(fake.forge.snapshot);
+    expect(twice.ledgerSwap).toBe(fake.forge.ledgerSwap);
+    const files = tip([rec({ unit: UNIT })], { [COORDINATOR_PATH]: serializeCoordinator(claim()) });
+    const edit = keepAlive({ unit: UNIT, by: ALICE, now: FORGE_NOW, generation: 1 });
+    expect(ledgerFenceOf(twice)(edit)(files).ok).toBe(true);
+    expect(ledgerFenceOf(once)(edit)(files).ok).toBe(false);
+  });
+
+  test("the step kit's held edit through it lands while coordinator.json is held at the generation", async () => {
+    const w = await kitWorld();
+    seedClaim(w, claim());
+    const kit = w.kit({ forge: fenceForge(w.fake.forge, { by: COORD, generation: 2 }) });
+    await kit.held("park", park({ unit: UNIT, by: ALICE, now: kit.forgeNow(), generation: kit.generation, kind: "blocked", reason: "no-op" }));
+    expect(await w.ledger()).toMatchObject({ state: "parked" });
+  });
+
+  test.each([
+    ["taken over by another identity", claim({ owner: "dave", host: "44444444-4444-4444-8444-444444444444", generation: 3 })],
+    ["at another generation", claim({ generation: 3 })],
+  ] as const)("coordinator.json %s: the step kit's held edit is refused as a lost unit, nothing written", async (_name, foreign) => {
+    const w = await kitWorld();
+    seedClaim(w, foreign);
+    const kit = w.kit({ forge: fenceForge(w.fake.forge, { by: COORD, generation: 2 }) });
+    const out = await ended(() => kit.held("park", park({ unit: UNIT, by: ALICE, now: kit.forgeNow(), generation: kit.generation, kind: "blocked", reason: "no-op" })));
+    expect(out.outcome).toBe("failed");
+    expect(out.state).toBeNull();
+    expect(out.reason).toContain("park: unit lost: ");
+    expect(out.reason).toContain("the coordinator claim is lost");
+    expect(await w.ledger()).toEqual(w.record);
+    expect(w.fake.control.ledgerLog().at(-1)?.message).toBe("claim [skip ci]");
   });
 });
 

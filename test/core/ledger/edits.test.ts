@@ -10,6 +10,7 @@ import {
   claim,
   claimCoordinator,
   coordinatorClaimState,
+  coordinatorFenced,
   deleteMerged,
   deleteReleasedRecurring,
   ejected,
@@ -1137,6 +1138,53 @@ describe("fenced", () => {
   test("an item already done writes nothing, not even the fence", () => {
     const r = fenced(fence(), deleteMerged({ unit: U, by: COORD, now: NOW }))(tip([own]));
     expect(r.ok && r.value).toBeNull();
+  });
+});
+
+describe("coordinatorFenced (Q5)", () => {
+  const own = by(COORD, T0, { unit: "reconcile:5", globs: [] });
+  const ownPath = "units/reconcile__5.json";
+  const beat = keepAlive({ unit: "reconcile:5", by: COORD, now: NOW, generation: 1 });
+  const fence = { by: COORD, generation: 2 };
+
+  test("coordinator.json held by the writer at the generation: the edit's own commit, coordinator.json untouched", () => {
+    const files = coordTip(coordRec(COORD, T0, { generation: 2 }), [own]);
+    const r = coordinatorFenced(fence, beat)(files);
+    expect(r).toEqual(beat(files));
+    expect(r.ok && r.value).toEqual({ message: "ledger: keepAlive reconcile:5 [skip ci]", writes: { [ownPath]: serializeUnitRecord({ ...own, heartbeat_at: NOW }) }, deletes: [] });
+  });
+
+  test("stale but still held: the edit applies, as the claim's own keeper would still beat it", () => {
+    const r = coordinatorFenced(fence, beat)(coordTip(coordRec(COORD, "2026-10-22T08:00:00Z", { generation: 2 }), [own]));
+    expect(r.ok).toBe(true);
+  });
+
+  test.each([
+    ["another identity took it over", coordRec(COORD_2, T0, { generation: 3 }), "held by dave/44444444-4444-4444-8444-444444444444/coordinator"],
+    ["the same identity at another generation", coordRec(COORD, T0, { generation: 3 }), "at generation 3, expected 2"],
+    ["no record", null, "is missing"],
+  ] as const)("%s: a precondition error naming the lost claim, the edit not applied", (_name, current, says) => {
+    const r = coordinatorFenced(fence, beat)(coordTip(current, [own]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+    expect(r.ok ? "" : r.error.message).toContain(says);
+    expect(r.ok ? "" : r.error.message).toContain("the coordinator claim is lost");
+  });
+
+  test("a lost claim refuses even an edit that would write nothing", () => {
+    const r = coordinatorFenced(fence, deleteMerged({ unit: U, by: COORD, now: NOW }))(coordTip(coordRec(COORD_2, T0, { generation: 3 }), [own]));
+    expect(r.ok ? "ok" : r.error.kind).toBe("precondition");
+  });
+
+  test("the edit's own error is the result when the claim holds", () => {
+    const r = coordinatorFenced(fence, keepAlive({ unit: "reconcile:5", by: COORD, now: NOW, generation: 9 }))(coordTip(coordRec(COORD, T0, { generation: 2 }), [own]));
+    expect(r.ok ? "ok" : r.error.message).toContain("generation");
+    expect(r.ok ? "ok" : r.error.message).not.toContain("coordinator claim");
+  });
+
+  test("a schema_version 7 coordinator.json stops", () => {
+    const v7 = serializeCoordinator(coordRec(COORD, T0, { generation: 2 })).replace('"schema_version": 6', '"schema_version": 7');
+    const r = coordinatorFenced(fence, beat)({ ...tip([own]), [COORDINATOR_PATH]: v7 });
+    expect(r.ok ? "ok" : r.error.kind).toBe("stop");
   });
 });
 

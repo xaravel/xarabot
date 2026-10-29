@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../src/core/ledger/codec.ts";
+import { coordinatorFenced, type LedgerFence } from "../../src/core/ledger/edits.ts";
 import { unitPath, type CoordinatorRecord, type UnitRecord } from "../../src/core/schemas/ledger.ts";
 import { startCoordinatorHeartbeat, startHeartbeat, type Heartbeat } from "../../src/lane/heartbeat.ts";
 import { acquireLaneLock, type LaneLockCheck } from "../../src/lane/lane-lock.ts";
@@ -28,6 +29,10 @@ type WorldOpts = {
   readonly retryMs?: number;
   /** The lane lock's re-read; default the keeper's own (`checkHeldLaneLocks`). */
   readonly laneLock?: () => LaneLockCheck;
+  /** Wraps each beat and the release; default none. */
+  readonly fence?: LedgerFence;
+  /** Stops the keeper once aborted; default never. */
+  readonly until?: AbortSignal;
 };
 
 type World = {
@@ -121,6 +126,8 @@ function world(o: WorldOpts = {}): World {
     random: () => 0,
     ...(o.retryMs !== undefined ? { retryMs: o.retryMs } : {}),
     ...(o.laneLock !== undefined ? { laneLock: o.laneLock } : {}),
+    ...(o.fence !== undefined ? { fence: o.fence } : {}),
+    ...(o.until !== undefined ? { until: o.until } : {}),
     log: (text) => logs.push(text),
   });
 
@@ -391,6 +398,63 @@ describe("startHeartbeat", () => {
     await w.keeper.stop();
     expect(w.swaps).toEqual([]);
     expect(w.keeper.end()).toBeNull();
+  });
+});
+
+describe("the unit keeper of a coordinator unit (Epic 2 retro item 22)", () => {
+  test("until aborts during the wait: the keeper stops with no beat, no abort of its own signal and no end, and logs why", async () => {
+    const claim = new AbortController();
+    const w = world({ holdAt: 0, until: claim.signal });
+    await until(() => w.loopSleeps.length === 1);
+    claim.abort("lost");
+    await until(() => w.logs.some((l) => l.includes(`${UNIT}: the keeper stops (lost)`)));
+    await w.keeper.stop();
+    expect(w.swaps).toEqual([]);
+    expect(w.loopSleeps).toEqual([5 * MIN]);
+    expect(w.keeper.end()).toBeNull();
+    expect(w.keeper.signal.aborted).toBe(false);
+    expect(await w.record()).toEqual(rec());
+  });
+
+  test("until already aborted at the start: the keeper never waits or beats", async () => {
+    const claim = new AbortController();
+    claim.abort("lapsed");
+    const w = world({ until: claim.signal });
+    await w.keeper.stop();
+    expect(w.loopSleeps).toEqual([]);
+    expect(w.swaps).toEqual([]);
+    expect(w.logs.some((l) => l.includes("the keeper stops (lapsed)"))).toBe(true);
+  });
+
+  test("until never aborted: the keeper beats as before", async () => {
+    const w = world({ holdAt: 2, until: new AbortController().signal });
+    await settle(w, 2);
+    expect(w.keepAlives()).toBe(2);
+  });
+
+  test("the fence wraps each beat: coordinator.json lost (here missing) ends the keeper lost with nothing written", async () => {
+    const w = world({ fence: (edit) => coordinatorFenced({ by: COORD, generation: 1 }, edit) });
+    await settle(w);
+    expect(w.keeper.end()?.kind).toBe("lost");
+    expect(w.keeper.end()?.message).toContain("the coordinator claim is lost");
+    expect(w.keeper.signal.reason).toBe("lost");
+    expect(w.swaps).toEqual([]);
+    expect(await w.record()).toEqual(rec());
+  });
+
+  test("the fence wraps the lapse release too", async () => {
+    const fencedEdits: string[] = [];
+    const fence: LedgerFence = (edit) => (files) => {
+      const r = edit(files);
+      if (r.ok && r.value !== null) fencedEdits.push(editName(r.value.message));
+      return r;
+    };
+    const w = world({ fence });
+    w.fail({ kind: "rate-limited", message: "slow down", retry_after: 180 });
+    await settle(w);
+    expect(w.keeper.end()?.kind).toBe("released");
+    expect(fencedEdits).toContain("keepAlive");
+    expect(fencedEdits.at(-1)).toBe("release");
   });
 });
 

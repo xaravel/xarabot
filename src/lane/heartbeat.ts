@@ -1,6 +1,6 @@
 import { HEARTBEAT_MS, HEARTBEAT_RETRY_MS, heartbeatRetryMs, wouldLapse } from "../core/lane/heartbeat.ts";
 import { COORDINATOR_PATH } from "../core/ledger/codec.ts";
-import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit } from "../core/ledger/edits.ts";
+import { keepAlive, keepCoordinator, release, STALE_AFTER_MS, type LedgerCommit, type LedgerEdit, type LedgerFence } from "../core/ledger/edits.ts";
 import type { LaneIdentity, UnitRecord } from "../core/schemas/ledger.ts";
 import { isLaneStopKind, type Forge } from "../ports/forge.ts";
 import { checkHeldLaneLocks, type LaneLockCheck } from "./lane-lock.ts";
@@ -29,6 +29,13 @@ import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, writtenRecord, type 
  *   longer. When the next try could land at or past the stale age since the
  *   last good beat, it releases the unit (no attempt counted) and aborts with
  *   `released`; if that release fails, with `lapsed`.
+ *
+ * - `until` aborted (the coordinator keeper's signal, for a coordinator
+ *   unit): the keeper stops as `stop()` stops it, with no abort and no
+ *   write, so a unit is never kept for a coordinator that lost its claim.
+ *
+ * A coordinator unit's beats and release carry `fence`, so each one also
+ * fails once `coordinator.json` changed holder or generation (Q5).
  *
  * It is a `sleep` loop, so beats never overlap, and it never throws.
  */
@@ -64,6 +71,10 @@ export type HeartbeatParams = {
   readonly claimedMs?: number;
   /** Re-reads the lane lock before each beat; default `checkHeldLaneLocks`, the locks this process holds. */
   readonly laneLock?: () => LaneLockCheck;
+  /** Wraps each beat and the release (`coordinatorFenced`); default none. */
+  readonly fence?: LedgerFence;
+  /** Stops the keeper once aborted; default never. */
+  readonly until?: AbortSignal;
   readonly log: (text: string) => void;
 };
 
@@ -83,19 +94,20 @@ function message(e: unknown): string {
 
 export function startHeartbeat(params: HeartbeatParams): Heartbeat {
   const { identity, unit, generation } = params;
+  const fence = params.fence ?? ((edit: LedgerEdit) => edit);
   return startKeeper({
     ...params,
     what: unit,
-    beat: (now) => keepAlive({ unit, by: identity, now, generation }),
+    beat: (now) => fence(keepAlive({ unit, by: identity, now, generation })),
     release: {
-      edit: (now) => release({ unit, by: identity, now, generation }),
+      edit: (now) => fence(release({ unit, by: identity, now, generation })),
       record: (commit) => writtenRecord(commit, unit),
     },
   });
 }
 
 /** The coordinator keeper's parameters: `HeartbeatParams` for `coordinator.json`, at the claim's generation. */
-export type CoordinatorHeartbeatParams = Omit<HeartbeatParams, "unit">;
+export type CoordinatorHeartbeatParams = Omit<HeartbeatParams, "unit" | "fence">;
 
 /**
  * The `coordinator.json` keeper (FR4, AD-8): the unit keeper's timing and
@@ -108,7 +120,7 @@ export function startCoordinatorHeartbeat(params: CoordinatorHeartbeatParams): H
   return startKeeper({ ...params, what: COORDINATOR_PATH, beat: (now) => keepCoordinator({ by: identity, now, generation }), release: null });
 }
 
-type KeeperParams = Omit<HeartbeatParams, "unit" | "identity"> & {
+type KeeperParams = Omit<HeartbeatParams, "unit" | "identity" | "fence"> & {
   /** What the keeper keeps, for its log lines. */
   readonly what: string;
   /** One beat at forge time `now`; a `null` commit means the record moved on. */
@@ -229,6 +241,17 @@ function startKeeper(params: KeeperParams): Heartbeat {
       log(`${failure}; retrying in ${delay} ms`);
     }
   };
+
+  const until = params.until;
+  if (until !== undefined) {
+    const end = (): void => {
+      if (stopping.signal.aborted || ended !== null) return;
+      log(`${what}: the keeper stops (${String(until.reason)})`);
+      stopping.abort();
+    };
+    if (until.aborted) end();
+    else until.addEventListener("abort", end, { once: true });
+  }
 
   const running = loop().catch((e: unknown) => {
     // Never reached by design; a keeper that throws stops beating, which the stale age covers.

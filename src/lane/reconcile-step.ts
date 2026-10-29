@@ -43,7 +43,7 @@ import { answerRulings } from "./rulings-step.ts";
 import { DEFAULT_CALL_TIMEOUT_MS, defaultSleep, swapLedger, type Sleep } from "./ledger-cas.ts";
 import { ENQUEUE_TRIES, gateComment } from "./merge-step.ts";
 import type { ReconcileCommitter } from "./reconcile-commit.ts";
-import { allowanceReason, callPassedGate, describeError, message, stepKit, stepOps, type FreshMain, type PassedGate, type PrStepOutput } from "./session.ts";
+import { allowanceReason, callPassedGate, describeError, ledgerFenceOf, message, stepKit, stepOps, type FreshMain, type PassedGate, type PrStepOutput } from "./session.ts";
 
 /**
  * The `reconcile` step (FR2, NFR20, AR4, AR10, AR14, AD-9): runner code only,
@@ -286,6 +286,8 @@ export function reparkComment(unit: string, cause: ReparkCause): string {
 
 export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
   const { forge, committer, identity } = deps;
+  // A coordinator forge's fence (Q5), for the swaps made here and not through the step kit.
+  const ledgerFence = ledgerFenceOf(forge);
   const clock = deps.now ?? Date.now;
   const callTimeoutMs = deps.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   const sleep = deps.sleep ?? defaultSleep;
@@ -996,7 +998,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     const coordinatorSwap = async (what: string, edit: LedgerEdit, bare = false): Promise<boolean> => {
       const r = await swapLedger({
         forge,
-        edit: bare ? edit : fenced(heartbeat({ unit, by: identity, now: forgeNow(), generation }), edit),
+        edit: ledgerFence(bare ? edit : fenced(heartbeat({ unit, by: identity, now: forgeNow(), generation }), edit)),
         signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
         sleep,
         ...(deps.random !== undefined ? { random: deps.random } : {}),
@@ -1089,7 +1091,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         );
         const r = await swapLedger({
           forge,
-          edit,
+          edit: ledgerFence(edit),
           signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
           sleep,
           ...(deps.random !== undefined ? { random: deps.random } : {}),

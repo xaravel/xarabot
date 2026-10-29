@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
@@ -11,7 +11,7 @@ import type { CoordinatorRecord, UnitRecord } from "../../src/core/schemas/ledge
 import type { Agent } from "../../src/ports/agent.ts";
 import { forgeErr, type Forge } from "../../src/ports/forge.ts";
 import { claimCoordinatorRecord, missingStepReason, runCoordinatorProcess, type CoordinatorDeps, type CoordinatorStep, type CoordinatorStepInput } from "../../src/lane/coordinator-process.ts";
-import type { Sleep } from "../../src/lane/ledger-cas.ts";
+import { CAS_MAX_TRIES, type Sleep } from "../../src/lane/ledger-cas.ts";
 import { createFsLaneStore } from "../../src/lane/lane-store.ts";
 import { addReviewUsage, newTrack } from "../../src/lane/session.ts";
 import type { WaitParams, WaitResult } from "../../src/lane/wait.ts";
@@ -84,6 +84,8 @@ type HarnessOpts = {
   /** The claim the process is handed; default the seeded `coordinator.json`. */
   readonly claim?: CoordinatorRecord;
   readonly waiter?: (p: WaitParams, h: Harness) => Promise<WaitResult>;
+  /** The keepers' wait after a failed beat; default theirs (60 s). */
+  readonly retryMs?: number;
 };
 
 function harness(o: HarnessOpts = {}): Harness {
@@ -135,7 +137,7 @@ function harness(o: HarnessOpts = {}): Harness {
         now: () => T0 + 1000 * clock++,
         sleep: async () => {},
         random: () => 0,
-        heartbeat: { sleep: hbSleep },
+        heartbeat: { sleep: hbSleep, ...(o.retryMs !== undefined ? { retryMs: o.retryMs } : {}) },
         waiter: {
           async wait(p) {
             waits.push(p);
@@ -321,7 +323,7 @@ describe("runCoordinatorProcess", () => {
     expect(beatsInWait).toBe(0);
   });
 
-  test("a failed Halt after the claim (the coordinator claim lost) fails the unit's attempt at once: released, attempts + 1", async () => {
+  test("a failed Halt after the claim (the coordinator claim lost): the fence refuses the failed attempt, the unit is left claimed for the new coordinator (Q5)", async () => {
     const h = harness();
     const step: CoordinatorStep = async (input) => {
       h.steps.push(input);
@@ -332,11 +334,34 @@ describe("runCoordinatorProcess", () => {
       return { outcome: "progress", state: "claimed" };
     };
     expect((await h.run({ steps: { reconcile: step } })).outcome).toBe("failed");
+    expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "claimed", attempts: 0, owner: COORD.owner, generation: 1 });
+    expect(h.commits("ledger: failAttempt ")).toBe(0);
+    const unit = h.journal().find((j) => j.type === "unit");
+    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: null });
+    const reason = unit?.type === "unit" ? (unit.reason ?? "") : "";
+    expect(reason).toStartWith("coordinator claim: coordinator.json lost");
+    expect(reason).toContain("failAttempt: coordinator.json is held by dave/");
+  });
+
+  test("a failed Halt after the claim lapsed (coordinator.json still this lane's): the fence lets the failed attempt through, released, attempts + 1", async () => {
+    // Every coordinator.json beat fails; with a 40 min retry wait the first failure would lapse.
+    const h = harness({ retryMs: 40 * MIN });
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) =>
+        commit.message.startsWith("ledger: keepCoordinator ") ? forgeErr("transient", "down") : h.fake.forge.ledgerSwap(oldSha, commit, o),
+    };
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      h.pulse();
+      await abortOf(input.signal);
+      return { outcome: "progress", state: "claimed" };
+    };
+    expect((await h.run({ forge, steps: { reconcile: step } })).outcome).toBe("failed");
     expect((await h.ledger()).units.get("reconcile:1")).toMatchObject({ state: "released", attempts: 1 });
     expect(h.commits("ledger: failAttempt reconcile:1 ")).toBe(1);
     const unit = h.journal().find((j) => j.type === "unit");
-    expect(unit).toMatchObject({ unit: "reconcile:1", outcome: "failed", state: "released", attempts: 1 });
-    expect(unit?.type === "unit" ? unit.reason : "").toStartWith("coordinator claim: coordinator.json lost");
+    expect(unit?.type === "unit" ? unit.reason : "").toStartWith("coordinator claim: coordinator.json lapsed");
   });
 
   test("a failed Halt whose failAttempt fails too: the state is unknown, the record left claimed", async () => {
@@ -366,6 +391,88 @@ describe("runCoordinatorProcess", () => {
     const reason = unit?.type === "unit" ? (unit.reason ?? "") : "";
     expect(reason).toContain("coordinator claim: coordinator.json lost");
     expect(reason).toContain("failAttempt: ");
+  });
+
+  test("the coordinator claim lapses mid-step: the unit keeper stops at once, so it beats no more while the step winds down (2.4 F2)", async () => {
+    // Every coordinator.json beat fails, and with a 40 min retry wait the first failure lapses the claim.
+    // coordinator.json stays this lane's, so the fence alone would still let a unit beat land.
+    const h = harness({ retryMs: 40 * MIN });
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) =>
+        commit.message.startsWith("ledger: keepCoordinator ") ? forgeErr("transient", "down") : h.fake.forge.ledgerSwap(oldSha, commit, o),
+    };
+    let beatsAfter = -1;
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      h.pulse();
+      await abortOf(input.signal);
+      const before = h.commits("ledger: keepAlive reconcile:1 ");
+      h.pulse();
+      await Bun.sleep(20);
+      beatsAfter = h.commits("ledger: keepAlive reconcile:1 ") - before;
+      return { outcome: "progress", state: "claimed" };
+    };
+    expect((await h.run({ forge, steps: { reconcile: step } })).outcome).toBe("failed");
+    expect(beatsAfter).toBe(0);
+    const logs = readdirSync(join(h.laneDir, "logs")).map((f) => readFileSync(join(h.laneDir, "logs", f), "utf8"));
+    expect(logs.join("")).toContain("heartbeat: reconcile:1: the keeper stops (lapsed)");
+  });
+
+  test.each([
+    ["the start snapshot 20 min before the process start: the first failed beat lapses the claim", T0 - 20 * MIN, true],
+    ["no claimSeenMs (the process start): the same failed beat is retried", undefined, false],
+  ] as const)("the coordinator keeper's lapse window counts from claimSeenMs: %s (2.4 F1)", async (_name, claimSeenMs, lapses) => {
+    // A 9 min retry wait: now + 9 + 1 min reaches 30 min past a claim seen 20 min before the start, not past one seen at the start.
+    const h = harness({ retryMs: 9 * MIN });
+    let tries = 0;
+    const forge: Forge = {
+      ...h.fake.forge,
+      ledgerSwap: async (oldSha, commit, o) => {
+        if (!commit.message.startsWith("ledger: keepCoordinator ")) return h.fake.forge.ledgerSwap(oldSha, commit, o);
+        tries += 1;
+        return forgeErr("transient", "down");
+      },
+    };
+    let aborted: boolean | null = null;
+    const step: CoordinatorStep = async (input) => {
+      h.steps.push(input);
+      h.pulse();
+      await until(() => tries >= CAS_MAX_TRIES);
+      await Bun.sleep(20);
+      aborted = input.signal.aborted;
+      return { outcome: "progress", state: "claimed" };
+    };
+    const r = await h.run({ forge, steps: { reconcile: step }, ...(claimSeenMs !== undefined ? { claimSeenMs } : {}) });
+    expect(aborted as boolean | null).toBe(lapses);
+    expect(r.outcome).toBe(lapses ? "failed" : "progress");
+    const unit = h.journal().find((j) => j.type === "unit");
+    if (lapses) expect(unit?.type === "unit" ? unit.reason : "").toStartWith("coordinator claim: coordinator.json lapsed");
+  });
+
+  test("every unit edit is fenced on coordinator.json: a claim after another identity took coordinator.json over is refused, nothing written (Q5)", async () => {
+    const h = harness();
+    // The snapshot still shows this lane's claim; another identity takes coordinator.json over just before the unit claim's swap.
+    const foreign = claimRec({ ...OTHER, generation: 2 });
+    let taken = false;
+    const forge: Forge = {
+      ...h.fake.forge,
+      snapshot: async (o) => {
+        const snap = await h.fake.forge.snapshot(o);
+        if (!taken && o.read === undefined) {
+          taken = true;
+          h.fake.control.writeForeignLedger({ message: "foreign [skip ci]", writes: { [COORDINATOR_PATH]: serializeCoordinator(foreign) }, deletes: [] });
+          return h.fake.forge.snapshot(o);
+        }
+        return snap;
+      },
+    };
+    const r = await h.run({ forge, steps: { reconcile: stepping(h) } });
+    expect(r.outcome).toBe("failed");
+    expect(h.steps).toHaveLength(0);
+    expect(h.commits("ledger: claim ")).toBe(0);
+    expect((await h.ledger()).units.size).toBe(0);
+    expect((await h.ledger()).coordinator).toEqual(foreign);
   });
 
   test("a released coordinator unit with its PR open is claimed at generation + 1, adopting the PR", async () => {

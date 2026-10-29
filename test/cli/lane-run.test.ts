@@ -8,6 +8,8 @@ import type { JournalRecord } from "../../src/core/schemas/journal.ts";
 import { checkReviewerCli, composeReviewers, credentialSecrets, laneRun, LANE_START_FAILED, type CliVersion, type LaneRunDeps } from "../../src/cli/lane-run.ts";
 import { PI_DEFERRAL } from "../../src/cli/pi-deferral.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
+import { keepCoordinator } from "../../src/core/ledger/edits.ts";
+import { ledgerFenceOf } from "../../src/lane/session.ts";
 import type { CoordinatorRecord } from "../../src/core/schemas/ledger.ts";
 import { runCoordinatorProcess, type CoordinatorDeps } from "../../src/lane/coordinator-process.ts";
 import { runLaneProcess, type LaneDeps } from "../../src/lane/lane-process.ts";
@@ -198,6 +200,8 @@ type Setup = {
   readonly lockText?: string;
   /** The lock's owner and process table; default `LOCK_OWNER` with no process for any PID. */
   readonly lock?: LaneRunDeps["lock"];
+  /** The run's host clock, made with the run's fake forge; default `Date.now`. */
+  readonly now?: (fake: FakeForge) => () => number;
 };
 
 type Versions = Readonly<Record<string, string | null>>;
@@ -327,6 +331,7 @@ async function laneRunWith(
     out: (l) => out.push(l),
     errOut: (l) => err.push(l),
     lock: o.lock ?? { ...LOCK_OWNER, table: table() },
+    ...(o.now !== undefined ? { now: o.now(fake) } : {}),
   };
   const code = await laneRun(args, deps);
   return {
@@ -983,6 +988,8 @@ describe("xarabot lane run: the reviewers and the review gate (Story 3.5)", () =
     const d = r.starts[0] as LaneDeps;
     expect(built.review).toHaveLength(1);
     const review = (built.review[0] as (typeof built.review)[number]).deps;
+    // A builder's review step runs on the plain forge, with no coordinator fence.
+    expect(review.forge).toBe(d.forge);
     expect(Object.keys(review.reviewers)).toEqual(["claude", "codex"]);
     expect(review.reviewers.claude).toBe(d.agent);
     expect(review.reviewers.codex?.vendor).toBe("codex");
@@ -1015,8 +1022,12 @@ describe("xarabot lane run: the reviewers and the review gate (Story 3.5)", () =
     const r = await laneRunWith({ host: hostYaml({ lanes: [{ name: "coordinator", role: "coordinator" }] }), main: BOTH, codex: ["auth.json"] }, [REPO, "coordinator"]);
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
+    expect(built.review).toHaveLength(1);
     const review = built.review[0] as (typeof built.review)[number];
     expect(Object.keys(review.deps.reviewers)).toEqual(["claude", "codex"]);
+    // The review step's ledger edits are fenced on the claim too (Q5): it runs on the process's fenced forge.
+    expect(review.deps.forge).toBe((r.coordinatorStarts[0] as CoordinatorDeps).forge);
+    expect(review.deps.forge).not.toBe(r.fake.forge);
     const reconcile = (built.reconcile[0] as (typeof built.reconcile)[number]).deps;
     expect(reconcile.agent).toBe("claude");
     for (const s of [built.planning[0]?.deps, built.retro[0]?.deps, built.retroItem[0]?.deps]) {
@@ -1262,6 +1273,38 @@ describe("xarabot lane run: a coordinator lane", () => {
     expect(retroItem.deps.graphTrees).toBe(reconcile.deps.graphTrees);
     expect(typeof retro.deps.treeFiles).toBe("function");
     expect(typeof retroItem.deps.merger.merge).toBe("function");
+  });
+
+  test("claimSeenMs is the host time the start snapshot was read, before the claim and the slower checks after it; the clock goes to the process (Epic 2 retro item 22)", async () => {
+    const reads: { readonly at: number; readonly snapshots: number; readonly commits: number }[] = [];
+    let host = 1_000_000;
+    const now = (fake: FakeForge) => () => {
+      host += 60_000;
+      reads.push({ at: host, snapshots: fake.control.trace().length, commits: fake.control.ledgerLog().length });
+      return host;
+    };
+    const r = await laneRunWith({ host: COORD_HOST, now }, ARGS);
+    expect(r.code).toBe(0);
+    const d = r.coordinatorStarts[0] as CoordinatorDeps;
+    // One read, after the start snapshot and before the claim's commit.
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.snapshots).toBeGreaterThan(0);
+    expect(reads[0]?.commits).toBe(1);
+    expect(d.claimSeenMs).toBe(1_060_000);
+    expect(d.claim.heartbeat_at).toBe("2026-10-23T10:00:00Z");
+    expect(d.now?.()).toBe(1_120_000);
+  });
+
+  test("the process and every step get a forge fenced on the claim's holder and generation (Q5)", async () => {
+    const r = await laneRunWith({ host: COORD_HOST, ledger: seed(other({ owner: "alice", host: HOST_ID, generation: 3 })) }, ARGS);
+    expect(r.code).toBe(0);
+    const d = r.coordinatorStarts[0] as CoordinatorDeps;
+    const fence = ledgerFenceOf(d.forge);
+    const edit = keepCoordinator({ by: IDENTITY, now: "2026-10-23T10:01:00Z", generation: 3 });
+    expect(fence(edit)(seed(other({ owner: "alice", host: HOST_ID, generation: 3 }))).ok).toBe(true);
+    const taken = fence(edit)(seed(other({ generation: 4 })));
+    expect(taken.ok ? "ok" : taken.error.kind).toBe("precondition");
+    expect(ledgerFenceOf(r.fake.forge)(edit)).toBe(edit);
   });
 
   test("the same identity re-claims at the same generation", async () => {
