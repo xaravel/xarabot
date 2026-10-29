@@ -141,7 +141,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/cli/lane-run.ts", "src/lane/coordinator-process.ts", "src/lane/heartbeat.ts", "src/core/ledger/**", "test/cli/lane-run.test.ts", "test/lane/coordinator-process.test.ts", "test/lane/heartbeat.test.ts", "test/core/ledger/**", "src/lane/session.ts", "src/lane/reconcile-step.ts", "src/lane/planning-step.ts", "src/lane/retro-step.ts", "src/lane/retro-item-step.ts", "src/lane/review-gate.ts", "test/lane/session.test.ts", "test/lane/reconcile-step.test.ts", "test/lane/planning-step.test.ts", "test/lane/retro-step.test.ts", "test/lane/retro-item-step.test.ts", "test/lane/review-gate.test.ts"]
-        status: open
+        status: done
       - id: "epic-2-retro-item-23-harden-the-lane-lock"
         text: "Harden the lane lock (Story 2.11 follow-up review F1, F2): re-check lane.lock's PID and start time at each heartbeat and end the unit on a mismatch, so two live holders never both run (F1); treat a failing ps as held, never as gone (F2); remove the lane.lock.stale-* and .tmp-* files a SIGKILL leaves; tests for each. Story 3.6's switch confirms this item is done before XARABOT_MAX_BUILDERS is raised"
         route: lane
