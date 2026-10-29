@@ -10,6 +10,7 @@ import { applyRuling } from "../../src/core/ledger/edits.ts";
 import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
 import { next } from "../../src/core/next/next.ts";
 import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
+import { renderDigest } from "../../src/core/inbox/render-digest.ts";
 import { assembleSnapshot, epicSourceLine } from "../../src/core/next/snapshot.ts";
 import { planReconcile } from "../../src/core/reconcile/plan.ts";
 import { err, ok, type Result } from "../../src/core/result.ts";
@@ -413,6 +414,31 @@ describe("createPlanningStep: the result", () => {
     expect(text).not.toContain("sekrit-credential");
   });
 
+  test("AC: a blocked first-compile result parks blocked readiness for the Maintainer with the questions; their digest quotes them; nothing committed (Epic 3 retro item 15)", async () => {
+    const questions = [
+      "Epic 2",
+      "- Story 2.1: Is the second step per lane or per host? Readings: per lane, each lane keeps its own; per host, lanes share one.",
+    ].join("\n");
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("blocked", questions))] });
+    const out = await h.run();
+    expect(h.prompts[0]).toContain("# Open design questions");
+    expect([out.outcome, out.state]).toEqual(["progress", "parked"]);
+    // The Maintainer (`config.maintainer`), not the coordinator lane's owner, answers them.
+    expect(COORD.owner).not.toBe("edanisko");
+    expect((await h.ledger()).get("planning:status.1")).toMatchObject({
+      state: "parked",
+      park: { kind: "blocked", reason: "readiness", inbox_owner: "edanisko", globs_held: [], text: questions },
+    });
+    expect(out.reason).toBe(`blocked readiness: ${questions}`);
+    expect(h.commits).toEqual([]);
+    const digests = renderDigest({ snapshot: (await h.input()).snapshot, files: {}, repoUrl: "https://github.com/xaravel/xarabot" });
+    expect(digests.has(COORD.owner)).toBe(false);
+    const body = digests.get("edanisko")?.body ?? "";
+    expect(body).toContain("planning:status.1");
+    expect(body).toContain("blocked `readiness`");
+    expect(body).toContain(questions.split("\n").map((l) => `  > ${l}`).join("\n"));
+  });
+
   test("a blocked graph result parks blocked readiness too", async () => {
     const h = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("blocked", "cannot tell what 2.2 builds on"))] });
     const out = await h.run("planning:graph.1");
@@ -488,6 +514,21 @@ describe("createPlanningStep: the prompt and the clone", () => {
     expect(p).toContain("directly below its `# Epic <N> Context:` heading");
     expect(p).toContain("HOUSE RULE: keep it short.");
     expect(p).toContain(join(h.laneDir, "tmp"));
+  });
+
+  test("status: a missing Epic 2 context is a first compile; the prompt asks for Epic 2's open design questions first (Epic 3 retro item 15)", async () => {
+    const h = harness({ contextMissing: true, behaviors: [writes(planningResult("blocked"))] });
+    await h.run();
+    const p = h.prompts[0] ?? "";
+    expect(p).toContain("# Open design questions");
+    expect(p).toContain("so this run compiles theirs for the first time:\n\n- Epic 2\n\n");
+    expect(p).toContain(`read every Story of it in \`${EPICS}\``);
+  });
+
+  test("status: a stale Epic 2 context is on main, so it recompiles as before, with no open design questions step", async () => {
+    const h = harness({ contextStale: true, behaviors: [writes(planningResult("blocked"))] });
+    await h.run();
+    expect(h.prompts[0] ?? "").not.toContain("# Open design questions");
   });
 
   test("status: a stale Epic 2 context (no source line) is due; the prompt gives the source line of Epic 2's section on main", async () => {

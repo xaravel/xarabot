@@ -105,6 +105,7 @@ const TemplateSchema = z.strictObject({
   result_fix: z.string(),
   planning_status: z.string(),
   planning_graph: z.string(),
+  planning_questions: z.string(),
   result_planning: z.string(),
   retro: z.string(),
   result_retro: z.string(),
@@ -230,14 +231,20 @@ export type PlanningPromptHeading = { readonly id: string; readonly epic: number
 
 /**
  * A status planning unit: the Epics whose context file it compiles, each
- * with its output path and the source line it writes below the heading
- * (retro item 12).
+ * with its output path, the source line it writes below the heading (retro
+ * item 12), and whether it is a first compile, with no context file on
+ * `main` yet (Epic 3 retro item 15).
  */
 export type StatusPlanningPromptUnit = {
   readonly kind: "status";
   readonly id: string;
   readonly epics_path: string;
-  readonly contexts: readonly { readonly epic: number; readonly output_path: string; readonly source_line: string }[];
+  readonly contexts: readonly {
+    readonly epic: number;
+    readonly output_path: string;
+    readonly source_line: string;
+    readonly first_compile: boolean;
+  }[];
 };
 
 /** A graph planning unit: the headings it writes manifests for, and where. */
@@ -282,6 +289,7 @@ const PlanningInputSchema = z.strictObject({
           epic: z.int().positive(),
           output_path: SafeText,
           source_line: z.string().regex(/^<!-- source: sha256:[0-9a-f]{64} -->$/, "must be <!-- source: sha256:<64 lowercase hex digits> -->"),
+          first_compile: z.boolean(),
         }),
       ),
     }),
@@ -314,9 +322,10 @@ function folderOf(path: string): string {
 
 /**
  * Builds a planning prompt (Story 2.7): the unit's task (`planning_status`
- * or `planning_graph`), the rules, the repo sections, and the `planning`
- * result step with its JSON Schema last. Pure; placeholders are filled in
- * one pass, as for a Story.
+ * or `planning_graph`), for a status unit with a first compile the
+ * `planning_questions` step naming those Epics (Epic 3 retro item 15), the
+ * rules, the repo sections, and the `planning` result step with its JSON
+ * Schema last. Pure; placeholders are filled in one pass, as for a Story.
  */
 export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<string, BuildPromptError> {
   const template = checkTemplate(input.template);
@@ -347,6 +356,11 @@ export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<str
             .sort((a, b) => a.epic - b.epic)
             .map((c) => `- Epic ${c.epic}: output path \`${c.output_path}\`, source line \`${c.source_line}\``)
             .join("\n");
+    values.planning_first_compiles = [...unit.contexts]
+      .filter((c) => c.first_compile)
+      .sort((a, b) => a.epic - b.epic)
+      .map((c) => `- Epic ${c.epic}`)
+      .join("\n");
   } else {
     const dup = firstDuplicate(unit.headings.map((h) => h.id));
     if (dup !== undefined) return err("invalid-input", `unit.headings: duplicate Story ${dup}`);
@@ -358,7 +372,9 @@ export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<str
         : `\`${unit.path_key.key}\`: the area the Story's work changes, one of ${unit.path_key.values.map((v) => `\`${v}\``).join(", ")}.`;
   }
 
-  const parts: string[] = [unit.kind === "status" ? t.planning_status : t.planning_graph, t.rules];
+  const parts: string[] = [unit.kind === "status" ? t.planning_status : t.planning_graph];
+  if (unit.kind === "status" && unit.contexts.some((c) => c.first_compile)) parts.push(t.planning_questions);
+  parts.push(t.rules);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_planning);
   return fill(parts, values, `a ${unit.kind} planning prompt`);
