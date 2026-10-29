@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-15-decide-an-epics-questions-before-it-starts",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "docs/maintainer/self-host.md",
@@ -14,7 +14,7 @@
     "test/core/prompt/build-prompt.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:10:13.959Z",
+  "heartbeat_at": "2026-10-29T18:12:53Z",
   "pr": 263,
   "pr_owner": "edanisko",
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
