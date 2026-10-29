@@ -318,7 +318,7 @@ No attempt is counted either way.
     - `retro`: `verdict` (`accepted` | `accepted-with-open-items` | `rejected`), `unit` (`retro:<N>`) and `recorded_at`, written once by `reconcile`. A `rejected` verdict also gets a `go`, absent until the Maintainer's go is recorded.
     - `items[]`: `id` (`epic-<N>-retro-item-<seq>-<slug>`), `text`, `route` (`lane` | `maintainer`), `blocking`, `globs` (`[]` for none) and `status` (`open` | `in-progress` | `waiting` | `deferred` | `done`). `in-progress` is not written in 0.x; a claimed item stays `open`. `reconcile` writes `deferred` and `done` (a merged retro-item PR, or a ruling).
     - `checkpoint`: written by `reconcile` when the Maintainer's go for a checkpoint Epic is recorded (AD-28). It holds that `go`, and it stays when the checkpoint is retired (AD-11). A checkpoint Epic with no `checkpoint` entry is awaiting its go.
-    - Every `go` is {`by`, `at`, `ruling`}: the Maintainer's login, an ISO 8601 time, and the id of the ruling comment (AD-28), or `maintainer-pr` for a go the Maintainer writes by hand before the rulings Story (4.6) merges (AD-3).
+    - Every `go` is {`by`, `at`, `ruling`}: the Maintainer's login, an ISO 8601 time, and the id of the ruling comment (AD-28), `maintainer-pr` for a go the Maintainer writes by hand before the rulings Story (4.6) merges (AD-3), or `xarabot-rule` for a go given from the host with `xarabot rule go` (no comment exists; Maintainer ruling 2026-10-29 on `4.6-d1`).
   - **Graph changes** take effect at the next claim; Stories already claimed finish. A checkpoint added after an Epic's retro holds its dependents from the next claim until the go.
 
 ### AD-13: How `next` chooses
