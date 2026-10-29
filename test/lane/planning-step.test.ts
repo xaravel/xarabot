@@ -6,7 +6,7 @@ import { checkModel } from "../../src/adapters/agent/claude/usage.ts";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { checkWrite, type CoordinatorWriteRules, type WriteChange } from "../../src/core/lane/write-check.ts";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../src/core/ledger/codec.ts";
-import { applyRuling } from "../../src/core/ledger/edits.ts";
+import { applyRuling, claim } from "../../src/core/ledger/edits.ts";
 import { coordinatorGlobs } from "../../src/core/next/coordinator.ts";
 import { next } from "../../src/core/next/next.ts";
 import { checkGraphChange } from "../../src/core/graph/graph-gate.ts";
@@ -453,6 +453,34 @@ describe("createPlanningStep: the result", () => {
     expect((await h.ledger()).has("planning:status.1")).toBe(false);
     expect(swaps(h.events)).toEqual(["finishRecurring planning:status.1", "deleteMerged planning:status.1"]);
     expect(out.reason).toContain("nothing-due: all in place");
+  });
+
+  test.each([
+    ["nothing-due", {}],
+    ["done with an empty commit", { committer: () => ok({ kind: "empty" as const }) }],
+  ] as const)("C4: %s beside an older released record of its kind with a count: left merged for reconcile, so the count resets", async (name, over) => {
+    const older = coord("planning:status.1", { globs: STATUS_GLOBS, state: "released", attempts: 2, heartbeat_at: minutesBefore(10) });
+    const own = coord("planning:status.2", { globs: STATUS_GLOBS, attempts: 2 });
+    const h = harness({ contextMissing: true, records: [older, own], behaviors: [writes(planningResult(name === "nothing-due" ? "nothing-due" : "done", "all in place"))], ...over });
+    const out = await h.run("planning:status.2");
+    expect([out.outcome, out.state]).toEqual(["progress", "merged"]);
+    const ledger = await h.ledger();
+    expect(ledger.get("planning:status.2")?.state).toBe("merged");
+    expect(ledger.get("planning:status.1")?.state).toBe("released");
+    expect(swaps(h.events)).toEqual(["finishRecurring planning:status.2"]);
+    // The next new record of its kind starts at 0: the merged one is the newest.
+    const next = claim({ unit: "planning:status.3", by: COORD, now: FORGE_NOW, globs: STATUS_GLOBS, expectGeneration: null })(tip([...ledger.values()]));
+    if (!next.ok || next.value === null) throw new Error("expected the claim to apply");
+    expect(JSON.parse(next.value.writes["units/planning__status.3.json"] as string).attempts).toBe(0);
+  });
+
+  test.each([
+    ["a released record of the other kind", coord("planning:graph.1", { globs: GRAPH_GLOBS, state: "released", attempts: 2, heartbeat_at: minutesBefore(10) })],
+    ["an older released record of its kind with no count", coord("planning:sprint.1", { globs: STATUS_GLOBS, state: "released", heartbeat_at: minutesBefore(10) })],
+  ] as const)("C4: nothing-due beside %s deletes its record at once", async (_name, other) => {
+    const h = harness({ contextMissing: true, records: [other, OWN_STATUS], behaviors: [writes(planningResult("nothing-due", "all in place"))] });
+    await h.run();
+    expect(swaps(h.events)).toEqual(["finishRecurring planning:status.1", "deleteMerged planning:status.1"]);
   });
 
   test("done with an empty commit: merged with no PR, deleted, nothing pushed", async () => {

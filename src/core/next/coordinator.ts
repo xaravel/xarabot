@@ -1,6 +1,6 @@
 import { EPICS_YAML_PATH } from "../config/load-repo-config.ts";
 import { digestDue, digestSlot } from "../inbox/digest-time.ts";
-import { heldGlobs, isStale } from "../ledger/edits.ts";
+import { ATTEMPTS_CAP, heldGlobs, isStale, planningPredecessor } from "../ledger/edits.ts";
 import { globsOverlap } from "../manifests/globs.ts";
 import { standingApproval } from "../reconcile/approval.ts";
 import type { Config } from "../schemas/config.ts";
@@ -735,8 +735,11 @@ function describeHold(rec: UnitRecord): string {
  * The planning position (Story 2.7): for each kind, graph first, a parked,
  * `merging` or live `claimed` record of the kind holds it (no new unit until
  * it is released); a stale `claimed` one with no open PR is taken over, same
- * id; else a due kind gets `planning:<kind>.<n>`. A unit whose globs overlap
- * another record's held globs is passed over with an `overlap` reason.
+ * id; else a due kind gets `planning:<kind>.<n>`, which starts with the
+ * `attempts` of the newest record of its kind when that one is `released`
+ * (`planningPredecessor`, C4), so the third failed run in a row parks
+ * `attempts-cap`. A unit whose globs overlap another record's held globs is
+ * passed over with an `overlap` reason.
  */
 function nextPlanning(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | null {
   const due = planningDue(snapshot);
@@ -774,7 +777,9 @@ function nextPlanning(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | 
       const why = `${stale.unit} is claimed and stale (heartbeat ${stale.heartbeat_at}) with no open PR`;
       return { unit, kind: "planning", globs, expect_generation: stale.generation, take_over: "claimed", pr: null, why };
     }
-    return { unit, kind: "planning", globs, expect_generation: null, take_over: null, pr: null, why: `${kind} planning is due: ${d.why}` };
+    const carried = planningPredecessor(snapshot.ledger.units, unit, kind);
+    const count = carried === undefined || carried.attempts === 0 ? "" : `; it starts at ${carried.attempts} of ${ATTEMPTS_CAP} attempts, from ${carried.unit}`;
+    return { unit, kind: "planning", globs, expect_generation: null, take_over: null, pr: null, why: `${kind} planning is due: ${d.why}${count}` };
   }
   return null;
 }

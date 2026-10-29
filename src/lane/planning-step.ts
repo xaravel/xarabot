@@ -1,7 +1,7 @@
 import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { deleteMerged, finishRecurring, park, parkText, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
+import { deleteMerged, finishRecurring, park, parkText, release, releaseDisposable, startMerging, supersedesReleased } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -58,7 +58,9 @@ import {
  *   design questions, Epic 3 retro item 15) parks `blocked` `readiness` for
  *   the Maintainer (`inbox_owner`), the summary in the journal reason and,
  *   redacted, as the park's text for their inbox; `nothing-due`, or `done` with an empty commit, finishes
- *   the unit (`finishRecurring`) and deletes its record. A missing or invalid
+ *   the unit (`finishRecurring`) and deletes its record (left `merged` for
+ *   `reconcile` while an older `released` record of its kind with a count
+ *   is on the ledger, so the run resets the attempts count, C4). A missing or invalid
  *   result, a commit conflict, or a push or PR failure is a failed attempt;
  *   a PR the `record` beat fails to record is closed first, since no record
  *   carries it.
@@ -215,12 +217,23 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       secrets,
     });
 
-    /** Nothing to commit: `merged` with no PR, then the record deleted at once. */
+    /**
+     * Nothing to commit: `merged` with no PR, then the record deleted at
+     * once, unless an older `released` record of its kind with a count is on
+     * the ledger: then it is left `merged` for `reconcile`, which deletes
+     * that record first, so this run resets the count instead of the older
+     * record's carrying over to the next one (C4).
+     */
     const finish = async (why: string): Promise<never> => {
       aborted();
       await held("finishRecurring", finishRecurring({ unit, by: identity, now: forgeNow(), generation }));
       reasons.push(why);
       note(`finished with no PR: ${why}`);
+      const older = snapshot.ledger.units.filter((r) => supersedesReleased([r], kit.record));
+      if (older.length > 0) {
+        note(`left merged for reconcile, after ${older.map((r) => r.unit).join(", ")} released`);
+        throw end("progress", kit.record.state);
+      }
       const r = await swap(deleteMerged({ unit, by: identity, now: forgeNow() }));
       if (r.kind === "ok") note(`deleteMerged ${unit}`);
       else {

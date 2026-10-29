@@ -495,14 +495,66 @@ describe("planReconcile: planning records (Story 2.7)", () => {
     expect(p.openPrs).toEqual([]);
   });
 
+  /** A newer record of each kind, which supersedes the released one (C4). */
+  const newer = [
+    coord("planning:status.3", { globs: STATUS_GLOBS, state: "claimed" }),
+    coord("planning:graph.2", { globs: graphGlobs, state: "claimed" }),
+  ];
+  const older = { heartbeat_at: minutesBefore(5) };
+
   test.each([
-    ["status, its PR closed", status({ state: "released" }), { "planning:status.2": closed(6) }, ["planning:status.2"]],
-    ["status, no PR", status({ state: "released", pr: null, head_sha: null }), {}, ["planning:status.2"]],
-    ["graph, its PR closed", graph({ state: "released" }), { "planning:graph.1": closed(6) }, ["planning:graph.1"]],
-    ["status, its PR open (the open-PR position resumes it)", status({ state: "released" }), { "planning:status.2": open(6) }, []],
-    ["graph, its PR open", graph({ state: "released" }), { "planning:graph.1": open(6) }, []],
-  ] as const)("the matrix: a released planning record, %s", (_name, record, prs, want) => {
-    expect(plan({ records: [record], prs }).deleteReleased.map((t) => t.unit)).toEqual([...want]);
+    ["status, its PR closed", status({ state: "released", ...older }), { "planning:status.2": closed(6) }, ["planning:status.2"]],
+    ["status, no PR", status({ state: "released", pr: null, head_sha: null, ...older }), {}, ["planning:status.2"]],
+    ["graph, its PR closed", graph({ state: "released", ...older }), { "planning:graph.1": closed(6) }, ["planning:graph.1"]],
+    ["status, its PR open (the open-PR position resumes it)", status({ state: "released", ...older }), { "planning:status.2": open(6) }, []],
+    ["graph, its PR open", graph({ state: "released", ...older }), { "planning:graph.1": open(6) }, []],
+  ] as const)("the matrix: a released planning record a newer one supersedes, %s", (_name, record, prs, want) => {
+    expect(plan({ records: [record, ...newer], prs }).deleteReleased.map((t) => t.unit)).toEqual([...want]);
+  });
+
+  test.each([
+    ["status, its PR closed", status({ state: "released", attempts: 1 }), { "planning:status.2": closed(6) }],
+    ["status, no PR", status({ state: "released", pr: null, head_sha: null, attempts: 2 }), {}],
+    ["graph, its PR closed", graph({ state: "released", attempts: 1 }), { "planning:graph.1": closed(6) }],
+  ] as const)("C4: the newest record of its kind, released with a count (%s), is kept for the next new record to take its attempts from", (_name, record, prs) => {
+    expect(plan({ records: [record], prs }).deleteReleased).toEqual([]);
+  });
+
+  test("C4: the two kinds are kept apart: a newer graph record never supersedes a released status record", () => {
+    const p = plan({ records: [status({ state: "released", pr: null, head_sha: null, attempts: 1, ...older }), newer[1] as UnitRecord] });
+    expect(p.deleteReleased).toEqual([]);
+  });
+
+  test("C4: of two released records of a kind, the older is deleted and the newest, with a count, kept", () => {
+    const p = plan({ records: [status({ state: "released", pr: null, head_sha: null, attempts: 1, ...older }), coord("planning:status.3", { globs: STATUS_GLOBS, state: "released", attempts: 2 })] });
+    expect(p.deleteReleased.map((t) => t.unit)).toEqual(["planning:status.2"]);
+  });
+
+  test("C4: a newest released record with no count waits a run while an older one with a count is on the ledger", () => {
+    const records = [status({ state: "released", pr: null, head_sha: null, attempts: 1, ...older }), coord("planning:status.3", { globs: STATUS_GLOBS, state: "released" })];
+    expect(plan({ records }).deleteReleased.map((t) => t.unit)).toEqual(["planning:status.2"]);
+    expect(plan({ records: [records[1] as UnitRecord] }).deleteReleased.map((t) => t.unit)).toEqual(["planning:status.3"]);
+    const countless = [status({ state: "released", pr: null, head_sha: null, ...older }), records[1] as UnitRecord];
+    expect(plan({ records: countless }).deleteReleased.map((t) => t.unit)).toEqual(["planning:status.2", "planning:status.3"]);
+  });
+
+  test("C4: a merged planning record newer than a released one of its kind with a count is deleted only after it, so a done run resets the count", () => {
+    const records = [status({ state: "released", pr: null, head_sha: null, attempts: 1, ...older }), coord("planning:status.3", { globs: STATUS_GLOBS, state: "merged" })];
+    const p = plan({ records });
+    expect(p.deleteReleased.map((t) => t.unit)).toEqual(["planning:status.2"]);
+    expect(p.deleteMerged).toEqual([]);
+    expect(plan({ records: [records[1] as UnitRecord] }).deleteMerged).toEqual(["planning:status.3"]);
+  });
+
+  test("C4: a merged planning record beside a released one of its kind with no count is deleted at once", () => {
+    const p = plan({ records: [status({ state: "released", pr: null, head_sha: null, ...older }), coord("planning:status.3", { globs: STATUS_GLOBS, state: "merged" })] });
+    expect(p.deleteMerged).toEqual(["planning:status.3"]);
+  });
+
+  test("C4: a merged planning record older than a released one of its kind is deleted at once", () => {
+    const p = plan({ records: [coord("planning:status.2", { globs: STATUS_GLOBS, state: "merged", ...older }), coord("planning:status.3", { globs: STATUS_GLOBS, state: "released", attempts: 1 })] });
+    expect(p.deleteMerged).toEqual(["planning:status.2"]);
+    expect(p.deleteReleased).toEqual([]);
   });
 
   test.each([

@@ -23,6 +23,7 @@ import {
   type Dismissal,
   type Park,
   type PendingRuling,
+  type PlanningKind,
   type UnitRecord,
   type UnitState,
 } from "../schemas/ledger.ts";
@@ -217,6 +218,60 @@ export function heldGlobs(rec: UnitRecord): readonly string[] {
   return [];
 }
 
+/** Whether planning record `a` is newer than `b`: a later `heartbeat_at`, then a higher run number. */
+function newerPlanning(a: UnitRecord, b: UnitRecord): boolean {
+  const ta = Date.parse(a.heartbeat_at);
+  const tb = Date.parse(b.heartbeat_at);
+  if (ta !== tb) return ta > tb;
+  const n = (r: UnitRecord) => Number(r.unit.slice(r.unit.lastIndexOf(".") + 1));
+  return n(a) > n(b);
+}
+
+/** The newest planning record of `kind` among `units` (a later `heartbeat_at`, then a higher run number), or `undefined`. */
+export function newestPlanning(units: Iterable<UnitRecord>, kind: PlanningKind): UnitRecord | undefined {
+  let top: UnitRecord | undefined;
+  for (const r of units) {
+    if (planningKindOf(r) !== kind) continue;
+    if (top === undefined || newerPlanning(r, top)) top = r;
+  }
+  return top;
+}
+
+/**
+ * The record a new planning record of `kind` takes its `attempts` from
+ * (Maintainer decision C4): the newest other record of its kind, when it is
+ * `released`, so failed runs in a row count towards `ATTEMPTS_CAP`. A newer
+ * record in any other state (a `done` or `nothing-due` run left `merged`, a
+ * parked or held one) means no count carries over.
+ */
+export function planningPredecessor(units: Iterable<UnitRecord>, unit: string, kind: PlanningKind): UnitRecord | undefined {
+  const others = [...units].filter((r) => r.unit !== unit);
+  const top = newestPlanning(others, kind);
+  return top?.state === "released" ? top : undefined;
+}
+
+/** Whether `rec` is a `released` planning record a newer record of its kind supersedes (its count, if any, carried over or reset). */
+export function supersededPlanning(units: Iterable<UnitRecord>, rec: UnitRecord): boolean {
+  const kind = planningKindOf(rec);
+  if (kind === null || rec.state !== "released") return false;
+  return newestPlanning(units, kind)?.unit !== rec.unit;
+}
+
+/**
+ * Whether planning record `rec` is newer than a `released` record of its kind
+ * still in `units` that carries a count (`attempts` above 0): deleting `rec`
+ * first would leave that record the newest of its kind, so its count would
+ * carry over `rec`'s run (C4).
+ */
+export function supersedesReleased(units: Iterable<UnitRecord>, rec: UnitRecord): boolean {
+  const kind = planningKindOf(rec);
+  if (kind === null) return false;
+  for (const o of units) {
+    if (o.unit !== rec.unit && o.state === "released" && o.attempts > 0 && planningKindOf(o) === kind && newerPlanning(rec, o)) return true;
+  }
+  return false;
+}
+
 /** A record with no PR, SHAs, providers, park, counters or approval. */
 function fresh(ctx: Ctx, state: UnitState, globs: string[], park: Park | null): UnitRecord {
   return {
@@ -270,7 +325,11 @@ export type ClaimParams = EditBase & {
   readonly baseSha?: string | null;
 };
 
-/** `none → claimed` and `released → claimed`. */
+/**
+ * `none → claimed` and `released → claimed`. A new planning record starts
+ * with the `attempts` of its `planningPredecessor` on the tip (C4); every
+ * other new record starts at 0, and a released one keeps its count.
+ */
 export function claim(p: ClaimParams): LedgerEdit {
   return makeEdit("claim", p, (ctx) => {
     if (p.expectGeneration !== null) {
@@ -311,7 +370,10 @@ export function claim(p: ClaimParams): LedgerEdit {
     if (rec === undefined) {
       if (p.expectGeneration !== null) return pre(`${ctx.unit} has no record; expected generation ${p.expectGeneration}`);
       if (manifestSha !== null) return pre(`${ctx.unit} has no record, so no approval for manifest ${manifestSha}`);
-      return to("claimed", { ...fresh(ctx, "claimed", globs.value, null), ...prFields });
+      // A new planning record carries the count of the failed run before it (C4).
+      const kind = planningKindOf({ unit: ctx.unit, globs: globs.value });
+      const attempts = kind === null ? 0 : (planningPredecessor(ctx.ledger.units.values(), ctx.unit, kind)?.attempts ?? 0);
+      return to("claimed", { ...fresh(ctx, "claimed", globs.value, null), ...prFields, attempts });
     }
     const s = requireState(rec, ["released"]);
     if (!s.ok) return s;
