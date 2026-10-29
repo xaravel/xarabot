@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-3-retro-item-15-decide-an-epics-questions-before-it-starts",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -14,7 +14,7 @@
     "test/core/prompt/**",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:08:13.662Z",
+  "heartbeat_at": "2026-10-29T18:08:24.174Z",
   "pr": 263,
   "pr_owner": "edanisko",
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
@@ -28,7 +28,19 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "src/core/prompt/build-prompt.ts",
+      "src/core/prompt/template.ts",
+      "src/lane/planning-step.ts",
+      "test/core/prompt/build-prompt.test.ts",
+      "test/lane/planning-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
