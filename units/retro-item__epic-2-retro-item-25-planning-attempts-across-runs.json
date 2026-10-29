@@ -1,24 +1,22 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-25-planning-attempts-across-runs",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 2,
+  "generation": 3,
   "globs": [
     "src/core/ledger/edits.ts",
     "src/core/next/coordinator.ts",
     "src/core/reconcile/plan.ts",
-    "src/lane/coordinator-process.ts",
     "src/lane/planning-step.ts",
     "test/core/ledger/edits.test.ts",
     "test/core/next/coordinator.test.ts",
-    "test/core/reconcile/**",
-    "test/lane/coordinator-process.test.ts",
+    "test/core/reconcile/plan.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:53:51.173Z",
+  "heartbeat_at": "2026-10-29T18:55:22.135Z",
   "pr": 267,
   "pr_owner": "edanisko",
   "base_sha": "575bd90c52eeadfafdee5d0fd8b065222ec0a6b4",
@@ -26,27 +24,13 @@
   "reviewed_sha": "03b238b0dadbce9f07cb636cf837b269167a4f6f",
   "passed_sha": "03b238b0dadbce9f07cb636cf837b269167a4f6f",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "03b238b0dadbce9f07cb636cf837b269167a4f6f",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/core/ledger/edits.ts",
-      "src/core/next/coordinator.ts",
-      "src/core/reconcile/plan.ts",
-      "src/lane/planning-step.ts",
-      "test/core/ledger/edits.test.ts",
-      "test/core/next/coordinator.test.ts",
-      "test/core/reconcile/plan.test.ts",
-      "test/lane/planning-step.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
