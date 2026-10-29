@@ -14,7 +14,7 @@
     "test/core/prompt/**",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T17:54:28Z",
+  "heartbeat_at": "2026-10-29T17:59:32.662Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "3fc89913c109730e2e4defd114d8b60aba2185eb",
