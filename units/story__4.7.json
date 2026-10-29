@@ -1,10 +1,10 @@
 {
   "schema_version": 5,
   "unit": "story:4.7",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "_bmad-output/implementation-artifacts/spec-4-7-parallel-epics-and-gates-verification.md",
@@ -12,7 +12,7 @@
     "test/e2e/parallel-epics-harness.ts",
     "test/e2e/parallel-epics.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T17:51:36.303Z",
+  "heartbeat_at": "2026-10-29T17:54:14Z",
   "pr": 262,
   "pr_owner": "edanisko",
   "base_sha": "507cc1df0407e7377ace5fc0353779e3c2a95988",
