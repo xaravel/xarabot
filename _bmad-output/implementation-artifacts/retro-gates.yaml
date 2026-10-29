@@ -331,4 +331,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/prompt/template.ts", "src/core/prompt/build-prompt.ts", "src/lane/planning-step.ts", "test/core/prompt/**", "test/lane/planning-step.test.ts", "docs/maintainer/self-host.md"]
-        status: open
+        status: done
