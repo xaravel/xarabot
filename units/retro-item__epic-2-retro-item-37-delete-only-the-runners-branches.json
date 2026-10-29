@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-37-delete-only-the-runners-branches",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -15,7 +15,7 @@
     "test/contracts/forge.contract.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T19:20:03.265Z",
+  "heartbeat_at": "2026-10-29T19:22:29.963Z",
   "pr": 269,
   "pr_owner": "edanisko",
   "base_sha": "157f74059ac6d5f2adb04ac1d7eb38b75ce4e45a",
@@ -29,7 +29,12 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "escalation",
+    "inbox_owner": "edanisko",
+    "globs_held": []
+  },
   "attempts": 0,
   "loopbacks": 1,
   "ci_fixes": 0,
