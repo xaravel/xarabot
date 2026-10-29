@@ -18,7 +18,7 @@
     "test/lane/coordinator-process.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:46:34.518Z",
+  "heartbeat_at": "2026-10-29T18:46:36.621Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "575bd90c52eeadfafdee5d0fd8b065222ec0a6b4",
@@ -29,7 +29,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
