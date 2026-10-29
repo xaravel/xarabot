@@ -1,7 +1,7 @@
 {
   "schema_version": 5,
   "unit": "retro-item:epic-2-retro-item-25-planning-attempts-across-runs",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -18,7 +18,7 @@
     "test/lane/coordinator-process.test.ts",
     "test/lane/planning-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T18:53:41.361Z",
+  "heartbeat_at": "2026-10-29T18:53:51.173Z",
   "pr": 267,
   "pr_owner": "edanisko",
   "base_sha": "575bd90c52eeadfafdee5d0fd8b065222ec0a6b4",
@@ -32,7 +32,21 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/ledger/edits.ts",
+      "src/core/next/coordinator.ts",
+      "src/core/reconcile/plan.ts",
+      "src/lane/planning-step.ts",
+      "test/core/ledger/edits.test.ts",
+      "test/core/next/coordinator.test.ts",
+      "test/core/reconcile/plan.test.ts",
+      "test/lane/planning-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
