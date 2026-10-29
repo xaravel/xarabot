@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { COORDINATOR_PATH, serializeCoordinator, serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
+import { COORDINATOR_PATH, parseLedger, serializeCoordinator, serializeUnitRecord } from "../../../src/core/ledger/codec.ts";
 import {
   advanceRulingsCursor,
   allOf,
@@ -27,9 +27,11 @@ import {
   keepCoordinator,
   loopback,
   markMerged,
+  newestPlanning,
   park,
   parkNew,
   parkText,
+  planningPredecessor,
   release,
   releaseDeadReconcile,
   releaseDisposable,
@@ -40,6 +42,8 @@ import {
   stampDigest,
   startMerging,
   STALE_AFTER_MS,
+  supersededPlanning,
+  supersedesReleased,
   takeApproved,
   takeOverStale,
   type LedgerEdit,
@@ -990,6 +994,154 @@ describe("planning records: disposable and recurring (Story 2.7)", () => {
     const kept = keepCoordinator({ by: COORD, now: NOW, generation: 1 })({ [COORDINATOR_PATH]: v1 });
     if (!kept.ok || kept.value === null) throw new Error("expected a write");
     expect(JSON.parse(kept.value.writes[COORDINATOR_PATH] as string).schema_version).toBe(6);
+  });
+});
+
+describe("planning attempts across runs (C4)", () => {
+  const STATUS_GLOBS = ["_bmad-output/implementation-artifacts/sprint-status.yaml"];
+  const GRAPH_GLOBS = ["_bmad-output/planning-artifacts/epics.md", "xarabot:graph"];
+  const globsOf = (unit: string) => (unit.includes("graph") ? GRAPH_GLOBS : STATUS_GLOBS);
+  /** `i` minutes after T0. */
+  const at = (i: number) => new Date(Date.parse(T0) + i * 60_000).toISOString();
+
+  /** A ledger the edits run over, one minute apart, as the coordinator. */
+  function ledger(records: readonly UnitRecord[] = []) {
+    let files: Record<string, string> = tip(records);
+    let clock = 0;
+    const apply = (edit: (now: string) => LedgerEdit): void => {
+      clock += 1;
+      const r = edit(at(clock))(files);
+      if (!r.ok) throw new Error(r.error.message);
+      if (r.value === null) return;
+      const out: Record<string, string> = { ...files, ...r.value.writes };
+      for (const d of r.value.deletes) delete out[d];
+      files = out;
+    };
+    const get = (unit: string): UnitRecord | undefined => {
+      const l = parseLedger(files);
+      if (!l.ok) throw new Error(l.error.message);
+      return l.value.units.get(unit);
+    };
+    const run = {
+      claim: (unit: string) => apply((now) => claim({ unit, by: COORD, now, globs: globsOf(unit), expectGeneration: null })),
+      fail: (unit: string) => apply((now) => failAttempt({ unit, by: COORD, now, generation: 1 })),
+      finish: (unit: string) => apply((now) => finishRecurring({ unit, by: COORD, now, generation: 1 })),
+      deleteMerged: (unit: string) => apply((now) => deleteMerged({ unit, by: COORD, now })),
+      deleteReleased: (unit: string) => apply((now) => deleteReleasedRecurring({ unit, by: COORD, now, generation: 1 })),
+    };
+    return { run, get };
+  }
+
+  test("three failed runs in a row park the third attempts-cap, a later reconcile deleting each superseded record", () => {
+    const { run, get } = ledger();
+    run.claim("planning:status.1");
+    expect(get("planning:status.1")?.attempts).toBe(0);
+    run.fail("planning:status.1");
+    expect(get("planning:status.1")).toMatchObject({ state: "released", attempts: 1 });
+    run.claim("planning:status.2");
+    expect(get("planning:status.2")).toMatchObject({ state: "claimed", attempts: 1 });
+    run.deleteReleased("planning:status.1");
+    run.fail("planning:status.2");
+    expect(get("planning:status.2")).toMatchObject({ state: "released", attempts: 2 });
+    run.claim("planning:status.3");
+    expect(get("planning:status.3")).toMatchObject({ state: "claimed", attempts: 2 });
+    run.fail("planning:status.3");
+    expect(get("planning:status.3")).toMatchObject({ state: "parked", attempts: ATTEMPTS_CAP, park: { kind: "blocked", reason: "attempts-cap" } });
+  });
+
+  test("the count carries over while the superseded records are still on the ledger", () => {
+    const { run, get } = ledger();
+    for (const n of [1, 2]) {
+      run.claim(`planning:graph.${n}`);
+      run.fail(`planning:graph.${n}`);
+    }
+    run.claim("planning:graph.3");
+    expect(get("planning:graph.3")?.attempts).toBe(2);
+    run.fail("planning:graph.3");
+    expect(get("planning:graph.3")).toMatchObject({ state: "parked", park: { reason: "attempts-cap" } });
+  });
+
+  test("a failure after a done run starts again at 1: the done run's record, left merged until the released one goes, resets the count", () => {
+    const { run, get } = ledger();
+    run.claim("planning:status.1");
+    run.fail("planning:status.1");
+    run.claim("planning:status.2");
+    expect(get("planning:status.2")?.attempts).toBe(1);
+    run.finish("planning:status.2");
+    // Before reconcile: the merged record is the newest of its kind.
+    run.claim("planning:status.3");
+    expect(get("planning:status.3")?.attempts).toBe(0);
+    run.fail("planning:status.3");
+    expect(get("planning:status.3")).toMatchObject({ state: "released", attempts: 1 });
+  });
+
+  test("a done run's record deleted after the released one before it: the reused run number starts at 0", () => {
+    const { run, get } = ledger();
+    run.claim("planning:status.1");
+    run.fail("planning:status.1");
+    run.claim("planning:status.2");
+    run.finish("planning:status.2");
+    run.deleteReleased("planning:status.1");
+    run.deleteMerged("planning:status.2");
+    run.claim("planning:status.2");
+    expect(get("planning:status.2")).toMatchObject({ state: "claimed", attempts: 0 });
+  });
+
+  test("the two kinds are counted apart", () => {
+    const { run, get } = ledger();
+    run.claim("planning:status.1");
+    run.fail("planning:status.1");
+    run.claim("planning:graph.1");
+    expect(get("planning:graph.1")?.attempts).toBe(0);
+    run.fail("planning:graph.1");
+    run.claim("planning:status.2");
+    expect(get("planning:status.2")?.attempts).toBe(1);
+    run.fail("planning:status.2");
+    run.claim("planning:graph.2");
+    expect(get("planning:graph.2")?.attempts).toBe(1);
+    run.claim("planning:status.3");
+    expect(get("planning:status.3")?.attempts).toBe(2);
+  });
+
+  test("another slug counts with the kind its globs give it", () => {
+    const { run, get } = ledger([by(COORD, T0, { unit: "planning:sprint.4", globs: GRAPH_GLOBS, state: "released", attempts: 2 })]);
+    run.claim("planning:status.1");
+    expect(get("planning:status.1")?.attempts).toBe(0);
+    run.claim("planning:graph.1");
+    expect(get("planning:graph.1")?.attempts).toBe(2);
+  });
+
+  test("a new non-planning record starts at 0 beside a released planning record", () => {
+    const { run, get } = ledger([by(COORD, T0, { unit: "planning:status.1", globs: STATUS_GLOBS, state: "released", attempts: 2 })]);
+    run.claim("reconcile:3");
+    expect(get("reconcile:3")?.attempts).toBe(0);
+  });
+
+  test("a released record claimed again keeps its own count, whatever a newer released record holds", () => {
+    const older = by(COORD, T0, { unit: "planning:status.1", globs: STATUS_GLOBS, state: "released", attempts: 1 });
+    const newer = by(COORD, NOW, { unit: "planning:status.2", globs: STATUS_GLOBS, state: "released", attempts: 2 });
+    const r = claim({ unit: "planning:status.1", by: COORD, now: NOW, globs: STATUS_GLOBS, expectGeneration: 1 })(tip([older, newer]));
+    if (!r.ok || r.value === null) throw new Error("expected a write");
+    expect(JSON.parse(r.value.writes["units/planning__status.1.json"] as string).attempts).toBe(1);
+  });
+
+  test("newestPlanning orders by heartbeat_at, then run number; planningPredecessor needs it released", () => {
+    const a = by(COORD, at(1), { unit: "planning:status.9", globs: STATUS_GLOBS, state: "released", attempts: 2 });
+    const b = by(COORD, at(2), { unit: "planning:status.3", globs: STATUS_GLOBS, state: "merged" });
+    const c = by(COORD, at(2), { unit: "planning:status.4", globs: STATUS_GLOBS, state: "released", attempts: 1 });
+    expect(newestPlanning([a, b], "status")?.unit).toBe("planning:status.3");
+    expect(newestPlanning([a, b, c], "status")?.unit).toBe("planning:status.4");
+    expect(newestPlanning([a, b, c], "graph")).toBeUndefined();
+    expect(planningPredecessor([a, b], "planning:status.5", "status")).toBeUndefined();
+    expect(planningPredecessor([a, b, c], "planning:status.5", "status")?.unit).toBe("planning:status.4");
+    expect(planningPredecessor([a, b, c], "planning:status.4", "status")).toBeUndefined();
+    expect(supersededPlanning([a, b, c], a)).toBe(true);
+    expect(supersededPlanning([a, b, c], c)).toBe(false);
+    expect(supersededPlanning([a, b, c], b)).toBe(false);
+    expect(supersedesReleased([a, b, c], b)).toBe(true);
+    expect(supersedesReleased([b, c], b)).toBe(false);
+    expect(supersedesReleased([a, b], c)).toBe(true);
+    expect(supersedesReleased([{ ...a, attempts: 0 }, b], b)).toBe(false);
   });
 });
 

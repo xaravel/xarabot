@@ -649,6 +649,28 @@ describe("next(coordinator): planning (Story 2.7)", () => {
     expect(picked(pick(w as Partial<World>))).toBe(want);
   });
 
+  const whyOf = (o: NextOutcome) => (o.kind === "coordinator" ? o.unit.why : o.kind);
+
+  test("C4: a new record names the count it takes from the newest released record of its kind", () => {
+    const o = pick({ ...CONTEXT_DUE, records: [planningRec("planning:status.2", { state: "released", attempts: 2 })] });
+    expect(picked(o)).toBe("unit planning:status.3");
+    expect(whyOf(o)).toMatch(/^status planning is due: .*; it starts at 2 of 3 attempts, from planning:status\.2$/);
+  });
+
+  test.each([
+    ["a released record with no failed attempt", { ...CONTEXT_DUE, records: [planningRec("planning:status.2", { state: "released" })] }, "unit planning:status.3"],
+    [
+      "the newest record merged (a done run)",
+      { ...GRAPH_DUE, records: [planningRec("planning:graph.3", { state: "released", attempts: 2, heartbeat_at: minutesBefore(5) }), planningRec("planning:graph.4", { state: "merged" })] },
+      "unit planning:graph.5",
+    ],
+    ["a released record of the other kind", { ...CONTEXT_DUE, records: [planningRec("planning:graph.2", { state: "released", attempts: 2 })] }, "unit planning:status.1"],
+  ] as const)("C4: no count named for %s", (_name, w, want) => {
+    const o = pick(w as Partial<World>);
+    expect(picked(o)).toBe(want);
+    expect(whyOf(o)).not.toContain("it starts at");
+  });
+
   test.each(["readiness", "write-check", "verification", "ci-timeout", "attempts-cap"] as const)("a blocked %s park holds its kind, naming it with planning-held", (reason) => {
     const o = pick({ ...CONTEXT_DUE, records: [planningRec("planning:status.2", parkedAs(reason))] });
     expect(o.kind).toBe("idle");

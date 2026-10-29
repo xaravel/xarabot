@@ -1,4 +1,4 @@
-import { isDisposable, isStale, isUngatedRetro } from "../ledger/edits.ts";
+import { isDisposable, isStale, isUngatedRetro, supersededPlanning, supersedesReleased } from "../ledger/edits.ts";
 import { RETRO_ITEM_ID_PATTERN, RETRO_UNIT_PATTERN } from "../schemas/retro-gates.ts";
 import { approvalParkedAt, doneOnMain, epicStatusKey, isGraphPlanning, missingStatusEntries } from "../next/coordinator.ts";
 import { unitKind, type PendingRuling, type UnitRecord } from "../schemas/ledger.ts";
@@ -133,10 +133,19 @@ export type ReconcilePlan = {
   /**
    * 6. `released` `reconcile` records, and `released` planning records whose
    * PR the snapshot does not show open (an open one is the open-PR
-   * position's to resume): the open PRs on their branch closed, then deleted.
+   * position's to resume), except the newest record of a kind while it
+   * carries a count, which the next new record of its kind takes (C4): the
+   * open PRs on their branch closed, then deleted. A newest one with no count
+   * waits a run while an older record of its kind with a count is still on
+   * the ledger (`supersedesReleased`).
    */
   readonly deleteReleased: readonly PlanTarget[];
-  /** 7. `merged` records (as of this run) whose unit is done on `main`. */
+  /**
+   * 7. `merged` records (as of this run) whose unit is done on `main`, but
+   * not a planning record while an older `released` record of its kind with
+   * a count is on the ledger: deleting it first would leave that record the
+   * newest of its kind, and its count would carry over a `done` run (C4).
+   */
   readonly deleteMerged: readonly string[];
   /** `sprint_status_path`. */
   readonly path: string;
@@ -355,10 +364,12 @@ export function planReconcile(
   const isPlanning = (r: UnitRecord) => unitKind(r.unit) === "planning";
 
   // 2, 5, 6. Earlier reconcile runs, disposable planning PRs and released planning records.
+  const deletable = (r: UnitRecord) =>
+    supersededPlanning(snapshot.ledger.units, r) || (r.attempts === 0 && !supersedesReleased(snapshot.ledger.units, r));
   const checkQueue = unmerged.filter((r) => isDisposable(r) && r.state === "merging" && r.lane === "coordinator").map((r) => target(r, snapshot));
   const releaseDead = pending.filter((r) => r.state === "claimed" && isStale(r, snapshot.now)).map((r) => target(r, snapshot));
   const deleteReleased = unmerged
-    .filter((r) => r.state === "released" && (isReconcile(r) || (isPlanning(r) && prOf(r)?.state !== "open")))
+    .filter((r) => r.state === "released" && (isReconcile(r) || (isPlanning(r) && prOf(r)?.state !== "open" && deletable(r))))
     .map((r) => target(r, snapshot));
 
   // 3. Approval-gated PRs the coordinator queued; 3a. ungated retro and retro-item PRs their step queued.
@@ -409,7 +420,7 @@ export function planReconcile(
   // 7. Records merged as of this run whose unit is done on main.
   const effective = asMerged(snapshot, marked);
   const mergedNow = effective.ledger.units.filter((r) => r.unit !== unit && r.state === "merged");
-  const deleteMerged = mergedNow.filter((r) => doneOnMain(r, effective)).map((r) => r.unit);
+  const deleteMerged = mergedNow.filter((r) => doneOnMain(r, effective) && !supersedesReleased(effective.ledger.units, r)).map((r) => r.unit);
   const deleted = new Set(deleteMerged);
   const supersededMerged = mergedNow.filter((r) => isReconcile(r) && !deleted.has(r.unit)).map((r) => r.unit);
 
