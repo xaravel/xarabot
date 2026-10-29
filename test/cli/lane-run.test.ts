@@ -178,6 +178,8 @@ type Setup = {
   readonly runner?: string | null;
   readonly failedStarts?: number;
   readonly main?: MainOpts;
+  /** Lines appended to `main`'s `.xarabot/config.yaml`. */
+  readonly configLines?: readonly string[];
   readonly credential?: boolean;
   /** The codex credential files to write, mode 600; default none. */
   readonly codex?: readonly ("auth.json" | "api-key")[];
@@ -287,7 +289,9 @@ async function laneRunWith(
   if (o.appSlug !== undefined) writeApp(w, o.appSlug);
   if (o.botUserCache !== undefined) writeFileSync(join(laneDir, "bot-user.json"), o.botUserCache);
   before?.(w);
-  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main: mainFiles(o.main), ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
+  const main = mainFiles(o.main);
+  if (o.configLines !== undefined) main[".xarabot/config.yaml"] = `${main[".xarabot/config.yaml"] ?? ""}${o.configLines.join("\n")}\n`;
+  const fake = createFakeForge({ now: "2026-10-23T10:00:00Z", main, ...(o.ledger !== undefined ? { ledger: o.ledger } : {}) });
   const conn = fakeConnect(fake, { ...(o.connectFail !== undefined ? { fail: o.connectFail } : {}), ...(o.botUserFails === true ? { botUserFails: true } : {}) });
   let botReads = 0;
   const connect: Connect = async (l) => {
@@ -767,8 +771,16 @@ describe("xarabot lane run: a passing start", () => {
     expect(d.mergeStep).toBeDefined();
     const runnerGit = join(r.w.laneDir, "runner.git");
     expect(existsSync(join(runnerGit, "HEAD"))).toBe(true);
-    expect(r.record.forgeOpts).toContainEqual({ runnerGit, maintainer: "edanisko" });
+    expect(r.record.forgeOpts).toContainEqual({ runnerGit, maintainer: "edanisko", unitBranchPrefix: "xarabot/" });
     expect(r.record.fetchDirs).toEqual([runnerGit]);
+  });
+
+  test("the lane's forge deletes only in config branches.xarabot's namespace (Epic 2 retro item 37)", async () => {
+    const r = await laneRunWith({ configLines: ["branches:", "  xarabot: bot/"] });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    const runnerGit = join(r.w.laneDir, "runner.git");
+    expect(r.record.forgeOpts).toContainEqual({ runnerGit, maintainer: "edanisko", unitBranchPrefix: "bot/" });
   });
 
   test("with the real dependencies and no eligible Story, runLaneProcess ends idle and journals an idle span", async () => {

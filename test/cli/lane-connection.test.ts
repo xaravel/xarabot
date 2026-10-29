@@ -68,6 +68,22 @@ describe("githubConnect", () => {
     expect(value(await connection.botUserId(live().signal))).toBe(41898282);
   });
 
+  test("the production connection's forge deletes only in its unit-branch namespace: another branch is forbidden with no request", async () => {
+    const { gh, env } = world();
+    const connection = await connected(githubConnect(env, { fetch: gh.fetch, apiUrl: gh.control.apiUrl }));
+    const main = gh.control.ref("main") as string;
+    gh.control.setBranch("bot/reconcile-1", main);
+    gh.control.setBranch("xarabot/reconcile-1", main);
+    const forge = connection.forge({ unitBranchPrefix: "bot/" });
+    gh.control.clearLog();
+    const refused = await forge.deleteBranch("xarabot/reconcile-1", live());
+    expect(refused.ok ? "ok" : refused.error.kind).toBe("forbidden");
+    expect(gh.control.log()).toEqual([]);
+    expect(gh.control.ref("xarabot/reconcile-1")).toBe(main);
+    expect(value(await forge.deleteBranch("bot/reconcile-1", live()))).toEqual({ deleted: true });
+    expect(gh.control.ref("bot/reconcile-1")).toBeUndefined();
+  });
+
   hostTest("the production connection's runner.git forge pushes through git", async () => {
     const { gh, dir, env } = world();
     const server = await startGitServer({

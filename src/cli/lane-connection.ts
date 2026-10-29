@@ -23,6 +23,8 @@ export type ForgeOpts = {
   readonly runnerGit?: string;
   /** The Maintainer's login, for alerts. */
   readonly maintainer?: string;
+  /** Config `branches.xarabot`: the runner's unit-branch namespace, the only one `deleteBranch` deletes in. */
+  readonly unitBranchPrefix?: string;
 };
 
 export type LaneConnection = {
@@ -71,6 +73,7 @@ export function githubConnect(env: CredentialEnv, net: GitHubNet = {}): Connect 
             ...git,
             ...(o.runnerGit !== undefined ? { runnerGit: o.runnerGit } : {}),
             ...(o.maintainer !== undefined ? { maintainer: o.maintainer } : {}),
+            ...(o.unitBranchPrefix !== undefined ? { unitBranchPrefix: o.unitBranchPrefix } : {}),
           }),
         token: (signal) => tokens.get(signal),
         fetchShas: (gitDir) => createGitHubFetch({ repo, credentials, gitDir, ...http, ...git }),

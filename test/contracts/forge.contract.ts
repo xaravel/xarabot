@@ -501,6 +501,24 @@ export function forgeContract(harness: ForgeHarness): void {
       },
     );
 
+    scenario(
+      "deleteBranch of a branch outside the runner's unit-branch namespace is forbidden and keeps it (Epic 2 retro item 37)",
+      ["pushBranch", "branchHead", "deleteBranch"],
+      ["makeCommit"],
+      async (fx) => {
+        const sha = await need(fx, "makeCommit")();
+        for (const branch of ["story/9.1", "alice/topic", "xarabot-reconcile-9"]) {
+          value(await fx.forge.pushBranch({ branch, expected_sha: null, sha }, live()));
+          expect([branch, kind(await fx.forge.deleteBranch(branch, live()))]).toEqual([branch, "forbidden"]);
+          expect([branch, value(await fx.forge.branchHead(branch, live()))]).toEqual([branch, sha]);
+        }
+        for (const branch of ["xarabot/", "xarabot/../story/9.1", "xarabot/./reconcile-9", "xarabot//reconcile-9"]) {
+          expect([branch, kind(await fx.forge.deleteBranch(branch, live()))]).toEqual([branch, "forbidden"]);
+        }
+        expect(value(await fx.forge.branchHead("story/9.1", live()))).toBe(sha);
+      },
+    );
+
     scenario("a push a rule refuses is rejected and moves nothing", OPEN_PR, ["makeCommit", "refusePushes"], async (fx) => {
       const mk = need(fx, "makeCommit");
       await need(fx, "refusePushes")("story/2.9");
