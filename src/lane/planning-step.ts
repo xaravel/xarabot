@@ -1,7 +1,7 @@
 import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
-import { deleteMerged, finishRecurring, park, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
+import { deleteMerged, finishRecurring, park, parkText, release, releaseDisposable, startMerging } from "../core/ledger/edits.ts";
 import { planningDue, unitBranch } from "../core/next/coordinator.ts";
 import { epicContextPath, epicSourceLine } from "../core/next/snapshot.ts";
 import { buildPlanningPrompt, type PlanningPromptUnit, type PromptSection } from "../core/prompt/build-prompt.ts";
@@ -54,8 +54,10 @@ import {
  *   (`planning:graph.<n>`) writes the missing manifests. What is due comes
  *   from `planningDue` on the round's snapshot; nothing due finishes the
  *   unit with no session.
- * - A `blocked` result parks `blocked` `readiness`, the findings in the
- *   journal reason; `nothing-due`, or `done` with an empty commit, finishes
+ * - A `blocked` result (readiness findings, or a first compile's open
+ *   design questions, Epic 3 retro item 15) parks `blocked` `readiness` for
+ *   the Maintainer (`inbox_owner`), the summary in the journal reason and,
+ *   redacted, as the park's text for their inbox; `nothing-due`, or `done` with an empty commit, finishes
  *   the unit (`finishRecurring`) and deletes its record. A missing or invalid
  *   result, a commit conflict, or a push or PR failure is a failed attempt;
  *   a PR the `record` beat fails to record is closed first, since no record
@@ -114,6 +116,7 @@ const PROMPT_SECTION = /^\.xarabot\/prompts\/([^/]+\.md)$/;
  * The planning prompt's unit for `kind` on `snapshot`, or why there is none.
  * `files` are `main`'s files the snapshot was built from: each due context's
  * source line hashes its Epic's section of `epics_path` there (retro item 12).
+ * A context with no file on `main` is a first compile (Epic 3 retro item 15).
  */
 export function planningPromptUnit(
   unit: string,
@@ -125,11 +128,16 @@ export function planningPromptUnit(
   const due = planningDue(snapshot);
   if (kind === "status") {
     const epicsText = Object.hasOwn(files, config.epics_path) ? files[config.epics_path] : undefined;
-    const contexts: { epic: number; output_path: string; source_line: string }[] = [];
+    const contexts: { epic: number; output_path: string; source_line: string; first_compile: boolean }[] = [];
     for (const epic of due.status.contexts) {
       const source = epicsText === undefined ? null : epicSourceLine(epicsText, epic);
       if (source === null) return { ok: false, reason: `Epic ${epic} has no section in ${config.epics_path} on main to hash for its context's source line` };
-      contexts.push({ epic, output_path: epicContextPath(config.epic_context_path, epic), source_line: source });
+      contexts.push({
+        epic,
+        output_path: epicContextPath(config.epic_context_path, epic),
+        source_line: source,
+        first_compile: (snapshot.epic_context[String(epic)] ?? "missing") === "missing",
+      });
     }
     return { ok: true, value: { kind: "status", id: unit, epics_path: config.epics_path, contexts } };
   }
@@ -436,8 +444,19 @@ export function createPlanningStep(deps: PlanningStepDeps): CoordinatorStep {
       aborted();
       note(`result: ${result.outcome}`);
       switch (result.outcome) {
-        case "blocked":
-          return await parkBlocked("readiness", `blocked readiness: ${capText(sanitizeAgentText(result.summary, { secrets }).trim(), FORGE_TEXT_LIMITS.body)}`, result.summary);
+        case "blocked": {
+          // Only the Maintainer changes the planning artifacts, so the findings or open questions wait in their inbox.
+          const why = `blocked readiness: ${capText(sanitizeAgentText(result.summary, { secrets }).trim(), FORGE_TEXT_LIMITS.body)}`;
+          const maintainer = config.maintainer;
+          reasons.push(why);
+          note(`parking blocked readiness for the Maintainer ${maintainer}: ${why}`);
+          const text = parkText(result.summary, secrets);
+          await held(
+            "park",
+            park({ unit, by: identity, now: forgeNow(), generation, kind: "blocked", reason: "readiness", inboxOwner: maintainer, ...(text !== undefined ? { text } : {}) }),
+          );
+          throw end("progress", kit.record.state);
+        }
         case "nothing-due":
           return await finish(`nothing-due: ${sanitizeAgentText(result.summary, { secrets }).replace(/\s+/g, " ").trim()}`);
         case "done":

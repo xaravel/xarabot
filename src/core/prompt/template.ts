@@ -16,8 +16,9 @@
  *
  * Placeholders: `story_id`, `sprint_key`, `findings_path` (loopbacks only),
  * `log_path` (CI fix only), `steps`, `sections`, `result_path` and
- * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`
- * and `planning_contexts` (status), `planning_headings`, `manifests_dir`
+ * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`,
+ * `planning_contexts` and `planning_first_compiles` (status, the last in
+ * `planning_questions` only), `planning_headings`, `manifests_dir`
  * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
  * `prs_path`; for a retro item `retro_item_unit`, `retro_item_id`,
  * `retro_item_epic`, `retro_item_text` and `retro_item_globs` (and
@@ -48,6 +49,13 @@ export type PromptTemplate = {
   readonly planning_status: string;
   /** A graph planning unit: writes the missing manifests; no skill. */
   readonly planning_graph: string;
+  /**
+   * After `planning_status`, only when it compiles an Epic's context for the
+   * first time (Epic 3 retro item 15): lists that Epic's open design
+   * questions, and ends `blocked` with them instead of compiling when there
+   * are any.
+   */
+  readonly planning_questions: string;
   /** The result step of a planning unit: always the prompt's last part. */
   readonly result_planning: string;
   /** A retro unit: runs `bmad-retrospective -H <N>` on the prefetched PR history. */
@@ -85,6 +93,7 @@ export const PLACEHOLDERS = [
   "epics_path",
   "epics_dir",
   "planning_contexts",
+  "planning_first_compiles",
   "planning_headings",
   "manifests_dir",
   "manifest_paths",
@@ -195,6 +204,17 @@ Plan the sprint for this repository (\`{{planning_unit}}\`).
 {{planning_contexts}}
 
 3. In each file you compiled, write the source line given for its Epic, exactly as given, as the file's second line, directly below its \`# Epic <N> Context:\` heading. Keep the heading the first line, and leave no other source line in the file.`,
+
+  planning_questions: `# Open design questions
+
+Do this after step 1 and before step 2. These Epics have no context file on \`main\` yet, so this run compiles theirs for the first time:
+
+{{planning_first_compiles}}
+
+For each of these Epics, read every Story of it in \`{{epics_path}}\`, and the Maintainer decisions recorded there, and list each design question that the Stories' acceptance criteria and those decisions leave open: the kind a build session would stop on as an \`intent-gap\`, because the texts allow two or more readings that would behave differently. List no question those texts already settle, and none about how to write the code.
+
+- If any of these Epics has an open question, skip steps 2 and 3: write no context file, for any Epic. End \`blocked\`, with every open question in \`summary\`, in one batch, grouped by Epic and then by Story: an \`Epic <N>\` line, then one line for each of its questions, as \`- Story <id>: <question> Readings: <each reading, and how it would behave>.\` Keep each line short: the Maintainer answers them all from one inbox item.
+- If none has an open question, go on with step 2 for every Epic it lists.`,
 
   planning_graph: `# Task
 

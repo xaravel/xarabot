@@ -327,7 +327,7 @@ describe("_bmad/custom", () => {
 // ------------------------------------------------------------ planning prompts
 
 /** The template parts only planning prompts use (Story 2.7). */
-const PLANNING_PARTS: readonly string[] = ["planning_status", "planning_graph", "result_planning"];
+const PLANNING_PARTS: readonly string[] = ["planning_status", "planning_graph", "planning_questions", "result_planning"];
 
 /** No CI, merge, queue, PR, push, approval, claim, `next`, ledger or selection word in a planning prompt. */
 const PLANNING_BANNED: readonly { readonly what: string; readonly pattern: RegExp }[] = [
@@ -353,8 +353,18 @@ const STATUS_UNIT: StatusPlanningPromptUnit = {
   id: "planning:status.3",
   epics_path: "_bmad-output/planning-artifacts/epics.md",
   contexts: [
-    { epic: 4, output_path: "_bmad-output/implementation-artifacts/epic-4-context.md", source_line: `<!-- source: sha256:${"4".repeat(64)} -->` },
-    { epic: 2, output_path: "_bmad-output/implementation-artifacts/epic-2-context.md", source_line: `<!-- source: sha256:${"2".repeat(64)} -->` },
+    { epic: 4, output_path: "_bmad-output/implementation-artifacts/epic-4-context.md", source_line: `<!-- source: sha256:${"4".repeat(64)} -->`, first_compile: false },
+    { epic: 2, output_path: "_bmad-output/implementation-artifacts/epic-2-context.md", source_line: `<!-- source: sha256:${"2".repeat(64)} -->`, first_compile: false },
+  ],
+};
+
+/** `STATUS_UNIT` with Epic 5 and Epic 3, in that order, compiled for the first time (Epic 3 retro item 15). */
+const FIRST_UNIT: StatusPlanningPromptUnit = {
+  ...STATUS_UNIT,
+  contexts: [
+    ...STATUS_UNIT.contexts,
+    { epic: 5, output_path: "_bmad-output/implementation-artifacts/epic-5-context.md", source_line: `<!-- source: sha256:${"5".repeat(64)} -->`, first_compile: true },
+    { epic: 3, output_path: "_bmad-output/implementation-artifacts/epic-3-context.md", source_line: `<!-- source: sha256:${"3".repeat(64)} -->`, first_compile: true },
   ],
 };
 
@@ -414,6 +424,48 @@ describe("planning prompt: status", () => {
   });
 });
 
+describe("planning prompt: open design questions before a first compile (Epic 3 retro item 15)", () => {
+  const p = planning({ unit: FIRST_UNIT });
+  const questions = p.slice(p.indexOf("# Open design questions"), p.indexOf("# Rules"));
+  test("the step appears only when an Epic's context is a first compile", () => {
+    expect(planning()).not.toContain("# Open design questions");
+    expect(planning({ unit: { ...STATUS_UNIT, contexts: [] } })).not.toContain("# Open design questions");
+    expect(planning({ unit: GRAPH_UNIT })).not.toContain("# Open design questions");
+    expect(p).toContain("# Open design questions");
+  });
+  test("it names each first-compile Epic, in order, and no recompiled one", () => {
+    expect(questions).toContain("so this run compiles theirs for the first time:\n\n- Epic 3\n- Epic 5\n\n");
+    expect(questions).not.toContain("- Epic 2");
+    expect(questions).not.toContain("- Epic 4");
+    // Every due Epic is still listed for step 2.
+    for (const n of [2, 3, 4, 5]) expect(p).toContain(`- Epic ${n}: output path \`_bmad-output/implementation-artifacts/epic-${n}-context.md\``);
+  });
+  test("a single first compile names that Epic alone", () => {
+    const q = planning({ unit: { ...STATUS_UNIT, contexts: [{ ...STATUS_UNIT.contexts[1]!, first_compile: true }, STATUS_UNIT.contexts[0]!] } });
+    expect(q).toContain("for the first time:\n\n- Epic 2\n\n");
+    expect(q).not.toContain("- Epic 4\n\n");
+  });
+  test("it comes after the task, between steps 1 and 2, and before the rules", () => {
+    const at = ["# Task", "# Open design questions", "# Rules", "# Result"].map((h) => p.indexOf(h));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(questions).toContain("Do this after step 1 and before step 2.");
+  });
+  test("it reads every Story of the Epic and the recorded Maintainer decisions, for questions a build would stop on as intent-gap", () => {
+    expect(questions).toContain("read every Story of it in `_bmad-output/planning-artifacts/epics.md`, and the Maintainer decisions recorded there");
+    expect(questions).toContain("the kind a build session would stop on as an `intent-gap`");
+    expect(questions).toContain("readings that would behave differently");
+  });
+  test("any open question: no context file, blocked, every question in summary in one batch by Epic and Story, with its readings", () => {
+    expect(questions).toContain("If any of these Epics has an open question, skip steps 2 and 3: write no context file, for any Epic.");
+    expect(questions).toContain("End `blocked`, with every open question in `summary`, in one batch, grouped by Epic and then by Story");
+    expect(questions).toContain("`- Story <id>: <question> Readings: <each reading, and how it would behave>.`");
+  });
+  test("no open question: compiles as now", () => {
+    expect(questions).toContain("If none has an open question, go on with step 2 for every Epic it lists.");
+  });
+});
+
 describe("planning prompt: graph", () => {
   const p = planning({ unit: GRAPH_UNIT });
   test("runs no skill and never bmad-sprint-planning", () => {
@@ -467,9 +519,9 @@ describe("planning prompt: shape", () => {
 
 describe("planning prompt: banned words", () => {
   const sections = [{ name: "style.md", text: "Prefer small functions." }];
-  for (const unit of [STATUS_UNIT, GRAPH_UNIT, { ...GRAPH_UNIT, path_key: { key: "area", values: ["core"] } }, { ...STATUS_UNIT, contexts: [] }]) {
+  for (const unit of [STATUS_UNIT, GRAPH_UNIT, { ...GRAPH_UNIT, path_key: { key: "area", values: ["core"] } }, { ...STATUS_UNIT, contexts: [] }, FIRST_UNIT]) {
     for (const extra of [{}, { sections }]) {
-      test(`${unit.kind}${"sections" in extra ? " with sections" : ""}${unit.kind === "graph" && unit.path_key !== null ? " with a path key" : ""}${unit.kind === "status" && unit.contexts.length === 0 ? " with no context" : ""}`, () => {
+      test(`${unit.kind}${"sections" in extra ? " with sections" : ""}${unit.kind === "graph" && unit.path_key !== null ? " with a path key" : ""}${unit.kind === "status" && unit.contexts.length === 0 ? " with no context" : ""}${unit === FIRST_UNIT ? " with a first compile" : ""}`, () => {
         const p = planning({ unit, ...extra });
         expect(PLANNING_BANNED.filter((b) => b.pattern.test(p)).map((b) => b.what)).toEqual([]);
       });
@@ -497,11 +549,12 @@ describe("planning prompt: invalid input and template", () => {
     { name: "a graph unit with no heading", patch: { unit: { ...GRAPH_UNIT, headings: [] } }, field: /unit\.headings/ },
     { name: "a bad heading id", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.x", epic: 3, line: 1 }] } }, field: /unit\.headings\.0\.id/ },
     { name: "a duplicate heading", patch: { unit: { ...GRAPH_UNIT, headings: [{ id: "3.1", epic: 3, line: 1 }, { id: "3.1", epic: 3, line: 2 }] } }, field: /duplicate Story 3\.1/ },
-    { name: "a duplicate context Epic", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: SOURCE_2 }, { epic: 2, output_path: "b.md", source_line: SOURCE_2 }] } }, field: /duplicate Epic 2/ },
+    { name: "a duplicate context Epic", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: SOURCE_2, first_compile: false }, { epic: 2, output_path: "b.md", source_line: SOURCE_2, first_compile: false }] } }, field: /duplicate Epic 2/ },
     { name: "a backtick in epics_path", patch: { unit: { ...STATUS_UNIT, epics_path: "a`b.md" } }, field: /unit\.epics_path/ },
-    { name: "a newline in an output path", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a\nb.md", source_line: SOURCE_2 }] } }, field: /unit\.contexts\.0\.output_path/ },
-    { name: "a source line with no hash", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: "<!-- source: sha256: -->" }] } }, field: /unit\.contexts\.0\.source_line/ },
-    { name: "a source line with a backtick", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: `${SOURCE_2}\`` }] } }, field: /unit\.contexts\.0\.source_line/ },
+    { name: "a newline in an output path", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a\nb.md", source_line: SOURCE_2, first_compile: false }] } }, field: /unit\.contexts\.0\.output_path/ },
+    { name: "a source line with no hash", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: "<!-- source: sha256: -->", first_compile: false }] } }, field: /unit\.contexts\.0\.source_line/ },
+    { name: "a source line with a backtick", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: `${SOURCE_2}\``, first_compile: false }] } }, field: /unit\.contexts\.0\.source_line/ },
+    { name: "a context with no first_compile", patch: { unit: { ...STATUS_UNIT, contexts: [{ epic: 2, output_path: "a.md", source_line: SOURCE_2 } as unknown as StatusPlanningPromptUnit["contexts"][number]] } }, field: /unit\.contexts\.0\.first_compile/ },
     { name: "an empty manifests dir", patch: { unit: { ...GRAPH_UNIT, manifests_dir: "" } }, field: /unit\.manifests_dir/ },
     { name: "a relative result path", patch: { result_path: "result.json" }, field: /result_path/ },
     { name: "a duplicate section", patch: { sections: [{ name: "a.md", text: "x" }, { name: "a.md", text: "y" }] }, field: /duplicate section/ },
