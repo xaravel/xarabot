@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-14-globs-cover-tests-and-wiring",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -16,29 +16,21 @@
     "test/core/prompt/**",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-29T23:30:27.499Z",
+  "heartbeat_at": "2026-10-29T23:31:18Z",
   "pr": 259,
   "pr_owner": "edanisko",
   "base_sha": "7c3f9cc02eb6b16abeb6fbd8295d9f8309473b50",
   "head_sha": "5cc205d9c50d7f3682d3dc3f1fd78e47c955779d",
-  "reviewed_sha": "5cc205d9c50d7f3682d3dc3f1fd78e47c955779d",
+  "reviewed_sha": null,
   "passed_sha": null,
   "enqueued_sha": null,
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [
-    "anthropic"
-  ],
-  "park": {
-    "kind": "blocked",
-    "reason": "escalation",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "The review's blocking findings need the 2026-10-29 config-supplied glob_coverage ruling applied, which means changing src/core/schemas/config.ts, src/core/config/load-repo-config.ts, src/core/prompt/build-prompt.ts, docs/maintainer/self-host.md, test/core/schemas/** and test/core/config/**. This unit's globs are the item's pre-ruling set and cover none of these, though item 14's globs on main (42d3af1, #271) were widened to cover them. Please re-issue the unit with the widened globs, or rule how to proceed within the old ones."
-  },
+  "builder_providers": [],
+  "park": null,
   "attempts": 0,
-  "loopbacks": 1,
-  "ci_fixes": 1,
+  "loopbacks": 0,
+  "ci_fixes": 0,
   "approval": null
 }
