@@ -337,7 +337,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/cli/lane-install.ts", "test/cli/lane-install.test.ts", "docs/maintainer/self-host.md"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-17-review-prompt-counts-committed-agent-config"
         text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; finding C7): in the review template (src/core/prompt/template.ts, the line that says agent config files are not part of the change), say that the agent config files on disk are main's and their working-tree state is to be ignored, but that any agent-configuration change git diff main...HEAD shows is part of the change, to be reviewed and reported as blocking unless the Story asks for it. Prompt test in test/core/prompt/"
         route: lane
