@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro:4",
-  "state": "claimed",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T02:47:21.946Z",
+  "heartbeat_at": "2026-10-30T02:48:05.009Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "d1e8aabf5ee36520f5977cf97f53950f7589ff8c",
@@ -25,7 +25,7 @@
   "retro_result": null,
   "builder_providers": [],
   "park": null,
-  "attempts": 0,
+  "attempts": 1,
   "loopbacks": 0,
   "ci_fixes": 0,
   "approval": null
