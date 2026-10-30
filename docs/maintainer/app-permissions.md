@@ -11,7 +11,7 @@ permission's row.
 |---|---|
 | `contents: write` | `getRef`, `getCommit`, `getTree`, `getBlob`, `readBlobs`, `createBlob`, `createTree`, `createCommit`, `createRef`, `updateRef`, `deleteRef` (only the runner's own `branches.xarabot` branches, of closed `reconcile` and disposable planning PRs), `git push` of unit branches, `enqueuePullRequest`, `dequeuePullRequest` |
 | `pull_requests: write` | `getPull`, `listPulls`, `listReviews`, `createPull`, `updatePull`, `createComment`, `createReview` (comment-only), `pullQueueState` |
-| `issues: write` | `listIssues`, `createIssue`, `updateIssue`, `listIssueComments`, `createIssueComment` (the owners' `xarabot-inbox` issues: the Maintainer's alerts, and Story 4.2's inbox bodies and daily digest mentions) |
+| `issues: write` | `listIssues`, `createIssue`, `updateIssue`, `listIssueComments`, `createIssueComment` (the owners' `xarabot-inbox` issues: the Maintainer's alerts, Story 4.2's inbox bodies and daily digest mentions, and Stories 4.5 and 4.6's rulings: `readRulings` reads the open inbox issues' comments with `listIssues` and `listIssueComments`, and each 🤖 ruling reply is a `createIssueComment`) |
 | `checks: read` | `listCheckRuns` |
 | `statuses: read` | `getCombinedStatus` |
 | `actions: read` | `getJobLogs` |
