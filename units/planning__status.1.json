@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T07:54:31.530Z",
+  "heartbeat_at": "2026-10-30T08:14:11Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "1ebc76c6f6d519f886a40cc596b965ace1e273bf",
@@ -23,13 +23,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "readiness",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "Readiness gate PASS. sprint-status.yaml kept unchanged: it is otherwise in sync, and Story 3.2's renamed heading keeps sprint key 3-2-the-pi-adapter, per the approved 2026-10-25 proposal. Epics 5 and 6 have open design questions, so no context file was written.\nEpic 5\n- Story 5.1a: AD-26 lists an `administration: read` row (branch-protection reads, AD-33/Story 7.5) that the App never has, but the permission test fails on any operation needing a permission the manifest lacks. Readings: (a) add the row to the adapter's table now, and the test exempts permissions the App deliberately lacks (those calls report \"unverified\"); (b) the table lists only calls the adapter makes today, and Story 7.5 adds the row and changes the test.\n- Story 5.3: the precondition needs an App \"created there by `xarabot join`\" in a test org, but GitHub App names are global and `edanisko-xarabot` already exists, and Story 5.1 creates only `<login>-xarabot` on the caller's account. Readings: (a) a second GitHub account runs join, making `<that-login>-xarabot`, and that account is the owner whose review clears the PR; (b) join gets an org-owned App or name option, which Story 5.1 does not have; (c) the existing `edanisko-xarabot` App is installed on the test org, so only join's install path is checked live.\nEpic 6\n- Story 6.2: `ssh <host> xarabot status --json --watch` has no `xarabot` to run, because the host runs `bun ~/.xarabot/runner/<tag>/src/cli/main.ts` as the lane user and only `~/.xarabot/bin/xarabot-lane` is installed. Readings: (a) a new fixed launcher, such as `~/.xarabot/bin/xarabot`, that `lane install` writes and that picks a pinned runner version (which one, when the host has several repos?); (b) a bare `xarabot` on the remote PATH, which the runbook makes a Human Live Step; (c) the laptop sends the full `bun ~/.xarabot/runner/<tag>/...` path.\n- Story 6.3: the decision says `xarabot tui --host <host>`, \"as status does\", but Story 6.2's AC is a bare `status --host` with the name taken from XARABOT_HOST, and FR12/CAP-12 say \"the host named by XARABOT_HOST\". Readings: (a) `--host` is a bare switch for both commands, and XARABOT_HOST supplies the name; (b) both commands take `--host <host>`, and XARABOT_HOST plays no part; (c) both take `--host <host>`, and a bare `--host` falls back to XARABOT_HOST.\n- Story 6.5: the AC and its self-host.md live check still say `xarabot tui` on a laptop with XARABOT_HOST set, which under the 6.3 decision draws the laptop's own empty stream. Readings: (a) the check becomes `xarabot tui --host <host>`, in whichever form the 6.3 answer gives; (b) the text stands, which means XARABOT_HOST does switch the TUI to ssh, against the decision."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
