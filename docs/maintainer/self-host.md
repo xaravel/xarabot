@@ -1083,7 +1083,7 @@ write it. The file holds:
 Once Epic 3 has merged and its evidence file is on `main`, in this order:
 
 1. **Drop the every-path approval rule.** In a Maintainer PR, remove `owner_approval_paths: ["**"]` from `.xarabot/policy.yaml`. The Protected Paths stay gated.
-2. **Allow the adapters unattended.** In the same PR, set `unattended_adapters: [claude, codex]`.
+2. **Allow the adapters unattended.** In the same PR, set `unattended_adapters: [claude, codex]`. Codex may then review unattended, but install no `agent: codex` builder lane until you have recorded one real Story or retro item built by a codex lane with the real `bmad-build-auto` (Epic 3 retro item 18).
 3. **Confirm lane item 23 is done.** `epic-2-retro-item-23-harden-the-lane-lock` (the lane-lock hardening) must be `status: done` in `_bmad-output/implementation-artifacts/retro-gates.yaml` on `main`. Until it is, keep the limit at 1:
 
    ```sh

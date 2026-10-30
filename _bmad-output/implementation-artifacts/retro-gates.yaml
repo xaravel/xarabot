@@ -332,3 +332,27 @@ epics:
         blocking: false
         globs: ["src/core/prompt/template.ts", "src/core/prompt/build-prompt.ts", "src/lane/planning-step.ts", "test/core/prompt/**", "test/lane/planning-step.test.ts", "docs/maintainer/self-host.md"]
         status: done
+      - id: "epic-3-retro-item-16-lane-install-checks-the-lanes-agent"
+        text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; finding A9, spec-3-2's deferral): xarabot lane install (src/cli/lane-install.ts) refuses a lane whose agent is not in main's .xarabot/policy.yaml unattended_adapters, with the same message lane start gives (unattendedRefusal in src/core/lane/runner.ts), before it writes anything; an absent policy behaves as today. Tests in test/cli/lane-install.test.ts: a codex lane under unattended_adapters [claude] is refused, an allowed one installs, an absent policy installs. Say in docs/maintainer/self-host.md's lane install step that install now refuses such a lane"
+        route: lane
+        blocking: false
+        globs: ["src/cli/lane-install.ts", "test/cli/lane-install.test.ts", "docs/maintainer/self-host.md"]
+        status: open
+      - id: "epic-3-retro-item-17-review-prompt-counts-committed-agent-config"
+        text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; finding C7): in the review template (src/core/prompt/template.ts, the line that says agent config files are not part of the change), say that the agent config files on disk are main's and their working-tree state is to be ignored, but that any agent-configuration change git diff main...HEAD shows is part of the change, to be reviewed and reported as blocking unless the Story asks for it. Prompt test in test/core/prompt/"
+        route: lane
+        blocking: false
+        globs: ["src/core/prompt/template.ts", "test/core/prompt/**"]
+        status: open
+      - id: "epic-3-retro-item-18-codex-builder-evidence"
+        text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; findings A9, C4; spec-3-1's deferrals): before any agent: codex builder lane, the Maintainer runs one real Story or retro item through a codex lane with the real .agents/skills/bmad-build-auto and records it in an evidence file, including the resumed run's model; and when a codex session hits a usage limit, saves its --json output and rollout file, and decides from them how a limit with no rate_limits is seen. Deferred until a codex builder lane is planned; codex may review unattended before it"
+        route: maintainer
+        blocking: false
+        globs: []
+        status: deferred
+      - id: "epic-3-retro-item-19-xarabot-glob-coverage-table"
+        text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; finding A10's tail; the 2026-10-29 config-supplied ruling on item 14): once every lane's runner_version is a tag that includes #276, the Maintainer adds Xarabot's own glob_coverage table to .xarabot/config.yaml (the example in docs/maintainer/self-host.md). Deferred until that runner tag is pinned"
+        route: maintainer
+        blocking: false
+        globs: []
+        status: deferred
