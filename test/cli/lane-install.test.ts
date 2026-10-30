@@ -15,6 +15,7 @@ afterEach(() => cleanup(dirs));
 
 const BUN = "/opt/homebrew/bin/bun";
 const ARGS = ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "claude"];
+const CODEX_ARGS = ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "codex"];
 const LABEL = "com.xarabot.lane.xaravel__xarabot.builder-1";
 
 async function install(w: World, args: readonly string[], o: { main?: Record<string, string>; fail?: string; connectFail?: string } = {}) {
@@ -292,7 +293,7 @@ describe("xarabot lane install", () => {
   test("a codex lane installs with codex on the PATH and no claude", async () => {
     const w = world(dirs);
     rmSync(join(w.bin, "claude"));
-    const r = await install(w, ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "codex"]);
+    const r = await install(w, CODEX_ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended: ["claude", "codex"] }) });
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
     const host = loadHostConfig(readFileSync(w.hostYaml, "utf8"));
@@ -302,7 +303,7 @@ describe("xarabot lane install", () => {
   test("a codex lane without codex on the PATH is refused before anything is written", async () => {
     const w = world(dirs);
     rmSync(join(w.bin, "codex"));
-    const r = await install(w, ["builder-1", "--repo", "xaravel/xarabot", "--role", "builder", "--owner", "alice", "--agent", "codex"]);
+    const r = await install(w, CODEX_ARGS);
     expect(r.code).toBe(1);
     expect(r.err.join("\n")).toContain("codex does not resolve on the PATH");
     nothingWritten(w);
@@ -361,6 +362,32 @@ describe("xarabot lane install", () => {
     const r = await install(w, ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended: ["claude", "pi"] }) });
     expect(r.err).toEqual([]);
     expect(r.code).toBe(0);
+  });
+
+  test("a codex lane under a main policy allowing only claude is refused with lane start's message before the runner installs", async () => {
+    const w = world(dirs);
+    const r = await install(w, CODEX_ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended: ["claude"] }) });
+    expect(r.code).toBe(1);
+    expect(r.err).toEqual(["xarabot lane install: agent codex is not in .xarabot/policy.yaml unattended_adapters (allowed: claude)"]);
+    expect(r.calls).toHaveLength(0);
+    expect(existsSync(w.runnerRoot)).toBe(false);
+    nothingWritten(w);
+  });
+
+  test("a codex lane under a main policy allowing codex installs", async () => {
+    const w = world(dirs);
+    const r = await install(w, CODEX_ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", unattended: ["codex"] }) });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(existsSync(w.hostYaml)).toBe(true);
+  });
+
+  test("a codex lane under an absent main policy is left to lane start: the lane installs", async () => {
+    const w = world(dirs);
+    const r = await install(w, CODEX_ARGS, { main: mainFiles({ runnerVersion: "v0.2.0", policy: null }) });
+    expect(r.err).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(existsSync(w.hostYaml)).toBe(true);
   });
 
   test("a coordinator lane named coordinator installs in lanes/coordinator", async () => {

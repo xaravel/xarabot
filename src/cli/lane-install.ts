@@ -8,7 +8,7 @@ import type { CredentialEnv } from "../adapters/forge/github/credentials.ts";
 import { openRunnerGit } from "../adapters/forge/github/runner-git.ts";
 import { CONFIG_PATH, POLICY_PATH } from "../core/config/load-repo-config.ts";
 import { laneLabel, plistEnv, renderLauncher, renderPlist, shQuote } from "../core/lane/launchd.ts";
-import { builderLimit, builderRefusal, checkRunnerVersion, runnerFileText } from "../core/lane/runner.ts";
+import { builderLimit, builderRefusal, checkRunnerVersion, runnerFileText, unattendedRefusal } from "../core/lane/runner.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { describeIssues, parseVersionedYaml } from "../core/schemas/common.ts";
 import { ConfigSchema, type Config } from "../core/schemas/config.ts";
@@ -30,8 +30,9 @@ import { piAgentRefusal, piReviewerRefusal, type SessionAdapter } from "./pi-def
  * holds for another repo (the same name and repo is replaced) and a lane that
  * would take the host over `XARABOT_MAX_BUILDERS`. It then reads
  * `runner_version` and `.xarabot/policy.yaml` from `main`, refuses a policy
- * that does not parse or allows neither `claude` nor `codex` (its only
- * reviewer would be `pi`), and installs that runner first; only then
+ * that does not parse, allows neither `claude` nor `codex` (its only
+ * reviewer would be `pi`) or does not allow the lane's agent unattended
+ * (lane start's refusal), and installs that runner first; only then
  * does it write `host.yaml`, the lane folder, its
  * `runner` file, the fixed launcher and the lane's LaunchDaemon plist. It
  * never runs `sudo` or `launchctl`: it prints the two commands for the
@@ -139,16 +140,19 @@ export function pinnedConfig(snap: ForgeSnapshot): Result<Config> {
 }
 
 /**
- * Refuses `main`'s `.xarabot/policy.yaml` when it does not parse, or allows
- * neither `claude` nor `codex` (Story 3.2). An absent policy passes: lane
- * start refuses it, and it may land in the same bootstrap PR.
+ * Refuses `main`'s `.xarabot/policy.yaml` when it does not parse, allows
+ * neither `claude` nor `codex` (Story 3.2), or does not allow `agent`
+ * unattended, with lane start's message and in its order. An absent policy
+ * passes: lane start refuses it, and it may land in the same bootstrap PR.
  */
-export function mainPolicyRefusal(snap: ForgeSnapshot): Result<void> {
+export function mainPolicyRefusal(snap: ForgeSnapshot, agent: SessionAdapter): Result<void> {
   const text = Object.hasOwn(snap.main.files, POLICY_PATH) ? snap.main.files[POLICY_PATH] : undefined;
   if (typeof text !== "string") return ok(undefined);
   const policy = parseVersionedYaml(POLICY_PATH, text, PolicySchema);
   if (!policy.ok) return policy;
-  return piReviewerRefusal(policy.value);
+  const reviewer = piReviewerRefusal(policy.value);
+  if (!reviewer.ok) return reviewer;
+  return unattendedRefusal(policy.value, agent);
 }
 
 /**
@@ -270,8 +274,8 @@ export async function laneInstall(args: readonly string[], deps: LaneInstallDeps
   const config = pinnedConfig(snap.value);
   if (!config.ok) return fail(config.error.message);
   const version = config.value.runner_version;
-  const reviewer = mainPolicyRefusal(snap.value);
-  if (!reviewer.ok) return fail(reviewer.error.message);
+  const policy = mainPolicyRefusal(snap.value, agent.value);
+  if (!policy.ok) return fail(policy.error.message);
 
   // 4. The runner.
   const installed = await ensureRunner({
