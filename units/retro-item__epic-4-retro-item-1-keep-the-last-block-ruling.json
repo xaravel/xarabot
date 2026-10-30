@@ -18,7 +18,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/lane/rulings-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T06:56:01.048Z",
+  "heartbeat_at": "2026-10-30T06:56:21.595Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
@@ -29,7 +29,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
