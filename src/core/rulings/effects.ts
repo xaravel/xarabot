@@ -3,7 +3,7 @@ import { inboxInstance } from "../inbox/render-digest.ts";
 import { allOf, applyRuling, changeRulingLists, recordRulings, rulingListsOf, type LedgerEdit, type RulingLists } from "../ledger/edits.ts";
 import { applyPendingRulings } from "../reconcile/retro-gates-edit.ts";
 import { COORDINATOR_PATH } from "../ledger/codec.ts";
-import { PENDING_RULING_VERBS, pendingKey, type Approval, type Dismissal, type LaneIdentity, type PendingRuling, type PendingRulingVerb, type UnitRecord } from "../schemas/ledger.ts";
+import { PENDING_RULING_VERBS, pendingKey, unitKind, type Approval, type Dismissal, type LaneIdentity, type PendingRuling, type PendingRulingVerb, type UnitRecord } from "../schemas/ledger.ts";
 import type { Snapshot } from "../schemas/snapshot.ts";
 import { judgeRuling, manifestOf, type RulingComment, type RulingJudgement } from "./rulings.ts";
 
@@ -182,6 +182,11 @@ export function rulingAdds(judged: readonly JudgedRuling[]): { readonly pending:
 
 export type RulingsDrops = { readonly pending: readonly PendingRuling[]; readonly dismissals: readonly Dismissal[] };
 
+/** Whether the snapshot shows a `reconcile` record's PR open: its `retro-gates.yaml` can still change what `main` shows. */
+function reconcilePrOpen(snapshot: Snapshot): boolean {
+  return snapshot.ledger.units.some((r) => unitKind(r.unit) === "reconcile" && snapshot.prs[r.unit]?.state === "open");
+}
+
 /**
  * What a run drops from the snapshot's `coordinator.json` lists: each
  * pending entry `main` shows (applying it alone to `main`'s
@@ -190,11 +195,17 @@ export type RulingsDrops = { readonly pending: readonly PendingRuling[]; readonl
  * new instance, with another subject or start time. A dismissal whose item
  * is not listed stays: it is no new instance. When `main`'s graph does not
  * resolve, the snapshot's `retro_gates` is empty rather than `main`'s, so no
- * pending entry is dropped.
+ * pending entry is dropped. While the snapshot shows a `reconcile` PR open,
+ * no pending entry is dropped either (Epic 4 retro item 1): that PR may
+ * carry an earlier ruling the entry superseded (a `block` an `unblock`
+ * replaced), so `main` showing the entry now does not keep it once the PR
+ * merges; the entry is written again by the next PR, and dropped once
+ * `main` shows it with no reconcile PR open.
  */
 export function rulingsDrops(view: Snapshot, snapshot: Snapshot): RulingsDrops {
   const lists = rulingListsOf(snapshot.ledger.coordinator);
-  const pending = snapshot.graph.ok ? lists.pending.filter((e) => applyPendingRulings(snapshot.retro_gates, [e]).summary.length === 0) : [];
+  const settled = snapshot.graph.ok && !reconcilePrOpen(snapshot);
+  const pending = settled ? lists.pending.filter((e) => applyPendingRulings(snapshot.retro_gates, [e]).summary.length === 0) : [];
   const dismissals = lists.dismissals.filter((d) => {
     const now = inboxInstance(view, d.unit);
     return now !== null && (now.subject !== d.subject || now.since !== d.since);
