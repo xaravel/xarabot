@@ -19,7 +19,8 @@
  * `result_schema`; for planning `planning_unit`, `epics_path`, `epics_dir`,
  * `planning_contexts` and `planning_first_compiles` (status, the last in
  * `planning_questions` only), `planning_headings`, `manifests_dir`
- * and `manifest_paths` (graph); for a retro `retro_unit`, `retro_epic` and
+ * and `manifest_paths` (graph); `coverage_rules` (`glob_coverage` only);
+ * for a retro `retro_unit`, `retro_epic` and
  * `prs_path`; for a retro item `retro_item_unit`, `retro_item_id`,
  * `retro_item_epic`, `retro_item_text` and `retro_item_globs` (and
  * `log_path` in its CI fix, `findings_path` in its loopback); for a review `review_unit`, `review_sha`,
@@ -56,6 +57,12 @@ export type PromptTemplate = {
    * are any.
    */
   readonly planning_questions: string;
+  /**
+   * After the graph planning or retro task, only when the repo's config sets
+   * `glob_coverage` (Epic 3 retro item 14): the table of globs each glob
+   * needs beside it, generated from that config.
+   */
+  readonly glob_coverage: string;
   /** The result step of a planning unit: always the prompt's last part. */
   readonly result_planning: string;
   /** A retro unit: runs `bmad-retrospective -H <N>` on the prefetched PR history. */
@@ -97,6 +104,7 @@ export const PLACEHOLDERS = [
   "planning_headings",
   "manifests_dir",
   "manifest_paths",
+  "coverage_rules",
   "retro_unit",
   "retro_epic",
   "prs_path",
@@ -246,6 +254,12 @@ epics:
 \`\`\`
 
 An Epic not listed there, or listed with no \`depends_on\`, depends on the nearest lower Epic number in \`{{epics_path}}\`.`,
+
+  glob_coverage: `# Globs cover tests and wiring
+
+This repository's coverage table says which globs each glob needs beside it in the same list: its tests, and the wiring files a known kind of change needs. In every list of globs you write, add each glob the table needs for a glob in the list, including the globs you add. A needed glob counts as listed when the list holds it, or a glob that covers it: \`test/**\` covers \`test/a.test.ts\`. In the table, \`<name>\` stands for any text, the same text everywhere in its row; every other character must be written exactly as shown, so a \`*\` matches only a \`*\`.
+
+{{coverage_rules}}`,
 
   result_planning: `${resultHead("planning")}
 

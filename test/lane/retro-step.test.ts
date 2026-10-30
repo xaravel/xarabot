@@ -59,11 +59,17 @@ function statusText(ids: readonly string[]): string {
   return `${lines.join("\n")}\n`;
 }
 
-type MainOpts = { readonly policy?: readonly string[] };
+type MainOpts = {
+  readonly policy?: readonly string[];
+  /** Lines added to `.xarabot/config.yaml`. */
+  readonly config?: readonly string[];
+  /** Files added to main. */
+  readonly extra?: Record<string, string>;
+};
 
 function mainFiles(o: MainOpts = {}): Record<string, string> {
   return {
-    ".xarabot/config.yaml": ["schema_version: 1", 'runner_version: "v1"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "bootstrapped_epics: [1]", "manifests:", "  dir: stories", ""].join("\n"),
+    ".xarabot/config.yaml": ["schema_version: 1", 'runner_version: "v1"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "bootstrapped_epics: [1]", "manifests:", "  dir: stories", ...(o.config ?? []), ""].join("\n"),
     ".xarabot/policy.yaml": ["schema_version: 1", "unattended_adapters: [claude]", ...(o.policy ?? []), ""].join("\n"),
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
     ".xarabot/prompts/house.md": "HOUSE RULE: keep it short.\n",
@@ -76,6 +82,7 @@ function mainFiles(o: MainOpts = {}): Record<string, string> {
     "stories/1.1.md": '---\nstory_id: "1.1"\nepic: 1\nsprint_key: 1-1-first\ntitle: First\nglobs: ["src/a/**"]\n---\n',
     "stories/2.1.md": '---\nstory_id: "2.1"\nepic: 2\nsprint_key: 2-1-second\ntitle: Second\nglobs: ["src/b/**"]\n---\n',
     "stories/2.2.md": '---\nstory_id: "2.2"\nepic: 2\nsprint_key: 2-2-third\ntitle: Third\ndepends_on: ["2.1"]\nglobs: ["src/c/**"]\n---\n',
+    ...o.extra,
   };
 }
 
@@ -884,6 +891,57 @@ describe("createRetroStep: validation", () => {
     expect(out.reason).toContain(`write-check: refused ${RETRO} (retro-verdict)`);
     expect((await h.ledger()).get(U)).toMatchObject({ park: { kind: "blocked", reason: "write-check" } });
     expect(h.events).not.toContain("pushBranch");
+  });
+
+  describe("glob_coverage (Epic 3 retro item 14)", () => {
+    const COVERAGE = [
+      "glob_coverage:",
+      "  tests:",
+      '    - {path: "src/<dir>/**", test: "test/<dir>/**"}',
+      "  wiring:",
+      '    - {path: "src/<dir>/**", needs_if_present: ["docs/<dir>.md"]}',
+    ];
+    const covered = (o: MainOpts) => ({ ...o, headFiles: { ...mainFiles(o), [STATUS]: statusText([OLD_ITEM, A, B]), [DOC]: doc("accepted-with-open-items") } });
+
+    test("a lane item whose globs miss a glob the table needs: a failed attempt naming the item and each missing glob; nothing committed", async () => {
+      const o = { config: COVERAGE, extra: { "docs/x.md": "# x\n" } };
+      // The maintainer item's globs miss the same globs: only a lane item is refused.
+      const items: Item[] = [ITEMS[0] as Item, { ...(ITEMS[1] as Item), globs: ["src/y/**"] }];
+      const h = harness({ ...covered(o), behaviors: [writes(retroResult({ items }))] });
+      const out = await h.run();
+      await failedNothingPushed(h, out, /retro result: item epic-2-retro-item-1-wire-it: its globs miss `test\/x\/\*\*` \(for `src\/x\/\*\*`\), `docs\/x\.md` \(for `src\/x\/\*\*`\)$/);
+      expect(out.reason).not.toContain(B);
+      expect(h.commits).toEqual([]);
+    });
+
+    test("a needs_if_present glob that matches no file on main is not needed", async () => {
+      const items: Item[] = [{ ...(ITEMS[0] as Item), globs: ["src/x/**"] }, ITEMS[1] as Item];
+      const h = harness({ ...covered({ config: COVERAGE }), behaviors: [writes(retroResult({ items }))] });
+      const out = await h.run();
+      expect([out.outcome, out.state]).toEqual(["failed", "released"]);
+      expect(out.reason).toMatch(/its globs miss `test\/x\/\*\*` \(for `src\/x\/\*\*`\)$/);
+    });
+
+    test("a lane item with every glob the table needs passes: the PR opens and is enqueued", async () => {
+      const items: Item[] = [{ ...(ITEMS[0] as Item), globs: ["src/x/**", "test/**", "docs/x.md"] }, ITEMS[1] as Item];
+      const o = { config: COVERAGE, extra: { "docs/x.md": "# x\n" } };
+      const h = harness({ ...covered(o), behaviors: [writes(retroResult({ items }))] });
+      const out = await h.run();
+      expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+      expect(h.events).toContain("openPr");
+    });
+
+    test("the prompt states the configured table; with no glob_coverage key, no rule and no refusal", async () => {
+      const on = harness({ ...covered({ config: COVERAGE }), behaviors: [writes(retroResult())] });
+      await on.run();
+      expect(on.prompts[0]).toContain("# Globs cover tests and wiring");
+      expect(on.prompts[0]).toContain("- `src/<dir>/**` needs its tests, `test/<dir>/**`.");
+
+      const off = harness({ behaviors: [writes(retroResult())] });
+      const out = await off.run();
+      expect(off.prompts[0]).not.toContain("# Globs cover tests and wiring");
+      expect([out.outcome, out.state]).toEqual(["progress", "merging"]);
+    });
   });
 
   test.each([

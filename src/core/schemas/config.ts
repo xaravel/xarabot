@@ -55,6 +55,81 @@ const Hostname = z.string().superRefine((host, ctx) => {
 /** One command line: non-empty, with no line break and no leading or trailing whitespace. */
 const Command = NonEmpty.regex(/^\S(?:[^\r\n]*\S)?$/, "must be one line with no leading or trailing whitespace");
 
+/** A `<name>` placeholder in a `glob_coverage` pattern. */
+export const COVERAGE_PLACEHOLDER = /<([A-Za-z][A-Za-z0-9_]*)>/g;
+
+/** The placeholder names in `pattern`, in order, each as often as it appears. */
+export function coveragePlaceholders(pattern: string): string[] {
+  return [...pattern.matchAll(COVERAGE_PLACEHOLDER)].map((m) => m[1] as string);
+}
+
+/**
+ * One `glob_coverage` pattern: a repo-relative glob, never a negation or a
+ * home path, with no backtick or control character, whose only `<` and `>`
+ * are `<name>` placeholders, no two of them side by side.
+ */
+const CoveragePattern = RepoPath.superRefine((p, ctx) => {
+  const issue = (message: string) => ctx.addIssue({ code: "custom", message });
+  if (p.startsWith("!") || p.startsWith("~")) issue("must not start with ! or ~");
+  if ([...p].some((c) => c === "`" || (c.codePointAt(0) ?? 0) < 0x20 || c === "\u007f")) issue("must have no backtick or control character");
+  if (/[<>]/.test(p.replace(COVERAGE_PLACEHOLDER, ""))) issue("may hold < and > only as <name> placeholders");
+  if (p.includes("><")) issue("must not put two placeholders side by side");
+});
+
+/** The placeholders a needed pattern uses, all of which its row's `path` must hold. */
+function placeholdersFrom(path: string, needs: readonly string[], ctx: z.RefinementCtx, field: string): void {
+  const have = coveragePlaceholders(path);
+  const seen = new Set<string>();
+  for (const name of have) {
+    if (seen.has(name)) ctx.addIssue({ code: "custom", path: ["path"], message: `repeats the placeholder <${name}>` });
+    seen.add(name);
+  }
+  for (const [i, need] of needs.entries()) {
+    for (const name of coveragePlaceholders(need)) {
+      if (!seen.has(name)) ctx.addIssue({ code: "custom", path: [field, i], message: `uses <${name}>, which its path does not hold` });
+    }
+  }
+}
+
+/** A `glob_coverage.tests` row: a glob matching `path` needs `test`, its tests. */
+export const CoverageTestRowSchema = z
+  .strictObject({ path: CoveragePattern, test: CoveragePattern })
+  .superRefine((r, ctx) => placeholdersFrom(r.path, [r.test], ctx, "test"));
+
+/**
+ * A `glob_coverage.wiring` row: a glob matching `path` (with `only_new`,
+ * only a literal path not yet in the tree) needs each of `needs`, and each
+ * of `needs_if_present` that some tree file matches.
+ */
+export const CoverageWiringRowSchema = z
+  .strictObject({
+    path: CoveragePattern,
+    needs: z.array(CoveragePattern).default([]),
+    needs_if_present: z.array(CoveragePattern).default([]),
+    only_new: z.boolean().default(false),
+  })
+  .superRefine((r, ctx) => {
+    if (r.needs.length + r.needs_if_present.length === 0) {
+      ctx.addIssue({ code: "custom", message: "needs or needs_if_present must list at least one glob" });
+    }
+    placeholdersFrom(r.path, r.needs, ctx, "needs");
+    placeholdersFrom(r.path, r.needs_if_present, ctx, "needs_if_present");
+  });
+
+/**
+ * `glob_coverage` (Epic 3 retro item 14): the globs a manifest's or a lane
+ * retro item's glob needs beside it, its tests (`tests`) and the wiring a
+ * known kind of change needs (`wiring`). A `<name>` placeholder stands for
+ * any text, the same in a row's `path` and its needed globs; every other
+ * character matches itself, so `*` in a pattern matches only a `*`.
+ */
+export const GlobCoverageSchema = z
+  .strictObject({
+    tests: z.array(CoverageTestRowSchema).min(1).optional(),
+    wiring: z.array(CoverageWiringRowSchema).min(1).optional(),
+  })
+  .refine((c) => c.tests !== undefined || c.wiring !== undefined, { message: "set tests, wiring or both" });
+
 /** `.xarabot/config.yaml` (AR21). */
 export const ConfigSchema = z.strictObject({
   schema_version: SchemaVersion,
@@ -90,7 +165,15 @@ export const ConfigSchema = z.strictObject({
   live_evidence_checks: z
     .record(z.string().regex(/^[1-9][0-9]*$/, "must be an Epic number"), z.array(Command).min(1))
     .optional(),
+  /**
+   * The globs that must sit beside a glob (Epic 3 retro item 14): with it,
+   * `graph check` warns per manifest, the retro step refuses a lane item, and
+   * the graph planning and retro prompts state the table. Without it the rule
+   * is off.
+   */
+  glob_coverage: GlobCoverageSchema.optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type ManifestsConfig = z.infer<typeof ManifestsConfigSchema>;
+export type GlobCoverage = z.infer<typeof GlobCoverageSchema>;

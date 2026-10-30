@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { err, ok, type Result } from "../result.ts";
+import { coverageRuleLines } from "../manifests/coverage.ts";
 import { describeIssues } from "../schemas/common.ts";
+import { GlobCoverageSchema, type GlobCoverage } from "../schemas/config.ts";
 import { HumanLiveStepSchema, type HumanLiveStep } from "../schemas/human-live-steps.ts";
 import { GitSha } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN } from "../schemas/retro-gates.ts";
@@ -106,6 +108,7 @@ const TemplateSchema = z.strictObject({
   planning_status: z.string(),
   planning_graph: z.string(),
   planning_questions: z.string(),
+  glob_coverage: z.string(),
   result_planning: z.string(),
   retro: z.string(),
   result_retro: z.string(),
@@ -256,6 +259,8 @@ export type GraphPlanningPromptUnit = {
   /** `manifests.path_key` and the `path_map` keys, or `null` when manifests carry `globs`. */
   readonly path_key: { readonly key: string; readonly values: readonly string[] } | null;
   readonly headings: readonly PlanningPromptHeading[];
+  /** The repo's `glob_coverage`, stated for the `globs` it writes; absent when the config has none. */
+  readonly coverage?: GlobCoverage;
 };
 
 export type PlanningPromptUnit = StatusPlanningPromptUnit | GraphPlanningPromptUnit;
@@ -308,6 +313,7 @@ const PlanningInputSchema = z.strictObject({
           }),
         )
         .min(1, "a graph unit needs at least one heading"),
+      coverage: GlobCoverageSchema.optional(),
     }),
   ]),
   sections: SectionsSchema,
@@ -323,7 +329,9 @@ function folderOf(path: string): string {
 /**
  * Builds a planning prompt (Story 2.7): the unit's task (`planning_status`
  * or `planning_graph`), for a status unit with a first compile the
- * `planning_questions` step naming those Epics (Epic 3 retro item 15), the
+ * `planning_questions` step naming those Epics (Epic 3 retro item 15), for
+ * a graph unit whose manifests carry `globs` and whose repo sets
+ * `glob_coverage` the `glob_coverage` table (Epic 3 retro item 14), the
  * rules, the repo sections, and the `planning` result step with its JSON
  * Schema last. Pure; placeholders are filled in one pass, as for a Story.
  */
@@ -371,9 +379,13 @@ export function buildPlanningPrompt(input: BuildPlanningPromptInput): Result<str
         ? "`globs`: a list of quoted repo-relative globs covering every file the Story's work changes."
         : `\`${unit.path_key.key}\`: the area the Story's work changes, one of ${unit.path_key.values.map((v) => `\`${v}\``).join(", ")}.`;
   }
+  // A path key's globs come from the config, which the session never writes: the table applies only to `globs`.
+  const coverage = unit.kind === "graph" && unit.path_key === null ? unit.coverage : undefined;
+  if (coverage !== undefined) values.coverage_rules = coverageRuleLines(coverage).join("\n");
 
   const parts: string[] = [unit.kind === "status" ? t.planning_status : t.planning_graph];
   if (unit.kind === "status" && unit.contexts.some((c) => c.first_compile)) parts.push(t.planning_questions);
+  if (coverage !== undefined) parts.push(t.glob_coverage);
   parts.push(t.rules);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_planning);
@@ -388,6 +400,8 @@ export type RetroPromptUnit = {
   readonly id: string;
   readonly epic: number;
   readonly prs_path: string;
+  /** The repo's `glob_coverage`, stated for the items' globs; absent when the config has none. */
+  readonly coverage?: GlobCoverage;
 };
 
 export type BuildRetroPromptInput = {
@@ -404,6 +418,7 @@ const RetroInputSchema = z.strictObject({
       id: z.string().regex(/^retro:[1-9][0-9]*$/, "must be retro:<N>"),
       epic: z.int().positive(),
       prs_path: AbsolutePath,
+      coverage: GlobCoverageSchema.optional(),
     })
     .refine((u) => u.id === `retro:${u.epic}`, { message: "must be retro:<epic>", path: ["id"] }),
   sections: SectionsSchema,
@@ -412,7 +427,8 @@ const RetroInputSchema = z.strictObject({
 
 /**
  * Builds a retro prompt (Story 2.9): the `retro` task (`bmad-retrospective
- * -H <N>` on the prefetched PR file), the rules, the repo sections, and the
+ * -H <N>` on the prefetched PR file), with `glob_coverage` set the
+ * `glob_coverage` table (Epic 3 retro item 14), the rules, the repo sections, and the
  * `retro` result step with its JSON Schema last. Pure; placeholders are
  * filled in one pass.
  */
@@ -435,7 +451,10 @@ export function buildRetroPrompt(input: BuildRetroPromptInput): Result<string, B
     result_schema: RETRO_RESULT_JSON_SCHEMA,
     sections: sectionsText(sections),
   };
-  const parts: string[] = [t.retro, t.rules];
+  if (unit.coverage !== undefined) values.coverage_rules = coverageRuleLines(unit.coverage).join("\n");
+  const parts: string[] = [t.retro];
+  if (unit.coverage !== undefined) parts.push(t.glob_coverage);
+  parts.push(t.rules);
   if (sections.length > 0) parts.push(t.repo_sections);
   parts.push(t.result_retro);
   return fill(parts, values, "a retro prompt");

@@ -1102,6 +1102,75 @@ until this switch. The "Several builder lanes" drain step waits for the PID
 in the lane's `lane.lock` to be gone, not for a missing `lane.lock` or a
 written `outcome`.
 
+## Globs cover tests and wiring: `glob_coverage` (Epic 3 retro item 14)
+
+Most units that parked for you on 2026-10-26 to 27 parked over globs: a
+manifest or a lane retro item named a `src/` path but not its tests, or not
+the wiring files its kind of change needs. The optional `glob_coverage` table
+in `.xarabot/config.yaml` states which globs each glob needs beside it in the
+same list. Nothing of any repo's layout is built in: with no `glob_coverage`
+key the rule is off everywhere. With it:
+
+- `xarabot graph check` prints, after its other warnings, one
+  `warning: Story <id> (<manifest>) globs miss ...` line for each manifest
+  whose globs miss a glob the table needs, naming each missing glob and the
+  glob that needs it. It only warns: the exit code stays 0, so manifests
+  already on `main` keep CI green.
+- A retro's result check refuses each `lane` item whose globs miss a glob the
+  table needs (on fresh `main`'s tree), as a failed attempt naming the item
+  and each missing glob, before anything is committed. The retro runs again,
+  and its prompt states the table, so the session can fix the globs. A
+  `maintainer` item is never refused for coverage.
+- The graph planning prompt (when manifests carry `globs`, not a
+  `manifests.path_key`) and the retro prompt state the table, generated from
+  your config, for the globs they write.
+
+The shape, with Xarabot's own table as the example:
+
+```yaml
+glob_coverage:
+  tests:              # each glob's tests
+    - path: "src/<p>.ts"
+      test: "test/<p>.test.ts"
+    - path: "src/<dir>/**"
+      test: "test/<dir>/**"
+  wiring:             # the wiring files a known kind of change needs
+    - path: "src/ports/forge.ts"
+      needs: ["test/ports/forge.test.ts", "test/contracts/forge.contract.ts", "src/adapters/forge/**"]
+    - path: "src/ports/<x>.ts"
+      needs: ["test/ports/<x>.test.ts"]
+      needs_if_present: ["test/contracts/<x>.contract.ts"]
+    - path: "src/lane/<x>-step.ts"
+      only_new: true
+      needs: ["src/cli/lane-run.ts", "test/cli/lane-run.test.ts"]
+```
+
+- Set `tests`, `wiring` or both; each, when set, lists at least one row. No
+  other key is allowed, at either level.
+- A row's `path` is matched against each glob of the list as text. A
+  `<name>` placeholder (a letter, then letters, digits or `_`) stands for one
+  or more characters of any kind, `/` included; every other character matches
+  only itself, so `src/<p>.ts` matches `src/core/a.ts` and `src/core/*.ts`,
+  but a `*` in a row's `path` matches only a `*` in the glob. The needed
+  globs get the same text for each placeholder: `src/core/*.ts` needs
+  `test/core/*.test.ts`. Every placeholder a needed glob uses must be in its
+  row's `path`, at most once, and no two placeholders may sit side by side.
+- A `tests` row has exactly `path` and `test`. A `wiring` row has `path`,
+  then `needs` (needed always), `needs_if_present` (needed only when the
+  tree, the working tree for `graph check` and `main` for a retro, has a file
+  the glob matches) or both, and `only_new: true` to apply the row only when
+  the matched glob is a literal path the tree does not have yet (a new file).
+- Every pattern is a repo-relative glob: no leading `/`, `./`, `!` or `~`,
+  no `.` or `..` segment, no backslash, backtick or control character, and
+  no `<` or `>` outside a placeholder.
+- A needed glob counts as listed when the list holds it or a glob that
+  matches it: `test/**` covers `test/a.test.ts` and `test/a/**`. A missing
+  glob's own needs are needed too: the Forge row's `src/adapters/forge/**`
+  also needs `test/adapters/forge/**`.
+
+Add the key in a Maintainer PR, and only once every lane's `runner_version`
+knows it: an older runner refuses the unknown key and stops on bad config.
+
 ## Epic 4's live evidence (Story 4.7)
 
 Epic 4's retro (`retro:4`) waits until `docs/maintainer/evidence/epic-4.md`
