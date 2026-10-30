@@ -2490,6 +2490,8 @@ So that each owner's App asks for exactly the rights Xarabot uses, and no call n
 
 **Maintainer decision (2026-10-30, `planning:status.1`'s open question):** AD-26's table records the three calls the adapter already makes, as built. `deleteRef` is listed under `contents: write`. The bot user lookup (`GET /users/<slug>[bot]`) and the CI log download from GitHub's signed URL are listed in the no-token row, as public calls with no credential. The signed download must never carry the token. The spine's AD-26 is updated to match.
 
+**Maintainer decision (2026-10-30, `planning:status.1`'s second open questions):** the adapter's table lists only the calls the adapter makes today. AD-26's `administration: read` row (branch-protection reads, which the App never has) is not added here: Story 7.5 adds it with the reads themselves, together with the permission test's exemption for a permission the App deliberately lacks.
+
 ### Story 5.2: Installing the App and checking its reach
 
 As a human joining a repo,
@@ -2555,6 +2557,8 @@ Precondition (Human Live Step): the Maintainer provides a test org with an App c
 **Then** it records this suite's live command (`XARABOT_LIVE=1 bun test <suite>`) and the expected result of each case above, which the Maintainer runs on the host, outside the sandbox, against the test org, before Epic 5's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
 
+**Maintainer decision (2026-10-30, `planning:status.1`'s second open questions):** GitHub App names are global and `edanisko-xarabot` already exists, so the precondition's App is made by a second GitHub account. That account runs `xarabot join`, which creates `<that-login>-xarabot` and installs it on the test org's repo. That account is the owner whose review clears the PR in the cases above, and it provides the Human Live Step.
+
 ## Epic 6: Operators can see and measure every lane
 
 `xarabot status --json --watch` reports every lane's unit, claim, CI and merge state and the inbox; the TUI draws it locally or over `ssh $XARABOT_HOST`; `xarabot report` compares agents and models and computes Stories per hour. All of it reads; none of it decides (AR25).
@@ -2603,6 +2607,10 @@ So that I can follow lanes live without logging in to the Xarabot host (FR12, AR
 **When** `xarabot status --json --watch --host` runs
 **Then** it runs the same command over ssh on that host and relays its lines unchanged.
 
+**Maintainer decisions (2026-10-30, `planning:status.1`'s second open questions):**
+- **What runs on the host.** `xarabot lane install` also writes a fixed launcher, `~/.xarabot/bin/xarabot`, beside `xarabot-lane`. It runs the newest runner version that any lane on the host pins, since with several repos the newest knows every journal format. The ssh command runs that launcher.
+- **The flag.** `--host` is a bare switch, here and on `xarabot tui` (Story 6.3), and `XARABOT_HOST` supplies the host's name (FR12). `XARABOT_HOST` alone never switches a command to ssh.
+
 ### Story 6.3: The TUI
 
 As an operator,
@@ -2627,7 +2635,7 @@ So that I see at a glance what each lane is doing and what is waiting on me (FR1
 **When** it is built
 **Then** it draws with plain ANSI output and adds no runtime dependency, and its rendering is tested against golden frames from fixture status lines.
 
-**Maintainer decision (2026-10-30, `planning:status.1`'s open question):** the TUI picks the remote host from an explicit `--host` flag, as `status` does (Story 6.2), not from `XARABOT_HOST`. Without `--host`, it reads the local host's stream. `XARABOT_HOST` is host-layer config and may be set on the host itself, so its value never switches the TUI to ssh. This replaces the laptop criterion above: `xarabot tui --host <host>` draws the same view over `ssh <host>`.
+**Maintainer decision (2026-10-30, `planning:status.1`'s open questions; corrected the same day):** the TUI switches to ssh only with `--host`, a bare switch as on `status` (Story 6.2), and `XARABOT_HOST` supplies the host's name. Without `--host`, it reads the local host's stream. `XARABOT_HOST` is host-layer config and may be set on the host itself, so it never switches the TUI to ssh by itself. This replaces the laptop criterion above: with `XARABOT_HOST` set, `xarabot tui --host` draws the same view over `ssh $XARABOT_HOST`.
 
 ### Story 6.4: `xarabot report` and log retention
 
@@ -2685,6 +2693,8 @@ So that I can trust the success-signal figure and the TUI during Xaravel's adopt
 **When** the Story is done
 **Then** it records the live checks, each with its command (`XARABOT_LIVE=1 bun test <suite>`, and `xarabot tui` on a laptop with `XARABOT_HOST` set) and expected result, which the Maintainer runs on the host and the laptop, outside the sandbox, before Epic 6's retro
 **And** inside a sandboxed session the live cases are reported as skipped, never as passed.
+
+**Maintainer decision (2026-10-30, `planning:status.1`'s second open questions):** following Story 6.3's decision, the laptop check above and its runbook entry run `xarabot tui --host` on a laptop with `XARABOT_HOST` set; on the host, `xarabot tui` runs with no flag.
 
 ## Epic 7: Xarabot 0.x is ready for a consuming repo
 
@@ -2810,6 +2820,8 @@ So that a missing setting stops lanes with the step to fix instead of failing la
 **Given** the case tables
 **When** they run against the fake forge
 **Then** each prerequisite, missing and unverifiable, has a case.
+
+**Maintainer decision (2026-10-30, Story 5.1a's open question):** this Story adds the `administration: read` row to the GitHub adapter's operation table with the branch-protection reads, and changes Story 5.1a's permission test to exempt a permission the App deliberately lacks; those reads report "unverified".
 
 ### Story 7.6: Adoption inputs for Xaravel
 
