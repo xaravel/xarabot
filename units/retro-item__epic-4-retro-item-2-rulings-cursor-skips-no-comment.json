@@ -1,10 +1,10 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-2-rulings-cursor-skips-no-comment",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "src/adapters/forge/fake/fake-forge.ts",
@@ -16,7 +16,7 @@
     "test/contracts/forge.contract.ts",
     "test/contracts/forge.github.contract.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:15:31.901Z",
+  "heartbeat_at": "2026-10-30T08:18:17Z",
   "pr": 291,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
