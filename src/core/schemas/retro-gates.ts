@@ -3,7 +3,11 @@ import { normalizeGlob } from "../manifests/globs.ts";
 import { GitHubLogin, IsoDateTime, NonEmpty, SchemaVersion } from "./common.ts";
 import { EpicKey } from "./epics-yaml.ts";
 
-/** A recorded go: who, when, and the ruling (`maintainer-pr` for one written by hand before Story 4.6). */
+/**
+ * A recorded go: who, when, and the ruling: the ruling comment's id (AD-28),
+ * `xarabot-rule` for the Maintainer's host ruling (`HOST_RULING_ID`), or
+ * `maintainer-pr` for one written by hand.
+ */
 export const GoSchema = z.strictObject({
   by: GitHubLogin,
   at: IsoDateTime,

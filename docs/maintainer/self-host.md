@@ -213,7 +213,7 @@ The `edanisko-xarabot` App asks for exactly the permissions in
 `actions: read` and `metadata: read`. It never asks for `workflows`,
 `administration` or any bypass right.
 
-- `issues: write` is Story 1.10's precondition, for the `xarabot-inbox` alerts.
+- `issues: write` is Story 1.10's precondition, for the `xarabot-inbox` alerts; Stories 4.2 to 4.6 use it for the inbox bodies, the daily digest, reading rulings and the 🤖 ruling replies.
 - AR38 found that the merge queue needs no permission of its own.
 
 Check the App's settings page,
@@ -517,6 +517,111 @@ issue open; if you close it, the next run opens a new one, which you pin
 again. Once the inbox is pinned and the daily digest arrives, you can drop
 the "All Activity" watch above.
 
+### Rulings in your inbox (Stories 4.5 and 4.6)
+
+With a `runner_version` that has Story 4.6 and the coordinator lane
+running, you and the other owners rule on inbox items with a comment on an
+open `xarabot-inbox` issue. Every `reconcile` run reads the comments posted
+on the open inbox issues since its last read, oldest first, so a ruling
+takes effect within one coordinator round.
+
+**Grammar.** A ruling is a comment that reads exactly
+`/xarabot <verb> <unit-id>`, on one line, with nothing before or after it
+but whitespace: for example `/xarabot go checkpoint:4` or
+`/xarabot release story:2.1`. The unit id is one the inbox shows
+(`story:<id>`, `checkpoint:<N>`, `retro:<N>`, `retro-item:<id>`,
+`planning:…`). A comment that does not start with `/xarabot` (a quote, a
+note, a 🤖 comment) is not a ruling: it gets no reply and changes nothing.
+One that starts with `/xarabot` but names no verb, an unknown verb, no unit
+id or a malformed one, or has text after the unit id, is refused. A comment
+is judged once: editing or deleting it after its reply changes nothing, so
+post a new one instead.
+
+**Verbs and authority.** Logins compare case-insensitively.
+
+| Verb | Applies to | Who may rule it | What it does |
+|---|---|---|---|
+| `go` | `checkpoint:<N>` of a checkpoint Epic with no go; `retro:<N>` of a `rejected` retro with no go | the Maintainer | a pending go (below) |
+| `approve` | a unit parked `needs-approval` whose Story manifest is on `main` | the Maintainer | releases it, recording your approval with that manifest's SHA |
+| `block`, `unblock` | a `retro-item:<id>` that `retro-gates.yaml` lists, not already in that state | the Maintainer | a pending change of the item's `blocking` |
+| `done` | a listed retro item not yet `done` | the Maintainer | a pending `status: done` |
+| `defer` | a listed retro item that is `open`, `in-progress` or `waiting` | the Maintainer | a pending `status: deferred` |
+| `release` | a `parked` unit | the item's owner or the Maintainer | as `rule release`: `released`, counters at 0, the PR kept |
+| `rebuild` | a `parked` unit | the item's owner or the Maintainer | as `rule rebuild`: closes the open PR first, then releases it with the counters at 0 and the SHAs and providers cleared |
+| `dismiss` | any item an inbox lists | the item's owner or the Maintainer | a dismissal (below) |
+
+The item's owner is the one whose inbox lists it: a unit parked
+`needs-approval` or blocked `human-live-step` is yours as the Maintainer,
+any other parked unit its `park.inbox_owner`'s, and every other item
+yours. A run judges its comments in order, each against the state the
+earlier ones left, so a second `release` of the same unit is refused (it is
+released already), a second `go` is refused (there is a go), and `unblock`
+while a `block` is pending replaces it. All of a run's rulings land in one
+ledger write with the read cursor, or none do: a write another run beat
+leaves the cursor, posts no reply, and the next run judges the same
+comments again. A `rebuild` whose PR fails to close is refused, with the
+reason.
+
+**Replies.** Once that write lands, each ruling gets one 🤖 reply on its own
+inbox issue, linking the comment: `🤖 Ruling acknowledged: /xarabot <verb>
+<unit-id> from <login> (comment).` when it counts, or `🤖 Ruling not
+applied (comment): <reason>. Nothing changed.` when it is refused, the
+reason naming why (who may rule the verb, or why it does not apply). A
+reply never @-mentions anyone. A reply that fails to post is logged and
+never retried; what the ruling did stands, and the inbox shows it.
+
+**The pending list.** `go`, `block`, `unblock`, `done` and `defer` change
+`retro-gates.yaml`, which only a PR to `main` can. So each one is kept as a
+pending ruling in `coordinator.json` (`pending_rulings`), and that same
+run's `reconcile` PR writes it into `retro-gates.yaml`, one summary line per
+change. The go it writes has `by` the comment's author, `at` its time and
+`ruling` the comment's id. Every `reconcile` run writes the pending rulings
+again until `main` shows them, so a closed or failed PR, or a run that died,
+loses none; an entry leaves the list once applying it to `main`'s
+`retro-gates.yaml` changes nothing (that covers an item no longer listed).
+Your inbox renders with the pending rulings applied, so an item ruled
+`go`, `done` or `defer` leaves it before the PR merges; the gates read only
+`main`, so the units a go or an item status frees are claimed after the
+`reconcile` PR merges. A later ruling on the same unit in the same family
+(`go`, `block`/`unblock`, `done`/`defer`) replaces a pending one, so rule
+`unblock` to undo a pending `block`. A hand edit of `retro-gates.yaml` does
+not undo a pending ruling: the next `reconcile` PR writes it again.
+
+**Dismissals.** `dismiss <unit-id>` hides that item from its inbox and
+changes nothing else: the unit, its PR, the ledger record and
+`retro-gates.yaml` stay as they are, and a gate it holds stays shut. The
+dismissal, kept in `coordinator.json` (`dismissals`), names the item as the
+inbox showed it: its text and start time. When the item comes back with
+another text or start time (the unit parked again, say), the dismissal is
+dropped and the item shows again. While no inbox lists the item, its
+dismissal stays. A deferred spec entry has no unit id, so it cannot be
+dismissed.
+
+**`xarabot rule` on the host.** The same nine verbs work from the host, as
+`edanisko-xarabot`, with no comment:
+
+```sh
+bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule <verb> <unit-id> [--repo <owner>/<name>]
+```
+
+- Every verb but `release` and `rebuild` is judged as you, the
+  Maintainer, by the rules above, against one snapshot. A refusal exits 1
+  with the reason, and the ledger is unchanged. An unknown verb or a
+  malformed unit id is refused before any file or forge access.
+- It makes the same edit a comment ruling would, but moves no read cursor
+  and posts no reply. A pending ruling it records has `by` the Maintainer,
+  `at` the forge's time and `ruling: xarabot-rule`, in place of a comment
+  id; a go written by hand has `ruling: maintainer-pr`.
+- `approve` prints `approved <unit> (manifest <sha>): released`; `go`,
+  `block`, `unblock`, `done` and `defer` print `recorded <verb> <unit> as
+  pending: the next reconcile PR writes it to retro-gates.yaml`; `dismiss`
+  prints `dismissed <unit> from the inbox`. `release` and `rebuild` keep
+  their own path and output ([Releasing a parked unit](#while-epic-2-is-built)
+  below).
+- `go`, `block`, `unblock`, `done`, `defer` and `dismiss` write
+  `coordinator.json`, so they need the repo's coordinator lane in the
+  host's `host.yaml`, as does any ruling on a unit other than a Story.
+
 ## While Epic 2 is built
 
 - **Advancing the runner.** A lane runs only the pinned `runner_version` (Story 1.19). When a Story merges whose code the lanes need:
@@ -624,7 +729,7 @@ the "All Activity" watch above.
   - `release` makes the record `released` with `attempts`, `loopbacks` and `ci_fixes` at 0. It keeps the PR, the SHAs and `builder_providers`, so the next claim adopts the open PR.
   - `rebuild` first closes the record's PR if it is open (`closed PR #<n>`), then releases it with the counters at 0 and `builder_providers`, `reviewed_sha`, `passed_sha` and `approved_sha` cleared. If the close lands but the edit fails, it exits 1 with `(PR #<n> was closed)`: run the same command again; the re-run finds the PR closed, skips the close and makes only the edit.
   - Until `runner_version` has Story 2.6b, after a `rebuild` delete the Story's branch before the lane claims it again (`git push origin --delete story/<id>`). Otherwise the next claim pushes as if the branch did not exist, conflicts on every attempt and parks again at `attempts-cap`. From Story 2.6b on, a claim with no open PR leases its push from the branch's real head, so the branch can stay. That push replaces whatever commits are on the Story branch, so keep no work on a Story branch with no open PR.
-  - Either prints `released <unit> (<park kind>[ <reason>])` and exits 0. It refuses, exit 1 and the ledger unchanged, when the unit has no record, is not `parked` (`story:<id> is claimed, not parked`), or its record moved on before the edit. Any other verb (`approve`, `go`, …) prints `<verb>: not before Story 4.6`.
+  - Either prints `released <unit> (<park kind>[ <reason>])` and exits 0. It refuses, exit 1 and the ledger unchanged, when the unit has no record, is not `parked` (`story:<id> is claimed, not parked`), or its record moved on before the edit. From Story 4.6 on, `rule` takes every ruling verb, not only these two: see [Rulings in your inbox](#rulings-in-your-inbox-stories-45-and-46) above.
   - The edit is written as the repo's `coordinator` lane, or the lowest-numbered `builder-<n>` when the host has no coordinator lane; a non-Story unit (`planning:`, `retro:`, …) needs the coordinator lane. With lanes for several repos in `host.yaml`, add `--repo <owner>/<name>`.
 - **Lane stops.** Once `runner_version` has Story 2.5b, a run that ends `stop` for any reason but a STOP marker (a forge `auth`, `forbidden` or `uninstalled` error, an unknown ledger `schema_version`, or bad config, policy or graph on `main`) exits 1 and counts as a failed start, like a refused start. The third in a row writes the lane's `STOP` and posts `lane-start-failed`. A run that ends without a lane stop resets the count. A STOP marker never counts. Once you have fixed the cause, remove the lane's `STOP` (`rm ~/.xarabot/repos/xaravel__xarabot/lanes/<lane>/STOP`).
 - **Recovering a blocked Story's work.** A Story that parks `blocked` keeps its work on the host only, as the wip ref `refs/wip/story__<id>` in the lane's `runner.git`; it is never pushed, and the run after a release starts fresh from `main`. The unit's journal line names the ref in `wip_ref`, and its log says the same. If the session changed any file, its work is saved under that ref when the lane next rebuilds its clone, at the start of its next session; until then, the work is in the lane's `clone/` folder. A session that changed nothing saves nothing, so the ref may be missing or hold an older wip. To see the work, run this on the host as `edanisko-xarabot`, before the unit's next session overwrites it:
@@ -645,7 +750,7 @@ the "All Activity" watch above.
   - **Refused.** The PR parks `blocked` `graph-invalid`, with a 🤖 comment naming why: the merge result fails `graph check` (a missing or invalid config included); it drops an Epic number or Story id already used (a status beyond `backlog`, a ledger record, a retro-gates entry, or for a Story a PR on `story/<id>`); it adds a Story to an Epic whose retro is recorded or that is in `bootstrapped_epics`; or it removes `checkpoint: true` from an Epic whose checkpoint go is not recorded. Fix the PR, then release the unit with `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule release <unit-id>` or rebuild it.
   - A merge that conflicts, or a `main` whose own graph does not resolve, is a failed attempt (in `reconcile`, the take is skipped; a conflict there parks the PR again with the conflict comment).
 
-- **A rejected retro's go.** Until Story 4.6 adds `/xarabot go retro:<N>`, a `rejected` retro of Epic 2 or Epic 3 holds its dependents. Record the go by hand in `_bmad-output/implementation-artifacts/retro-gates.yaml` (`retro_gates_path`), in a Maintainer PR. Add a `go` with `ruling: maintainer-pr` to the Epic's existing `retro` entry (AR13):
+- **A rejected retro's go.** A `rejected` retro holds its dependents until it has a go. Once `runner_version` has Story 4.6, rule the go: comment `/xarabot go retro:<N>` on your inbox, where the rejected retro's item shows that verb, or run `bun ~/.xarabot/runner/<tag>/src/cli/main.ts rule go retro:<N>` on the host. The next `reconcile` PR writes it into `retro-gates.yaml`, so you no longer write it by hand ([Rulings in your inbox](#rulings-in-your-inbox-stories-45-and-46) above). With a runner before Story 4.6, record the go by hand in `_bmad-output/implementation-artifacts/retro-gates.yaml` (`retro_gates_path`), in a Maintainer PR. Add a `go` with `ruling: maintainer-pr` to the Epic's existing `retro` entry (AR13):
 
   ```yaml
   schema_version: 1
