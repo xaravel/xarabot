@@ -2488,6 +2488,8 @@ So that each owner's App asks for exactly the rights Xarabot uses, and no call n
 **When** the Story is done
 **Then** the adapter's table matches it, and any difference is raised to the Maintainer instead of decided in the Story.
 
+**Maintainer decision (2026-10-30, `planning:status.1`'s open question):** AD-26's table records the three calls the adapter already makes, as built. `deleteRef` is listed under `contents: write`. The bot user lookup (`GET /users/<slug>[bot]`) and the CI log download from GitHub's signed URL are listed in the no-token row, as public calls with no credential. The signed download must never carry the token. The spine's AD-26 is updated to match.
+
 ### Story 5.2: Installing the App and checking its reach
 
 As a human joining a repo,
@@ -2625,6 +2627,8 @@ So that I see at a glance what each lane is doing and what is waiting on me (FR1
 **When** it is built
 **Then** it draws with plain ANSI output and adds no runtime dependency, and its rendering is tested against golden frames from fixture status lines.
 
+**Maintainer decision (2026-10-30, `planning:status.1`'s open question):** the TUI picks the remote host from an explicit `--host` flag, as `status` does (Story 6.2), not from `XARABOT_HOST`. Without `--host`, it reads the local host's stream. `XARABOT_HOST` is host-layer config and may be set on the host itself, so its value never switches the TUI to ssh. This replaces the laptop criterion above: `xarabot tui --host <host>` draws the same view over `ssh <host>`.
+
 ### Story 6.4: `xarabot report` and log retention
 
 As the Maintainer,
@@ -2652,6 +2656,10 @@ So that I can compare lanes and measure the 0.x success signal from Xarabot's ow
 **Given** the report's case tables
 **When** they run on fixture journals
 **Then** each figure, an all-lanes-waiting span, a span where only some lanes wait, and an all-lanes `usage-limit` span, whose hours are not left out, each have a case.
+
+**Maintainer decisions (2026-10-30, `planning:status.1`'s open questions):**
+- **Merged Stories** are read from the forge: the Stories whose PR merged within the period, by merge time. Journals alone miss or misattribute a Story that `reconcile` merged, since it gets a `merged` record only if a builder's sweep marks it first.
+- **Hours when every lane waits on the Maintainer** count builder lanes only. Each builder's `waiting-on-maintainer` span lasts until that lane's next journal record, and the hours left out are where every builder's span overlaps. The coordinator is not counted, because it runs `reconcile` at least every 10 minutes and its idle spans record only the seconds of a round.
 
 ### Story 6.5: Status and report verification
 
