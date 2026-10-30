@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-1-keep-the-last-block-ruling",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -18,7 +18,7 @@
     "test/lane/reconcile-step.test.ts",
     "test/lane/rulings-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T07:02:13.260Z",
+  "heartbeat_at": "2026-10-30T07:02:23.168Z",
   "pr": 290,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
@@ -32,7 +32,17 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/rulings/effects.ts",
+      "src/lane/reconcile-step.ts",
+      "test/core/rulings/effects.test.ts",
+      "test/lane/reconcile-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
