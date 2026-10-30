@@ -402,6 +402,25 @@ describe("fake forge readRulings (Story 4.5)", () => {
     expect(value(await forge.readRulings(c1, live())).comments.map((c) => c.id)).toEqual([posted, c3, c4]);
   });
 
+  test("a comment posted while readRulings reads the inboxes is left for the next read, on an inbox already read or one still to read", async () => {
+    const { forge, control } = createFakeForge();
+    const a = value(await forge.openInbox("alice", live())).number;
+    const b = value(await forge.openInbox("bob", live())).number;
+    control.addInboxComment(a, "carol", "A1");
+    control.addInboxComment(b, "dave", "B1");
+    control.addInboxCommentBeforeRead(b, a, "carol", "A2");
+    control.addInboxCommentBeforeRead(b, b, "dave", "B2");
+    const r1 = value(await forge.readRulings(null, live()));
+    expect(r1.comments.map((c) => c.body)).toEqual(["A1", "B1"]);
+    expect(control.inboxComments(a)).toEqual(["A1", "A2"]);
+    const r2 = value(await forge.readRulings(r1.cursor, live()));
+    expect(r2.comments.map((c) => c.body)).toEqual(["A2", "B2"]);
+    // Each runs once.
+    expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+    expect(control.inboxComments(b)).toEqual(["B1", "B2"]);
+    expect(() => control.addInboxCommentBeforeRead(b, 4242, "carol", "x")).toThrow("no issue #4242");
+  });
+
   test("a non-numeric cursor, or one above every id issued, is rejected; addInboxComment needs an existing issue; an injected error changes nothing", async () => {
     const { forge, control } = createFakeForge();
     expect((await forge.readRulings("2026-01-01T00:00:00Z|5", live())).ok).toBe(false);

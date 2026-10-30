@@ -58,6 +58,12 @@ export type ForgeContractControls = {
   inboxComments(issue: number): MaybePromise<string[]>;
   /** Adds a comment by `author` on inbox issue `issue`, as that user posting it would (Story 4.5). */
   addInboxComment(issue: number, author: string, body: string): MaybePromise<unknown>;
+  /**
+   * As `addInboxComment`, once, while the next `readRulings` runs: just
+   * before it reads open inbox issue `read`'s comments, after the
+   * lower-numbered ones. Several run in the order added.
+   */
+  addInboxCommentBeforeRead(read: number, issue: number, author: string, body: string): MaybePromise<void>;
 };
 
 /** An inbox issue as the `inboxes` control reports it. */
@@ -868,6 +874,32 @@ export function forgeContract(harness: ForgeHarness): void {
       expect(r2.cursor).not.toBe(r1.cursor);
       expect(value(await fx.forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
     });
+
+    scenario(
+      "with two inboxes, a comment posted on the one read first while the other is read is returned by the next read, and none twice",
+      ["openInbox", "readRulings"],
+      ["addInboxComment", "addInboxCommentBeforeRead"],
+      async (fx) => {
+        const add = need(fx, "addInboxComment");
+        const numbers = [value(await fx.forge.openInbox(owner, live())).number, value(await fx.forge.openInbox("bob", live())).number].sort((x, y) => x - y);
+        const [first, second] = numbers as [number, number];
+        await add(first, "carol", "A1");
+        await add(second, "dave", "B1");
+        // A2 lands on the inbox read first after it was read; B2 lands later still, on the inbox not yet read.
+        await need(fx, "addInboxCommentBeforeRead")(second, first, "carol", "A2");
+        await need(fx, "addInboxCommentBeforeRead")(second, second, "dave", "B2");
+        const r1 = value(await fx.forge.readRulings(null, live()));
+        expect(r1.comments.map((c) => c.body).slice(0, 2)).toEqual(["A1", "B1"]);
+        expect(r1.comments.map((c) => c.body)).not.toContain("A2");
+        const r2 = value(await fx.forge.readRulings(r1.cursor, live()));
+        expect(r2.comments.map((c) => c.body)).toContain("A2");
+        const read = [...r1.comments, ...r2.comments];
+        expect(read.map((c) => c.body).sort()).toEqual(["A1", "A2", "B1", "B2"]);
+        expect(new Set(read.map((c) => c.id)).size).toBe(read.length);
+        expect(read.find((c) => c.body === "A2")?.issue).toBe(first);
+        expect(value(await fx.forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+      },
+    );
 
     scenario("a cursor the forge did not issue is rejected", ["readRulings"], [], async (fx) => {
       expect(kind(await fx.forge.readRulings("not-a-cursor", live()))).toBe("rejected");

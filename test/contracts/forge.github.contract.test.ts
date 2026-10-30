@@ -7,7 +7,7 @@ import { GITHUB_OPERATIONS, isSuccess, request, SWAP_CONFLICT_STATUS, type Opera
 import { openRunnerGit, runGit, type GitIdentity } from "../../src/adapters/forge/github/runner-git.ts";
 import { createTokenSource } from "../../src/adapters/forge/github/tokens.ts";
 import { FORGE_OPERATIONS, type Forge, type ForgeOperation, type ForgePr, type ForgeResult, type GitSha } from "../../src/ports/forge.ts";
-import { createFakeGitHub, testKeys } from "../adapters/forge/github/fake-github.ts";
+import { createFakeGitHub, testKeys, type FakeGitHub } from "../adapters/forge/github/fake-github.ts";
 import { startGitServer, type GitServer } from "../adapters/forge/github/git-server.ts";
 import { cleanupScratch, LIVE_LOGIN, liveCredentials, liveGithubEnabled, liveRepo, prefixed } from "../support/live-github.ts";
 import { isSandboxed } from "../support/sandbox.ts";
@@ -32,6 +32,28 @@ function must<T>(r: ForgeResult<T>): T {
 
 function signal(): AbortSignal {
   return AbortSignal.timeout(60_000);
+}
+
+/**
+ * The `addInboxCommentBeforeRead` control on the emulator: one hook on the
+ * next list of issue `read`'s comments runs every comment queued for it.
+ */
+function beforeRead(gh: FakeGitHub): (read: number, issue: number, author: string, body: string) => void {
+  const queued = new Map<number, (() => void)[]>();
+  return (read, issue, author, body) => {
+    const add = () => gh.control.addComment(issue, body, author);
+    const list = queued.get(read);
+    if (list !== undefined) {
+      list.push(add);
+      return;
+    }
+    const fresh = [add];
+    queued.set(read, fresh);
+    gh.control.before("GET", new RegExp(`^/repos/acme/widgets/issues/${read}/comments\\?`), () => {
+      queued.delete(read);
+      for (const f of fresh) f();
+    });
+  };
 }
 
 // ------------------------------------------------------------ emulator
@@ -59,6 +81,7 @@ forgeContract({
     "inboxes",
     "inboxComments",
     "addInboxComment",
+    "addInboxCommentBeforeRead",
   ],
   make: async (): Promise<ForgeFixture> => {
     const { privateKey, publicKey } = testKeys();
@@ -104,6 +127,7 @@ forgeContract({
             gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
           inboxComments: (issue) => gh.control.comments(issue),
           addInboxComment: (issue, author, body) => gh.control.addComment(issue, body, author),
+          addInboxCommentBeforeRead: beforeRead(gh),
           setChecks: (sha, checks) => gh.control.setChecks(sha, checks),
           setCiLog: (sha, check, log) => gh.control.setCiLog(sha, check, log),
           setMain: (files) => gh.control.setMain(files),
@@ -135,7 +159,7 @@ forgeContract({
 forgeContract({
   name: "github (emulator, no git remote)",
   operations: FORGE_OPERATIONS.filter((op) => op !== "pushBranch"),
-  controls: ["comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace", "inboxes", "inboxComments", "addInboxComment"],
+  controls: ["comments", "setChecks", "setCiLog", "setMain", "setNow", "writeForeignLedger", "trace", "inboxes", "inboxComments", "addInboxComment", "addInboxCommentBeforeRead"],
   make: (): ForgeFixture => {
     const { privateKey, publicKey } = testKeys();
     const gh = createFakeGitHub({ publicKey });
@@ -162,6 +186,7 @@ forgeContract({
         inboxes: () => gh.control.issues().map((i) => ({ number: i.number, title: i.title, owner: i.assignees[0] ?? null, body: i.body, open: i.state === "open" })),
         inboxComments: (issue) => gh.control.comments(issue),
         addInboxComment: (issue, author, body) => gh.control.addComment(issue, body, author),
+        addInboxCommentBeforeRead: beforeRead(gh),
       },
     };
   },

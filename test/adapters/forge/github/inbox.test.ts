@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createGitHubForge, DEFAULT_INBOX_LABEL, INBOX_TITLE } from "../../../../src/adapters/forge/github/github-forge.ts";
-import { GITHUB_OPERATIONS } from "../../../../src/adapters/forge/github/http.ts";
+import { createGitHubForge, DEFAULT_INBOX_LABEL, INBOX_TITLE, RULINGS_SETTLE_MS } from "../../../../src/adapters/forge/github/github-forge.ts";
+import { formatDate, GITHUB_OPERATIONS } from "../../../../src/adapters/forge/github/http.ts";
 import type { Forge, ForgeResult } from "../../../../src/ports/forge.ts";
 import { createFakeGitHub, testKeys, type FakeGitHub } from "./fake-github.ts";
 
@@ -142,7 +142,10 @@ describe("readRulings (Story 4.5)", () => {
   const T = "2026-01-01T00:00:00Z";
   const commentsCalls = (gh: FakeGitHub) => calls(gh).filter((c) => c.includes("/comments"));
 
-  test("reads each open inbox's comments, oldest first by (created_at, id), and writes its cursor as <created_at>|<id>", async () => {
+  /** The floor a read whose inbox listing is dated `iso` writes: that time less `RULINGS_SETTLE_MS`. */
+  const floorOf = (iso: string) => formatDate(Date.parse(iso) - RULINGS_SETTLE_MS);
+
+  test("reads each open inbox's comments, oldest first by (created_at, id), and writes its cursor as <floor>|0|<ids returned past it>", async () => {
     const { gh, forge } = setup();
     const a = issue(gh, ["alice"]);
     const b = issue(gh, ["bob"]);
@@ -157,12 +160,13 @@ describe("readRulings (Story 4.5)", () => {
       { id: ids[1], issue: a, author: "alice", body: "thanks", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[1]}` },
       { id: ids[2], issue: a, author: "carol", body: "later", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[2]}` },
     ]);
-    expect(r.cursor).toBe(`2026-01-01T00:00:01Z|${ids[2]}`);
+    // Every comment is younger than the read's start less the settle time, so each rides the cursor.
+    expect(r.cursor).toBe(`${floorOf("2026-01-01T00:00:01Z")}|0|${ids.join(",")}`);
     // From no cursor, no `since`.
     expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?per_page=100&page=1`, `GET /issues/${b}/comments?per_page=100&page=1`]);
   });
 
-  test("the since query is sent from a cursor, and a same-second comment after it is told apart by id", async () => {
+  test("the since query is sent from the cursor's floor, and a comment the cursor names is not returned again", async () => {
     const { gh, forge } = setup();
     const a = issue(gh, ["alice"]);
     gh.control.addComment(a, "first", "carol");
@@ -171,9 +175,78 @@ describe("readRulings (Story 4.5)", () => {
     gh.control.clearLog();
     const r2 = value(await forge.readRulings(r1.cursor, live()));
     expect(r2.comments.map((c) => [c.author, c.body])).toEqual([["dave", "/xarabot release story:1.1"]]);
-    expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?since=${encodeURIComponent(T)}&per_page=100&page=1`]);
-    expect(r2.cursor).toBe(`${T}|${gh.control.commentRecords(a)[1]?.id}`);
+    expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?since=${encodeURIComponent(floorOf(T))}&per_page=100&page=1`]);
+    expect(r2.cursor).toBe(`${floorOf(T)}|0|${gh.control.commentRecords(a).map((c) => c.id).join(",")}`);
     expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+  });
+
+  test("C2: with two inboxes, a comment posted on the one read first while the other is read is returned by the next read", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    const b = issue(gh, ["bob"]);
+    gh.control.addComment(a, "A1", "alice");
+    gh.control.addComment(b, "B1", "bob");
+    gh.control.advance(10_000);
+    // Between the two lists: A2 on the inbox already read, then B2, newer still, on the one about to be.
+    gh.control.before("GET", new RegExp(`^/repos/acme/widgets/issues/${b}/comments\\?`), () => {
+      gh.control.advance(1000);
+      gh.control.addComment(a, "A2", "carol");
+      gh.control.advance(1000);
+      gh.control.addComment(b, "B2", "dave");
+    });
+    const r1 = value(await forge.readRulings(null, live()));
+    expect(r1.comments.map((c) => [c.body, c.created_at])).toEqual([
+      ["A1", T],
+      ["B1", T],
+      ["B2", "2026-01-01T00:00:12Z"],
+    ]);
+    // The floor stays at the read's start less the settle time, behind A2.
+    const [a1, a2] = gh.control.commentRecords(a).map((c) => c.id) as [number, number];
+    const [b1, b2] = gh.control.commentRecords(b).map((c) => c.id) as [number, number];
+    expect(r1.cursor).toBe(`${floorOf("2026-01-01T00:00:10Z")}|0|${[a1, b1, b2].join(",")}`);
+    const r2 = value(await forge.readRulings(r1.cursor, live()));
+    expect(r2.comments.map((c) => [c.issue, c.author, c.body])).toEqual([[a, "carol", "A2"]]);
+    expect(r2.cursor).toBe(`${floorOf("2026-01-01T00:00:12Z")}|0|${[a1, b1, a2, b2].join(",")}`);
+    expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+  });
+
+  test("the floor moves up to the read's start less RULINGS_SETTLE_MS, and the ids it passes leave the cursor", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    gh.control.addComment(a, "old", "alice");
+    const r1 = value(await forge.readRulings(null, live()));
+    const [old] = gh.control.commentRecords(a).map((c) => c.id) as [number];
+    expect(r1.cursor).toBe(`${floorOf(T)}|0|${old}`);
+    gh.control.advance(2 * RULINGS_SETTLE_MS);
+    gh.control.addComment(a, "new", "bob");
+    const r2 = value(await forge.readRulings(r1.cursor, live()));
+    expect(r2.comments.map((c) => c.body)).toEqual(["new"]);
+    const later = formatDate(Date.parse(T) + 2 * RULINGS_SETTLE_MS);
+    // `old` is behind the new floor now, so the cursor no longer names it.
+    expect(r2.cursor).toBe(`${floorOf(later)}|0|${gh.control.commentRecords(a)[1]?.id}`);
+  });
+
+  test("a two-part cursor's floor is kept while it is ahead of the read's start less the settle time", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    gh.control.addComment(a, "seen", "alice");
+    const seen = gh.control.commentRecords(a)[0]?.id;
+    gh.control.addComment(a, "unseen", "bob");
+    const r = value(await forge.readRulings(`${T}|${seen}`, live()));
+    expect(r.comments.map((c) => c.body)).toEqual(["unseen"]);
+    expect(r.cursor).toBe(`${T}|${seen}|${gh.control.commentRecords(a)[1]?.id}`);
+  });
+
+  test("a comment listed twice is returned once; no Date header is transient", async () => {
+    const { gh, forge } = setup();
+    const a = issue(gh, ["alice"]);
+    const twice = { id: 7, body: "/xarabot go retro:2", user: { login: "alice" }, created_at: T };
+    gh.control.inject("GET", /\/comments\?/, { status: 200, body: [twice, twice] });
+    const r = value(await forge.readRulings(null, live()));
+    expect(r.comments.map((c) => [c.issue, c.id])).toEqual([[a, "7"]]);
+    expect(r.cursor).toBe(`${floorOf(T)}|0|7`);
+    gh.control.omitDate(true);
+    expect(kind(await forge.readRulings(null, live()))).toBe("transient");
   });
 
   test("a closed inbox's comments are skipped: its comments are never listed", async () => {
@@ -213,10 +286,24 @@ describe("readRulings (Story 4.5)", () => {
       { id: "501", issue: a, author: "bob", body: "new", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-501` },
       { id: "502", issue: a, author: null, body: "", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-502` },
     ]);
-    expect(r.cursor).toBe("2026-01-01T00:00:01Z|502");
+    expect(r.cursor).toBe(`${T}|500|501,502`);
   });
 
-  test.each(["nope", "", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z|", "2026-01-01T00:00:00Z|x", "yesterday|5", "2026-01-01T00:00:00Z|05"])(
+  test.each([
+    "nope",
+    "",
+    "2026-01-01T00:00:00Z",
+    "2026-01-01T00:00:00Z|",
+    "2026-01-01T00:00:00Z|x",
+    "yesterday|5",
+    "2026-01-01T00:00:00Z|05",
+    "2026-01-01T00:00:00Z|0|",
+    "2026-01-01T00:00:00Z|0|x",
+    "2026-01-01T00:00:00Z|0|1,,2",
+    "2026-01-01T00:00:00Z|0|01",
+    "2026-01-01T00:00:00Z|0|1|2",
+    "2026-01-01T00:00:00Z|0|99999999999999999",
+  ])(
     "the cursor %p is rejected before any request",
     async (cursor) => {
       const { gh, forge } = setup();

@@ -219,8 +219,9 @@ export type InboxComment = {
 
 /**
  * What `readRulings` read: the comments after the cursor, oldest first, and
- * the cursor past the last of them (the given one, unchanged, when there are
- * none). A cursor is opaque: only the forge that issued it reads it.
+ * the cursor past them and no comment left unread (the given one, unchanged,
+ * when there are none). A cursor is opaque: only the forge that issued it
+ * reads it.
  */
 export type RulingsRead = {
   readonly comments: readonly InboxComment[];
@@ -288,8 +289,10 @@ export type Forge = {
   /**
    * The comments on every open inbox issue posted after `cursor` (Story
    * 4.5), oldest first, with the cursor past the last one returned; `null`
-   * reads every comment. A cursor this forge cannot have issued is
-   * `rejected`. Read-only.
+   * reads every comment. The cursor never passes a comment the read did not
+   * return: a comment posted while the read runs, on any inbox, is returned
+   * by this read or a later one, and a comment is returned once. A cursor
+   * this forge cannot have issued is `rejected`. Read-only.
    */
   readRulings(cursor: string | null, opts: CallOpts): Promise<ForgeResult<RulingsRead>>;
 };
