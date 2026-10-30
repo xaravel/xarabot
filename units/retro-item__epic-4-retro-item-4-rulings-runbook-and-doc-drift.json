@@ -1,19 +1,17 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-4-rulings-runbook-and-doc-drift",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "docs/maintainer/app-permissions.md",
     "docs/maintainer/self-host.md",
-    "src/core/schemas/retro-gates.ts",
-    "test/adapters/forge/github/http.test.ts",
-    "test/core/schemas/**"
+    "src/core/schemas/retro-gates.ts"
   ],
-  "heartbeat_at": "2026-10-30T07:38:42.165Z",
+  "heartbeat_at": "2026-10-30T08:15:55.553Z",
   "pr": 292,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
@@ -21,22 +19,13 @@
   "reviewed_sha": "035d34077b07ca7510e3e9fa8d4e7b3c877cddd1",
   "passed_sha": "035d34077b07ca7510e3e9fa8d4e7b3c877cddd1",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "035d34077b07ca7510e3e9fa8d4e7b3c877cddd1",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "docs/maintainer/app-permissions.md",
-      "docs/maintainer/self-host.md",
-      "src/core/schemas/retro-gates.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
