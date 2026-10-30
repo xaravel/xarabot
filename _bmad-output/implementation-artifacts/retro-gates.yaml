@@ -301,7 +301,7 @@ epics:
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-3-retro-item-11-a-passing-round-after-the-cap-proceeds"
         text: "Maintainer decision 2026-10-26 (Epic 3 retro open question 2, finding A7; epics.md Story 3.5 amendment): the loopback cap stops a third loopback, never a pass. In reviewNext (src/core/review/gate.ts), once loopbacks >= LOOPBACK_CAP return cap only for a blocking round; a round with no blocking pass returns pass, so the review gate (src/lane/review-gate.ts) sets passed_sha and the unit proceeds to the merge step; update both doc comments ('whatever its verdict' goes); tests: after 2 loopbacks a passing round passes and is enqueued, a blocking one parks blocked review-cap in the owner's inbox"
         route: lane
