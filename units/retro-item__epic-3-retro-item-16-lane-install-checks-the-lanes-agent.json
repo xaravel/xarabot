@@ -11,7 +11,7 @@
     "src/cli/lane-install.ts",
     "test/cli/lane-install.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T05:55:36Z",
+  "heartbeat_at": "2026-10-30T05:58:59.915Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "202a178235cee57a1c7972837ee6c21e3961b7a0",
@@ -22,7 +22,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
