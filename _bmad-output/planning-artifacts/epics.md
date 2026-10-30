@@ -2608,7 +2608,7 @@ So that I can follow lanes live without logging in to the Xarabot host (FR12, AR
 **Then** it runs the same command over ssh on that host and relays its lines unchanged.
 
 **Maintainer decisions (2026-10-30, `planning:status.1`'s second open questions):**
-- **What runs on the host.** `xarabot lane install` also writes a fixed launcher, `~/.xarabot/bin/xarabot`, beside `xarabot-lane`. It runs the newest runner version that any lane on the host pins, since with several repos the newest knows every journal format. The ssh command runs that launcher.
+- **What runs on the host.** `xarabot lane install` also writes a fixed launcher, `~/.xarabot/bin/xarabot`, beside `xarabot-lane`. It runs the runner version named in the lane `runner` file written most recently (corrected 2026-10-30, `planning:status.1`'s third open questions: version names are free-form, such as `runner-14` or an npm pin like `0.3.0`, so they have no order; the latest-written `runner` file always names a version some lane pins now, and after a pin-back it follows the pin-back). The ssh command runs that launcher.
 - **The flag.** `--host` is a bare switch, here and on `xarabot tui` (Story 6.3), and `XARABOT_HOST` supplies the host's name (FR12). `XARABOT_HOST` alone never switches a command to ssh.
 
 ### Story 6.3: The TUI
@@ -2668,6 +2668,10 @@ So that I can compare lanes and measure the 0.x success signal from Xarabot's ow
 **Maintainer decisions (2026-10-30, `planning:status.1`'s open questions):**
 - **Merged Stories** are read from the forge: the Stories whose PR merged within the period, by merge time. Journals alone miss or misattribute a Story that `reconcile` merged, since it gets a `merged` record only if a builder's sweep marks it first.
 - **Hours when every lane waits on the Maintainer** count builder lanes only. Each builder's `waiting-on-maintainer` span lasts until that lane's next journal record, and the hours left out are where every builder's span overlaps. The coordinator is not counted, because it runs `reconcile` at least every 10 minutes and its idle spans record only the seconds of a round.
+
+**Maintainer decisions (2026-10-30, `planning:status.1`'s third open questions):**
+- **Per repo.** The report gives one figure per repo: each repo's merged Stories over its own builders' spans, so a host that also runs Xarabot's lanes still gives the SPEC's figure for Xaravel's work.
+- **The forge read.** This Story adds the read of PRs merged in a period to the `Forge` port, the GitHub and fake forges, and the forge contract suite. Its manifest globs are widened to cover them (`src/ports/forge.ts`, `src/adapters/forge/**` and their tests and contracts), with no graph change.
 
 ### Story 6.5: Status and report verification
 
