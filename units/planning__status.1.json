@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T06:47:33.274Z",
+  "heartbeat_at": "2026-10-30T06:49:36.657Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
@@ -23,7 +23,13 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "readiness",
+    "inbox_owner": "edanisko",
+    "globs_held": [],
+    "text": "Readiness gate PASS; sprint-status.yaml already in sync (Story 3.2 keeps key 3-2-the-pi-adapter per the 2026-10-25 proposal). No Epic context compiled: Epics 5 and 6 have open design questions.\nEpic 5\n- Story 5.1a: AD-26's table lacks three calls the adapter already makes: deleteRef (contents: write, Q4 2026-10-25), the token-less bot lookup GET /users/<slug>[bot], and the token-less signed CI-log download. Readings: (a) AD-26 gains them as built, with a no-token row for public reads and signed downloads; (b) they move under a listed permission with the installation token, so the no-token row stays join-only (the bot lookup then uses the installation budget, not 60/h per IP).\nEpic 6\n- Story 6.3: xarabot tui goes over ssh when XARABOT_HOST is set, but the spine makes XARABOT_HOST host-layer config, so the host may set it too (6.2 gives status an explicit --host flag instead). Readings: (a) set means always ssh, so the host must leave it unset or the TUI ssh-es to itself; (b) local whenever this machine has the lanes (host.yaml present), ssh only otherwise; (c) a --host flag, as for status.\n- Story 6.4: merged Stories from the journals: a Story merged after reconcile enqueues it (every PR here, owner_approval_paths **) gets a merged journal record only if a builder's sweep marks it before reconcile does, timed at the sweep and under that lane's agent. Readings: (a) count story: journal records with state merged (misses or misattributes those); (b) count Stories whose PR merged in the window, by merge time, from the forge.\n- Story 6.4: hours when every lane is waiting-on-maintainer: the coordinator runs reconcile at least every 10 minutes, and an idle span records only its round (seconds), not the wait after it. Readings: (a) builders only, each waiting span lasting until that lane's next record, excluding the exact overlap; (b) every lane including the coordinator, spans as written, which excludes almost nothing."
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
