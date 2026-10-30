@@ -30,7 +30,7 @@
     "test/lane/session.test.ts",
     "test/support/boundaries.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:34:41.581Z",
+  "heartbeat_at": "2026-10-30T08:36:27.730Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "1c1b0c0e6e9dd2307fafaf094e7e079d4ce0b246",
@@ -41,7 +41,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
