@@ -5,7 +5,7 @@ Every adapter runs one unit in a fresh session and returns the same JSON result.
 | Adapter | How it runs | Default model | Status |
 |---|---|---|---|
 | `claude` | `claude -p --model <model> --effort <effort> --permission-mode auto`, as Xaravel's `run.sh` does today. | `claude-opus-5-5` | 0.x |
-| `codex` | `codex exec -m <model> --json -c model_reasoning_effort=<effort>`, with the skills exposed through `.agents/skills`; `--dangerously-bypass-approvals-and-sandbox` inside Xarabot's sandbox, a private `CODEX_HOME`, closed stdin; usage, model and the reset time come from the session file under `CODEX_HOME`. | `gpt-6.1-sol` | 0.x |
+| `codex` | `codex exec -m <model> --json -c model_reasoning_effort=<effort>`, with the skills exposed through `.agents/skills`; `--dangerously-bypass-approvals-and-sandbox` inside Xarabot's sandbox, a private `CODEX_HOME`, closed stdin, `SSL_CERT_FILE` set to the system CA bundle and read access to codex's native package folder, which holds its tool host; usage, model and the reset time come from the session file under `CODEX_HOME`. | `gpt-6.1-sol` | 0.x |
 | `pi` | `pi -p --mode json --model <provider/id> --thinking <effort>` (v1 note, below). | none: the lane must set `model` | v1 (deferred 2026-10-25: stock pi 1.4.0 gives bmad-build-auto no subagents) |
 | `grok` | Only after lanes run as `<login>-xarabot` bot identities (CAP-13). | — | later |
 
@@ -13,7 +13,7 @@ Every adapter runs one unit in a fresh session and returns the same JSON result.
 - **Credentials:** the operator writes each vendor's credential once, in one mode-600 file per vendor under `$XDG_CONFIG_HOME/xarabot/vendors/<vendor>/` (falling back to `~/.config`), next to the App key. Before each session the lane process reads it and seeds the lane's vendor home, or the credential variable: for `claude`, the token from `claude setup-token`, passed as `CLAUDE_CODE_OAUTH_TOKEN`; for `codex`, its `auth.json` (ChatGPT login) or an API key passed as `CODEX_API_KEY`. Each adapter Story confirms the exact form. A lane whose adapter or reviewer has a missing or unreadable credential refuses to start (spine AD-17).
 - **Unattended:** which adapters may run unattended is repo policy (CAP-7).
 - **CLI versions:** each adapter has a minimum tested CLI version, not a pin: claude 2.1.304, codex-cli 0.163.0.
-- **v1 note (`pi`):** in 0.x a lane set to `agent: pi` refuses to start, naming the deferral. The v1 adapter brings pi's OpenRouter key as its credential, its minimum tested version (pi 1.3.0), its `--thinking` effort mapping and the pi review rows; pi rows return with the v1 adapter.
+- **v1 note (`pi`):** in 0.x a lane set to `agent: pi` refuses to start, naming the deferral. The v1 adapter brings pi's OpenRouter key as its credential, its minimum tested version (stock pi 1.4.0 was the version escalated on 2026-10-25), its `--thinking` effort mapping and the pi review rows; pi rows return with the v1 adapter.
 
 ## Model and effort
 
@@ -42,7 +42,7 @@ The runner picks the reviewer: the first allowed adapter of `claude`, `codex` wh
 | `claude` | `codex` |
 | `codex` | `claude` |
 
-- **Single vendor:** if the repo's policy allows no adapter from another vendor (a user with only a Claude or only a Codex subscription), a separate session from the same vendor reviews instead, under the same rules: fresh checkout, bound to the reviewed SHA, blocking findings as loopbacks. The reviewer is the first allowed adapter of `claude`, `codex` (confirmed by the Maintainer, 2026-10-21); a repo that allows neither has no reviewer, and its lanes refuse to start. The PR then merges on its required checks.
+- **Single vendor:** if the repo's policy allows no adapter from another vendor (a user with only a Claude or only a Codex subscription), a separate session from the same vendor reviews instead, under the same rules: fresh checkout, bound to the reviewed SHA, blocking findings as loopbacks (on a planning or retro PR, a park for the Maintainer). The reviewer is the first allowed adapter of `claude`, `codex` (confirmed by the Maintainer, 2026-10-21); a repo that allows neither has no reviewer, and its lanes refuse to start. The PR then merges on its required checks.
 - A session whose reported model differs from its config fails the attempt.
 - Xaravel's `bmad-build-auto` Fidelity Review (Codex reviewing Claude-built Stories) may still run for earlier feedback; it never counts as the gate (spine AD-16).
 
