@@ -398,3 +398,9 @@ epics:
         blocking: false
         globs: []
         status: waiting
+      - id: "epic-4-retro-item-7-fix-the-items-review-findings"
+        text: "Fix the non-blocking review findings left on Epic 4's item PRs (Maintainer, 2026-10-30): rulingsDrops must not treat a reconcile PR the queue merged between the snapshot's main and PR reads as settled, so the last block/unblock is never dropped (#290, medium); the coordinator's idle prefix counts a parked approval (retro, retro-item and approval-gated planning holders) as a Maintainer wait, as next.ts does for builders (#295, medium); the inbox step clears only bot-opened stale inbox issues, never a human's labelled issue (#295, low); readRulings never returns a comment twice when a returned comment drops out of one listing while still past the floor (#291, low); self-host.md's pending-list paragraph says which later rulings replace a pending one and which are refused (#292, low); inboxOwner gives a parked record's owner precedence over a Maintainer item, as its doc comment says, or the comment changes to match (#297, low); a test for each"
+        route: lane
+        blocking: false
+        globs: ["src/core/rulings/**", "test/core/rulings/**", "src/core/next/coordinator.ts", "src/core/next/next.ts", "test/core/next/**", "src/core/inbox/**", "test/core/inbox/**", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts", "src/adapters/forge/github/**", "src/adapters/forge/fake/**", "test/adapters/forge/**", "test/contracts/**", "src/ports/forge.ts", "test/ports/forge.test.ts", "docs/maintainer/self-host.md", "docs/maintainer/app-permissions.md"]
+        status: open
