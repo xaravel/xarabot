@@ -1,17 +1,17 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-16-lane-install-checks-the-lanes-agent",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "docs/maintainer/self-host.md",
     "src/cli/lane-install.ts",
     "test/cli/lane-install.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T06:03:53.208Z",
+  "heartbeat_at": "2026-10-30T06:05:23.131Z",
   "pr": 284,
   "pr_owner": "edanisko",
   "base_sha": "a34524f0f362c1daa9e0d25398887dca4965d794",
@@ -19,22 +19,13 @@
   "reviewed_sha": "ad0454a7f4865ea4a45d31fda38844a91bcf826d",
   "passed_sha": "ad0454a7f4865ea4a45d31fda38844a91bcf826d",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "ad0454a7f4865ea4a45d31fda38844a91bcf826d",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "docs/maintainer/self-host.md",
-      "src/cli/lane-install.ts",
-      "test/cli/lane-install.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
