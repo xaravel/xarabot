@@ -29,7 +29,7 @@
     "test/lane/rulings-step.test.ts",
     "test/ports/forge.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T16:32:30.620Z",
+  "heartbeat_at": "2026-10-30T16:35:31.313Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "cea891c5105e7ae55cd7c5f565535c4da3ec0c01",
@@ -40,7 +40,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
