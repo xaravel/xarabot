@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-14-globs-cover-tests-and-wiring",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -21,7 +21,7 @@
     "test/core/schemas/**",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T00:04:30.159Z",
+  "heartbeat_at": "2026-10-30T00:07:46Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "a83fa40544f02410f14ec6b28f5e413bd879ae6a",
@@ -33,13 +33,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "escalation",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "The planning_graph prompt can only state the configured glob_coverage rule if src/lane/planning-step.ts (planningPromptUnit) passes config.glob_coverage into the graph prompt unit, and that file is outside this item's globs. Please widen the item's globs to add src/lane/planning-step.ts and test/lane/planning-step.test.ts, or rule that the planning prompt's wiring is done in a separate item."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
