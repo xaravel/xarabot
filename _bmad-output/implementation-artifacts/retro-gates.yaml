@@ -343,7 +343,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/prompt/template.ts", "test/core/prompt/**"]
-        status: open
+        status: done
       - id: "epic-3-retro-item-18-codex-builder-evidence"
         text: "Maintainer decision 2026-10-29 (epics.md, Epic 3 retro decisions, item 7; findings A9, C4; spec-3-1's deferrals): before any agent: codex builder lane, the Maintainer runs one real Story or retro item through a codex lane with the real .agents/skills/bmad-build-auto and records it in an evidence file, including the resumed run's model; and when a codex session hits a usage limit, saves its --json output and rollout file, and decides from them how a limit with no rate_limits is seen. Deferred until a codex builder lane is planned; codex may review unattended before it"
         route: maintainer
