@@ -1,23 +1,22 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-2-rulings-cursor-skips-no-comment",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
-    "docs/maintainer/app-permissions.md",
-    "src/adapters/forge/fake/**",
-    "src/adapters/forge/github/**",
-    "src/lane/rulings-step.ts",
+    "src/adapters/forge/fake/fake-forge.ts",
+    "src/adapters/forge/github/github-forge.ts",
     "src/ports/forge.ts",
-    "test/adapters/forge/**",
-    "test/contracts/**",
-    "test/lane/rulings-step.test.ts",
-    "test/ports/forge.test.ts"
+    "test/adapters/forge/fake-forge.test.ts",
+    "test/adapters/forge/github/inbox.test.ts",
+    "test/contracts/forge.contract.test.ts",
+    "test/contracts/forge.contract.ts",
+    "test/contracts/forge.github.contract.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T07:24:27.172Z",
+  "heartbeat_at": "2026-10-30T08:15:21.015Z",
   "pr": 291,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
@@ -25,27 +24,13 @@
   "reviewed_sha": "327a417c5b02826558ac5ebe388bb13f2add3ae4",
   "passed_sha": "327a417c5b02826558ac5ebe388bb13f2add3ae4",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "327a417c5b02826558ac5ebe388bb13f2add3ae4",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/adapters/forge/fake/fake-forge.ts",
-      "src/adapters/forge/github/github-forge.ts",
-      "src/ports/forge.ts",
-      "test/adapters/forge/fake-forge.test.ts",
-      "test/adapters/forge/github/inbox.test.ts",
-      "test/contracts/forge.contract.test.ts",
-      "test/contracts/forge.contract.ts",
-      "test/contracts/forge.github.contract.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
