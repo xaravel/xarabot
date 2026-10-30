@@ -613,12 +613,12 @@ No attempt is counted either way.
 | Permission | Operations |
 | --- | --- |
 | `metadata: read` | GitHub grants it to every App; the table lists it so the manifest matches exactly. Repository lookups. |
-| `contents: write` | Reading files and trees from `main` for the snapshot and `prefetch`; `branchHead` (Story 2.6b); `ledgerSwap` (`PATCH git/refs` and the commits it writes); `enqueue` and `dequeue` (GraphQL `enqueuePullRequest` and `dequeuePullRequest`). Git fetches and pushes (`pushBranch`) also need it; they go through the credential helper (AD-18), not the request function. |
+| `contents: write` | Reading files and trees from `main` for the snapshot and `prefetch`; `branchHead` (Story 2.6b); `ledgerSwap` (`PATCH git/refs` and the commits it writes); `enqueue` and `dequeue` (GraphQL `enqueuePullRequest` and `dequeuePullRequest`); `deleteBranch` (`DELETE git/refs`, only in the runner's own unit-branch namespace; the 2026-10-25 decision Q4 and Epic 2 retro item 37). Git fetches and pushes (`pushBranch`) also need it; they go through the credential helper (AD-18), not the request function. |
 | `pull_requests: write` | PR open, update, close and state reads; review reads (`reviews`, Story 2.6); `postReview`; `comment` |
 | `issues: write` | The inbox issue: its body (`renderDigest`), the daily digest comment, `alert`, `readRulings` and ruling acknowledgements |
 | `checks: read`, `statuses: read` | `checks` |
 | `actions: read` | `prefetch` of CI logs for a CI-fix session |
-| None: no installation token | `xarabot join`'s manifest conversion, and the App-JWT calls: reading the App, finding the installation and minting installation tokens |
+| None: no installation token | `xarabot join`'s manifest conversion, and the App-JWT calls: reading the App, finding the installation and minting installation tokens. Two public calls go with no credential at all: the bot user lookup `GET /users/<slug>[bot]` (`getUser`, cached per lane in `bot-user.json`, Epic 2 retro item 36), and the CI log download from GitHub's signed URL (`downloadLog`), which must never carry the token (Maintainer, 2026-10-30, Story 5.1a's open question) |
 | `administration: read`, which the App never has | Branch-protection reads for the consumer prerequisite checks (AD-33). They report "unverified", and the lane continues with a warning. |
 
 ### AD-27: One schema library; every port has a contract suite
