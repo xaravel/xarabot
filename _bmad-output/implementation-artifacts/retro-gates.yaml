@@ -367,7 +367,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/rulings/**", "test/core/rulings/**", "src/core/reconcile/**", "test/core/reconcile/**", "src/core/ledger/edits.ts", "test/core/ledger/edits.test.ts", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-4-retro-item-2-rulings-cursor-skips-no-comment"
         text: "Make the GitHub readRulings cursor never pass a comment it has not returned, so with two or more inboxes a comment posted on one issue while another is read is read on a later run; adapter and contract tests for a comment posted between two issue reads (C2)"
         route: lane
