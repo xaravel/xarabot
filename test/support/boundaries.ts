@@ -463,7 +463,8 @@ export async function laneCycles(root: string): Promise<string[][]> {
  * The session runner's step helpers, declared only in `src/lane/session.ts`:
  * the kit's (Story 2.6a), then the step ops and error texts the CI step and
  * the coordinator steps share (Epic 2 retro, D2), then the review plumbing
- * the steps share (Epic 3 retro, D2).
+ * the steps share (Epic 3 retro, D2), then the best-effort log and forge
+ * calls of the inbox and rulings steps (Epic 4 retro, D2).
  */
 export const SHARED_HELPERS: readonly string[] = [
   "call",
@@ -486,6 +487,7 @@ export const SHARED_HELPERS: readonly string[] = [
   "callPassedGate",
   "passedGate",
   "haveCommits",
+  "bestEffortOps",
 ];
 
 /**

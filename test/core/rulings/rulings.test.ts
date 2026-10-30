@@ -12,7 +12,7 @@ import {
   type RulingJudgement,
   type RulingVerb,
 } from "../../../src/core/rulings/rulings.ts";
-import { renderDigest } from "../../../src/core/inbox/render-digest.ts";
+import { inboxInstance, inboxOwner as digestInboxOwner, parkedOwner, renderDigest } from "../../../src/core/inbox/render-digest.ts";
 import { FORGE_TEXT_LIMITS } from "../../../src/core/sanitize.ts";
 import { isUnitId, type Park, type UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { Snapshot } from "../../../src/core/schemas/snapshot.ts";
@@ -191,6 +191,21 @@ describe("inboxOwner agrees with renderDigest", () => {
     }
     expect(Object.keys(listed).length).toBeGreaterThan(5);
     expect(owned).toEqual(listed);
+  });
+});
+
+describe("inboxOwner: one rule with renderDigest (Epic 4 retro item 5)", () => {
+  test("the rulings' inboxOwner is the digest module's own", () => {
+    expect(inboxOwner).toBe(digestInboxOwner);
+  });
+
+  test("a unit has an owner exactly when a dismissal could name its item", () => {
+    const units = [...RECORDS.map((r) => r.unit), "checkpoint:3", "checkpoint:4", "retro:2", "retro:5", "retro-item:epic-2-retro-item-1-a", "retro-item:epic-2-retro-item-2-b", "story:7.1", "story:1.2"];
+    for (const unit of units) expect(inboxOwner(SNAPSHOT, unit) !== null).toBe(inboxInstance(SNAPSHOT, unit) !== null);
+  });
+
+  test("parkedOwner: a parked record's owner, or null for a record not parked", () => {
+    expect(RECORDS.map((r) => parkedOwner(SNAPSHOT, r))).toEqual(["alice", M, M, "bob", null]);
   });
 });
 

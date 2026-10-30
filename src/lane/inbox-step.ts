@@ -1,6 +1,6 @@
 import { EMPTY_INBOX_BODY, type OwnerDigest } from "../core/inbox/render-digest.ts";
-import type { CallOpts, Forge, ForgeResult, InboxIssue } from "../ports/forge.ts";
-import { DEFAULT_CALL_TIMEOUT_MS } from "./ledger-cas.ts";
+import type { Forge, InboxIssue } from "../ports/forge.ts";
+import { bestEffortOps, message } from "./session.ts";
 
 /**
  * The inbox step (Story 4.2, FR9, AR24): runner code only, run in every
@@ -14,9 +14,9 @@ import { DEFAULT_CALL_TIMEOUT_MS } from "./ledger-cas.ts";
  * `digest_posted_at` (`stamp`, a fenced `coordinator.json` edit that refuses
  * once today's digest is stamped), and only after a successful stamp posts
  * one comment per non-empty inbox: `@<owner>`, the item count and the issue
- * link. Forge errors are logged and skipped: they never fail or stop the
- * run, and a post that fails after the stamp is not retried that day. It
- * never throws.
+ * link. Forge errors are logged and skipped (`bestEffortOps`, which the
+ * rulings step shares): they never fail or stop the run, and a post that
+ * fails after the stamp is not retried that day. It never throws.
  */
 
 export type SyncInboxesParams = {
@@ -51,39 +51,19 @@ export function digestMention(owner: string, count: number, url: string): string
 }
 
 export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResult> {
-  const timeout = p.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  const { log, call } = bestEffortOps("inbox", p);
   const opened: string[] = [];
   const written: number[] = [];
   const mentioned: number[] = [];
   let stamped = false;
   const done = (): SyncInboxesResult => ({ opened, written, stamped, mentioned });
-  const log = (line: string): void => {
-    try {
-      p.log(`inbox step: ${line}`);
-    } catch {
-      // Logging is best effort.
-    }
-  };
-  /** One forge call under its own deadline; a throw is a failure with its message. */
-  const tryForge = async <T>(what: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<T | undefined> => {
-    let r: ForgeResult<T>;
-    try {
-      r = await run({ signal: AbortSignal.any([p.signal, AbortSignal.timeout(timeout)]) });
-    } catch (e) {
-      log(`${what} threw: ${e instanceof Error ? e.message : String(e)}; skipped`);
-      return undefined;
-    }
-    if (r.ok) return r.value;
-    log(`${what} failed: ${r.error.kind}: ${r.error.message}; skipped`);
-    return undefined;
-  };
-
   if (p.signal.aborted) return done();
-  const listed = await tryForge("inboxes", (o) => p.forge.inboxes(o));
-  if (listed === undefined) {
+  const got = await call("inboxes", (o) => p.forge.inboxes(o));
+  if (!got.ok) {
     log("no inbox rewritten and no digest posted this run");
     return done();
   }
+  const listed = got.value;
   /** Each owner's inbox: the lowest-numbered open one assigned to them, by lowercased login. */
   const inboxOf = new Map<string, InboxIssue>();
   for (const issue of [...listed].sort((a, b) => a.number - b.number)) {
@@ -95,8 +75,8 @@ export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResu
   /** `true` when the issue holds `body`: it already did, or the rewrite succeeded. */
   const rewrite = async (issue: InboxIssue, body: string, why: string): Promise<boolean> => {
     if (issue.body === body) return true;
-    const set = await tryForge(`setInboxBody #${issue.number}`, (o) => p.forge.setInboxBody(issue.number, body, o));
-    if (set === undefined) return false;
+    const set = await call(`setInboxBody #${issue.number}`, (o) => p.forge.setInboxBody(issue.number, body, o));
+    if (!set.ok) return false;
     written.push(issue.number);
     log(`#${issue.number}: ${why}`);
     return true;
@@ -108,8 +88,9 @@ export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResu
     if (p.signal.aborted) return done();
     let issue = inboxOf.get(owner.toLowerCase());
     if (issue === undefined) {
-      issue = await tryForge(`openInbox ${owner}`, (o) => p.forge.openInbox(owner, o));
-      if (issue === undefined) continue;
+      const made = await call(`openInbox ${owner}`, (o) => p.forge.openInbox(owner, o));
+      if (!made.ok) continue;
+      issue = made.value;
       opened.push(owner);
       log(`opened #${issue.number} for ${owner}`);
     }
@@ -135,7 +116,7 @@ export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResu
   try {
     stamped = await p.stamp();
   } catch (e) {
-    log(`digest stamp threw: ${e instanceof Error ? e.message : String(e)}`);
+    log(`digest stamp threw: ${message(e)}`);
     stamped = false;
   }
   if (!stamped) {
@@ -147,8 +128,8 @@ export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResu
   for (const r of ready) {
     if (p.signal.aborted) return done();
     if (r.count === 0) continue;
-    const posted = await tryForge(`inboxComment #${r.issue.number}`, (o) => p.forge.inboxComment(r.issue.number, digestMention(r.owner, r.count, r.issue.url), o));
-    if (posted === undefined) continue;
+    const posted = await call(`inboxComment #${r.issue.number}`, (o) => p.forge.inboxComment(r.issue.number, digestMention(r.owner, r.count, r.issue.url), o));
+    if (!posted.ok) continue;
     mentioned.push(r.issue.number);
     log(`digest mention for ${r.owner} on #${r.issue.number}`);
   }

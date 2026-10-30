@@ -672,6 +672,7 @@ export function retroItemCandidates(snapshot: Snapshot): RetroItemCandidate[] {
     .sort((a, b) => a - b);
   for (const epic of epics) {
     for (const item of snapshot.retro_gates.epics[String(epic)]?.items ?? []) {
+      // Narrower than `isOpenItem`: an `in-progress` or `waiting` item is open, and holds, but is no lane's to claim.
       if (item.status === "open" && item.route === "lane") out.push({ epic, item });
     }
   }

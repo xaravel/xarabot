@@ -1,8 +1,9 @@
 import { emptyRetroGates, parseRetroGates } from "../graph/retro-gates.ts";
 import { normalizeGlob } from "../manifests/globs.ts";
+import type { ClosedItemStatus } from "../next/epic-gates.ts";
 import { err, ok, type Result } from "../result.ts";
 import { bodyOf } from "../rulings/rulings.ts";
-import type { PendingRuling } from "../schemas/ledger.ts";
+import { unitKind, type PendingRuling } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN, type Go, type RetroGates, type RetroGatesEntry, type RetroItem, type RetroRecordResult } from "../schemas/retro-gates.ts";
 
 /**
@@ -36,8 +37,8 @@ export type RetroItemDone = {
   readonly id: string;
 };
 
-/** A status a ruling sets on a retro item: `/xarabot done` or `/xarabot defer`. */
-export type RuledItemStatus = "done" | "deferred";
+/** A status a ruling sets on a retro item: `/xarabot done` or `/xarabot defer`, the closed statuses. */
+export type RuledItemStatus = ClosedItemStatus;
 
 /** One retro item whose status a ruling sets (Story 4.3; Story 4.6 parses the ruling). */
 export type RetroItemStatusChange = {
@@ -136,12 +137,13 @@ export function applyPendingRulings(gates: RetroGates, pending: readonly Pending
     const epics: Record<string, RetroGatesEntry> = { ...current.epics };
     const go: Go = { by: e.by, at: e.at, ruling: e.ruling };
     const body = bodyOf(e.unit);
-    if (e.verb === "go" && e.unit.startsWith("checkpoint:")) {
+    const kind = unitKind(e.unit);
+    if (e.verb === "go" && kind === "checkpoint") {
       const entry = epics[body] ?? {};
       if (entry.checkpoint !== undefined) continue;
       epics[body] = { ...entry, checkpoint: { go } };
       summary.push(`epics.${body}.checkpoint: go by ${e.by} (${e.ruling})`);
-    } else if (e.verb === "go" && e.unit.startsWith("retro:")) {
+    } else if (e.verb === "go" && kind === "retro") {
       const entry = epics[body];
       const retro = entry?.retro;
       if (entry === undefined || retro === undefined || retro.verdict !== "rejected" || retro.go !== undefined) continue;

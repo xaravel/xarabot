@@ -15,6 +15,7 @@ import { runLaneProcess } from "../../src/lane/lane-process.ts";
 import { createFsLaneStore, laneLayout } from "../../src/lane/lane-store.ts";
 import {
   allowanceReason,
+  bestEffortOps,
   callPassedGate,
   createSessionRunner,
   End,
@@ -38,7 +39,7 @@ import {
   type StepOps,
 } from "../../src/lane/session.ts";
 import type { Agent, AgentLaunchSpec } from "../../src/ports/agent.ts";
-import type { Forge, ForgeCheck } from "../../src/ports/forge.ts";
+import { forgeErr, forgeOk, type Forge, type ForgeCheck, type ForgeResult } from "../../src/ports/forge.ts";
 import type { Sandbox, SandboxRun } from "../../src/ports/sandbox.ts";
 import type { BuildResult } from "../../src/core/schemas/session-result.ts";
 import type { FetchShas } from "../../src/lane/workspace.ts";
@@ -1259,5 +1260,49 @@ describe("the review plumbing the steps share (Epic 3 retro item 8)", () => {
       };
       expect(await haveCommits(repo.gitDir, fetch, "test", [["mainSha", main]], live())).toEqual(ok(undefined));
     });
+  });
+});
+
+describe("bestEffortOps: the inbox and rulings steps' log and forge calls (Epic 4 retro item 5)", () => {
+  test("a call that succeeds gives its value and logs nothing", async () => {
+    const logs: string[] = [];
+    const { call } = bestEffortOps("inbox", { log: (l) => logs.push(l), signal: new AbortController().signal });
+    expect(await call("inboxes", async () => forgeOk(7))).toEqual({ ok: true, value: 7 });
+    expect(logs).toEqual([]);
+  });
+
+  test("a failed call gives its kind and message, logged under the step's name", async () => {
+    const logs: string[] = [];
+    const { call } = bestEffortOps("rulings", { log: (l) => logs.push(l), signal: new AbortController().signal });
+    expect(await call("readRulings", async () => forgeErr("transient", "502"))).toEqual({ ok: false, message: "transient: 502" });
+    expect(logs).toEqual(["rulings step: readRulings failed: transient: 502; skipped"]);
+  });
+
+  test("a call that throws gives the thrown message, logged; it never throws", async () => {
+    const logs: string[] = [];
+    const { call } = bestEffortOps("inbox", { log: (l) => logs.push(l), signal: new AbortController().signal });
+    expect(await call("openInbox alice", async () => Promise.reject(new Error("boom")))).toEqual({ ok: false, message: "boom" });
+    expect(logs).toEqual(["inbox step: openInbox alice threw: boom; skipped"]);
+  });
+
+  test("each call gets its own deadline, joined with the step's signal", async () => {
+    const outer = new AbortController();
+    const { call } = bestEffortOps("inbox", { log: () => {}, signal: outer.signal, callTimeoutMs: 5 });
+    const timedOut = await call("inboxes", (o) => new Promise<ForgeResult<boolean>>((resolve) => o.signal.addEventListener("abort", () => resolve(forgeOk(o.signal.aborted)))));
+    expect(timedOut).toEqual({ ok: true, value: true });
+    outer.abort();
+    const aborted = await call("inboxes", async (o) => forgeOk(o.signal.aborted));
+    expect(aborted).toEqual({ ok: true, value: true });
+  });
+
+  test("a log that throws is swallowed", async () => {
+    const { log, call } = bestEffortOps("inbox", {
+      log: () => {
+        throw new Error("no log");
+      },
+      signal: new AbortController().signal,
+    });
+    expect(() => log("x")).not.toThrow();
+    expect(await call("inboxes", async () => forgeErr("transient", "502"))).toEqual({ ok: false, message: "transient: 502" });
   });
 });
