@@ -343,7 +343,7 @@ ${RESULT_FIELDS}`,
 
 Review the change of \`{{review_unit}}\` at commit \`{{review_sha}}\`.
 
-Run no skill, and change no tracked file in this checkout: your findings go only in your result. Files the verification commands write are thrown away with the checkout. This checkout's \`HEAD\` is the change's last commit, \`{{review_sha}}\`, and \`main\` is at \`{{review_main_sha}}\`. The change under review is \`git diff main...HEAD\`, and \`git log main..HEAD\` lists its commits. The agent configuration files here (such as \`AGENTS.md\`, \`CLAUDE.md\` and the \`.claude/\` and \`.agents/\` folders) are \`main\`'s, put back by the runner, so they show as uncommitted changes: they are not part of the change.
+Run no skill, and change no tracked file in this checkout: your findings go only in your result. Files the verification commands write are thrown away with the checkout. This checkout's \`HEAD\` is the change's last commit, \`{{review_sha}}\`, and \`main\` is at \`{{review_main_sha}}\`. The change under review is \`git diff main...HEAD\`, and \`git log main..HEAD\` lists its commits. The agent configuration files here (such as \`AGENTS.md\`, \`CLAUDE.md\` and the \`.claude/\` and \`.agents/\` folders) on disk are \`main\`'s, put back by the runner, so they show as uncommitted changes: ignore their working-tree state. Any agent configuration change that \`git diff main...HEAD\` shows is part of the change: review it, and report it as a blocking finding unless the Story asks for it.
 
 {{review_spec}}
 
