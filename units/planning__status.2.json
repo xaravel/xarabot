@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.2",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T13:48:05.176Z",
+  "heartbeat_at": "2026-10-30T16:27:40Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "dbd3325fe939324598e62fb3817788d4be0e3068",
@@ -23,13 +23,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "readiness",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "Readiness CONCERNS, so I went on. sprint-status.yaml is unchanged: Story 3.2's renamed heading keeps sprint key 3-2-the-pi-adapter, as its manifest and the approved 2026-10-25 proposal say. Epic 4 item 6 (correct course for Epic 4 drift) is still waiting on the Maintainer. Two open design questions stop the first Epic context compile, so I wrote no context file. Epic 5 has none.\nEpic 6\n- Story 6.4: What counts as a unit done per agent and model, which also feeds the median unit time and the first-pass review rate? Readings: (a) unit journal records with result done: counts builds that later park awaiting approval; (b) Stories whose PR merged in the period (6.4's forge read), under the agent and model of the builder record that built them: matches the Stories-per-hour figure; (c) journal records that end merged: misses Stories reconcile merged, so near zero while owner_approval_paths is [\"**\"].\n- Story 6.4: Which row gets a review session's tokens and cost? Readings: (a) the builder's agent and model, as the journal records it today, since a unit record's cost includes its review passes: a claude row carries codex review spend; (b) the reviewer's agent and model, which needs reviewer usage as journal fields (today it is only in the reason text): each vendor's row shows only its own spend."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
