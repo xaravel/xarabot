@@ -15,7 +15,7 @@
     "test/lane/inbox-step.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:02:42Z",
+  "heartbeat_at": "2026-10-30T08:07:24.549Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "98c8cfe6dcb31c949e48c70ec01d72fdc96f3dc3",
@@ -26,7 +26,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
