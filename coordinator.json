@@ -6,14 +6,5 @@
   "generation": 1,
   "heartbeat_at": "2026-10-30T06:10:20Z",
   "digest_posted_at": "2026-10-29T21:48:10.252Z",
-  "rulings_cursor": "2026-10-29T21:48:20Z|6509103477",
-  "pending_rulings": [
-    {
-      "verb": "done",
-      "unit": "retro-item:epic-3-retro-item-7-correct-course-for-epic-3-drift",
-      "by": "edanisko",
-      "at": "2026-10-30T05:52:42Z",
-      "ruling": "xarabot-rule"
-    }
-  ]
+  "rulings_cursor": "2026-10-29T21:48:20Z|6509103477"
 }
