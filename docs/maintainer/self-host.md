@@ -402,7 +402,11 @@ and the lane needs `claude`, `bun`, `git` and `uv` on it. `lane install`
 refuses, and writes nothing, when any of them does not resolve on that
 `PATH`; it names each missing tool and the `PATH`. It also refuses `--agent
 pi`, and a `main` policy that does not parse or allows neither `claude` nor
-`codex` (see "The `pi` adapter, deferred to v1").
+`codex` (see "The `pi` adapter, deferred to v1"). It refuses, before it
+installs the runner or writes anything, a lane whose agent is not in `main`'s
+`.xarabot/policy.yaml` `unattended_adapters`, with the message lane start
+gives (`agent codex is not in .xarabot/policy.yaml unattended_adapters
+(allowed: claude)`); an absent policy is still left to lane start.
 
 It installs `~/.xarabot/runner/<tag>/` and writes `host.yaml`, the lane folder
 and its `runner` file, the launcher `~/.xarabot/bin/xarabot-lane` and the plist.
