@@ -12,7 +12,7 @@
     "test/core/rulings/effects.test.ts",
     "test/lane/reconcile-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T07:45:23.068Z",
+  "heartbeat_at": "2026-10-30T07:45:27.903Z",
   "pr": 290,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
