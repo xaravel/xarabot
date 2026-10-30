@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T09:05:21Z",
+  "heartbeat_at": "2026-10-30T09:09:21.120Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "39c3d7cbbd678bfc2aa73fb1b33bcecaf1f8f056",
@@ -23,7 +23,13 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": null,
+  "park": {
+    "kind": "blocked",
+    "reason": "readiness",
+    "inbox_owner": "edanisko",
+    "globs_held": [],
+    "text": "Readiness gate PASS; sprint-status.yaml left unchanged (Story 3.2's renamed heading keeps sprint key 3-2-the-pi-adapter, per the approved 2026-10-25 proposal). Epic 5 has no open question; one Epic 6 question blocks the context files, so none was written.\nEpic 6\n- Story 6.1: Where does the progress line's \"recent merge rate\" for its ETA come from, and over what window? No merge time is in 6.1's reach: the snapshot's PRs and ledger records carry none, and the forge's merged-PR read arrives only in 6.4, outside 6.1's globs. Readings: (a) builder journals' unit records that end `merged`, which 6.4's decision says miss Stories `reconcile` merged, so the ETA runs long; (b) the merged-PR forge read from Story 6.4, so 6.1 depends on 6.4 and its globs widen to `src/ports/forge.ts`, the fake forge and the contract suite (a graph change), giving the same count as the report."
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
