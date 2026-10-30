@@ -906,6 +906,9 @@ describe("review prompt (Story 3.4)", () => {
     expect(p).toContain("Run no skill");
     expect(p).not.toMatch(/\bbmad-/);
     expect(p).toContain("show as uncommitted changes");
+    expect(p).toContain("on disk are `main`'s, put back by the runner, so they show as uncommitted changes: ignore their working-tree state.");
+    expect(p).toContain("Any agent configuration change that `git diff main...HEAD` shows is part of the change: review it, and report it as a blocking finding unless the Story asks for it.");
+    expect(p).not.toContain("they are not part of the change");
     expect(p).toContain("change no tracked file in this checkout");
     expect(p).toContain("Files the verification commands write are thrown away with the checkout.");
   });
