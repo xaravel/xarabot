@@ -12,7 +12,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T03:25:13.520Z",
+  "heartbeat_at": "2026-10-30T03:25:41.605Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "2dfb0f0e963cdb6172c48eedd47f27b8d5d4c52e",
@@ -23,7 +23,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 1,
   "loopbacks": 0,
