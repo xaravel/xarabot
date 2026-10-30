@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-22-2026 00:43
-last_updated: 10-26-2026 09:15
+last_updated: 10-29-2026 20:24
 project: xarabot
 project_key: NOKEY
 tracking_system: file-system
@@ -97,7 +97,7 @@ development_status:
   4-5-rulings-grammar-authority-and-cursor: done
   4-6-rulings-what-each-verb-does: done
   4-7-parallel-epics-and-gates-verification: done
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 
   epic-5: backlog
   5-1-xarabot-join-creates-the-owner-s-app: backlog
@@ -428,3 +428,59 @@ action_items:
     owner: "Maintainer"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-10-26.md"
+  - id: "epic-4-retro-item-1-keep-the-last-block-ruling"
+    epic: 4
+    action: "Keep the last block/unblock ruling across an in-flight reconcile PR:
+      rulingsDrops must not drop a pending entry while an open reconcile PR's retro-gates.yaml
+      can still change what main shows (e.g. drop only when main shows it and no reconcile
+      PR is open); tests for block then unblock with the first PR open, and the mirror
+      (C1)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
+  - id: "epic-4-retro-item-2-rulings-cursor-skips-no-comment"
+    epic: 4
+    action: "Make the GitHub readRulings cursor never pass a comment it has not returned,
+      so with two or more inboxes a comment posted on one issue while another is read
+      is read on a later run; adapter and contract tests for a comment posted between
+      two issue reads (C2)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
+  - id: "epic-4-retro-item-3-inbox-prefix-and-clearing"
+    epic: 4
+    action: "nextCoordinator adds waiting-on-maintainer: only when every idle reason
+      is a Maintainer cause, and the inbox step clears the stale body of every open
+      xarabot-inbox issue that is not an owner's current inbox (unassigned or duplicate);
+      tests for both (C7, C8)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
+  - id: "epic-4-retro-item-4-rulings-runbook-and-doc-drift"
+    epic: 4
+    action: "Bring docs up to the as-built rulings: fix self-host.md:623 and :644,
+      add a comment-rulings section (grammar, verbs and authority, replies, pending
+      list, dismissals, xarabot rule), name readRulings and ruling replies in app-permissions.md's
+      issues row, name xarabot-rule in GoSchema's comment (A3, A4)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
+  - id: "epic-4-retro-item-5-consolidate-inbox-and-rulings-rules"
+    epic: 4
+    action: "Consolidate Epic 4's duplicated rules: one exported open-item status
+      predicate, one inbox ownership and listing rule shared by renderDigest and inboxOwner,
+      the digest stamp through coordinatorSwap, one forge-call and log helper for
+      the inbox and rulings steps, unitKind() in retro-gates-edit.ts (D1, D2)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
+  - id: "epic-4-retro-item-6-correct-course-for-epic-4-drift"
+    epic: 4
+    action: "Run bmad-correct-course for Epic 4's drift: spine ledger v6, pending_rulings
+      in AD-28, the Forge port's inbox operations, SPEC CAP-9 and Escalations; decide
+      how settled deferrals (4.1-d1, 4.6-d1) leave the digest, dismissal pruning and
+      recurrence, an early checkpoint go, resolves merge order and the first null-cursor
+      read; route the residuals; close Epic 3 item 7 (A4-A6, C3-C6)"
+    owner: "Maintainer"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md"
