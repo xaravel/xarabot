@@ -23,7 +23,7 @@
     "test/lane/planning-step.test.ts",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T00:18:24.431Z",
+  "heartbeat_at": "2026-10-30T00:19:31.798Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "d656ee50d7f255544698103a250decda48d1a391",
@@ -34,7 +34,9 @@
   "approved_sha": null,
   "approved_graph": null,
   "retro_result": null,
-  "builder_providers": [],
+  "builder_providers": [
+    "anthropic"
+  ],
   "park": null,
   "attempts": 0,
   "loopbacks": 0,
