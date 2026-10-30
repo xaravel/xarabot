@@ -13,6 +13,7 @@ import {
   rulingsView,
   withPending,
   type JudgedRuling,
+  type RulingEffect,
   type RulingInput,
 } from "../../../src/core/rulings/effects.ts";
 import type { CoordinatorRecord, Dismissal, Park, PendingRuling, UnitRecord } from "../../../src/core/schemas/ledger.ts";
@@ -279,6 +280,68 @@ describe("drops", () => {
     const drops = rulingsDrops(withPending(broken), broken);
     expect(drops.pending).toEqual([]);
     expect(drops.dismissals).toEqual([stale]);
+  });
+
+  describe("a reconcile PR open keeps every pending entry (Epic 4 retro item 1)", () => {
+    const R = 11;
+    const reconcile = storyRec("9.9", { unit: "reconcile:7", state: "merging", lane: "coordinator", globs: [], pr: R, head_sha: HEAD });
+    /** `world` with `reconcile:7`'s PR in `state`, carrying what the first ruling wrote. */
+    const withReconcile = (coordinator: CoordinatorRecord, gates: string, state: "open" | "merged" | "closed"): Snapshot => {
+      const base = world(coordinator, gates);
+      return {
+        ...base,
+        ledger: { ...base.ledger, units: [...base.ledger.units, reconcile] },
+        prs: { ...base.prs, "reconcile:7": { number: R, state, head_sha: HEAD } },
+      };
+    };
+    const blockingE = RETRO_GATES.replace("        blocking: false", "        blocking: true");
+    const unblockedA = RETRO_GATES.replace("        blocking: true", "        blocking: false");
+
+    test.each([
+      // main shows item 5-e not blocking; the first PR blocks it; then the Maintainer unblocks it.
+      ["block then unblock", "block", "unblock", ITEM_E, RETRO_GATES, blockingE],
+      // The mirror: main shows item 1-a blocking; the first PR unblocks it; then the Maintainer blocks it again.
+      ["unblock then block", "unblock", "block", ITEM_A, RETRO_GATES, unblockedA],
+    ] as const)("%s with the first PR open: the last ruling is kept until main shows it with no reconcile PR open", (_name, first, last, unit, mainBefore, mainAfter) => {
+      const firstEntry = pending(first, unit, "1");
+      const run1 = withReconcile(claim({ pending_rulings: [firstEntry] }), mainBefore, "open");
+      // The first ruling is pending and on the open PR, not yet on main: the last one is valid against the view and supersedes it.
+      const { judged: js } = judgeRulings(run1, [c(`/xarabot ${last} ${unit}`)]);
+      const j = js[0] as JudgedRuling;
+      expect(j.judgement.kind).toBe("valid");
+      const lastEntry = (j.effect as Extract<RulingEffect, { kind: "pending" }>).entry;
+      expect(rulingsDrops(rulingsView(run1, js), run1).pending).toEqual([]);
+      expect(rulingsView(run1, js).ledger.coordinator?.pending_rulings).toEqual([lastEntry]);
+
+      // The next run: main still shows what the last ruling says, but the open PR carries the first: kept.
+      const run2 = withReconcile(claim({ pending_rulings: [lastEntry] }), mainBefore, "open");
+      expect(rulingsDrops(withPending(run2), run2).pending).toEqual([]);
+
+      // The first PR merges: main shows the first ruling, so the last one is kept and still applies.
+      const run3 = withReconcile(claim({ pending_rulings: [lastEntry] }), mainAfter, "merged");
+      expect(rulingsDrops(withPending(run3), run3).pending).toEqual([]);
+      const item = (s: Snapshot) => s.retro_gates.epics["2"]?.items?.find((x) => `retro-item:${x.id}` === unit)?.blocking;
+      expect(item(run3)).toBe(first === "block");
+      expect(item(withPending(run3))).toBe(last === "block");
+
+      // Main shows the last ruling and no reconcile PR is open: dropped.
+      const run4 = withReconcile(claim({ pending_rulings: [lastEntry] }), mainBefore, "merged");
+      expect(rulingsDrops(withPending(run4), run4).pending).toEqual([lastEntry]);
+    });
+
+    test("a closed reconcile PR does not keep an entry main shows", () => {
+      const shown = pending("block", ITEM_E, "1");
+      const snapshot = withReconcile(claim({ pending_rulings: [shown] }), blockingE, "closed");
+      expect(rulingsDrops(withPending(snapshot), snapshot).pending).toEqual([shown]);
+      const open = withReconcile(claim({ pending_rulings: [shown] }), blockingE, "open");
+      expect(rulingsDrops(withPending(open), open).pending).toEqual([]);
+    });
+
+    test("dismissals still expire while a reconcile PR is open", () => {
+      const changed: Dismissal = { unit: "checkpoint:4", subject: "Epic 4's retro is recorded (accepted)", since: "2026-10-19T00:00:00Z" };
+      const snapshot = withReconcile(claim({ dismissals: [changed] }), RETRO_GATES, "open");
+      expect(rulingsDrops(withPending(snapshot), snapshot).dismissals).toEqual([changed]);
+    });
   });
 
   test("an item a pending ruling changes is a new instance in the view", () => {

@@ -3355,6 +3355,44 @@ describe("createReconcileStep: what each verb does (Story 4.6)", () => {
     expect((await coordinatorRecord(f))?.pending_rulings).toEqual(pending);
   });
 
+  describe("a reconcile PR open keeps the last block/unblock ruling (Epic 4 retro item 1)", () => {
+    /** `reconcile:3` parked with its PR open (the first ruling's PR): the ledger work leaves it, so it stays open. */
+    const openReconcile = async (fake: FakeForge): Promise<readonly UnitRecord[]> => {
+      const r3 = (await prOn(fake, "xarabot/reconcile-3")).number;
+      return [coord("reconcile:3", { state: "parked", pr: r3, park: { kind: "blocked", reason: "verification", inbox_owner: "carol", globs_held: [] } })];
+    };
+
+    test.each([
+      // main shows A not blocking; the open PR blocks it; then the Maintainer unblocks it.
+      ["block then unblock", "block", "unblock", A],
+      // The mirror: main shows B blocking; the open PR unblocks it; then the Maintainer blocks it again.
+      ["unblock then block", "unblock", "block", B],
+    ] as const)("%s with the first PR open: the last ruling stays pending across runs while main shows it", async (_name, first, last, item) => {
+      const r: Partial<Ruled> = {};
+      const firstEntry = { verb: first, unit: `retro-item:${item}`, by: "edanisko", at: FORGE_NOW, ruling: "70" };
+      const f = await setup({ ...world(), coordinator: { pending_rulings: [firstEntry] } }, ruling([`/xarabot ${last} retro-item:${item}`], r, openReconcile));
+      const id = r.ids?.[0] as string;
+      const lastEntry = { verb: last, unit: `retro-item:${item}`, ...go(id) };
+      const out = await f.run();
+      expect(out.state).toBe("merged");
+      expect(f.commits).toEqual([]);
+      expect((await coordinatorRecord(f))?.pending_rulings).toEqual([lastEntry]);
+      // The next run reads no new comment: main shows the last ruling, but the PR carrying the first is still open.
+      reclaim(f);
+      const second = await f.run();
+      expect(second.state).toBe("merged");
+      expect((await coordinatorRecord(f))?.pending_rulings).toEqual([lastEntry]);
+    });
+
+    test("with no reconcile PR open, the same entry main shows is dropped", async () => {
+      const pending = [{ verb: "unblock" as const, unit: `retro-item:${A}`, by: "edanisko", at: FORGE_NOW, ruling: "71" }];
+      const f = await setup({ ...world(), coordinator: { pending_rulings: pending } });
+      await f.run({ forge: spied(f.fake, f.events, false, true) });
+      expect(swaps(f.events)).toContain("recordRulings coordinator");
+      expect((await coordinatorRecord(f))?.pending_rulings).toBeUndefined();
+    });
+  });
+
   describe("release and rebuild", () => {
     const parkedOn =
       (out: { pr?: number }) =>
