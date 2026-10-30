@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-16-lane-install-checks-the-lanes-agent",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "src/cli/lane-install.ts",
     "test/cli/lane-install.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T06:03:44.397Z",
+  "heartbeat_at": "2026-10-30T06:03:53.208Z",
   "pr": 284,
   "pr_owner": "edanisko",
   "base_sha": "a34524f0f362c1daa9e0d25398887dca4965d794",
@@ -25,7 +25,16 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "src/cli/lane-install.ts",
+      "test/cli/lane-install.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
