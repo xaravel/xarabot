@@ -912,6 +912,37 @@ describe("next(coordinator): retro (Story 2.9)", () => {
     expect(reasonOf(pick({ ...DUE, records: [retroRec()] })).startsWith("no coordinator unit due")).toBe(true);
   });
 
+  describe("the every-reason rule (Story 4.2; Epic 4 retro item 3)", () => {
+    const TWO = { epics: { 1: [], 2: ["1"], 3: ["1"] }, status: { ...DONE, "epic-3": "backlog", "3.1": "done" } } as const;
+    const retro3 = coord("retro:3", { globs: coordinatorGlobs({ kind: "retro", epic: 3 }, CONFIG_DEFAULTS) });
+
+    test("every reason besides reconcile-not-due a live-evidence one: the prefix names each, then the rest", () => {
+      const o = pick(TWO);
+      expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence", "retro:3 live-evidence"]);
+      expect(o.kind === "idle" ? o.reasons.filter((r) => r.code === "live-evidence").every((r) => r.maintainer === true) : false).toBe(true);
+      expect(reasonOf(o)).toStartWith(
+        `${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file docs/maintainer/evidence/epic-2.md on main; retro:3 waits for the live evidence file docs/maintainer/evidence/epic-3.md on main; no coordinator unit due; reconcile is not due`,
+      );
+    });
+
+    test("a live-evidence reason beside a lane reason (a held record): no prefix, every reason after nothing-due", () => {
+      const o = pick({ ...TWO, evidence: [3], records: [retro3] });
+      expect(picked(o)).toBe("idle");
+      expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence", "retro:3 record-state"]);
+      expect(reasonOf(o)).toStartWith("no coordinator unit due; reconcile is not due");
+      expect(reasonOf(o)).toContain("retro:2 waits for the live evidence file docs/maintainer/evidence/epic-2.md on main; retro:3 is due but its record is");
+      expect(reasonOf(o)).not.toContain(WAITING_ON_MAINTAINER);
+    });
+
+    test("a live-evidence reason beside an overlap: no prefix", () => {
+      const held = coord("planning:status.1", { globs: STATUS_GLOBS });
+      const o = pick({ ...TWO, evidence: [3], records: [held] });
+      expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence", "retro:3 overlap"]);
+      expect(reasonOf(o)).toStartWith("no coordinator unit due; ");
+      expect(reasonOf(o)).not.toContain(WAITING_ON_MAINTAINER);
+    });
+  });
+
   test("a held record is a record-state reason", () => {
     const o = pick({ ...DUE, records: [retroRec({ state: "merged" })] });
     expect(codes(o)).toContain("retro:2 record-state");
