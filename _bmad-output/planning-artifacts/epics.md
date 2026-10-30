@@ -2587,6 +2587,8 @@ So that the TUI, scripts and dashboards all read the same status (FR12, AR25, AR
 **When** status runs
 **Then** it still reports the local lane state and marks the forge fields unavailable with the error kind.
 
+**Maintainer decision (2026-10-30, `planning:status.1`'s fourth open question):** the ETA's merge rate comes from the host's builder journals: unit records for Stories that end `merged`, over the last 7 days (or since the first such record, if newer). While every path needs the Maintainer's approval, `reconcile` merges most Stories and the ETA runs long; it is a loose estimate, and no forge read or graph change is added for it.
+
 ### Story 6.2: Watching status, locally and over ssh
 
 As an operator,
