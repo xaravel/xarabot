@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro:4",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -12,7 +12,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T03:29:48.151Z",
+  "heartbeat_at": "2026-10-30T03:29:56.102Z",
   "pr": 281,
   "pr_owner": "edanisko",
   "base_sha": "2dfb0f0e963cdb6172c48eedd47f27b8d5d4c52e",
@@ -130,7 +130,15 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/epic-4-retro-2026-10-29.md",
+      "_bmad-output/implementation-artifacts/sprint-status.yaml"
+    ]
+  },
   "attempts": 1,
   "loopbacks": 0,
   "ci_fixes": 0,
