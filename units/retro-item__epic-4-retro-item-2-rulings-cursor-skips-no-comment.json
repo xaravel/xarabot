@@ -16,7 +16,7 @@
     "test/contracts/forge.contract.ts",
     "test/contracts/forge.github.contract.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:15:21.015Z",
+  "heartbeat_at": "2026-10-30T08:15:25.592Z",
   "pr": 291,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
