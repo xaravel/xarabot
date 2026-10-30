@@ -6,3 +6,5 @@ bootstrapped_epics: [1]
 manifests:
   dir: stories
 proxy_hosts: [registry.npmjs.org]
+live_evidence_checks:
+  "4": ["XARABOT_LIVE=1 XARABOT_LIVE_GITHUB_REPO=xaravel/xarabot-scratch XARABOT_LIVE_GITHUB_LOGIN=edanisko bun test test/e2e/parallel-epics.test.ts"]
