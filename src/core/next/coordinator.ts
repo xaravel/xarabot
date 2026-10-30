@@ -426,16 +426,31 @@ const NOTHING_DUE = "no coordinator unit due";
 /** The coordinator states an open coordinator PR's record may be in. */
 const OPEN_PR_STATES: readonly UnitRecord["state"][] = ["claimed", "merging", "released"];
 
-/** The prefix of an idle reason that waits on the Maintainer (a live evidence file missing on `main`, or lacking a required result). */
+/**
+ * The prefix of an idle reason that waits on the Maintainer (a live evidence
+ * file missing on `main`, or lacking a required result; a record parked
+ * awaiting an approval).
+ */
 export const WAITING_ON_MAINTAINER = "waiting-on-maintainer: ";
+
+/** Whether `rec` is parked awaiting an approval (`awaiting-approval` or `needs-approval`): it waits on the Maintainer (Story 4.2). */
+export function awaitsApproval(rec: UnitRecord): boolean {
+  return rec.state === "parked" && (rec.park?.kind === "awaiting-approval" || rec.park?.kind === "needs-approval");
+}
+
+/** `{ maintainer: true }` for a holder parked awaiting an approval (`awaitsApproval`), else nothing: spread into its reason. */
+function approvalWait(rec: UnitRecord): { readonly maintainer?: true } {
+  return awaitsApproval(rec) ? { maintainer: true } : {};
+}
 
 /**
  * The coordinator's next unit from a validated snapshot whose graph resolved
  * (AD-13): `reconcile` when due, then an open coordinator PR, then planning
  * (`nextPlanning`), then retro (`nextRetro`), then retro items
  * (`nextRetroItem`), else `idle`. An idle outcome whose every reason
- * besides `reconcile-not-due` is a Maintainer cause (a `live-evidence` one)
- * starts `waiting-on-maintainer: ` and those reasons' messages (Story 4.2's
+ * besides `reconcile-not-due` is a Maintainer cause (a `live-evidence` one,
+ * or a retro, retro-item or planning holder parked awaiting an approval,
+ * Epic 4 retro item 7, as `next` counts a Story's) starts `waiting-on-maintainer: ` and those reasons' messages (Story 4.2's
  * every-reason rule); one with any other reason beside them has no prefix.
  * Never a Story. The open-PR position never returns a `reconcile` record (a
  * released or dead run's PR is the next `reconcile` run's to close), but a
@@ -622,7 +637,7 @@ function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | nul
     const rec = snapshot.ledger.units.find((r) => r.unit === unit);
     const stale = rec !== undefined && rec.state === "claimed" && isStale(rec, snapshot.now) && snapshot.prs[unit]?.state !== "open";
     if (rec !== undefined && rec.state !== "released" && !stale) {
-      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}` });
+      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}`, ...approvalWait(rec) });
       continue;
     }
     const globs = coordinatorGlobs({ kind: "retro", epic: c.epic }, snapshot.config);
@@ -697,7 +712,7 @@ function nextRetroItem(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit |
     const rec = snapshot.ledger.units.find((r) => r.unit === unit);
     const stale = rec !== undefined && rec.state === "claimed" && isStale(rec, snapshot.now) && snapshot.prs[unit]?.state !== "open";
     if (rec !== undefined && rec.state !== "released" && !stale) {
-      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}` });
+      reasons.push({ subject: unit, code: "record-state", message: `${unit} is due but its record is ${describeHold(rec)}`, ...approvalWait(rec) });
       continue;
     }
     const globs = coordinatorGlobs({ kind: "retro-item", globs: item.globs }, snapshot.config);
@@ -760,6 +775,7 @@ function nextPlanning(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | 
           subject: holder.unit,
           code: "planning-held",
           message: `${kind} planning is due (${d.why}) but held: ${holder.unit} is ${describeHold(holder)}`,
+          ...approvalWait(holder),
         });
       }
       continue;

@@ -122,12 +122,13 @@ describe("syncInboxes: bodies", () => {
 });
 
 /**
- * The fake forge plus open inbox issues it cannot make itself (unassigned, or
- * an owner's second one), listed with its own and rewritten in place.
+ * The fake forge plus open inbox issues the runner opened that it cannot
+ * make itself (unassigned, or an owner's second one), listed with its own
+ * and rewritten in place.
  */
 function withExtra(w: World, extra: { number: number; owner: string | null; body: string }[]): Forge {
   const f = spied(w.fake, w.events);
-  const view = (i: (typeof extra)[number]): InboxIssue => ({ ...i, url: `https://github.com/fake/repo/issues/${i.number}` });
+  const view = (i: (typeof extra)[number]): InboxIssue => ({ ...i, url: `https://github.com/fake/repo/issues/${i.number}`, by_runner: true });
   return {
     ...f,
     inboxes: async (o) => {
@@ -200,6 +201,27 @@ describe("syncInboxes: an open inbox issue that is no owner's inbox (Epic 4 retr
     expect(r.written).toEqual([1003]);
     expect(extra.map((i) => i.body)).toEqual(["old", EMPTY_INBOX_BODY]);
     expect(w.logs.some((l) => l.includes("setInboxBody #1002 failed: transient: 502"))).toBe(true);
+  });
+});
+
+describe("syncInboxes: an issue a person opened and labelled (Epic 4 retro item 7)", () => {
+  test("an unassigned one, or an owner's later one, is never cleared; the runner's own stale issue still is", async () => {
+    const w = world();
+    await sync(w, { alice: digestOf("alice's items", 1) });
+    w.events.length = 0;
+    const unassigned = w.fake.control.labelIssue(null, "my notes");
+    const later = w.fake.control.labelIssue("alice", "alice's own list");
+    const extra = [{ number: 2001, owner: null, body: "old items" }];
+    const r = await sync(w, { alice: digestOf("alice's two items", 2) }, { forge: withExtra(w, extra) });
+    expect(r.written).toEqual([1001, 2001]);
+    expect(extra.map((i) => i.body)).toEqual([EMPTY_INBOX_BODY]);
+    const body = (n: number) => w.fake.control.inboxes().find((i) => i.number === n)?.body;
+    expect([body(1001), body(unassigned), body(later)]).toEqual(["alice's two items", "my notes", "alice's own list"]);
+    expect(w.events.filter((e) => e.startsWith("setInboxBody"))).toEqual(["setInboxBody #1001", "setInboxBody #2001"]);
+    // With no items anywhere: the owner's inbox is cleared, the person's issues still are not.
+    w.events.length = 0;
+    expect((await sync(w, {})).written).toEqual([1001]);
+    expect([body(unassigned), body(later)]).toEqual(["my notes", "alice's own list"]);
   });
 });
 

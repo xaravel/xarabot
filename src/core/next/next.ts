@@ -5,7 +5,7 @@ import { describeIssues } from "../schemas/common.ts";
 import type { UnitRecord } from "../schemas/ledger.ts";
 import { LaneRole, SnapshotSchema, type Snapshot, type SnapshotManifest } from "../schemas/snapshot.ts";
 import { compareStoryIds, storyKey } from "../story-id.ts";
-import { nextCoordinator, WAITING_ON_MAINTAINER, type CoordinatorOutcome } from "./coordinator.ts";
+import { awaitsApproval, nextCoordinator, WAITING_ON_MAINTAINER, type CoordinatorOutcome } from "./coordinator.ts";
 import { epicHolds } from "./epic-gates.ts";
 import type { Reason } from "./reasons.ts";
 import { epicContextPath } from "./snapshot.ts";
@@ -170,8 +170,7 @@ function nextBuilder(snap: Snapshot): BuilderOutcome {
       if (rec !== undefined && rec.state !== "released" && takeOver === null) {
         const message = `${unit} is ${rec.state}`;
         // A park awaiting an approval waits on the Maintainer (Story 4.2).
-        const approval = rec.state === "parked" && (rec.park?.kind === "awaiting-approval" || rec.park?.kind === "needs-approval");
-        reasons.push(approval ? { subject: unit, code: "record-state", message, maintainer: true } : { subject: unit, code: "record-state", message });
+        reasons.push(awaitsApproval(rec) ? { subject: unit, code: "record-state", message, maintainer: true } : { subject: unit, code: "record-state", message });
       } else if (takeOver !== null && m.infrastructure && rec?.approval?.manifest_sha !== m.sha) {
         reasons.push({
           subject: unit,

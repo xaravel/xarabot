@@ -8,9 +8,10 @@ import { bestEffortOps, message } from "./session.ts";
  * issue (an owner's inbox is the lowest-numbered one assigned to them),
  * opens one for each owner with items who has none, and rewrites a body only
  * when it differs from the rendered one, so an owner whose items all cleared
- * gets `EMPTY_INBOX_BODY`, and so does every open inbox issue that is no
- * owner's inbox (unassigned, or a later one of an owner's), so no stale body
- * stays. When the daily digest is due it first stamps
+ * gets `EMPTY_INBOX_BODY`, and so does every open inbox issue the runner
+ * opened that is no owner's inbox (unassigned, or a later one of an
+ * owner's), so no stale body stays; an issue a person opened and labelled is
+ * never cleared (Epic 4 retro item 7). When the daily digest is due it first stamps
  * `digest_posted_at` (`stamp`, a fenced `coordinator.json` edit that refuses
  * once today's digest is stamped), and only after a successful stamp posts
  * one comment per non-empty inbox: `@<owner>`, the item count and the issue
@@ -103,11 +104,11 @@ export async function syncInboxes(p: SyncInboxesParams): Promise<SyncInboxesResu
     if (owners.has(key)) continue;
     await rewrite(issue, EMPTY_INBOX_BODY, `cleared for ${issue.owner ?? "nobody"}: nothing waits on them`);
   }
-  // An issue that is no owner's inbox holds no items; a body left from before is cleared.
+  // An issue the runner opened that is no owner's inbox holds no items; a body left from before is cleared. A person's is theirs.
   const current = new Set([...inboxOf.values()].map((i) => i.number));
   for (const issue of [...listed].sort((a, b) => a.number - b.number)) {
     if (p.signal.aborted) return done();
-    if (current.has(issue.number)) continue;
+    if (current.has(issue.number) || !issue.by_runner) continue;
     const why = issue.owner === null ? "unassigned" : `#${inboxOf.get(issue.owner.toLowerCase())?.number} is ${issue.owner}'s inbox`;
     await rewrite(issue, EMPTY_INBOX_BODY, `cleared: not an owner's inbox (${why})`);
   }

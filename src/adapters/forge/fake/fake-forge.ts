@@ -126,6 +126,12 @@ export type FakeForgeControl = {
   addInboxCommentBeforeRead(read: number, issue: number, author: string, body: string): void;
   /** Closes inbox issue `issue`, as its owner closing it would; `false` when there is none. */
   closeInbox(issue: number): boolean;
+  /**
+   * Opens an issue labelled with the inbox label, as a person labelling one
+   * would: `by_runner` false, assigned to `owner` (`null` for nobody), with
+   * `body`. Returns its number.
+   */
+  labelIssue(owner: string | null, body: string): number;
   /** Queued PR numbers, head first. */
   queue(): number[];
   /** Reads `snapshot` made, in order: `ledger`, `main`, `prs`. */
@@ -189,7 +195,7 @@ type PrRecord = {
 /** A comment on an inbox issue; `id` is numeric. */
 type InboxCommentRecord = { readonly id: number; readonly author: string; readonly body: string; readonly created_at: string };
 
-type InboxRecord = { number: number; title: string; owner: string | null; body: string; open: boolean; comments: InboxCommentRecord[] };
+type InboxRecord = { number: number; title: string; owner: string | null; body: string; open: boolean; by_runner: boolean; comments: InboxCommentRecord[] };
 
 /** A cursor `readRulings` issues: a comment id. */
 const CURSOR_PATTERN = /^(?:0|[1-9][0-9]*)$/;
@@ -226,7 +232,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   let nextIssue = options.firstIssueNumber ?? 1001;
   const repoUrl = options.repoUrl ?? FAKE_REPO_URL;
   const unitBranchPrefix = options.unitBranchPrefix ?? DEFAULT_UNIT_BRANCH_PREFIX;
-  const inboxView = (i: InboxRecord): InboxIssue => ({ number: i.number, owner: i.owner, body: i.body, url: `${repoUrl}/issues/${i.number}` });
+  const inboxView = (i: InboxRecord): InboxIssue => ({ number: i.number, owner: i.owner, body: i.body, url: `${repoUrl}/issues/${i.number}`, by_runner: i.by_runner });
   const commentView = (i: InboxRecord, c: InboxCommentRecord): InboxComment => ({
     id: String(c.id),
     issue: i.number,
@@ -540,7 +546,7 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
         const mine = [...inboxes.values()].filter((i) => i.open && i.owner?.toLowerCase() === owner.toLowerCase()).sort((a, b) => a.number - b.number);
         const found = mine[0];
         if (found !== undefined) return forgeOk(inboxView(found));
-        const created: InboxRecord = { number: nextIssue++, title: FAKE_INBOX_TITLE, owner, body: "", open: true, comments: [] };
+        const created: InboxRecord = { number: nextIssue++, title: FAKE_INBOX_TITLE, owner, body: "", open: true, by_runner: true, comments: [] };
         inboxes.set(created.number, created);
         return forgeOk(inboxView(created));
       }),
@@ -662,6 +668,11 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       if (i === undefined) return false;
       i.open = false;
       return true;
+    },
+    labelIssue(owner, body) {
+      const n = nextIssue++;
+      inboxes.set(n, { number: n, title: "A labelled issue", owner, body, open: true, by_runner: false, comments: [] });
+      return n;
     },
     queue: () => [...queue],
     trace: () => [...trace],

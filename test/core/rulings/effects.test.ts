@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { COORDINATOR_PATH, parseLedger, serializeCoordinator } from "../../../src/core/ledger/codec.ts";
 import { renderDigest } from "../../../src/core/inbox/render-digest.ts";
 import { next } from "../../../src/core/next/next.ts";
-import { editRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
+import { applyPendingRulings, editRetroGates } from "../../../src/core/reconcile/retro-gates-edit.ts";
 import {
   HOST_RULING_ID,
   judgeRulings,
@@ -243,6 +243,34 @@ describe("the final view", () => {
   });
 });
 
+describe("a later ruling on a unit with a pending one, as self-host.md's pending list says (Epic 4 retro item 7)", () => {
+  test.each([
+    ["unblock replaces a pending block", pending("block", ITEM_E, "1"), `unblock ${ITEM_E}`],
+    ["block replaces a pending unblock", pending("unblock", ITEM_A, "1"), `block ${ITEM_A}`],
+    ["done replaces a pending defer", pending("defer", ITEM_E, "1"), `done ${ITEM_E}`],
+  ] as const)("%s", (_name, entry, body) => {
+    const snapshot = world(claim({ pending_rulings: [entry] }));
+    const { comment, j } = one(`/xarabot ${body}`, snapshot);
+    expect(j.judgement.kind).toBe("valid");
+    const [verb, unit] = body.split(" ") as [PendingRuling["verb"], string];
+    expect(rulingsView(snapshot, [j]).ledger.coordinator?.pending_rulings).toEqual([pending(verb, unit, comment.id)]);
+  });
+
+  test.each([
+    ["a second go", pending("go", "checkpoint:4", "1"), "go checkpoint:4", "checkpoint:4 already has a go"],
+    ["block again", pending("block", ITEM_E, "1"), `block ${ITEM_E}`, `${ITEM_E} is already blocking`],
+    ["unblock again", pending("unblock", ITEM_A, "1"), `unblock ${ITEM_A}`, `${ITEM_A} is already not blocking`],
+    ["done again", pending("done", ITEM_A, "1"), `done ${ITEM_A}`, `${ITEM_A} is already done`],
+    ["defer again", pending("defer", ITEM_E, "1"), `defer ${ITEM_E}`, `${ITEM_E} is deferred, not open, in-progress or waiting`],
+    ["defer while a done is pending", pending("done", ITEM_A, "1"), `defer ${ITEM_A}`, `${ITEM_A} is done, not open, in-progress or waiting`],
+  ] as const)("%s is refused, and the pending entry stays", (_name, entry, body, reason) => {
+    const snapshot = world(claim({ pending_rulings: [entry] }));
+    const { j } = one(`/xarabot ${body}`, snapshot);
+    expect(reasons([j])).toEqual([reason]);
+    expect(rulingsView(snapshot, [j]).ledger.coordinator?.pending_rulings).toEqual([entry]);
+  });
+});
+
 describe("drops", () => {
   const shownGates = RETRO_GATES.replace("        blocking: false", "        blocking: true");
 
@@ -285,12 +313,17 @@ describe("drops", () => {
   describe("a reconcile PR open keeps every pending entry (Epic 4 retro item 1)", () => {
     const R = 11;
     const reconcile = storyRec("9.9", { unit: "reconcile:7", state: "merging", lane: "coordinator", globs: [], pr: R, head_sha: HEAD });
-    /** `world` with `reconcile:7`'s PR in `state`, carrying what the first ruling wrote. */
-    const withReconcile = (coordinator: CoordinatorRecord, gates: string, state: "open" | "merged" | "closed"): Snapshot => {
+    /**
+     * `world` with `reconcile:7`'s PR in `state`, carrying what the first
+     * ruling wrote; a merged PR's record is `merged` (an earlier run marked
+     * it) unless `marked` is `false`.
+     */
+    const withReconcile = (coordinator: CoordinatorRecord, gates: string, state: "open" | "merged" | "closed", marked = true): Snapshot => {
       const base = world(coordinator, gates);
+      const record: UnitRecord = state === "merged" && marked ? { ...reconcile, state: "merged" } : reconcile;
       return {
         ...base,
-        ledger: { ...base.ledger, units: [...base.ledger.units, reconcile] },
+        ledger: { ...base.ledger, units: [...base.ledger.units, record] },
         prs: { ...base.prs, "reconcile:7": { number: R, state, head_sha: HEAD } },
       };
     };
@@ -327,6 +360,24 @@ describe("drops", () => {
       // Main shows the last ruling and no reconcile PR is open: dropped.
       const run4 = withReconcile(claim({ pending_rulings: [lastEntry] }), mainBefore, "merged");
       expect(rulingsDrops(withPending(run4), run4).pending).toEqual([lastEntry]);
+    });
+
+    test.each([
+      ["block then unblock", "block", "unblock", ITEM_E],
+      ["unblock then block", "unblock", "block", ITEM_A],
+    ] as const)("%s: a reconcile PR merged after the snapshot read main keeps the last ruling until its record is merged (Epic 4 retro item 7)", (_name, first, last, unit) => {
+      const lastEntry = pending(last, unit, "2");
+      // The queue merged the first ruling's PR between the snapshot's main and PR reads: main is still the old one, the PR shows merged.
+      const raced = withReconcile(claim({ pending_rulings: [lastEntry] }), RETRO_GATES, "merged", false);
+      expect(applyPendingRulings(raced.retro_gates, [lastEntry]).summary).toEqual([]);
+      expect(rulingsDrops(withPending(raced), raced).pending).toEqual([]);
+      // A later run marked the record merged: its snapshot's main has the merge, and shows the first ruling, so the last one is kept and applies.
+      const after = withReconcile(claim({ pending_rulings: [lastEntry] }), first === "block" ? blockingE : unblockedA, "merged");
+      expect(rulingsDrops(withPending(after), after).pending).toEqual([]);
+      expect(applyPendingRulings(after.retro_gates, [lastEntry]).summary).not.toEqual([]);
+      // With main showing the last ruling and the record merged: dropped.
+      const shown = withReconcile(claim({ pending_rulings: [lastEntry] }), RETRO_GATES, "merged");
+      expect(rulingsDrops(withPending(shown), shown).pending).toEqual([lastEntry]);
     });
 
     test("a closed reconcile PR does not keep an entry main shows", () => {

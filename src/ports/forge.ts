@@ -192,13 +192,16 @@ export type PostReviewRequest = { readonly commit_sha: GitSha; readonly body: st
 /**
  * An owner's inbox issue (Story 4.2): an open issue labelled with the inbox
  * label. `owner` is its first assignee, or `null` when it has none; `body`
- * is `""` for an empty body; `url` is the issue's web page.
+ * is `""` for an empty body; `url` is the issue's web page; `by_runner`
+ * whether the runner opened it (its author is the forge's bot account),
+ * `false` for an issue a person opened or labelled (Epic 4 retro item 7).
  */
 export type InboxIssue = {
   readonly number: number;
   readonly owner: string | null;
   readonly body: string;
   readonly url: string;
+  readonly by_runner: boolean;
 };
 
 /**
