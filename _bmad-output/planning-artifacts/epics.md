@@ -2675,6 +2675,10 @@ So that I can compare lanes and measure the 0.x success signal from Xarabot's ow
 - **Per repo.** The report gives one figure per repo: each repo's merged Stories over its own builders' spans, so a host that also runs Xarabot's lanes still gives the SPEC's figure for Xaravel's work.
 - **The forge read.** This Story adds the read of PRs merged in a period to the `Forge` port, the GitHub and fake forges, and the forge contract suite. Its manifest globs are widened to cover them (`src/ports/forge.ts`, `src/adapters/forge/**` and their tests and contracts), with no graph change.
 
+**Maintainer decisions (2026-10-30, `planning:status.2`'s open questions):**
+- **Units done** are the unit journal records whose result is `done`, of every unit kind, including one that then parks awaiting approval. The median unit time and the first-pass review rate are taken over the same records. The Stories-per-hour figure still counts merged Stories from the forge.
+- **Review cost** goes on the builder's row: the agent and model of the unit record, which today includes its review passes' tokens and cost. The report says that a row's cost includes its reviews, whoever the reviewer was. No journal field is added.
+
 ### Story 6.5: Status and report verification
 
 As the Maintainer,
