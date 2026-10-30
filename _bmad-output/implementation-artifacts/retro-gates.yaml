@@ -373,19 +373,19 @@ epics:
         route: lane
         blocking: false
         globs: ["src/adapters/forge/github/**", "src/adapters/forge/fake/**", "test/adapters/forge/**", "test/contracts/**", "src/ports/forge.ts", "test/ports/forge.test.ts", "docs/maintainer/app-permissions.md", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts"]
-        status: open
+        status: done
       - id: "epic-4-retro-item-3-inbox-prefix-and-clearing"
         text: "nextCoordinator adds waiting-on-maintainer: only when every idle reason is a Maintainer cause, and the inbox step clears the stale body of every open xarabot-inbox issue that is not an owner's current inbox (unassigned or duplicate); tests for both (C7, C8)"
         route: lane
         blocking: false
         globs: ["src/core/next/coordinator.ts", "test/core/next/**", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "test/lane/reconcile-step.test.ts", "test/e2e/parallel-epics.test.ts", "test/e2e/parallel-epics-harness.ts"]
-        status: open
+        status: done
       - id: "epic-4-retro-item-4-rulings-runbook-and-doc-drift"
         text: "Bring docs up to the as-built rulings: fix self-host.md:623 and :644, add a comment-rulings section (grammar, verbs and authority, replies, pending list, dismissals, xarabot rule), name readRulings and ruling replies in app-permissions.md's issues row, name xarabot-rule in GoSchema's comment (A3, A4)"
         route: lane
         blocking: false
         globs: ["docs/maintainer/self-host.md", "docs/maintainer/app-permissions.md", "src/core/schemas/retro-gates.ts", "test/core/schemas/**", "test/adapters/forge/github/http.test.ts"]
-        status: open
+        status: done
       - id: "epic-4-retro-item-5-consolidate-inbox-and-rulings-rules"
         text: "Consolidate Epic 4's duplicated rules: one exported open-item status predicate, one inbox ownership and listing rule shared by renderDigest and inboxOwner, the digest stamp through coordinatorSwap, one forge-call and log helper for the inbox and rulings steps, unitKind() in retro-gates-edit.ts (D1, D2)"
         route: lane
