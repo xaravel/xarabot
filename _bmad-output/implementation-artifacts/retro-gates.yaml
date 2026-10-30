@@ -283,7 +283,7 @@ epics:
         route: maintainer
         blocking: false
         globs: []
-        status: open
+        status: done
       - id: "epic-3-retro-item-8-consolidate-the-review-plumbing"
         text: "Consolidate the review plumbing: one shared passed-gate call, allowance re-check and fix-push helper in the session module; share planning and retro ciAndGate; one AGENT_CONFIG_DIRS rule for the write check and the review checkout; one missing-commit fetch helper; take the codex credential file name from the adapter in lane-run.ts (D1, D2)"
         route: lane
@@ -356,3 +356,45 @@ epics:
         blocking: false
         globs: []
         status: deferred
+  "4":
+    retro:
+      verdict: accepted-with-open-items
+      unit: "retro:4"
+      recorded_at: "2026-10-30T06:05:14Z"
+    items:
+      - id: "epic-4-retro-item-1-keep-the-last-block-ruling"
+        text: "Keep the last block/unblock ruling across an in-flight reconcile PR: rulingsDrops must not drop a pending entry while an open reconcile PR's retro-gates.yaml can still change what main shows (e.g. drop only when main shows it and no reconcile PR is open); tests for block then unblock with the first PR open, and the mirror (C1)"
+        route: lane
+        blocking: false
+        globs: ["src/core/rulings/**", "test/core/rulings/**", "src/core/reconcile/**", "test/core/reconcile/**", "src/core/ledger/edits.ts", "test/core/ledger/edits.test.ts", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts"]
+        status: open
+      - id: "epic-4-retro-item-2-rulings-cursor-skips-no-comment"
+        text: "Make the GitHub readRulings cursor never pass a comment it has not returned, so with two or more inboxes a comment posted on one issue while another is read is read on a later run; adapter and contract tests for a comment posted between two issue reads (C2)"
+        route: lane
+        blocking: false
+        globs: ["src/adapters/forge/github/**", "src/adapters/forge/fake/**", "test/adapters/forge/**", "test/contracts/**", "src/ports/forge.ts", "test/ports/forge.test.ts", "docs/maintainer/app-permissions.md", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts"]
+        status: open
+      - id: "epic-4-retro-item-3-inbox-prefix-and-clearing"
+        text: "nextCoordinator adds waiting-on-maintainer: only when every idle reason is a Maintainer cause, and the inbox step clears the stale body of every open xarabot-inbox issue that is not an owner's current inbox (unassigned or duplicate); tests for both (C7, C8)"
+        route: lane
+        blocking: false
+        globs: ["src/core/next/coordinator.ts", "test/core/next/**", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "test/lane/reconcile-step.test.ts", "test/e2e/parallel-epics.test.ts", "test/e2e/parallel-epics-harness.ts"]
+        status: open
+      - id: "epic-4-retro-item-4-rulings-runbook-and-doc-drift"
+        text: "Bring docs up to the as-built rulings: fix self-host.md:623 and :644, add a comment-rulings section (grammar, verbs and authority, replies, pending list, dismissals, xarabot rule), name readRulings and ruling replies in app-permissions.md's issues row, name xarabot-rule in GoSchema's comment (A3, A4)"
+        route: lane
+        blocking: false
+        globs: ["docs/maintainer/self-host.md", "docs/maintainer/app-permissions.md", "src/core/schemas/retro-gates.ts", "test/core/schemas/**", "test/adapters/forge/github/http.test.ts"]
+        status: open
+      - id: "epic-4-retro-item-5-consolidate-inbox-and-rulings-rules"
+        text: "Consolidate Epic 4's duplicated rules: one exported open-item status predicate, one inbox ownership and listing rule shared by renderDigest and inboxOwner, the digest stamp through coordinatorSwap, one forge-call and log helper for the inbox and rulings steps, unitKind() in retro-gates-edit.ts (D1, D2)"
+        route: lane
+        blocking: false
+        globs: ["src/core/next/epic-gates.ts", "src/core/next/next.ts", "src/core/next/coordinator.ts", "test/core/next/**", "src/core/inbox/**", "test/core/inbox/**", "src/core/rulings/**", "test/core/rulings/**", "src/core/reconcile/retro-gates-edit.ts", "test/core/reconcile/**", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts", "src/lane/rule.ts", "test/lane/rule.test.ts", "src/lane/session.ts", "test/lane/session.test.ts", "test/boundaries.test.ts", "test/support/boundaries.ts"]
+        status: open
+      - id: "epic-4-retro-item-6-correct-course-for-epic-4-drift"
+        text: "Run bmad-correct-course for Epic 4's drift: spine ledger v6, pending_rulings in AD-28, the Forge port's inbox operations, SPEC CAP-9 and Escalations; decide how settled deferrals (4.1-d1, 4.6-d1) leave the digest, dismissal pruning and recurrence, an early checkpoint go, resolves merge order and the first null-cursor read; route the residuals; close Epic 3 item 7 (A4-A6, C3-C6)"
+        route: maintainer
+        blocking: false
+        globs: []
+        status: waiting
