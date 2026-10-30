@@ -1,21 +1,18 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-3-inbox-prefix-and-clearing",
-  "state": "parked",
+  "state": "merging",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
-  "generation": 1,
+  "generation": 2,
   "globs": [
     "src/core/next/coordinator.ts",
     "src/lane/inbox-step.ts",
-    "test/core/next/**",
-    "test/e2e/parallel-epics-harness.ts",
-    "test/e2e/parallel-epics.test.ts",
-    "test/lane/inbox-step.test.ts",
-    "test/lane/reconcile-step.test.ts"
+    "test/core/next/coordinator.test.ts",
+    "test/lane/inbox-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:13:49.178Z",
+  "heartbeat_at": "2026-10-30T08:15:38.351Z",
   "pr": 295,
   "pr_owner": "edanisko",
   "base_sha": "98c8cfe6dcb31c949e48c70ec01d72fdc96f3dc3",
@@ -23,23 +20,13 @@
   "reviewed_sha": "034f17c2e48484a46342b8a62bece097f30ebb62",
   "passed_sha": "034f17c2e48484a46342b8a62bece097f30ebb62",
   "enqueued_sha": null,
-  "approved_sha": null,
+  "approved_sha": "034f17c2e48484a46342b8a62bece097f30ebb62",
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [
     "anthropic"
   ],
-  "park": {
-    "kind": "awaiting-approval",
-    "reason": null,
-    "inbox_owner": "edanisko",
-    "globs_held": [
-      "src/core/next/coordinator.ts",
-      "src/lane/inbox-step.ts",
-      "test/core/next/coordinator.test.ts",
-      "test/lane/inbox-step.test.ts"
-    ]
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
