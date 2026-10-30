@@ -1,10 +1,10 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-5-consolidate-inbox-and-rulings-rules",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
-  "lane": "coordinator",
+  "lane": "builder-1",
   "generation": 2,
   "globs": [
     "src/core/inbox/render-digest.ts",
@@ -22,7 +22,7 @@
     "test/lane/session.test.ts",
     "test/support/boundaries.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:44:28.596Z",
+  "heartbeat_at": "2026-10-30T08:47:19Z",
   "pr": 297,
   "pr_owner": "edanisko",
   "base_sha": "1c1b0c0e6e9dd2307fafaf094e7e079d4ce0b246",
