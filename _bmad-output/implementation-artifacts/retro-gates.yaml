@@ -391,7 +391,7 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/next/epic-gates.ts", "src/core/next/next.ts", "src/core/next/coordinator.ts", "test/core/next/**", "src/core/inbox/**", "test/core/inbox/**", "src/core/rulings/**", "test/core/rulings/**", "src/core/reconcile/retro-gates-edit.ts", "test/core/reconcile/**", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts", "src/lane/rule.ts", "test/lane/rule.test.ts", "src/lane/session.ts", "test/lane/session.test.ts", "test/boundaries.test.ts", "test/support/boundaries.ts"]
-        status: open
+        status: done
       - id: "epic-4-retro-item-6-correct-course-for-epic-4-drift"
         text: "Run bmad-correct-course for Epic 4's drift: spine ledger v6, pending_rulings in AD-28, the Forge port's inbox operations, SPEC CAP-9 and Escalations; decide how settled deferrals (4.1-d1, 4.6-d1) leave the digest, dismissal pruning and recurrence, an early checkpoint go, resolves merge order and the first null-cursor read; route the residuals; close Epic 3 item 7 (A4-A6, C3-C6)"
         route: maintainer
