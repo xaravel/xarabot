@@ -11,7 +11,7 @@
     "docs/maintainer/self-host.md",
     "src/core/schemas/retro-gates.ts"
   ],
-  "heartbeat_at": "2026-10-30T08:15:55.553Z",
+  "heartbeat_at": "2026-10-30T08:16:00.269Z",
   "pr": 292,
   "pr_owner": "edanisko",
   "base_sha": "249d6a4993ddf0fd7aa5fd195617e5b3ac08c396",
