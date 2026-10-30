@@ -116,6 +116,11 @@ epic_packages:
   "3": ["@xaravel/web"]
 live_evidence_checks:
   "2": ["XARABOT_LIVE=1 bun test test/contracts/", "bun test test/e2e/"]
+glob_coverage:
+  tests:
+    - {path: "src/<p>.ts", test: "test/<p>.test.ts"}
+  wiring:
+    - {path: "src/ports/<x>.ts", needs_if_present: ["test/contracts/<x>.contract.ts"]}
 `;
     const policy = `schema_version: 1
 unattended_adapters: [claude, pi]
@@ -136,6 +141,10 @@ owner_approval_paths: ["**"]
     expect(c.lockfile_command).toEqual(["bun", "install"]);
     expect(c.epic_packages).toEqual({ "3": ["@xaravel/web"] });
     expect(c.live_evidence_checks).toEqual({ "2": ["XARABOT_LIVE=1 bun test test/contracts/", "bun test test/e2e/"] });
+    expect(c.glob_coverage).toEqual({
+      tests: [{ path: "src/<p>.ts", test: "test/<p>.test.ts" }],
+      wiring: [{ path: "src/ports/<x>.ts", needs: [], needs_if_present: ["test/contracts/<x>.contract.ts"], only_new: false }],
+    });
     expect(p.unattended_adapters).toEqual(["claude", "pi"]);
     expect(p.effective_protected_paths).toEqual([
       ".xarabot/**",
@@ -197,6 +206,8 @@ const STOP_CASES: readonly StopCase[] = [
   { name: "config path_key without path_map", files: { [CONFIG_PATH]: `${CONFIG}manifests: {dir: m, path_key: area}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "path_key and path_map" },
   { name: "config empty path_map glob list", files: { [CONFIG_PATH]: `${CONFIG}manifests: {dir: m, path_key: a, path_map: {web: []}}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "path_map" },
   { name: "config unknown branches key", files: { [CONFIG_PATH]: `${CONFIG}branches: {story: s/, other: o/}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "other" },
+  { name: "config glob_coverage empty", files: { [CONFIG_PATH]: `${CONFIG}glob_coverage: {}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "glob_coverage: set tests, wiring or both" },
+  { name: "config glob_coverage unknown placeholder", files: { [CONFIG_PATH]: `${CONFIG}glob_coverage: {tests: [{path: "src/<p>.ts", test: "test/<q>.ts"}]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "glob_coverage.tests.0.test.0" },
   { name: "config empty lockfile_command", files: { [CONFIG_PATH]: `${CONFIG}lockfile_command: []\n` }, kind: "invalid", path: CONFIG_PATH, reason: "lockfile_command" },
   { name: "config live_evidence_checks bad key", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"0": [bun test]}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },
   { name: "config live_evidence_checks empty list", files: { [CONFIG_PATH]: `${CONFIG}live_evidence_checks: {"2": []}\n` }, kind: "invalid", path: CONFIG_PATH, reason: "live_evidence_checks" },

@@ -4,6 +4,7 @@ import { approvalPaths } from "../core/ci/approval.ts";
 import { pollDelayMs } from "../core/ci/checks.ts";
 import type { RepoConfig } from "../core/config/load-repo-config.ts";
 import { coordinatorWriteRules } from "../core/lane/write-check.ts";
+import { describeMissing, missingGlobs } from "../core/manifests/coverage.ts";
 import { normalizeGlob } from "../core/manifests/globs.ts";
 import { park, release, startMerging } from "../core/ledger/edits.ts";
 import { unitBranch } from "../core/next/coordinator.ts";
@@ -13,6 +14,7 @@ import { checkRetroDiff, checkRetroResult, retroDocGlob, type RetroTree } from "
 import { addProvider } from "../core/review/reviewer.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../core/sanitize.ts";
 import { describeIssues } from "../core/schemas/common.ts";
+import type { GlobCoverage } from "../core/schemas/config.ts";
 import { EpicPrsSchema, type EpicPr, type EpicPrs } from "../core/schemas/epic-prs.ts";
 import type { RetroRecordResult } from "../core/schemas/retro-gates.ts";
 import type { RetroResult } from "../core/schemas/session-result.ts";
@@ -60,7 +62,9 @@ import type { TreeFiles } from "./tree-files.ts";
  *   checked against `EpicPrsSchema`. Any forge failure is a failed attempt.
  *   The session never touches GitHub.
  * - The `retro` result is checked before the commit (`checkRetroResult`:
- *   item ids, globs that normalize and are not refused) and, after the
+ *   item ids, globs that normalize and are not refused; with
+ *   `glob_coverage` set, `coverageFailures`: each `lane` item's globs miss
+ *   no glob the table needs, on fresh `main`'s tree) and, after the
  *   commit and before any push, against the commit through `TreeFiles`
  *   (`checkRetroDiff`: the items are the action items the commit appends,
  *   exactly one retro document is added or changed, and its verdict is the
@@ -131,6 +135,25 @@ export function epicStories(snapshot: Snapshot, epic: number): string[] {
 function normalizedGlob(glob: string): string {
   const n = normalizeGlob(glob);
   return n.ok ? n.value : glob;
+}
+
+/**
+ * The `glob_coverage` failures of a retro result (Epic 3 retro item 14):
+ * each `lane` item whose globs (those that normalize) miss a glob the table
+ * needs on `tree`, naming the item and each missing glob.
+ */
+export function coverageFailures(result: Pick<RetroResult, "items">, coverage: GlobCoverage, tree: readonly string[]): string[] {
+  const failures: string[] = [];
+  for (const item of result.items) {
+    if (item.route !== "lane") continue;
+    const globs = item.globs.flatMap((g) => {
+      const n = normalizeGlob(g);
+      return n.ok ? [n.value] : [];
+    });
+    const missing = missingGlobs(globs, coverage, tree);
+    if (missing.length > 0) failures.push(`item ${item.id}: its globs miss ${describeMissing(missing)}`);
+  }
+  return failures;
 }
 
 const oneLine = (text: string, secrets: readonly string[]): string => sanitizeAgentText(text, { secrets }).replace(/\s+/g, " ").trim();
@@ -324,8 +347,12 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       note(`fresh main ${onto}`);
       const repoConfig = repo.repo.config;
 
-      // 2. The result on its own: item ids and globs.
-      const pre = checkRetroResult(epic, result, repoConfig, repo.repo.policy);
+      // 2. The result on its own: item ids and globs, and with `glob_coverage` the lane items' coverage.
+      const coverage = repoConfig.glob_coverage;
+      const pre = [
+        ...checkRetroResult(epic, result, repoConfig, repo.repo.policy),
+        ...(coverage === undefined ? [] : coverageFailures(result, coverage, snap.main.tree)),
+      ];
       if (pre.length > 0) return await failed(`retro result: ${pre.join("; ")}`);
       // Every glob normalized (the check passed it): the record and the PR carry what retro-gates.yaml will.
       const normalized: RetroResult = { ...result, items: result.items.map((i) => ({ ...i, globs: i.globs.map(normalizedGlob) })) };
@@ -545,7 +572,13 @@ export function createRetroStep(deps: RetroStepDeps): CoordinatorStep {
       } catch (e) {
         return { ok: false, reason: `prefetch: cannot write ${prsPath}: ${message(e)}` };
       }
-      const built = buildRetroPrompt({ template: PACKAGE_TEMPLATE, unit: { kind: "retro", id: unit, epic, prs_path: prsPath }, sections, result_path: layout.resultPath });
+      const coverage = config.glob_coverage === undefined ? {} : { coverage: config.glob_coverage };
+      const built = buildRetroPrompt({
+        template: PACKAGE_TEMPLATE,
+        unit: { kind: "retro", id: unit, epic, prs_path: prsPath, ...coverage },
+        sections,
+        result_path: layout.resultPath,
+      });
       return built.ok ? { ok: true, value: built.value } : { ok: false, reason: `prompt ${built.error.kind}: ${built.error.message}` };
     };
 

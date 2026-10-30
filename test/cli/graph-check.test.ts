@@ -124,6 +124,53 @@ describe("xarabot graph check", () => {
     expect(r.stdout.trimEnd().split("\n").slice(1)).toEqual(["1 → []", "2 → [1]", "3 → [2]"]);
   });
 
+  describe("glob_coverage (Epic 3 retro item 14)", () => {
+    const COVERAGE = [
+      "glob_coverage:",
+      "  tests:",
+      '    - {path: "src/<p>.ts", test: "test/<p>.test.ts"}',
+      '    - {path: "src/<dir>/**", test: "test/<dir>/**"}',
+      "  wiring:",
+      '    - {path: "src/ports/<x>.ts", needs: ["test/ports/<x>.test.ts"], needs_if_present: ["test/contracts/<x>.contract.ts"]}',
+    ];
+    const manifest = (id: string, globs: readonly string[]) =>
+      `---\nstory_id: "${id}"\nepic: ${id.split(".")[0]}\nsprint_key: k${id.replace(".", "-")}\ntitle: T\nglobs: ${JSON.stringify(globs)}\n---\n`;
+    const files = (config: readonly string[]) => ({
+      [MD]: "# Epics\n\n## Epic 1: One\n\n### Story 1.1: A\n\n### Story 1.2: B\n\n### Story 1.3: C\n",
+      ".xarabot/config.yaml": [...CONFIG_HEAD, "manifests: {dir: stories}", ...config].join("\n"),
+      "test/contracts/agent.contract.ts": "",
+      "stories/1.1.md": manifest("1.1", ["src/core/a.ts", "src/core/b/**"]),
+      "stories/1.2.md": manifest("1.2", ["src/ports/agent.ts", "test/ports/**"]),
+      "stories/1.3.md": manifest("1.3", ["src/core/a.ts", "test/core/**"]),
+    });
+
+    test("a warning per manifest naming each missing glob, and exit 0", () => {
+      const r = run(fixture(files(COVERAGE)));
+      expect(r.code).toBe(0);
+      expect(r.stdout.trimEnd().split("\n").slice(1)).toEqual(["1 → [] stories: 1.1, 1.2, 1.3"]);
+      expect(r.stderr).toBe(
+        [
+          "warning: Story 1.1 (stories/1.1.md) globs miss `test/core/a.test.ts` (for `src/core/a.ts`), `test/core/b/**` (for `src/core/b/**`)",
+          "warning: Story 1.2 (stories/1.2.md) globs miss `test/contracts/agent.contract.ts` (for `src/ports/agent.ts`)",
+          "",
+        ].join("\n"),
+      );
+    });
+
+    test("no glob_coverage key: no coverage warning", () => {
+      const r = run(fixture(files([])));
+      expect(r.code).toBe(0);
+      expect(r.stderr).toBe("");
+    });
+
+    test("a glob_coverage key that fails its schema: exit 1 naming it", () => {
+      const r = run(fixture(files(["glob_coverage: {}"])));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toStartWith("xarabot graph check: .xarabot/config.yaml: ");
+      expect(r.stderr).toContain("set tests, wiring or both");
+    });
+  });
+
   test("outside a git repo: exit 1", () => {
     const dir = mkdtempSync(join(tmpdir(), "xarabot-nogit-"));
     dirs.push(dir);

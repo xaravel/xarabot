@@ -19,7 +19,9 @@ import {
   type PromptMode,
   type StatusPlanningPromptUnit,
 } from "../../../src/core/prompt/build-prompt.ts";
+import { coverageRuleLines } from "../../../src/core/manifests/coverage.ts";
 import { PACKAGE_TEMPLATE, type PromptTemplate } from "../../../src/core/prompt/template.ts";
+import { GlobCoverageSchema, type GlobCoverage } from "../../../src/core/schemas/config.ts";
 import { BuildResultSchema, PlanningResultSchema, RetroResultSchema, ReviewResultSchema } from "../../../src/core/schemas/session-result.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
@@ -997,5 +999,69 @@ describe("review prompt (Story 3.4)", () => {
     const e = reviewFailure({ template: { ...PACKAGE_TEMPLATE, result_review: undefined } as unknown as PromptTemplate });
     expect(e.kind).toBe("invalid-template");
     expect(e.message).toMatch(/template: result_review/);
+  });
+});
+
+// ------------------------------------------------------------ glob coverage (Epic 3 retro item 14)
+
+describe("glob coverage in the graph planning and retro prompts (Epic 3 retro item 14)", () => {
+  const COVERAGE = GlobCoverageSchema.parse({
+    tests: [{ path: "src/<p>.ts", test: "test/<p>.test.ts" }],
+    wiring: [{ path: "src/ports/<x>.ts", needs: ["test/ports/<x>.test.ts"], needs_if_present: ["test/contracts/<x>.contract.ts"] }],
+  });
+  const LINES = coverageRuleLines(COVERAGE).join("\n");
+
+  test("no glob_coverage: no prompt states a rule", () => {
+    for (const p of [planning({ unit: GRAPH_UNIT }), planning(), planning({ unit: FIRST_UNIT }), retro()]) {
+      expect(p).not.toContain("# Globs cover tests and wiring");
+      expect(p).not.toContain("coverage table");
+    }
+  });
+
+  test("graph: the rule, generated from the table, after the task and before the rules", () => {
+    const p = planning({ unit: { ...GRAPH_UNIT, coverage: COVERAGE } });
+    expect(p).toContain("# Globs cover tests and wiring");
+    expect(p).toContain(`\n\n${LINES}\n\n# Rules`);
+    expect(p).toContain("- `src/<p>.ts` needs its tests, `test/<p>.test.ts`.");
+    expect(p).toContain("- `src/ports/<x>.ts` needs `test/ports/<x>.test.ts`, and each of `test/contracts/<x>.contract.ts` that matches a file this repository has.");
+    expect(p).toContain("`test/**` covers `test/a.test.ts`");
+    const order = ["# Task", "# Globs cover tests and wiring", "# Rules", "# Result"].map((h) => p.indexOf(h));
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(p).not.toMatch(/\{\{[^{}]*\}\}/);
+  });
+
+  test("graph with a path key: the session writes no globs, so no rule", () => {
+    const p = planning({ unit: { ...GRAPH_UNIT, path_key: { key: "area", values: ["core"] }, coverage: COVERAGE } });
+    expect(p).not.toContain("# Globs cover tests and wiring");
+  });
+
+  test("retro: the rule, generated from the table, after the task and before the rules", () => {
+    const p = retro({ unit: { kind: "retro", id: "retro:2", epic: 2, prs_path: PRS, coverage: COVERAGE } });
+    expect(p).toContain(`\n\n${LINES}\n\n# Rules`);
+    const order = ["# Task", "# Globs cover tests and wiring", "# Rules", "# Result"].map((h) => p.indexOf(h));
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(order.every((i) => i >= 0)).toBe(true);
+  });
+
+  test("another table, another text: nothing of Xarabot's layout is built in", () => {
+    const other = GlobCoverageSchema.parse({ tests: [{ path: "lib/<m>.rb", test: "spec/<m>_spec.rb" }] });
+    const p = planning({ unit: { ...GRAPH_UNIT, coverage: other } });
+    expect(p).toContain("- `lib/<m>.rb` needs its tests, `spec/<m>_spec.rb`.");
+    expect(p).not.toContain("src/");
+  });
+
+  test("the part carries no planning or retro banned word", () => {
+    const text = PACKAGE_TEMPLATE.glob_coverage;
+    for (const table of [PLANNING_BANNED, RETRO_BANNED]) expect(table.filter((b) => b.pattern.test(text)).map((b) => b.what)).toEqual([]);
+    const p = planning({ unit: { ...GRAPH_UNIT, coverage: COVERAGE } });
+    expect(PLANNING_BANNED.filter((b) => b.pattern.test(p)).map((b) => b.what)).toEqual([]);
+  });
+
+  test("a coverage table that fails its schema is invalid input", () => {
+    const bad = { tests: [{ path: "src/<p>.ts", test: "test/<q>.test.ts" }] } as unknown as GlobCoverage;
+    const r = buildPlanningPrompt(planningInput({ unit: { ...GRAPH_UNIT, coverage: bad } }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toContain("unit.coverage.tests.0.test.0: uses <q>");
   });
 });

@@ -146,7 +146,11 @@ export function planningPromptUnit(
   if (config.manifests === undefined) return { ok: false, reason: "graph planning needs manifests.dir in .xarabot/config.yaml" };
   const m = config.manifests;
   const pathKey = m.path_key === undefined ? null : { key: m.path_key, values: Object.keys(m.path_map ?? {}).sort() };
-  return { ok: true, value: { kind: "graph", id: unit, epics_path: config.epics_path, manifests_dir: m.dir, path_key: pathKey, headings: due.graph.headings } };
+  const coverage = config.glob_coverage === undefined ? {} : { coverage: config.glob_coverage };
+  return {
+    ok: true,
+    value: { kind: "graph", id: unit, epics_path: config.epics_path, manifests_dir: m.dir, path_key: pathKey, headings: due.graph.headings, ...coverage },
+  };
 }
 
 /** The commit message, PR title and PR body for a planning unit's `done` result. */

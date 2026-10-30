@@ -62,12 +62,14 @@ type MainOpts = {
   readonly graph?: boolean;
   /** Extra `policy.yaml` lines. */
   readonly policy?: readonly string[];
+  /** Extra `config.yaml` lines. */
+  readonly config?: readonly string[];
 };
 
 function mainFiles(o: MainOpts = {}): Record<string, string> {
   const epic2 = o.graph === true ? "### Story 2.1: Second\n\nBody.\n\n### Story 2.2: Third\n\nBody.\n" : "### Story 2.1: Second\n\nBody.\n";
   const files: Record<string, string> = {
-    ".xarabot/config.yaml": ["schema_version: 1", 'runner_version: "v1"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "bootstrapped_epics: [1]", "manifests:", "  dir: stories", ""].join("\n"),
+    ".xarabot/config.yaml": ["schema_version: 1", 'runner_version: "v1"', "maintainer: edanisko", `standing_authority_path: ${AUTHORITY}`, "bootstrapped_epics: [1]", "manifests:", "  dir: stories", ...(o.config ?? []), ""].join("\n"),
     ".xarabot/policy.yaml": ["schema_version: 1", "unattended_adapters: [claude]", ...(o.policy ?? []), ""].join("\n"),
     ".xarabot/human-live-steps.yaml": "schema_version: 1\nsteps: []\n",
     ".xarabot/prompts/house.md": "HOUSE RULE: keep it short.\n",
@@ -576,6 +578,26 @@ describe("createPlanningStep: the prompt and the clone", () => {
     expect(p).toContain("write `stories/<id>.md`");
     expect(p).toContain("Run no skill, and never run `bmad-sprint-planning`.");
     expect(h.prepares[0]?.branch).toBe("xarabot/planning-graph.1");
+  });
+
+  test("graph: with glob_coverage the prompt states the configured table; with none it states no rule (Epic 3 retro item 14)", async () => {
+    const config = ["glob_coverage:", "  tests:", '    - {path: "lib/<m>.rb", test: "spec/<m>_spec.rb"}'];
+    const on = harness({ graph: true, config, records: [OWN_GRAPH], behaviors: [writes(planningResult("blocked"))] });
+    await on.run("planning:graph.1");
+    expect(on.prompts[0] ?? "").toContain("# Globs cover tests and wiring");
+    expect(on.prompts[0] ?? "").toContain("- `lib/<m>.rb` needs its tests, `spec/<m>_spec.rb`.");
+
+    const off = harness({ graph: true, records: [OWN_GRAPH], behaviors: [writes(planningResult("blocked"))] });
+    await off.run("planning:graph.1");
+    expect(off.prompts[0] ?? "").not.toContain("# Globs cover tests and wiring");
+  });
+
+  test("status: glob_coverage states no rule, since a status unit writes no globs", async () => {
+    const config = ["glob_coverage:", "  tests:", '    - {path: "lib/<m>.rb", test: "spec/<m>_spec.rb"}'];
+    const h = harness({ contextMissing: true, config, behaviors: [writes(planningResult("blocked"))] });
+    await h.run();
+    expect(h.prompts[0] ?? "").toContain("`bmad-sprint-planning`");
+    expect(h.prompts[0] ?? "").not.toContain("# Globs cover tests and wiring");
   });
 });
 
