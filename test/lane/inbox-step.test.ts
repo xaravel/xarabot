@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createFakeForge, type FakeForge } from "../../src/adapters/forge/fake/fake-forge.ts";
 import { EMPTY_INBOX_BODY, type OwnerDigest } from "../../src/core/inbox/render-digest.ts";
-import type { Forge } from "../../src/ports/forge.ts";
+import { forgeOk, type Forge, type InboxIssue } from "../../src/ports/forge.ts";
 import { digestMention, syncInboxes, type SyncInboxesParams } from "../../src/lane/inbox-step.ts";
 
 const live = () => ({ signal: new AbortController().signal });
@@ -77,7 +77,7 @@ describe("syncInboxes: bodies", () => {
     expect(w.fake.control.inboxComments(1001)).toEqual([digestMention("carol", 1, "https://github.com/fake/repo/issues/1001")]);
   });
 
-  test("an inbox already at the empty text is left alone; one with no owner is never touched", async () => {
+  test("an inbox already at the empty text is left alone", async () => {
     const w = world();
     const bob = await w.fake.forge.openInbox("bob", live());
     if (!bob.ok) throw new Error(bob.error.message);
@@ -118,6 +118,88 @@ describe("syncInboxes: bodies", () => {
     const r = await sync(w, { alice: digestOf("a", 1) }, { digestDue: true, signal: AbortSignal.abort() });
     expect(r).toEqual({ opened: [], written: [], stamped: false, mentioned: [] });
     expect(w.events).toEqual([]);
+  });
+});
+
+/**
+ * The fake forge plus open inbox issues it cannot make itself (unassigned, or
+ * an owner's second one), listed with its own and rewritten in place.
+ */
+function withExtra(w: World, extra: { number: number; owner: string | null; body: string }[]): Forge {
+  const f = spied(w.fake, w.events);
+  const view = (i: (typeof extra)[number]): InboxIssue => ({ ...i, url: `https://github.com/fake/repo/issues/${i.number}` });
+  return {
+    ...f,
+    inboxes: async (o) => {
+      const r = await f.inboxes(o);
+      return r.ok ? forgeOk([...r.value, ...extra.map(view)]) : r;
+    },
+    setInboxBody: async (n, b, o) => {
+      const i = extra.find((x) => x.number === n);
+      if (i === undefined) return f.setInboxBody(n, b, o);
+      w.events.push(`setInboxBody #${n}`);
+      i.body = b;
+      return forgeOk(view(i));
+    },
+  };
+}
+
+describe("syncInboxes: an open inbox issue that is no owner's inbox (Epic 4 retro item 3)", () => {
+  test("an unassigned issue and an owner's later issue are cleared; the owner's inbox gets the items; an unchanged second run writes nothing", async () => {
+    const w = world();
+    await sync(w, { alice: digestOf("alice's items", 1) });
+    const extra = [
+      { number: 1002, owner: null, body: "old items" },
+      { number: 1003, owner: "Alice", body: "alice's items" },
+    ];
+    const r = await sync(w, { alice: digestOf("alice's two items", 2) }, { forge: withExtra(w, extra), digestDue: true });
+    expect(r).toEqual({ opened: [], written: [1001, 1002, 1003], stamped: true, mentioned: [1001] });
+    expect(w.fake.control.inboxes().map((i) => [i.number, i.body])).toEqual([[1001, "alice's two items"]]);
+    expect(extra.map((i) => i.body)).toEqual([EMPTY_INBOX_BODY, EMPTY_INBOX_BODY]);
+    expect(w.logs).toContain("inbox step: #1002: cleared: not an owner's inbox (unassigned)");
+    expect(w.logs).toContain("inbox step: #1003: cleared: not an owner's inbox (#1001 is Alice's inbox)");
+    // Only the owner's inbox gets the mention.
+    expect(w.events.filter((e) => e.startsWith("inboxComment"))).toEqual(["inboxComment #1001"]);
+    w.events.length = 0;
+    expect((await sync(w, { alice: digestOf("alice's two items", 2) }, { forge: withExtra(w, extra) })).written).toEqual([]);
+  });
+
+  test("with no items anywhere, every open inbox issue ends at the empty text", async () => {
+    const w = world();
+    await sync(w, { bob: digestOf("bob's items", 1) });
+    const extra = [
+      { number: 1002, owner: "bob", body: "older items" },
+      { number: 1003, owner: null, body: EMPTY_INBOX_BODY },
+    ];
+    const r = await sync(w, {}, { forge: withExtra(w, extra) });
+    // #1003 already holds the empty text: left alone.
+    expect(r.written).toEqual([1001, 1002]);
+    expect(w.fake.control.inboxes().map((i) => i.body)).toEqual([EMPTY_INBOX_BODY]);
+    expect(extra.map((i) => i.body)).toEqual([EMPTY_INBOX_BODY, EMPTY_INBOX_BODY]);
+  });
+
+  test("a failed clear is logged and skipped; the next issue is still cleared", async () => {
+    const w = world();
+    const extra = [
+      { number: 1002, owner: null, body: "old" },
+      { number: 1003, owner: null, body: "old" },
+    ];
+    const base = withExtra(w, extra);
+    let failed = false;
+    const forge: Forge = {
+      ...base,
+      setInboxBody: async (n, b, o) => {
+        if (n === 1002 && !failed) {
+          failed = true;
+          return { ok: false, error: { kind: "transient", message: "502" } };
+        }
+        return base.setInboxBody(n, b, o);
+      },
+    };
+    const r = await sync(w, {}, { forge });
+    expect(r.written).toEqual([1003]);
+    expect(extra.map((i) => i.body)).toEqual(["old", EMPTY_INBOX_BODY]);
+    expect(w.logs.some((l) => l.includes("setInboxBody #1002 failed: transient: 502"))).toBe(true);
   });
 });
 

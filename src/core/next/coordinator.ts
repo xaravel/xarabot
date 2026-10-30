@@ -433,9 +433,10 @@ export const WAITING_ON_MAINTAINER = "waiting-on-maintainer: ";
  * The coordinator's next unit from a validated snapshot whose graph resolved
  * (AD-13): `reconcile` when due, then an open coordinator PR, then planning
  * (`nextPlanning`), then retro (`nextRetro`), then retro items
- * (`nextRetroItem`), else `idle`. An idle outcome
- * with a `live-evidence` reason starts `waiting-on-maintainer: ` and those
- * reasons' messages.
+ * (`nextRetroItem`), else `idle`. An idle outcome whose every reason
+ * besides `reconcile-not-due` is a Maintainer cause (a `live-evidence` one)
+ * starts `waiting-on-maintainer: ` and those reasons' messages (Story 4.2's
+ * every-reason rule); one with any other reason beside them has no prefix.
  * Never a Story. The open-PR position never returns a `reconcile` record (a
  * released or dead run's PR is the next `reconcile` run's to close), but a
  * live one still makes later positions wait.
@@ -504,10 +505,15 @@ export function nextCoordinator(snapshot: Snapshot): CoordinatorOutcome {
   const item = nextRetroItem(snapshot, reasons);
   if (item !== null) return { kind: "coordinator", unit: item, reasons };
 
-  const waiting = reasons.filter((x) => x.code === "live-evidence").map((x) => x.message);
-  const head = waiting.length === 0 ? [] : [`${WAITING_ON_MAINTAINER}${waiting.join("; ")}`];
-  const rest = reasons.filter((x) => x.code !== "live-evidence").map((x) => x.message);
-  return { kind: "idle", reason: [...head, NOTHING_DUE, ...rest].join("; "), reasons };
+  // Idle only for Maintainer causes: the reason says it waits on the Maintainer (Story 4.2's every-reason rule).
+  // `reconcile-not-due` is in every idle outcome and holds nothing back, so it is no cause.
+  const causes = reasons.filter((x) => x.code !== "reconcile-not-due");
+  if (causes.length > 0 && causes.every((x) => x.maintainer === true)) {
+    const head = `${WAITING_ON_MAINTAINER}${causes.map((x) => x.message).join("; ")}`;
+    const rest = reasons.filter((x) => x.code === "reconcile-not-due").map((x) => x.message);
+    return { kind: "idle", reason: [head, NOTHING_DUE, ...rest].join("; "), reasons };
+  }
+  return { kind: "idle", reason: [NOTHING_DUE, ...reasons.map((x) => x.message)].join("; "), reasons };
 }
 
 /** Whether Epic `epic` has a Story, no unmanifested heading, and every Story `done` (the done-check idiom of `epicHolds`). */
@@ -606,11 +612,11 @@ function nextRetro(snapshot: Snapshot, reasons: Reason[]): CoordinatorUnit | nul
   for (const c of retroCandidates(snapshot)) {
     const unit = `retro:${c.epic}`;
     if (!c.evidenceOnMain) {
-      reasons.push({ subject: unit, code: "live-evidence", message: `${unit} waits for the live evidence file ${c.evidence} on main` });
+      reasons.push({ subject: unit, code: "live-evidence", message: `${unit} waits for the live evidence file ${c.evidence} on main`, maintainer: true });
       continue;
     }
     if (!evidenceReady(c)) {
-      reasons.push({ subject: unit, code: "live-evidence", message: describeGaps(snapshot, c) });
+      reasons.push({ subject: unit, code: "live-evidence", message: describeGaps(snapshot, c), maintainer: true });
       continue;
     }
     const rec = snapshot.ledger.units.find((r) => r.unit === unit);
