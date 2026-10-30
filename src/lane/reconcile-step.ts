@@ -1004,7 +1004,11 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
     /** The view the inboxes render from, and the pending rulings this run's `retro-gates.yaml` edit carries. */
     type RulingsOutcome = { readonly view: Snapshot; readonly pending: readonly PendingRuling[] };
 
-    /** One `coordinator.json` swap (`edit` fenced on the run's own record unless `bare`); `true` once it landed. */
+    /**
+     * One `coordinator.json` swap (`edit` fenced on the run's own record
+     * unless `bare`), for the rulings and the digest stamp; `true` once it
+     * landed, else `<what> refused or failed: …` is noted.
+     */
     const coordinatorSwap = async (what: string, edit: LedgerEdit, bare = false): Promise<boolean> => {
       const r = await swapLedger({
         forge,
@@ -1014,7 +1018,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
         ...(deps.random !== undefined ? { random: deps.random } : {}),
       });
       if (r.ok) return true;
-      note(`rulings: ${what} refused or failed: ${r.error.message}`);
+      note(`${what} refused or failed: ${r.error.message}`);
       return false;
     };
 
@@ -1040,7 +1044,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       const commit = async (from: string | null, to: string, judged: readonly JudgedRuling<InboxComment>[]): Promise<boolean> => {
         const drops = rulingsDrops(rulingsView(snapshot, judged), snapshot);
         const edit = rulingsEdit({ by: identity, now: forgeNow(), coordinatorGeneration: coordinator.generation, cursor: { from, to }, judged, drops });
-        const ok = await coordinatorSwap("recordRulings", edit);
+        const ok = await coordinatorSwap("rulings: recordRulings", edit);
         if (ok) outcome = landed(judged, drops);
         return ok;
       };
@@ -1059,7 +1063,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
       if (drops.pending.length === 0 && drops.dismissals.length === 0) return outcome;
       aborted();
       const dropped = await coordinatorSwap(
-        "recordRulings (drops only)",
+        "rulings: recordRulings (drops only)",
         recordRulings({ by: identity, now: forgeNow(), generation: coordinator.generation, drop: drops }),
         true,
       );
@@ -1095,20 +1099,7 @@ export function createReconcileStep(deps: ReconcileStepDeps): CoordinatorStep {
           return false;
         }
         const slot = digestSlot(snapshot.now, config.digest_time);
-        const edit = fenced(
-          heartbeat({ unit, by: identity, now: forgeNow(), generation }),
-          stampDigest({ by: identity, now: forgeNow(), generation: coordinator.generation, slot }),
-        );
-        const r = await swapLedger({
-          forge,
-          edit: ledgerFence(edit),
-          signal: AbortSignal.any([input.signal, AbortSignal.timeout(callTimeoutMs)]),
-          sleep,
-          ...(deps.random !== undefined ? { random: deps.random } : {}),
-        });
-        if (r.ok) return true;
-        note(`digest: stampDigest refused or failed: ${r.error.message}`);
-        return false;
+        return await coordinatorSwap("digest: stampDigest", stampDigest({ by: identity, now: forgeNow(), generation: coordinator.generation, slot }));
       };
       await syncInboxes({ forge, digests, digestDue: due, stamp, log: note, signal: input.signal, callTimeoutMs });
     };

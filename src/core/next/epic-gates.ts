@@ -3,8 +3,22 @@ import type { Snapshot, SnapshotManifest } from "../schemas/snapshot.ts";
 import { storyKey } from "../story-id.ts";
 import type { Reason } from "./reasons.ts";
 
-/** The item statuses that hold nothing; an item with any other status is open and holds. */
-const CLOSED_ITEM: ReadonlySet<RetroItem["status"]> = new Set<RetroItem["status"]>(["deferred", "done"]);
+/** The retro item statuses that hold nothing: the two a ruling sets (`/xarabot defer`, `/xarabot done`) through the gates edit. */
+export type ClosedItemStatus = "deferred" | "done";
+/** The retro item statuses that are open: `open`, `in-progress` and `waiting`. */
+export type OpenItemStatus = Exclude<RetroItem["status"], ClosedItemStatus>;
+
+const CLOSED_ITEM: ReadonlySet<RetroItem["status"]> = new Set<ClosedItemStatus>(["deferred", "done"]);
+
+/**
+ * Whether a retro item's status is open (`open`, `in-progress` or
+ * `waiting`): the one rule the gates, the digest and the rulings share. An
+ * open item holds, and lists in the Maintainer's inbox when routed to them;
+ * a closed one (`ClosedItemStatus`) holds nothing.
+ */
+export function isOpenItem(status: RetroItem["status"]): status is OpenItemStatus {
+  return !CLOSED_ITEM.has(status);
+}
 
 /**
  * The Epic-level holds the builder and the planning position share (FR2,
@@ -80,7 +94,7 @@ export function epicHolds(snap: Snapshot): EpicHolds {
     return {
       epic: e.number,
       rejected: entry?.retro?.verdict === "rejected" && entry.retro.go === undefined,
-      items: (entry?.items ?? []).filter((item) => !CLOSED_ITEM.has(item.status)),
+      items: (entry?.items ?? []).filter((item) => isOpenItem(item.status)),
       // A checkpoint with no go: `due` once its retro is done (a bootstrapped Epic counts as retro done, AD-12).
       checkpoint: checkpoints.has(e.number) && entry?.checkpoint === undefined ? { due: entry?.retro !== undefined || bootstrapped.has(e.number) } : null,
     };

@@ -1,3 +1,5 @@
+import { inboxOwner, parkedOwner } from "../inbox/render-digest.ts";
+import { isOpenItem } from "../next/epic-gates.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../sanitize.ts";
 import { isUnitId, unitKind, type UnitRecord } from "../schemas/ledger.ts";
 import { RETRO_ITEM_ID_PATTERN, type RetroItem } from "../schemas/retro-gates.ts";
@@ -17,10 +19,13 @@ import { storyKey } from "../story-id.ts";
  * (`config.maintainer`), checked before the target; `rebuild`, `release` and
  * `dismiss` count from the item's owner or the Maintainer, checked after the
  * target, which finds the owner. The owner is the one whose inbox lists the
- * unit, by `renderDigest`'s rules: a `parked` `needs-approval` or `blocked`
- * `human-live-step` record is the Maintainer's, any other parked record its
- * `park.inbox_owner`'s, and every other inbox item the Maintainer's.
+ * unit, by `renderDigest`'s own rules (`inboxOwner`, `parkedOwner`): a
+ * `parked` `needs-approval` or `blocked` `human-live-step` record is the
+ * Maintainer's, any other parked record its `park.inbox_owner`'s, and every
+ * other inbox item the Maintainer's.
  */
+
+export { inboxOwner };
 
 export const RULING_VERBS = ["go", "approve", "block", "unblock", "done", "defer", "rebuild", "release", "dismiss"] as const;
 export type RulingVerb = (typeof RULING_VERBS)[number];
@@ -100,15 +105,6 @@ type Target = { readonly ok: true; readonly owner: string } | { readonly ok: fal
 
 const fail = (reason: string): Target => ({ ok: false, reason });
 
-/** The owner of a parked record's inbox item, by `renderDigest`'s rules. */
-function parkedOwner(snapshot: Snapshot, r: UnitRecord): string | null {
-  const park = r.park;
-  if (r.state !== "parked" || park === null) return null;
-  if (park.kind === "needs-approval") return snapshot.config.maintainer;
-  if (park.kind === "blocked" && park.reason === "human-live-step") return snapshot.config.maintainer;
-  return park.inbox_owner;
-}
-
 const recordOf = (snapshot: Snapshot, unit: string): UnitRecord | undefined => snapshot.ledger.units.find((r) => r.unit === unit);
 
 /** The part of a unit id after its kind. */
@@ -119,51 +115,6 @@ export function manifestOf(snapshot: Snapshot, unit: string): SnapshotManifest |
   if (unitKind(unit) !== "story") return undefined;
   const key = storyKey(bodyOf(unit));
   return snapshot.manifests.find((m) => storyKey(m.story_id) === key);
-}
-
-const isOpenItem = (status: RetroItem["status"]): boolean => status !== "done" && status !== "deferred";
-
-/** Whether the Maintainer's inbox lists `unit` as one of its own items (not a parked record). */
-function maintainerLists(snapshot: Snapshot, unit: string): boolean {
-  const body = bodyOf(unit);
-  switch (unitKind(unit)) {
-    case "checkpoint": {
-      if (!snapshot.graph.ok || !snapshot.graph.value.checkpoints.includes(Number(body))) return false;
-      const entry = snapshot.retro_gates.epics[body];
-      // A bootstrapped Epic counts as retro done, as renderDigest has it.
-      const retroDone = entry?.retro !== undefined || snapshot.config.bootstrapped_epics.includes(Number(body));
-      return retroDone && entry?.checkpoint === undefined;
-    }
-    case "retro": {
-      const retro = snapshot.retro_gates.epics[body]?.retro;
-      return retro !== undefined && retro.verdict === "rejected" && retro.go === undefined;
-    }
-    case "retro-item": {
-      const epic = RETRO_ITEM_ID_PATTERN.exec(body)?.[1];
-      const item = epic === undefined ? undefined : snapshot.retro_gates.epics[epic]?.items?.find((i) => i.id === body);
-      return item !== undefined && item.route === "maintainer" && isOpenItem(item.status);
-    }
-    case "story": {
-      if (!snapshot.graph.ok) return false;
-      const bootstrapped = new Set(snapshot.config.bootstrapped_epics);
-      return snapshot.graph.value.unmanifested.some((u) => u.id === body && !bootstrapped.has(u.epic));
-    }
-    default:
-      return false;
-  }
-}
-
-/**
- * The owner whose inbox lists `unit`, or `null` when none does: a parked
- * record's owner, else the Maintainer for a waiting checkpoint go, a
- * rejected retro with no go, an open Maintainer-routed retro item or an
- * unmanifested Story heading outside `bootstrapped_epics`.
- */
-export function inboxOwner(snapshot: Snapshot, unit: string): string | null {
-  const r = recordOf(snapshot, unit);
-  const parked = r === undefined ? null : parkedOwner(snapshot, r);
-  if (parked !== null) return parked;
-  return maintainerLists(snapshot, unit) ? snapshot.config.maintainer : null;
 }
 
 /** The retro item `retro-item:<id>` names, in the Epic its id names. */
@@ -226,7 +177,7 @@ function target(snapshot: Snapshot, verb: RulingVerb, unit: string): Target {
       const found = listedItem(snapshot, verb, unit);
       if (!found.ok) return fail(found.reason);
       const status = found.item.status;
-      if (status !== "open" && status !== "in-progress" && status !== "waiting") return fail(`${unit} is ${status}, not open, in-progress or waiting`);
+      if (!isOpenItem(status)) return fail(`${unit} is ${status}, not open, in-progress or waiting`);
       return { ok: true, owner: maintainer };
     }
     case "rebuild":

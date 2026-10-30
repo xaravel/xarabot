@@ -1,3 +1,4 @@
+import { isOpenItem } from "../next/epic-gates.ts";
 import { capText, FORGE_TEXT_LIMITS, sanitizeAgentText } from "../sanitize.ts";
 import { unitFileName, type UnitRecord } from "../schemas/ledger.ts";
 import type { Snapshot } from "../schemas/snapshot.ts";
@@ -37,7 +38,9 @@ import { openDeferred } from "./deferred.ts";
  * Story 4.6: an item whose unit, text (`what`) and start time (`since`)
  * match a dismissal in the snapshot's `coordinator.json` is left out; the
  * same item comes back with another text or start time (a new instance)
- * lists again. `inboxInstance` gives a unit's item as a dismissal names it.
+ * lists again. `inboxInstance` gives a unit's item as a dismissal names it,
+ * and `inboxOwner` the owner whose inbox lists it, by these same rules (the
+ * rulings' authority, Story 4.5).
  */
 
 /** The body of an inbox with nothing in it. */
@@ -132,27 +135,36 @@ function recordUrl(repoUrl: string, r: UnitRecord): string {
   return r.pr !== null ? `${repoUrl}/pull/${r.pr}` : blobUrl(repoUrl, LEDGER_BRANCH, `units/${unitFileName(r.unit)}`);
 }
 
+/**
+ * The owner whose inbox lists a parked record: the Maintainer for a
+ * `needs-approval` or a `blocked` `human-live-step` park, else its
+ * `park.inbox_owner`; `null` for a record not parked.
+ */
+export function parkedOwner(snapshot: Snapshot, r: UnitRecord): string | null {
+  const park = r.park;
+  if (r.state !== "parked" || park === null) return null;
+  if (park.kind === "needs-approval" || (park.kind === "blocked" && park.reason === "human-live-step")) return snapshot.config.maintainer;
+  return park.inbox_owner;
+}
+
 /** The items of one parked record, with the owner whose inbox lists it; `null` for any other record. */
 function parkedItem(snapshot: Snapshot, repoUrl: string, r: UnitRecord): { readonly owner: string; readonly item: Item } | null {
   const park = r.park;
-  if (r.state !== "parked" || park === null) return null;
-  const maintainer = snapshot.config.maintainer;
+  const owner = parkedOwner(snapshot, r);
+  if (park === null || owner === null) return null;
   const base = { key: r.unit, label: r.unit, url: recordUrl(repoUrl, r), since: r.heartbeat_at };
   switch (park.kind) {
     case "needs-approval":
-      return { owner: maintainer, item: { ...base, section: "needs", what: "needs approval", verb: `/xarabot approve ${r.unit}`, under: [] } };
+      return { owner, item: { ...base, section: "needs", what: "needs approval", verb: `/xarabot approve ${r.unit}`, under: [] } };
     case "awaiting-approval":
       // A graph change's delta is posted: it waits on the Maintainer's approval, in their inbox (`inbox_owner`).
       const what = park.graph_posted !== undefined ? "awaiting approval (graph change)" : "awaiting approval";
-      return { owner: park.inbox_owner, item: { ...base, section: "awaiting", what, verb: null, under: [] } };
+      return { owner, item: { ...base, section: "awaiting", what, verb: null, under: [] } };
     case "blocked": {
       const reason = park.reason ?? "other";
       const text = park.text === undefined ? "" : sanitizeAgentText(park.text).trim();
       const under = text === "" ? [] : text.split(/\r?\n/).map((l) => (l.trim() === "" ? ">" : `> ${l.trimEnd()}`));
-      return {
-        owner: reason === "human-live-step" ? maintainer : park.inbox_owner,
-        item: { ...base, section: "blocked", what: `blocked \`${reason}\``, verb: null, under },
-      };
+      return { owner, item: { ...base, section: "blocked", what: `blocked \`${reason}\``, verb: null, under } };
     }
   }
 }
@@ -166,7 +178,6 @@ function maintainerItems(input: RenderDigestInput): Item[] {
   const epics = Object.entries(snapshot.retro_gates.epics)
     .map(([key, entry]) => ({ epic: Number(key), entry }))
     .sort((a, b) => a.epic - b.epic);
-  const open = (status: string) => status !== "done" && status !== "deferred";
   const bootstrapped = new Set(config.bootstrapped_epics);
 
   if (snapshot.graph.ok) {
@@ -189,7 +200,7 @@ function maintainerItems(input: RenderDigestInput): Item[] {
   }
 
   for (const { epic, entry } of epics) {
-    const routed = (entry.items ?? []).filter((i) => i.route === "maintainer" && open(i.status));
+    const routed = (entry.items ?? []).filter((i) => i.route === "maintainer" && isOpenItem(i.status));
     const retro = entry.retro;
     if (retro !== undefined && retro.verdict === "rejected" && retro.go === undefined) {
       items.push({
@@ -282,17 +293,33 @@ function ownedItems(input: RenderDigestInput): { readonly owner: string; readonl
   return out;
 }
 
+/**
+ * The inbox item `unit` names in `snapshot`, dismissed or not, with the
+ * owner whose inbox lists it; `undefined` when no inbox lists it. Deferred
+ * entries are not units, so no file is read.
+ */
+function unitItem(snapshot: Snapshot, unit: string): { readonly owner: string; readonly item: Item } | undefined {
+  return ownedItems({ snapshot, files: {}, repoUrl: "" }).find((o) => o.item.key === unit);
+}
+
 /** An inbox item as a dismissal names it: its text and start time, as the digest shows them. */
 export type InboxInstance = { readonly subject: string; readonly since: string | null };
 
-/**
- * The inbox item `unit` names in `snapshot`, as a dismissal records it
- * (Story 4.6), or `null` when no inbox lists it. Deferred entries are not
- * units, so no file is read.
- */
+/** The inbox item `unit` names in `snapshot`, as a dismissal records it (Story 4.6), or `null` when no inbox lists it. */
 export function inboxInstance(snapshot: Snapshot, unit: string): InboxInstance | null {
-  const found = ownedItems({ snapshot, files: {}, repoUrl: "" }).find((o) => o.item.key === unit);
+  const found = unitItem(snapshot, unit);
   return found === undefined ? null : { subject: found.item.what, since: found.item.since };
+}
+
+/**
+ * The owner whose inbox lists `unit` (Story 4.5), dismissed or not, or
+ * `null` when none does: a parked record's owner (`parkedOwner`), else the
+ * Maintainer for a waiting checkpoint go, a rejected retro with no go, an
+ * open Maintainer-routed retro item or an unmanifested Story heading outside
+ * `bootstrapped_epics`.
+ */
+export function inboxOwner(snapshot: Snapshot, unit: string): string | null {
+  return unitItem(snapshot, unit)?.owner ?? null;
 }
 
 /** Whether a dismissal in the snapshot's `coordinator.json` names this very item. */

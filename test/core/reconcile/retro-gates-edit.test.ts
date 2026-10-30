@@ -305,6 +305,8 @@ describe("applyPendingRulings (Story 4.6)", () => {
     ["go retro:2 with a go already there", entry("go", "retro:2"), gates({ go: true })],
     ["go retro:2 on an accepted retro", entry("go", "retro:2"), gates({ verdict: "accepted" })],
     ["go retro:3 with no retro recorded", entry("go", "retro:3"), gates()],
+    ["go on a checkpoint id that is not a unit id", entry("go", "checkpoint:02"), gates()],
+    ["go on a retro id that is not a unit id", entry("go", "retro:2x"), gates()],
     ["block on an item already blocking", entry("block", `retro-item:${A}`), gates({ item: { blocking: true } })],
     ["unblock on an item not blocking", entry("unblock", `retro-item:${A}`), gates()],
     ["block on an item no longer listed", entry("block", "retro-item:epic-2-retro-item-9-z"), gates()],

@@ -30,7 +30,7 @@ import type { LaunchSpec, ProxyRequest, Sandbox, SandboxProfile, SandboxResult, 
 import { emptyDir } from "../sandbox/vendor-home.ts";
 import { needCommit } from "./clone.ts";
 import type { Heartbeat } from "./heartbeat.ts";
-import { swapLedger, writtenRecord, type Sleep } from "./ledger-cas.ts";
+import { DEFAULT_CALL_TIMEOUT_MS, swapLedger, writtenRecord, type Sleep } from "./ledger-cas.ts";
 import type { LaneLayout } from "./lane-store.ts";
 import type { Waiter, WaitResult } from "./wait.ts";
 import type { FetchShas, Workspace, WorkspaceErrorKind } from "./workspace.ts";
@@ -47,6 +47,9 @@ import type { FetchShas, Workspace, WorkspaceErrorKind } from "./workspace.ts";
  * - `forgeOps`: one forge call or ledger swap under its own deadline. A port
  *   method that throws is a `transient` error; a lane-stop kind posts a
  *   best-effort alert and calls the caller's `stop`.
+ * - `bestEffortOps` (Epic 4 retro, D2): the log and forge calls of the
+ *   `reconcile` sub-steps that never fail the run, the inbox and rulings
+ *   steps: a failed or throwing call is logged and skipped.
  * - `stepKit`: a step's ending (`End`), its reasons, and its fenced edits on
  *   its own record (`held`, `beat`, `failed`, `lost`), on top of `forgeOps`.
  * - `stepOps`: what the CI step and the coordinator steps share on top of a
@@ -441,6 +444,55 @@ export function forgeOps(p: ForgeOpsParams): ForgeOps {
   };
 
   return { call, swap, laneStop, freshNow };
+}
+
+// ------------------------------------------------------------ best-effort steps
+
+/** One best-effort forge call's outcome: its value, or the failure's message, already logged. */
+export type BestEffortCall<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
+
+export type BestEffortOpsParams = {
+  readonly log: (line: string) => void;
+  /** Joined with each call's own deadline. */
+  readonly signal: AbortSignal;
+  /** Each forge call's deadline; default 60 000 ms. */
+  readonly callTimeoutMs?: number;
+};
+
+export type BestEffortOps = {
+  /** `<step> step: <line>` to the caller's log, best effort: it never throws. */
+  log(line: string): void;
+  /** One forge call under its own deadline and the step's signal; a failure or a throw is logged as `<what> failed|threw: …; skipped`. It never throws. */
+  call<T>(what: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<BestEffortCall<T>>;
+};
+
+/**
+ * The log and forge calls of a `reconcile` sub-step whose errors never fail
+ * or stop the run (the inbox and rulings steps, Stories 4.2 and 4.5): no
+ * lane-stop alert, unlike `forgeOps`.
+ */
+export function bestEffortOps(step: string, p: BestEffortOpsParams): BestEffortOps {
+  const timeout = p.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  const log = (line: string): void => {
+    try {
+      p.log(`${step} step: ${line}`);
+    } catch {
+      // Logging is best effort.
+    }
+  };
+  const call = async <T>(what: string, run: (opts: CallOpts) => Promise<ForgeResult<T>>): Promise<BestEffortCall<T>> => {
+    let r: ForgeResult<T>;
+    try {
+      r = await run({ signal: AbortSignal.any([p.signal, AbortSignal.timeout(timeout)]) });
+    } catch (e) {
+      log(`${what} threw: ${message(e)}; skipped`);
+      return { ok: false, message: message(e) };
+    }
+    if (r.ok) return { ok: true, value: r.value };
+    log(`${what} failed: ${r.error.kind}: ${r.error.message}; skipped`);
+    return { ok: false, message: `${r.error.kind}: ${r.error.message}` };
+  };
+  return { log, call };
 }
 
 // ------------------------------------------------------------ step kit
