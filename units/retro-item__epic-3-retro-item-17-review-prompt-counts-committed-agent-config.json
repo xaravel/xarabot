@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-17-review-prompt-counts-committed-agent-config",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -10,7 +10,7 @@
     "src/core/prompt/template.ts",
     "test/core/prompt/**"
   ],
-  "heartbeat_at": "2026-10-30T06:30:15.776Z",
+  "heartbeat_at": "2026-10-30T06:30:25.370Z",
   "pr": 288,
   "pr_owner": "edanisko",
   "base_sha": "677c342ac45dbe9486d452da7d41e57ea5402e5a",
@@ -24,7 +24,15 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "src/core/prompt/template.ts",
+      "test/core/prompt/build-prompt.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
