@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-3-retro-item-14-globs-cover-tests-and-wiring",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -23,7 +23,7 @@
     "test/lane/planning-step.test.ts",
     "test/lane/retro-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-30T00:25:37.750Z",
+  "heartbeat_at": "2026-10-30T00:25:47.200Z",
   "pr": 276,
   "pr_owner": "edanisko",
   "base_sha": "d656ee50d7f255544698103a250decda48d1a391",
@@ -37,7 +37,28 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "docs/maintainer/self-host.md",
+      "src/cli/graph-check.ts",
+      "src/core/manifests/coverage.ts",
+      "src/core/prompt/build-prompt.ts",
+      "src/core/prompt/template.ts",
+      "src/core/schemas/config.ts",
+      "src/lane/planning-step.ts",
+      "src/lane/retro-step.ts",
+      "test/cli/graph-check.test.ts",
+      "test/core/config/load-repo-config.test.ts",
+      "test/core/manifests/coverage.test.ts",
+      "test/core/prompt/build-prompt.test.ts",
+      "test/core/schemas/config.test.ts",
+      "test/lane/planning-step.test.ts",
+      "test/lane/retro-step.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
