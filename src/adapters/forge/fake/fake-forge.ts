@@ -31,7 +31,8 @@ import {
  * deterministic per forge instance. Tests drive it through `control`, which
  * is not part of `Forge`. An inbox comment's id comes from the counter PR
  * comments and reviews share, so ids rise with time across all of them;
- * `readRulings`'s cursor is the id of the last comment it returned.
+ * `readRulings` returns the comments posted before it began, and its cursor
+ * is the id of the last comment it returned.
  */
 
 export type FakeForgeOptions = {
@@ -117,6 +118,12 @@ export type FakeForgeControl = {
   inboxComments(issue: number): string[];
   /** Adds a comment by `author` on inbox issue `issue` (which must exist) at the forge's time, as that user posting it would; returns its id. */
   addInboxComment(issue: number, author: string, body: string): string;
+  /**
+   * Adds a comment as `addInboxComment` does, once, while the next
+   * `readRulings` runs: just before it reads open inbox `read`'s comments,
+   * after it read every lower-numbered one. Several run in the order added.
+   */
+  addInboxCommentBeforeRead(read: number, issue: number, author: string, body: string): void;
   /** Closes inbox issue `issue`, as its owner closing it would; `false` when there is none. */
   closeInbox(issue: number): boolean;
   /** Queued PR numbers, head first. */
@@ -214,6 +221,8 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
   const queue: number[] = [];
   const alerts: FakeAlert[] = [];
   const inboxes = new Map<number, InboxRecord>();
+  /** Comments `readRulings` adds just before it reads an inbox's comments, by that inbox's number. */
+  const beforeRead = new Map<number, (() => void)[]>();
   let nextIssue = options.firstIssueNumber ?? 1001;
   const repoUrl = options.repoUrl ?? FAKE_REPO_URL;
   const unitBranchPrefix = options.unitBranchPrefix ?? DEFAULT_UNIT_BRANCH_PREFIX;
@@ -560,10 +569,16 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
           return forgeErr("rejected", `readRulings: ${JSON.stringify(cursor)} is not a cursor this forge issued`);
         }
         const after = cursor === null ? 0 : Number(cursor);
-        const list = [...inboxes.values()]
-          .filter((i) => i.open)
-          .flatMap((i) => i.comments.filter((c) => c.id > after).map((c) => ({ id: c.id, view: commentView(i, c) })))
-          .sort((a, b) => a.id - b.id);
+        // Only the comments posted before the read began: one posted while it reads the inboxes is left for a later read.
+        const end = nextComment;
+        const list: { readonly id: number; readonly view: InboxComment }[] = [];
+        for (const i of [...inboxes.values()].sort((a, b) => a.number - b.number)) {
+          if (!i.open) continue;
+          for (const add of beforeRead.get(i.number) ?? []) add();
+          beforeRead.delete(i.number);
+          for (const c of i.comments) if (c.id > after && c.id < end) list.push({ id: c.id, view: commentView(i, c) });
+        }
+        list.sort((a, b) => a.id - b.id);
         const last = list.at(-1);
         return forgeOk({ comments: list.map((c) => c.view), cursor: last === undefined ? cursor : String(last.id) });
       }),
@@ -637,6 +652,10 @@ export function createFakeForge(options: FakeForgeOptions = {}): FakeForge {
       const id = nextComment++;
       i.comments.push({ id, author, body, created_at: now });
       return String(id);
+    },
+    addInboxCommentBeforeRead(read, issue, author, body) {
+      if (!inboxes.has(issue)) throw new Error(`addInboxCommentBeforeRead: no issue #${issue}`);
+      beforeRead.set(read, [...(beforeRead.get(read) ?? []), () => control.addInboxComment(issue, author, body)]);
     },
     closeInbox(issue) {
       const i = inboxes.get(issue);

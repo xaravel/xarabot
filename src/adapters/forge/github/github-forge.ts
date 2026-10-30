@@ -68,8 +68,8 @@ import { createTokenSource } from "./tokens.ts";
  * posts one deduplicated comment on the Maintainer's inbox issue; the inbox
  * operations (Story 4.2) list, find or create, rewrite and comment on the
  * owners' inbox issues over REST, and `readRulings` (Story 4.5) reads the
- * comments on the open ones, its cursor `<created_at>|<id>` of the last
- * comment it returned. Each call
+ * comments on the open ones, its cursor a floor held back to the read's
+ * start plus the comments past it already returned. Each call
  * makes one attempt, never throws, and returns `transient` for an
  * already-aborted signal before any request.
  */
@@ -111,17 +111,34 @@ export function alertMarker(condition: string, mainSha: GitSha): string {
 const COORDINATOR_ALERTS: Readonly<Record<string, string>> = { "coordinator-missing": "missing", "coordinator-expired": "expired" };
 
 /**
- * A `readRulings` cursor, `<created_at>|<id>`: the time (epoch ms) and id of
- * the last comment returned, and the time as written; `undefined` when
- * `cursor` is not one.
+ * How long before a `readRulings` read's start (the `Date` of its inbox
+ * listing) a comment may still be missing from a listing: the cursor's floor
+ * is held back this far, and the comments returned past it ride the cursor.
  */
-export function parseRulingsCursor(cursor: string): { readonly created_at: string; readonly at: number; readonly id: number } | undefined {
-  const m = /^([^|]+)\|(0|[1-9][0-9]*)$/.exec(cursor);
+export const RULINGS_SETTLE_MS = 60_000;
+
+/** A `readRulings` cursor's parts: its floor's time (epoch ms, and as written) and id, and the ids returned past the floor. */
+export type RulingsCursor = { readonly created_at: string; readonly at: number; readonly id: number; readonly returned: readonly number[] };
+
+/**
+ * A `readRulings` cursor, `<created_at>|<id>` or `<created_at>|<id>|<id>,…`:
+ * a floor (a time and an id; every comment at or before it, by `(created_at,
+ * id)`, has been returned) and the ids, ascending, of the comments past the
+ * floor already returned; `undefined` when `cursor` is not one.
+ */
+export function parseRulingsCursor(cursor: string): RulingsCursor | undefined {
+  const m = /^([^|]+)\|(0|[1-9][0-9]*)(?:\|((?:0|[1-9][0-9]*)(?:,(?:0|[1-9][0-9]*))*))?$/.exec(cursor);
   if (m === null) return undefined;
   const createdAt = m[1] as string;
   const at = IsoDateTime.safeParse(createdAt).success ? Date.parse(createdAt) : Number.NaN;
   const id = Number(m[2]);
-  return Number.isFinite(at) && Number.isSafeInteger(id) ? { created_at: createdAt, at, id } : undefined;
+  const returned = m[3] === undefined ? [] : m[3].split(",").map(Number);
+  return Number.isFinite(at) && Number.isSafeInteger(id) && returned.every(Number.isSafeInteger) ? { created_at: createdAt, at, id, returned } : undefined;
+}
+
+/** Whether a comment at `at` (epoch ms) with id `n` is past `floor`, by `(created_at, id)`; everything is past no floor. */
+function pastFloor(floor: { readonly at: number; readonly id: number } | null, at: number, n: number): boolean {
+  return floor === null || at > floor.at || (at === floor.at && n > floor.id);
 }
 
 /** The body of the alert comment for (`condition`, `mainSha`) to `maintainer`. */
@@ -1175,15 +1192,29 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     return { comment: { id: String(id), issue: inbox.number, author: str(user, "login") ?? null, body, created_at: created, url }, at, n: id };
   }
 
+  /**
+   * The inboxes are read one after another, so a comment posted on one while
+   * a later one is read can be older than a comment read after it. The
+   * cursor therefore never moves its floor past the read's start (the `Date`
+   * of the inbox listing, less `RULINGS_SETTLE_MS`): every comment created
+   * before then has been listed. A comment past the floor is returned once
+   * and then named in the cursor, so a later read skips it but returns every
+   * other comment past the floor, including one posted during this read.
+   */
   async function readRulings(cursor: string | null, opts: CallOpts): Promise<ForgeResult<RulingsRead>> {
-    return guarded("readRulings", opts, async (ctx) => {
+    return guarded<RulingsRead>("readRulings", opts, async (ctx) => {
       const after = cursor === null ? null : parseRulingsCursor(cursor);
       if (after === undefined) return forgeErr("rejected", `readRulings: ${JSON.stringify(cursor)} is not a cursor this forge issued`);
       const listed = await listInboxes(ctx, null);
       if (!listed.ok) return listed;
+      if (ctx.latest === null) return forgeErr("transient", "readRulings: GitHub sent no Date header");
+      // In whole seconds, as `created_at` is: a comment created in an earlier second than the listing's `Date` existed before any comment list was asked for.
+      const start = Math.floor(ctx.latest / 1000) * 1000 - RULINGS_SETTLE_MS;
       const op = GITHUB_OPERATIONS.listIssueComments;
       const since = after === null ? "" : `since=${encodeURIComponent(after.created_at)}&`;
-      const kept: { readonly comment: InboxComment; readonly at: number; readonly n: number }[] = [];
+      const returned = new Set(after?.returned);
+      // Every comment past the old floor, by id, and whether an earlier read returned it.
+      const past = new Map<number, { readonly comment: InboxComment; readonly at: number; readonly n: number; readonly returned: boolean }>();
       for (const inbox of listed.value) {
         const r = await paged(ctx, op, (page) => `/issues/${inbox.number}/comments?${since}per_page=${PER_PAGE}&page=${page}`, (b) => (Array.isArray(b) ? b : undefined));
         if (!r.ok) return r;
@@ -1191,13 +1222,16 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
           const c = toInboxComment(raw, inbox);
           if (c === undefined) return malformed(op, "not a comment");
           // `since` filters on the update time: a comment edited after the cursor but posted before it is dropped here.
-          if (after === null || c.at > after.at || (c.at === after.at && c.n > after.id)) kept.push(c);
+          if (pastFloor(after, c.at, c.n)) past.set(c.n, { ...c, returned: returned.has(c.n) });
         }
       }
-      kept.sort((a, b) => a.at - b.at || a.n - b.n);
-      const comments = kept.map((k) => k.comment);
-      const last = comments.at(-1);
-      return forgeOk({ comments, cursor: last === undefined ? cursor : `${last.created_at}|${last.id}` });
+      const kept = [...past.values()].filter((c) => !c.returned).sort((a, b) => a.at - b.at || a.n - b.n);
+      if (kept.length === 0) return forgeOk({ comments: [], cursor });
+      const floor = after !== null && pastFloor({ at: start, id: 0 }, after.at, after.id) ? after : { created_at: formatDate(start), id: 0, at: start };
+      // A comment named in the old cursor that this read did not list (deleted, or its inbox closed) is dropped.
+      const ids = [...past.values()].filter((c) => pastFloor(floor, c.at, c.n)).map((c) => c.n).sort((a, b) => a - b);
+      const next = `${floor.created_at}|${floor.id}${ids.length === 0 ? "" : `|${ids.join(",")}`}`;
+      return forgeOk({ comments: kept.map((k) => k.comment), cursor: next });
     });
   }
 

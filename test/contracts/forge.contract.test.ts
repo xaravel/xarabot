@@ -20,6 +20,7 @@ const CONTROLS = {
   inboxes: true,
   inboxComments: true,
   addInboxComment: true,
+  addInboxCommentBeforeRead: true,
 } as const satisfies Record<ForgeControlName, true>;
 const ALL_CONTROLS = Object.keys(CONTROLS) as ForgeControlName[];
 
