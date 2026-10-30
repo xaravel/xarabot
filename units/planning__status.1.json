@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T08:23:09.657Z",
+  "heartbeat_at": "2026-10-30T08:41:49Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "1c1b0c0e6e9dd2307fafaf094e7e079d4ce0b246",
@@ -23,13 +23,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "readiness",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "Epic 6\n- Story 6.2: The launcher runs \"the newest runner version any lane on the host pins\", but runner versions are free-form names (Xarabot's `runner-14`, a consumer's npm pin such as `0.3.0`), so \"newest\" has no defined order. Readings: (a) semver order: `runner-14` does not parse and needs its own rule; (b) the most recently installed `~/.xarabot/runner/<version>/`: after a pin-back, an older runner counts as newest; (c) a name order with numbers compared as numbers: ranks `runner-14` against `0.3.0` arbitrarily.\n- Story 6.4: Is `xarabot report` one figure for the whole host or one per repo? Readings: (a) host-wide: merged Stories from every repo on the host, with hours left out only when every builder of every repo waits on the Maintainer; (b) per repo: each repo's merged Stories over its own builders' spans, which gives the SPEC's \"Xaravel work\" figure on a host that also runs Xarabot's lanes.\n- Story 6.4: Merged Stories are read from the forge, but no Forge read lists PRs merged in a period, and 6.4's manifest globs leave out `src/ports/**`, `src/adapters/forge/**` and `test/contracts/**`, so the write check refuses the read. Readings: (a) a graph unit widens 6.4's globs, and 6.4 adds the read to the port, both forges and the contract suite; (b) a new forge Story adds the read, and 6.4 depends on it.\nEpic 5 has no open questions. Sprint planning: gate CONCERNS, only the three points above; sprint-status.yaml is valid and unchanged. The script would rename `3-2-the-pi-adapter` to `3-2-the-pi-adapter-deferred-to-v1` from the retitled heading, but `stories/3.2.md` pins `sprint_key: 3-2-the-pi-adapter`, so the existing key was kept and nothing was written. No context file was compiled."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
