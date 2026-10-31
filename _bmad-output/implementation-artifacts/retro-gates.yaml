@@ -403,4 +403,4 @@ epics:
         route: lane
         blocking: false
         globs: ["src/core/rulings/**", "test/core/rulings/**", "src/core/next/coordinator.ts", "src/core/next/next.ts", "test/core/next/**", "src/core/inbox/**", "test/core/inbox/**", "src/lane/reconcile-step.ts", "test/lane/reconcile-step.test.ts", "src/lane/inbox-step.ts", "test/lane/inbox-step.test.ts", "src/lane/rulings-step.ts", "test/lane/rulings-step.test.ts", "src/adapters/forge/github/**", "src/adapters/forge/fake/**", "test/adapters/forge/**", "test/contracts/**", "src/ports/forge.ts", "test/ports/forge.test.ts", "docs/maintainer/self-host.md", "docs/maintainer/app-permissions.md"]
-        status: open
+        status: done
