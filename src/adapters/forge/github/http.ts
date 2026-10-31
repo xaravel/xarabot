@@ -82,6 +82,10 @@ export const GITHUB_OPERATIONS = {
   downloadLog: { name: "downloadLog", method: "GET", permission: "none" },
   /** A public user, such as the bot account `<slug>[bot]`; sent with no token. */
   getUser: { name: "getUser", method: "GET", permission: "none" },
+  /** `xarabot join`: turns the manifest flow's one-time code into the App; sent with no token. */
+  convertManifest: { name: "convertManifest", method: "POST", permission: "none" },
+  /** `xarabot join`'s re-run: the App and the permissions it has. */
+  getApp: { name: "getApp", method: "GET", permission: "app-jwt" },
 } as const satisfies Readonly<Record<string, Operation>>;
 
 /**

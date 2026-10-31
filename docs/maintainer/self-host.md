@@ -216,10 +216,31 @@ The `edanisko-xarabot` App asks for exactly the permissions in
 - `issues: write` is Story 1.10's precondition, for the `xarabot-inbox` alerts; Stories 4.2 to 4.6 use it for the inbox bodies, the daily digest, reading rulings and the 🤖 ruling replies.
 - AR38 found that the merge queue needs no permission of its own.
 
-Check the App's settings page,
-`https://github.com/settings/apps/edanisko-xarabot/permissions`. If you
-changed a permission, accept the new permissions on the installation for
-`xaravel`.
+`xarabot join` creates the App from a manifest with exactly these
+permissions. Run it as the App's owner, on a machine with a browser signed
+in to GitHub as `edanisko`:
+
+```sh
+xarabot join --repo xaravel/xarabot --login edanisko
+# from a checkout: bun src/cli/main.ts join --repo xaravel/xarabot --login edanisko
+```
+
+It opens GitHub's manifest page; click "Create GitHub App for edanisko".
+It stores the key as `private-key.pem` (mode 600) and `app.json` in
+`${XDG_CONFIG_HOME:-$HOME/.config}/xarabot/apps/edanisko-xarabot/` (mode
+700), never prints the key, and prints the App ID and the install URL.
+`xarabot join` does not install the App yet: open the printed install URL
+and install it on `xaravel` by hand.
+
+Once the App exists, a re-run creates nothing. It reads the App's own
+permissions and checks them against the manifest; it does not read what
+the `xaravel` installation has accepted. If any differ, it stops and names
+each one to add, remove or change. Change them on the App's settings page,
+`https://github.com/settings/apps/edanisko-xarabot/permissions` (a Human
+Live Step), and run `xarabot join` again until it reports that the App has
+the manifest's permissions. Then, as a separate step, accept the new
+permissions on the installation for `xaravel`: GitHub asks for that on the
+installation's settings page, and `xarabot join` does not check it.
 
 ### 6. The Claude credential
 
