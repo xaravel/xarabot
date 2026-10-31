@@ -57,7 +57,7 @@ graph TD
 | `Forge` | `snapshot()` returns the ledger tip, `main` SHA, PR states, each parked PR's review decision (retro item 13) and the server's `now`; it reads the contents of only the `main` paths its `read` filter passes, and returns `blob_shas` for them. Also `ledgerSwap(oldSha, edit)`, which returns `ok` or `conflict`; `pushBranch(lease)`; PR open, update and close; `listPrsByBranch(branch)`; `branchHead(branch)` (Story 2.6b); `reviews(pr)` (Story 2.6); `postReview`; `comment(pr, body)` for 🤖 status comments; `checks`; `enqueue(pr, expectedHead)`; `dequeue`; `deleteBranch(branch)` for closed `reconcile` and disposable planning PRs (retro item 21); `queueState(pr)`; inbox `renderDigest`, `alert` and `readRulings(cursor)`; `prefetch(kind)`. There is no approve operation. |
 | `Agent` | `launchSpec(unit, settings, resultPath)` returns a `LaunchSpec`; `parseUsage(output, vendorHome, since)`, which may also read the CLI's session files in the lane's vendor home before it is re-seeded (codex: model, rate limits and `resets_at` are only there); `since` is the run's start, so files an earlier run left are not counted; `effortValues(model)` |
 | `Sandbox` | `run(LaunchSpec, profile)` returns the exit status, PID and timings. This is the only way any agent process is spawned. |
-| `LaneStore` | PIDs, the journal, the outcome and STOP, all inside the lane state folder |
+| `LaneStore` | PIDs, the journal, the outcome, the live state file and STOP, all inside the lane state folder |
 
 The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attempt per call.
 
@@ -116,7 +116,7 @@ The retry loop for compare-and-swap lives in `src/lane/`; adapters do one attemp
 | Inbox digest body, the daily digest comment and its last post time | forge issue; `coordinator.json` | coordinator (`reconcile`, AD-23) |
 | Urgent alert comment | forge issue | any lane (AD-23) |
 | The `status:` line of the unit's own Story file | PR diff | the agent session (BMAD) |
-| Journal, PIDs, outcome | lane state folder | that lane's process |
+| Journal, PIDs, outcome, and the live state file (current unit, state, wait reason; read by `xarabot status`, Story 6.1) | lane state folder | that lane's process |
 | `STOP` marker | lane state folder | the operator |
 
 ### AD-4: The unit ledger is the `xarabot/claims` branch, updated by compare-and-swap
