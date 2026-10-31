@@ -2679,6 +2679,10 @@ So that I can compare lanes and measure the 0.x success signal from Xarabot's ow
 - **Units done** are the unit journal records whose result is `done`, of every unit kind, including one that then parks awaiting approval. The median unit time and the first-pass review rate are taken over the same records. The Stories-per-hour figure still counts merged Stories from the forge.
 - **Review cost** goes on the builder's row: the agent and model of the unit record, which today includes its review passes' tokens and cost. The report says that a row's cost includes its reviews, whoever the reviewer was. No journal field is added.
 
+**Maintainer decisions (2026-10-31, `planning:status.1`'s fourth open questions):**
+- **Coordinator results.** This Story makes the coordinator fill the unit record's existing `result` field from its session: a planning or retro-item unit that finishes reports `done`, and a retro whose document validates reports `done`. `reconcile` runs no session and never counts. From then on, coordinator units count as units done on the coordinator's agent and model row; older records with `result: null` do not.
+- **First-pass review rate.** This Story adds an optional journal field for the first review's verdict on a unit record. The rate is units whose first review passed over units with that field, so a unit that never reached review (a write-check park, a crash before review) and older records without the field are left out. This field is the one exception to the review-cost decision's "no journal field".
+
 ### Story 6.5: Status and report verification
 
 As the Maintainer,
