@@ -2461,6 +2461,8 @@ So that my lanes can act as my bot with no long-lived token and no shared identi
 **When** the Story is done
 **Then** `bootstrap/join.ts` is removed, and `docs/maintainer/self-host.md` points to `xarabot join` instead.
 
+**Maintainer decision (2026-10-31, `planning:status.2`'s open questions):** an existing App with a permission beyond the manifest fails the check the same way as one that lacks a permission. `xarabot join` stops and names each extra permission to remove in the App's settings (a Human Live Step), whether it is `administration`, `workflows`, a bypass right or any other. The App keeps exactly the manifest's set. The extra-permission path gets a case.
+
 ### Story 5.1a: The GitHub adapter's permission table
 
 As the Maintainer,
@@ -2520,6 +2522,8 @@ So that adopting Xarabot in a repo needs no further GitHub step, or tells me exa
 **Given** the CLI tests
 **When** they run against a fake GitHub
 **Then** the create, re-run, install, install-request and uncovered-repo paths each have a case.
+
+**Maintainer decision (2026-10-31, `planning:status.2`'s open questions):** verification also compares the permissions the installation has granted, as returned with the installation token it mints, with the manifest. If any permission is still waiting for acceptance, which happens when one is added to the App after install, `xarabot join` stops and names each pending permission and who must approve it: an owner of the org the App is installed on. The pending-acceptance path gets a case.
 
 ### Story 5.3: Owner approvals and bot rights verification
 
