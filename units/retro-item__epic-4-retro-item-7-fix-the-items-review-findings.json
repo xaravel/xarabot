@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "retro-item:epic-4-retro-item-7-fix-the-items-review-findings",
-  "state": "merging",
+  "state": "merged",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -25,7 +25,7 @@
     "test/core/rulings/effects.test.ts",
     "test/lane/inbox-step.test.ts"
   ],
-  "heartbeat_at": "2026-10-31T06:57:08.177Z",
+  "heartbeat_at": "2026-10-31T07:00:00.021Z",
   "pr": 305,
   "pr_owner": "edanisko",
   "base_sha": "3c7ded088f85c659a263f6ac82b021301958f1fd",
