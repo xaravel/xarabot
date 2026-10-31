@@ -21,7 +21,7 @@ describe("xarabot bin", () => {
     expect(r.stderr).toBe("");
   });
 
-  test.each([[["--nope"]], [["run"]], [["--version", "extra"]], [["graph"]], [["graph", "check", "extra"]]])("%j prints usage and exits 1", (args) => {
+  test.each([[["--nope"]], [["run"]], [["--version", "extra"]], [["graph"]], [["graph", "check", "extra"]], [["join"]]])("%j prints usage and exits 1", (args) => {
     const r = run(args);
     expect(r.code).toBe(1);
     expect(r.stdout).toBe("");
@@ -33,6 +33,9 @@ describe("xarabot bin", () => {
     [["lane", "install", "builder-1", "--repo", "x/y", "--role", "builder", "--owner", "alice", "--agent", "claude"], "xarabot lane install: HOME is not set\n"],
     [["rule", "release", "story:2.6"], "xarabot rule: HOME is not set\n"],
     [["rule", "approve", "story:2.6"], "xarabot rule: HOME is not set\n"],
+    [["join", "--repo", "x/y", "--login", "alice"], "xarabot join: neither XDG_CONFIG_HOME nor HOME is set\n"],
+    // No `gh` on this PATH (nor a GitHub login in the scrubbed environment): the real login lookup fails.
+    [["join", "--repo", "x/y"], "xarabot join: cannot read your GitHub login from `gh api user --jq .login`; pass --login <login>\n"],
   ])("%j reaches its subcommand", (args, stderr) => {
     // A scrubbed environment with no HOME, so the subcommand stops before touching anything.
     const r = run(args, { PATH: "/usr/bin:/bin" });

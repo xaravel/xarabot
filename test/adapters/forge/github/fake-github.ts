@@ -8,7 +8,8 @@ import type { ForgeCheck, ForgePr } from "../../../../src/ports/forge.ts";
  * adapter calls. It holds git objects, refs, PRs, a clock that sets `Date`,
  * App JWT and installation-token checks, pull requests, issues and their
  * comments, PR reviews, check runs, commit statuses, a merge queue behind a GraphQL
- * endpoint, Actions job logs (redirected to a log host it also serves), a
+ * endpoint, Actions job logs (redirected to a log host it also serves), the
+ * App itself (`GET /app`) and manifest conversions for `xarabot join`, a
  * request log and one-shot hooks and response injections. Each request yields a macrotask and checks its signal
  * before any change, so an aborted request changes nothing.
  */
@@ -34,6 +35,21 @@ export type FakeGitHubOptions = {
   readonly appSlug?: string;
   /** The bot account's user id, served at `GET /users/<slug>[bot]`; default 41898282. */
   readonly botUserId?: number;
+  /** The App's owner login, at `GET /app` and in a manifest conversion; default `alice`. */
+  readonly appOwner?: string;
+  /** The App's granted permissions at `GET /app`; default the seven Xarabot asks for. */
+  readonly appPermissions?: Readonly<Record<string, string>>;
+};
+
+/** The permissions a fresh App has: the manifest's, written out independently of it. */
+export const DEFAULT_APP_PERMISSIONS: Readonly<Record<string, string>> = {
+  contents: "write",
+  pull_requests: "write",
+  issues: "write",
+  checks: "read",
+  statuses: "read",
+  actions: "read",
+  metadata: "read",
 };
 
 export type LoggedRequest = {
@@ -183,6 +199,16 @@ export type FakeGitHubControl = {
   omitDate(on: boolean): void;
   log(): LoggedRequest[];
   clearLog(): void;
+  /** Replaces the App's granted permissions at `GET /app`. */
+  setAppPermissions(permissions: Readonly<Record<string, string>>): void;
+  /**
+   * Stands in for GitHub's manifest page: records `manifest` and returns a
+   * single-use code that `POST /app-manifests/<code>/conversions` turns into
+   * the App, with `pem` as its key.
+   */
+  registerManifest(manifest: unknown, pem: string): string;
+  /** Every manifest `registerManifest` took, oldest first. */
+  manifests(): unknown[];
 };
 
 export type FakeGitHub = { readonly fetch: FetchLike; readonly control: FakeGitHubControl };
@@ -217,8 +243,14 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   const installationId = options.installationId ?? 777;
   const ledgerBranch = options.ledgerBranch ?? "xarabot/claims";
   const mainBranch = options.mainBranch ?? "main";
-  const botLogin = `${options.appSlug ?? "alice-xarabot"}[bot]`;
   const botUserId = options.botUserId ?? 41898282;
+  const appSlug = options.appSlug ?? "alice-xarabot";
+  const botLogin = `${appSlug}[bot]`;
+  const appOwner = options.appOwner ?? "alice";
+  let appPermissions: Readonly<Record<string, string>> = { ...(options.appPermissions ?? DEFAULT_APP_PERMISSIONS) };
+  /** Manifest codes not yet converted, with the manifest and key behind each. */
+  const manifestCodes = new Map<string, { readonly manifest: unknown; readonly pem: string }>();
+  const manifests: unknown[] = [];
   let clock = options.now ?? Date.parse("2026-01-01T00:00:00Z");
   let installed = true;
   let truncate = false;
@@ -519,6 +551,16 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
   type Reply = { status: number; body: unknown; headers: Record<string, string> };
 
   function handleJwt(method: string, path: string, body: unknown): Reply {
+    if (method === "GET" && path === "/app") {
+      return json(200, {
+        id: appId,
+        slug: appSlug,
+        name: appSlug,
+        owner: { login: appOwner, type: "User" },
+        html_url: `https://github.com/apps/${appSlug}`,
+        permissions: { ...appPermissions },
+      });
+    }
     if (method === "GET" && path === `${repoPrefix}/installation`) {
       return installed ? json(200, { id: installationId, app_id: appId }) : notFound();
     }
@@ -888,10 +930,34 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     if (headers["accept"] !== "application/vnd.github+json" || headers["x-github-api-version"] !== "2022-11-28") {
       return respond(json(400, { message: "missing Accept or X-GitHub-Api-Version" }));
     }
-    const appRoute = path.startsWith("/app/") || path === `${repoPrefix}/installation`;
+    const appRoute = path === "/app" || path.startsWith("/app/") || path === `${repoPrefix}/installation`;
     if (appRoute) {
       if (!isJwt || !verifyJwt(credential)) return respond(json(401, { message: "A JSON web token could not be decoded" }));
       return respond(handleJwt(method, path, body));
+    }
+    const conversion = /^\/app-manifests\/([^/]+)\/conversions$/.exec(path);
+    if (method === "POST" && conversion !== null) {
+      // The code is the only credential; GitHub needs no token here.
+      const code = decodeURIComponent(conversion[1] as string);
+      const entry = manifestCodes.get(code);
+      if (entry === undefined) return respond(notFound());
+      manifestCodes.delete(code);
+      const named = obj(entry.manifest)?.["name"];
+      const slug = typeof named === "string" ? named.toLowerCase().replace(/[^a-z0-9]+/g, "-") : appSlug;
+      return respond(
+        json(201, {
+          id: appId,
+          slug,
+          name: named,
+          owner: { login: appOwner, type: "User" },
+          html_url: `https://github.com/apps/${slug}`,
+          client_id: `Iv1.${randomBytes(8).toString("hex")}`,
+          client_secret: randomBytes(20).toString("hex"),
+          webhook_secret: randomBytes(20).toString("hex"),
+          pem: entry.pem,
+          permissions: obj(entry.manifest)?.["default_permissions"] ?? {},
+        }),
+      );
     }
     if (method === "GET" && path.startsWith("/users/")) {
       // Public users need no credential; only the App's bot account exists.
@@ -1037,6 +1103,16 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
     clearLog() {
       log.length = 0;
     },
+    setAppPermissions(permissions) {
+      appPermissions = { ...permissions };
+    },
+    registerManifest(manifest, pem) {
+      const code = randomBytes(10).toString("hex");
+      manifestCodes.set(code, { manifest, pem });
+      manifests.push(manifest);
+      return code;
+    },
+    manifests: () => [...manifests],
   };
 
   // A repo starts with an empty `main`.
