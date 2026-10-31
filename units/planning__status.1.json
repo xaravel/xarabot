@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-30T16:49:53.303Z",
+  "heartbeat_at": "2026-10-31T06:55:33Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "3c7ded088f85c659a263f6ac82b021301958f1fd",
@@ -23,13 +23,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "readiness",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "Readiness gate PASS. sprint-status.yaml is unchanged: the one orphan, 3-2-the-pi-adapter, keeps its key per the approved 2026-10-25 proposal. No context file was written, because Epic 6 has open questions; Epic 5 has none.\nEpic 6\n- Story 6.4: Coordinator unit records (planning, retro, retro-item, reconcile) are journaled with `result: null` today, so \"result `done`, of every unit kind\" counts only Story units. Readings: (a) count records as journaled: coordinator units never count, and the coordinator's agent/model row shows 0 units done; (b) 6.4 makes the coordinator journal its session's result (planning and retro-item `done`, a validated retro as `done`; `reconcile` runs no session), so those units count from then on.\n- Story 6.4: The journal records `loopbacks` but not whether a review ran or passed, so \"units whose first review passed\" has no field to read. Readings: (a) `loopbacks` 0 counts as a first-pass pass, so a `done` unit that never reached review (a write-check park, or a crash before review) counts as passed; (b) 6.4 adds a journal field for the first review's verdict, and the rate counts only reviewed units (planning:status.2's no-new-field decision covered review cost only)."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
