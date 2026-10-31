@@ -344,7 +344,7 @@ describe("fake forge", () => {
 describe("fake forge inboxes (Story 4.2)", () => {
   test("issue numbers start apart from PR numbers; links use the repo URL", async () => {
     const { forge } = createFakeForge({ repoUrl: "https://github.com/o/r", firstIssueNumber: 50 });
-    expect(value(await forge.openInbox("alice", live()))).toEqual({ number: 50, owner: "alice", body: "", url: "https://github.com/o/r/issues/50" });
+    expect(value(await forge.openInbox("alice", live()))).toEqual({ number: 50, owner: "alice", body: "", url: "https://github.com/o/r/issues/50", by_runner: true });
   });
 
   test("an owner's inbox is the lowest-numbered open one, matched case-insensitively; a closed one is left out", async () => {
@@ -360,6 +360,18 @@ describe("fake forge inboxes (Story 4.2)", () => {
       [first.number, false],
       [second.number, true],
     ]);
+  });
+
+  test("labelIssue: a person's labelled issue is listed with by_runner false, and can be an owner's inbox (Epic 4 retro item 7)", async () => {
+    const { forge, control } = createFakeForge();
+    const unassigned = control.labelIssue(null, "my notes");
+    const mine = control.labelIssue("alice", "alice's list");
+    expect(value(await forge.inboxes(live())).map((i) => [i.number, i.owner, i.body, i.by_runner])).toEqual([
+      [unassigned, null, "my notes", false],
+      [mine, "alice", "alice's list", false],
+    ]);
+    expect(value(await forge.openInbox("alice", live())).number).toBe(mine);
+    expect(value(await forge.openInbox("bob", live())).by_runner).toBe(true);
   });
 
   test("bodies and comments; an injected error changes nothing", async () => {

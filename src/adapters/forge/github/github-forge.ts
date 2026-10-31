@@ -117,23 +117,38 @@ const COORDINATOR_ALERTS: Readonly<Record<string, string>> = { "coordinator-miss
  */
 export const RULINGS_SETTLE_MS = 60_000;
 
-/** A `readRulings` cursor's parts: its floor's time (epoch ms, and as written) and id, and the ids returned past the floor. */
-export type RulingsCursor = { readonly created_at: string; readonly at: number; readonly id: number; readonly returned: readonly number[] };
+/** A comment a `readRulings` cursor names as returned: its id, and its `created_at` (epoch ms), `null` when the cursor did not record it. */
+export type ReturnedComment = { readonly id: number; readonly at: number | null };
+
+/** A `readRulings` cursor's parts: its floor's time (epoch ms, and as written) and id, and the comments returned past the floor. */
+export type RulingsCursor = { readonly created_at: string; readonly at: number; readonly id: number; readonly returned: readonly ReturnedComment[] };
+
+const RETURNED_ENTRY = /^(0|[1-9][0-9]*)(?:@(0|[1-9][0-9]*))?$/;
 
 /**
- * A `readRulings` cursor, `<created_at>|<id>` or `<created_at>|<id>|<id>,…`:
+ * A `readRulings` cursor, `<created_at>|<id>` or `<created_at>|<id>|<entry>,…`:
  * a floor (a time and an id; every comment at or before it, by `(created_at,
- * id)`, has been returned) and the ids, ascending, of the comments past the
- * floor already returned; `undefined` when `cursor` is not one.
+ * id)`, has been returned) and, ascending by id, the comments past the floor
+ * already returned, each `<id>@<created_at in epoch ms>` (a bare `<id>`, as
+ * an older cursor wrote it, records no time); `undefined` when `cursor` is
+ * not one.
  */
 export function parseRulingsCursor(cursor: string): RulingsCursor | undefined {
-  const m = /^([^|]+)\|(0|[1-9][0-9]*)(?:\|((?:0|[1-9][0-9]*)(?:,(?:0|[1-9][0-9]*))*))?$/.exec(cursor);
+  const m = /^([^|]+)\|(0|[1-9][0-9]*)(?:\|([^|]+))?$/.exec(cursor);
   if (m === null) return undefined;
   const createdAt = m[1] as string;
   const at = IsoDateTime.safeParse(createdAt).success ? Date.parse(createdAt) : Number.NaN;
   const id = Number(m[2]);
-  const returned = m[3] === undefined ? [] : m[3].split(",").map(Number);
-  return Number.isFinite(at) && Number.isSafeInteger(id) && returned.every(Number.isSafeInteger) ? { created_at: createdAt, at, id, returned } : undefined;
+  const returned: ReturnedComment[] = [];
+  for (const entry of m[3] === undefined ? [] : m[3].split(",")) {
+    const e = RETURNED_ENTRY.exec(entry);
+    if (e === null) return undefined;
+    const n = Number(e[1]);
+    const when = e[2] === undefined ? null : Number(e[2]);
+    if (!Number.isSafeInteger(n) || (when !== null && !Number.isSafeInteger(when))) return undefined;
+    returned.push({ id: n, at: when });
+  }
+  return Number.isFinite(at) && Number.isSafeInteger(id) ? { created_at: createdAt, at, id, returned } : undefined;
 }
 
 /** Whether a comment at `at` (epoch ms) with id `n` is past `floor`, by `(created_at, id)`; everything is past no floor. */
@@ -1077,7 +1092,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
 
   const gitUrl = (options.gitUrl ?? DEFAULT_GIT_URL).replace(/\/+$/, "");
 
-  /** An issue item as an `InboxIssue`; `undefined` when malformed. */
+  /** An issue item as an `InboxIssue`, `by_runner` when the bot account opened it; `undefined` when malformed. */
   function toInbox(raw: unknown): InboxIssue | undefined {
     const issue = asObj(raw);
     const number = issue?.["number"];
@@ -1087,7 +1102,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
     const assignees = issue["assignees"];
     const first = Array.isArray(assignees) && assignees.length > 0 ? str(assignees[0], "login") : str(issue["assignee"], "login");
     const url = str(issue, "html_url") ?? `${gitUrl}/${owner}/${name}/issues/${number}`;
-    return { number, owner: first ?? null, body, url };
+    return { number, owner: first ?? null, body, url, by_runner: str(issue["user"], "login") === botLogin };
   }
 
   /** Every open inbox issue, or only `login`'s with `login`, ascending by number; PRs are left out. */
@@ -1198,8 +1213,11 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
    * cursor therefore never moves its floor past the read's start (the `Date`
    * of the inbox listing, less `RULINGS_SETTLE_MS`): every comment created
    * before then has been listed. A comment past the floor is returned once
-   * and then named in the cursor, so a later read skips it but returns every
-   * other comment past the floor, including one posted during this read.
+   * and then named in the cursor, with its time, so a later read skips it but
+   * returns every other comment past the floor, including one posted during
+   * this read. A named comment a read does not list (missing from one
+   * listing, deleted, or its inbox closed) stays named until the floor passes
+   * it, so it is never returned twice (Epic 4 retro item 7).
    */
   async function readRulings(cursor: string | null, opts: CallOpts): Promise<ForgeResult<RulingsRead>> {
     return guarded<RulingsRead>("readRulings", opts, async (ctx) => {
@@ -1212,7 +1230,7 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
       const start = Math.floor(ctx.latest / 1000) * 1000 - RULINGS_SETTLE_MS;
       const op = GITHUB_OPERATIONS.listIssueComments;
       const since = after === null ? "" : `since=${encodeURIComponent(after.created_at)}&`;
-      const returned = new Set(after?.returned);
+      const returned = new Set(after?.returned.map((r) => r.id));
       // Every comment past the old floor, by id, and whether an earlier read returned it.
       const past = new Map<number, { readonly comment: InboxComment; readonly at: number; readonly n: number; readonly returned: boolean }>();
       for (const inbox of listed.value) {
@@ -1228,9 +1246,11 @@ export function createGitHubForge(options: GitHubForgeOptions): Forge {
       const kept = [...past.values()].filter((c) => !c.returned).sort((a, b) => a.at - b.at || a.n - b.n);
       if (kept.length === 0) return forgeOk({ comments: [], cursor });
       const floor = after !== null && pastFloor({ at: start, id: 0 }, after.at, after.id) ? after : { created_at: formatDate(start), id: 0, at: start };
-      // A comment named in the old cursor that this read did not list (deleted, or its inbox closed) is dropped.
-      const ids = [...past.values()].filter((c) => pastFloor(floor, c.at, c.n)).map((c) => c.n).sort((a, b) => a - b);
-      const next = `${floor.created_at}|${floor.id}${ids.length === 0 ? "" : `|${ids.join(",")}`}`;
+      // A comment named in the old cursor that this read did not list stays named while it is past the new floor; one an older cursor named with no time is dropped.
+      const seen = [...past.values()].map((c): ReturnedComment => ({ id: c.n, at: c.at }));
+      const unlisted = (after?.returned ?? []).filter((r) => !past.has(r.id));
+      const named = [...seen, ...unlisted].filter((r) => r.at !== null && pastFloor(floor, r.at, r.id)).sort((a, b) => a.id - b.id);
+      const next = `${floor.created_at}|${floor.id}${named.length === 0 ? "" : `|${named.map((r) => `${r.id}@${r.at}`).join(",")}`}`;
       return forgeOk({ comments: kept.map((k) => k.comment), cursor: next });
     });
   }

@@ -176,7 +176,8 @@ import { allowanceReason, callPassedGate, describeError, ledgerFenceOf, message,
  * another run moved the cursor: `recordRulings` moves the cursor, adds the
  * batch's pending `retro-gates.yaml` rulings and dismissals, and drops the
  * pending rulings `main` shows (none while the snapshot shows a `reconcile`
- * PR open, Epic 4 retro item 1) and the dismissals whose item came back as a
+ * PR open, Epic 4 retro item 1, or merged with its record not yet `merged`,
+ * Epic 4 retro item 7) and the dismissals whose item came back as a
  * new instance. Only after it lands is each ruling answered with one 🤖
  * reply on its own inbox, at most once. With nothing new to read but
  * something to drop, the swap holds only `recordRulings`. With no

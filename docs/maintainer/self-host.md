@@ -582,10 +582,21 @@ loses none; an entry leaves the list once applying it to `main`'s
 Your inbox renders with the pending rulings applied, so an item ruled
 `go`, `done` or `defer` leaves it before the PR merges; the gates read only
 `main`, so the units a go or an item status frees are claimed after the
-`reconcile` PR merges. A later ruling on the same unit in the same family
-(`go`, `block`/`unblock`, `done`/`defer`) replaces a pending one, so rule
-`unblock` to undo a pending `block`. A hand edit of `retro-gates.yaml` does
-not undo a pending ruling: the next `reconcile` PR writes it again.
+`reconcile` PR merges. A later ruling is judged against the state with the
+pending rulings applied, so on a unit with a pending ruling:
+
+- `unblock` replaces a pending `block`, and `block` a pending `unblock`:
+  rule `unblock` to undo a pending `block`.
+- `done` replaces a pending `defer`.
+- A second `go` is refused (there is a go), and so is a repeat of the
+  pending verb (`block`, `unblock`, `done` or `defer` again: the item is
+  already in that state).
+- `defer` while a `done` is pending is refused: the item reads as `done`,
+  not `open`, `in-progress` or `waiting`.
+
+So a pending `go` or `done` cannot be replaced by a ruling. A hand edit of
+`retro-gates.yaml` does not undo a pending ruling: the next `reconcile` PR
+writes it again.
 
 **Dismissals.** `dismiss <unit-id>` hides that item from its inbox and
 changes nothing else: the unit, its PR, the ledger record and

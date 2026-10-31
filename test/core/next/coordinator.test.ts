@@ -680,6 +680,19 @@ describe("next(coordinator): planning (Story 2.7)", () => {
     expect(reasonOf(o)).toContain("status planning is due");
   });
 
+  test("a holder parked awaiting an approval is a Maintainer wait: the idle reason starts waiting-on-maintainer (Epic 4 retro item 7)", () => {
+    const awaiting = planningRec("planning:status.2", { state: "parked", park: { kind: "awaiting-approval", reason: null, inbox_owner: "carol", globs_held: [] } });
+    const o = pick({ ...CONTEXT_DUE, records: [awaiting] });
+    expect(o.kind).toBe("idle");
+    expect(reasonsOf(o).find((r) => r.code === "planning-held")?.maintainer).toBe(true);
+    expect(reasonOf(o)).toStartWith(`${WAITING_ON_MAINTAINER}status planning is due (`);
+    expect(reasonOf(o)).toContain("but held: planning:status.2 is parked awaiting-approval; no coordinator unit due; reconcile is not due");
+    // A blocked park is the lane's: no prefix.
+    const blocked = pick({ ...CONTEXT_DUE, records: [planningRec("planning:status.2", parkedAs("readiness"))] });
+    expect(reasonsOf(blocked).find((r) => r.code === "planning-held")?.maintainer).toBeUndefined();
+    expect(reasonOf(blocked)).toStartWith("no coordinator unit due; ");
+  });
+
   test("the matrix: a stale claim with no PR is taken over, same id", () => {
     const stale = planningRec("planning:graph.1", { generation: 2, heartbeat_at: minutesBefore(30) });
     const o = pick({ ...GRAPH_DUE, records: [stale] });
@@ -934,6 +947,17 @@ describe("next(coordinator): retro (Story 2.9)", () => {
       expect(reasonOf(o)).not.toContain(WAITING_ON_MAINTAINER);
     });
 
+    test.each(["awaiting-approval", "needs-approval"] as const)("a retro record parked %s is a Maintainer wait: prefixed, alone or beside a live-evidence reason (Epic 4 retro item 7)", (kind) => {
+      const park = { kind, reason: null, inbox_owner: "carol", globs_held: [] };
+      const parked: UnitRecord = { ...retro3, state: "parked", park };
+      const alone = pick({ ...DUE, records: [retroRec({ state: "parked", park })] });
+      expect(codes(alone)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 record-state"]);
+      expect(reasonOf(alone)).toBe(`${WAITING_ON_MAINTAINER}retro:2 is due but its record is parked ${kind}; no coordinator unit due; reconcile is not due: ${RECENT.unit} ran at ${RECENT.heartbeat_at}, under 10 min ago, and the snapshot shows no reconcile work`);
+      const both = pick({ ...TWO, evidence: [3], records: [parked] });
+      expect(codes(both)).toEqual(["reconcile:4 reconcile-not-due", "retro:2 live-evidence", "retro:3 record-state"]);
+      expect(reasonOf(both)).toStartWith(`${WAITING_ON_MAINTAINER}retro:2 waits for the live evidence file docs/maintainer/evidence/epic-2.md on main; retro:3 is due but its record is parked ${kind}; no coordinator unit due`);
+    });
+
     test("a live-evidence reason beside an overlap: no prefix", () => {
       const held = coord("planning:status.1", { globs: STATUS_GLOBS });
       const o = pick({ ...TWO, evidence: [3], records: [held] });
@@ -1152,6 +1176,14 @@ describe("next(coordinator): retro items (Story 2.10)", () => {
     const o = pick({ ...DUE, records: [itemRec({ state: "parked", park: BLOCKED })] });
     expect(codes(o)).toContain(`${UNIT_X} record-state`);
     expect(reasonOf(o)).toContain(`${UNIT_X} is due but its record is parked blocked verification`);
+  });
+
+  test.each(["awaiting-approval", "needs-approval"] as const)("a record parked %s is a Maintainer wait: the idle reason starts waiting-on-maintainer (Epic 4 retro item 7)", (kind) => {
+    const o = pick({ ...DUE, records: [itemRec({ state: "parked", park: { kind, reason: null, inbox_owner: "carol", globs_held: [] } })] });
+    expect(codes(o)).toEqual(["reconcile:4 reconcile-not-due", `${UNIT_X} record-state`]);
+    expect(reasonOf(o)).toStartWith(`${WAITING_ON_MAINTAINER}${UNIT_X} is due but its record is parked ${kind}; no coordinator unit due; `);
+    // A blocked park is the lane's: no prefix.
+    expect(reasonOf(pick({ ...DUE, records: [itemRec({ state: "parked", park: BLOCKED })] }))).toStartWith("no coordinator unit due; ");
   });
 
   test("an overlap with any held glob passes the item over", () => {

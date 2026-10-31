@@ -81,7 +81,11 @@ export type FakeCheckRun = ForgeCheck & {
 /** A commit status as `setStatuses` takes it. */
 export type FakeStatus = { readonly context: string; readonly state: "success" | "failure" | "error" | "pending" };
 
-/** An issue as the emulator holds it. */
+/**
+ * An issue as the emulator holds it. `author` is its opener's login, sent as
+ * its `user`: the bot account for one `POST /issues` creates; absent sends
+ * `user: null`.
+ */
 export type FakeIssue = {
   readonly number: number;
   readonly title: string;
@@ -89,6 +93,7 @@ export type FakeIssue = {
   readonly state: "open" | "closed";
   readonly labels: readonly string[];
   readonly assignees: readonly string[];
+  readonly author?: string;
 };
 
 /**
@@ -391,6 +396,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       labels: i.labels.map((name) => ({ name })),
       assignees: i.assignees.map((login) => ({ login })),
       assignee: i.assignees[0] === undefined ? null : { login: i.assignees[0] },
+      user: i.author === undefined ? null : { login: i.author },
       html_url: `https://github.com/${owner}/${name}/issues/${i.number}`,
     };
   }
@@ -778,7 +784,7 @@ export function createFakeGitHub(options: FakeGitHubOptions): FakeGitHub {
       if (typeof title !== "string" || typeof text !== "string") return unprocessable("Invalid request.");
       if (!Array.isArray(labels) || !labels.every((l) => typeof l === "string")) return unprocessable("Invalid request.");
       if (!Array.isArray(assignees) || !assignees.every((l) => typeof l === "string")) return unprocessable("Invalid request.");
-      const issue: FakeIssue = { number: nextNumber(), title, body: text, state: "open", labels: labels as string[], assignees: assignees as string[] };
+      const issue: FakeIssue = { number: nextNumber(), title, body: text, state: "open", labels: labels as string[], assignees: assignees as string[], author: botLogin };
       issues.set(issue.number, issue);
       return json(201, issueJson(issue));
     }

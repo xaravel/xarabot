@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createGitHubForge, DEFAULT_INBOX_LABEL, INBOX_TITLE, RULINGS_SETTLE_MS } from "../../../../src/adapters/forge/github/github-forge.ts";
 import { formatDate, GITHUB_OPERATIONS } from "../../../../src/adapters/forge/github/http.ts";
 import type { Forge, ForgeResult } from "../../../../src/ports/forge.ts";
-import { createFakeGitHub, testKeys, type FakeGitHub } from "./fake-github.ts";
+import { createFakeGitHub, testKeys, type FakeComment, type FakeGitHub } from "./fake-github.ts";
 
 const live = () => ({ signal: new AbortController().signal });
 
@@ -50,8 +50,8 @@ describe("the inbox operations (Story 4.2)", () => {
     issue(gh, ["alice"], { labels: ["other"] });
     const nobody = issue(gh, []);
     expect(value(await forge.inboxes(live()))).toEqual([
-      { number: bob, owner: "bob", body: "b", url: `https://github.com/acme/widgets/issues/${bob}` },
-      { number: nobody, owner: null, body: "", url: `https://github.com/acme/widgets/issues/${nobody}` },
+      { number: bob, owner: "bob", body: "b", url: `https://github.com/acme/widgets/issues/${bob}`, by_runner: false },
+      { number: nobody, owner: null, body: "", url: `https://github.com/acme/widgets/issues/${nobody}`, by_runner: false },
     ]);
     expect(calls(gh)).toEqual(["GET /issues?labels=xarabot-inbox&state=open&sort=created&direction=asc&per_page=100&page=1"]);
   });
@@ -65,7 +65,22 @@ describe("the inbox operations (Story 4.2)", () => {
         { number: 3, body: "x", assignees: [{ login: "bob" }], pull_request: {} },
       ],
     });
-    expect(value(await forge.inboxes(live()))).toEqual([{ number: 4, owner: "alice", body: "", url: "https://github.com/acme/widgets/issues/4" }]);
+    expect(value(await forge.inboxes(live()))).toEqual([{ number: 4, owner: "alice", body: "", url: "https://github.com/acme/widgets/issues/4", by_runner: false }]);
+  });
+
+  test("by_runner: an issue the App's bot account opened is the runner's; one a person opened, or with no author, is not (Epic 4 retro item 7)", async () => {
+    const { gh, forge } = setup();
+    const created = value(await forge.openInbox("bob", live()));
+    expect(created.by_runner).toBe(true);
+    const noAuthor = issue(gh, [], { body: "my notes" });
+    const person = gh.control.setIssue({ title: "mine", body: "", state: "open", labels: [DEFAULT_INBOX_LABEL], assignees: ["alice"], author: "alice" });
+    const otherBot = gh.control.setIssue({ title: "other bot", body: "", state: "open", labels: [DEFAULT_INBOX_LABEL], assignees: [], author: "dependabot[bot]" });
+    expect(value(await forge.inboxes(live())).map((i) => [i.number, i.by_runner])).toEqual([
+      [created.number, true],
+      [noAuthor, false],
+      [person, false],
+      [otherBot, false],
+    ]);
   });
 
   test("a malformed issue is transient", async () => {
@@ -98,8 +113,8 @@ describe("the inbox operations (Story 4.2)", () => {
   test("openInbox creates a missing inbox: titled, labelled with the configured label, assigned, with an empty body", async () => {
     const { gh, forge } = setup({ inboxLabel: "my-inbox" });
     const created = value(await forge.openInbox("bob", live()));
-    expect(gh.control.issues()).toEqual([{ number: created.number, title: "🤖 Xarabot inbox", body: "", state: "open", labels: ["my-inbox"], assignees: ["bob"] }]);
-    expect(created).toEqual({ number: created.number, owner: "bob", body: "", url: `https://github.com/acme/widgets/issues/${created.number}` });
+    expect(gh.control.issues()).toEqual([{ number: created.number, title: "🤖 Xarabot inbox", body: "", state: "open", labels: ["my-inbox"], assignees: ["bob"], author: "alice-xarabot[bot]" }]);
+    expect(created).toEqual({ number: created.number, owner: "bob", body: "", url: `https://github.com/acme/widgets/issues/${created.number}`, by_runner: true });
     expect(calls(gh)).toEqual(["GET /issues?labels=my-inbox&assignee=bob&state=open&sort=created&direction=asc&per_page=100&page=1", "POST /issues"]);
   });
 
@@ -144,8 +159,10 @@ describe("readRulings (Story 4.5)", () => {
 
   /** The floor a read whose inbox listing is dated `iso` writes: that time less `RULINGS_SETTLE_MS`. */
   const floorOf = (iso: string) => formatDate(Date.parse(iso) - RULINGS_SETTLE_MS);
+  /** A cursor's entries for comments returned past its floor: `<id>@<created_at in epoch ms>`, joined with commas. */
+  const named = (...cs: readonly { readonly id: number; readonly created_at: string }[]) => cs.map((c) => `${c.id}@${Date.parse(c.created_at)}`).join(",");
 
-  test("reads each open inbox's comments, oldest first by (created_at, id), and writes its cursor as <floor>|0|<ids returned past it>", async () => {
+  test("reads each open inbox's comments, oldest first by (created_at, id), and writes its cursor as <floor>|0|<id@time of each returned past it>", async () => {
     const { gh, forge } = setup();
     const a = issue(gh, ["alice"]);
     const b = issue(gh, ["bob"]);
@@ -154,14 +171,15 @@ describe("readRulings (Story 4.5)", () => {
     gh.control.advance(1000);
     gh.control.addComment(a, "later", "carol");
     const r = value(await forge.readRulings(null, live()));
-    const ids = [...gh.control.commentRecords(b), ...gh.control.commentRecords(a)].map((c) => String(c.id)) as [string, string, string];
+    const records = [...gh.control.commentRecords(b), ...gh.control.commentRecords(a)];
+    const ids = records.map((c) => String(c.id)) as [string, string, string];
     expect(r.comments).toEqual([
       { id: ids[0], issue: b, author: "edanisko", body: "/xarabot go retro:2", created_at: T, url: `https://github.com/acme/widgets/issues/${b}#issuecomment-${ids[0]}` },
       { id: ids[1], issue: a, author: "alice", body: "thanks", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[1]}` },
       { id: ids[2], issue: a, author: "carol", body: "later", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-${ids[2]}` },
     ]);
     // Every comment is younger than the read's start less the settle time, so each rides the cursor.
-    expect(r.cursor).toBe(`${floorOf("2026-01-01T00:00:01Z")}|0|${ids.join(",")}`);
+    expect(r.cursor).toBe(`${floorOf("2026-01-01T00:00:01Z")}|0|${named(...records)}`);
     // From no cursor, no `since`.
     expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?per_page=100&page=1`, `GET /issues/${b}/comments?per_page=100&page=1`]);
   });
@@ -176,7 +194,7 @@ describe("readRulings (Story 4.5)", () => {
     const r2 = value(await forge.readRulings(r1.cursor, live()));
     expect(r2.comments.map((c) => [c.author, c.body])).toEqual([["dave", "/xarabot release story:1.1"]]);
     expect(commentsCalls(gh)).toEqual([`GET /issues/${a}/comments?since=${encodeURIComponent(floorOf(T))}&per_page=100&page=1`]);
-    expect(r2.cursor).toBe(`${floorOf(T)}|0|${gh.control.commentRecords(a).map((c) => c.id).join(",")}`);
+    expect(r2.cursor).toBe(`${floorOf(T)}|0|${named(...gh.control.commentRecords(a))}`);
     expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
   });
 
@@ -201,12 +219,12 @@ describe("readRulings (Story 4.5)", () => {
       ["B2", "2026-01-01T00:00:12Z"],
     ]);
     // The floor stays at the read's start less the settle time, behind A2.
-    const [a1, a2] = gh.control.commentRecords(a).map((c) => c.id) as [number, number];
-    const [b1, b2] = gh.control.commentRecords(b).map((c) => c.id) as [number, number];
-    expect(r1.cursor).toBe(`${floorOf("2026-01-01T00:00:10Z")}|0|${[a1, b1, b2].join(",")}`);
+    const [a1, a2] = gh.control.commentRecords(a) as [FakeComment, FakeComment];
+    const [b1, b2] = gh.control.commentRecords(b) as [FakeComment, FakeComment];
+    expect(r1.cursor).toBe(`${floorOf("2026-01-01T00:00:10Z")}|0|${named(a1, b1, b2)}`);
     const r2 = value(await forge.readRulings(r1.cursor, live()));
     expect(r2.comments.map((c) => [c.issue, c.author, c.body])).toEqual([[a, "carol", "A2"]]);
-    expect(r2.cursor).toBe(`${floorOf("2026-01-01T00:00:12Z")}|0|${[a1, b1, a2, b2].join(",")}`);
+    expect(r2.cursor).toBe(`${floorOf("2026-01-01T00:00:12Z")}|0|${named(a1, b1, a2, b2)}`);
     expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
   });
 
@@ -215,15 +233,15 @@ describe("readRulings (Story 4.5)", () => {
     const a = issue(gh, ["alice"]);
     gh.control.addComment(a, "old", "alice");
     const r1 = value(await forge.readRulings(null, live()));
-    const [old] = gh.control.commentRecords(a).map((c) => c.id) as [number];
-    expect(r1.cursor).toBe(`${floorOf(T)}|0|${old}`);
+    const [old] = gh.control.commentRecords(a) as [FakeComment];
+    expect(r1.cursor).toBe(`${floorOf(T)}|0|${named(old)}`);
     gh.control.advance(2 * RULINGS_SETTLE_MS);
     gh.control.addComment(a, "new", "bob");
     const r2 = value(await forge.readRulings(r1.cursor, live()));
     expect(r2.comments.map((c) => c.body)).toEqual(["new"]);
     const later = formatDate(Date.parse(T) + 2 * RULINGS_SETTLE_MS);
     // `old` is behind the new floor now, so the cursor no longer names it.
-    expect(r2.cursor).toBe(`${floorOf(later)}|0|${gh.control.commentRecords(a)[1]?.id}`);
+    expect(r2.cursor).toBe(`${floorOf(later)}|0|${named(gh.control.commentRecords(a)[1] as FakeComment)}`);
   });
 
   test("a two-part cursor's floor is kept while it is ahead of the read's start less the settle time", async () => {
@@ -234,7 +252,7 @@ describe("readRulings (Story 4.5)", () => {
     gh.control.addComment(a, "unseen", "bob");
     const r = value(await forge.readRulings(`${T}|${seen}`, live()));
     expect(r.comments.map((c) => c.body)).toEqual(["unseen"]);
-    expect(r.cursor).toBe(`${T}|${seen}|${gh.control.commentRecords(a)[1]?.id}`);
+    expect(r.cursor).toBe(`${T}|${seen}|${named(gh.control.commentRecords(a)[1] as FakeComment)}`);
   });
 
   test("a comment listed twice is returned once; no Date header is transient", async () => {
@@ -244,7 +262,7 @@ describe("readRulings (Story 4.5)", () => {
     gh.control.inject("GET", /\/comments\?/, { status: 200, body: [twice, twice] });
     const r = value(await forge.readRulings(null, live()));
     expect(r.comments.map((c) => [c.issue, c.id])).toEqual([[a, "7"]]);
-    expect(r.cursor).toBe(`${floorOf(T)}|0|7`);
+    expect(r.cursor).toBe(`${floorOf(T)}|0|7@${Date.parse(T)}`);
     gh.control.omitDate(true);
     expect(kind(await forge.readRulings(null, live()))).toBe("transient");
   });
@@ -286,7 +304,47 @@ describe("readRulings (Story 4.5)", () => {
       { id: "501", issue: a, author: "bob", body: "new", created_at: T, url: `https://github.com/acme/widgets/issues/${a}#issuecomment-501` },
       { id: "502", issue: a, author: null, body: "", created_at: "2026-01-01T00:00:01Z", url: `https://github.com/acme/widgets/issues/${a}#issuecomment-502` },
     ]);
-    expect(r.cursor).toBe(`${T}|500|501,502`);
+    expect(r.cursor).toBe(`${T}|500|501@${Date.parse(T)},502@${Date.parse("2026-01-01T00:00:01Z")}`);
+  });
+
+  describe("a returned comment missing from one listing (Epic 4 retro item 7)", () => {
+    const at = (iso: string) => Date.parse(iso);
+
+    test("it stays named while past the floor, so it is never returned twice; once the floor passes it, it leaves the cursor", async () => {
+      const { gh, forge } = setup();
+      const a = issue(gh, ["alice"]);
+      gh.control.addComment(a, "/xarabot go retro:2", "edanisko");
+      const [x] = gh.control.commentRecords(a) as [FakeComment];
+      const r1 = value(await forge.readRulings(null, live()));
+      expect(r1.comments.map((c) => c.id)).toEqual([String(x.id)]);
+      // The next listing leaves x out but has a new comment y.
+      gh.control.advance(1000);
+      const y = { id: x.id + 100, body: "y", user: { login: "bob" }, created_at: "2026-01-01T00:00:01Z" };
+      gh.control.inject("GET", /\/comments\?/, { status: 200, body: [y] });
+      const r2 = value(await forge.readRulings(r1.cursor, live()));
+      expect(r2.comments.map((c) => c.body)).toEqual(["y"]);
+      expect(r2.cursor).toBe(`${floorOf("2026-01-01T00:00:01Z")}|0|${named(x)},${y.id}@${at(y.created_at)}`);
+      // x is listed again, still past the floor: not returned again.
+      expect(value(await forge.readRulings(r2.cursor, live()))).toEqual({ comments: [], cursor: r2.cursor });
+      // The floor passes x and y: a later read with a new comment names neither.
+      gh.control.advance(2 * RULINGS_SETTLE_MS);
+      gh.control.addComment(a, "z", "carol");
+      const z = gh.control.commentRecords(a)[1] as FakeComment;
+      const r4 = value(await forge.readRulings(r2.cursor, live()));
+      expect(r4.comments.map((c) => c.body)).toEqual(["z"]);
+      expect(r4.cursor).toBe(`${floorOf(formatDate(Date.parse(T) + 1000 + 2 * RULINGS_SETTLE_MS))}|0|${named(z)}`);
+    });
+
+    test("an older cursor's bare id is read; listed again it is not returned, and is named with its time; unlisted it is dropped", async () => {
+      const { gh, forge } = setup();
+      const a = issue(gh, ["alice"]);
+      gh.control.addComment(a, "seen", "alice");
+      gh.control.addComment(a, "new", "bob");
+      const [seen, fresh] = gh.control.commentRecords(a) as [FakeComment, FakeComment];
+      const r = value(await forge.readRulings(`${floorOf(T)}|0|${seen.id},999999`, live()));
+      expect(r.comments.map((c) => c.body)).toEqual(["new"]);
+      expect(r.cursor).toBe(`${floorOf(T)}|0|${named(seen, fresh)}`);
+    });
   });
 
   test.each([
@@ -303,6 +361,12 @@ describe("readRulings (Story 4.5)", () => {
     "2026-01-01T00:00:00Z|0|01",
     "2026-01-01T00:00:00Z|0|1|2",
     "2026-01-01T00:00:00Z|0|99999999999999999",
+    "2026-01-01T00:00:00Z|0|1@",
+    "2026-01-01T00:00:00Z|0|1@x",
+    "2026-01-01T00:00:00Z|0|1@01",
+    "2026-01-01T00:00:00Z|0|@5",
+    "2026-01-01T00:00:00Z|0|1@2@3",
+    "2026-01-01T00:00:00Z|0|1@99999999999999999",
   ])(
     "the cursor %p is rejected before any request",
     async (cursor) => {

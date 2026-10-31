@@ -295,10 +295,16 @@ function ownedItems(input: RenderDigestInput): { readonly owner: string; readonl
 
 /**
  * The inbox item `unit` names in `snapshot`, dismissed or not, with the
- * owner whose inbox lists it; `undefined` when no inbox lists it. Deferred
- * entries are not units, so no file is read.
+ * owner whose inbox lists it; `undefined` when no inbox lists it. A parked
+ * record's item comes first: when the unit is also a Maintainer item (a
+ * Maintainer-routed retro item or an unmanifested Story heading with a
+ * parked record), the parked record's owner rules it (Epic 4 retro item 7).
+ * Deferred entries are not units, so no file is read.
  */
 function unitItem(snapshot: Snapshot, unit: string): { readonly owner: string; readonly item: Item } | undefined {
+  const r = snapshot.ledger.units.find((x) => x.unit === unit);
+  const parked = r === undefined ? null : parkedItem(snapshot, "", r);
+  if (parked !== null) return parked;
   return ownedItems({ snapshot, files: {}, repoUrl: "" }).find((o) => o.item.key === unit);
 }
 

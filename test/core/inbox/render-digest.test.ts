@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ageText, EMPTY_INBOX_BODY, inboxInstance, renderDigest } from "../../../src/core/inbox/render-digest.ts";
+import { ageText, EMPTY_INBOX_BODY, inboxInstance, inboxOwner, renderDigest } from "../../../src/core/inbox/render-digest.ts";
 import { FORGE_TEXT_LIMITS } from "../../../src/core/sanitize.ts";
 import type { CoordinatorRecord, Dismissal, Park, UnitRecord } from "../../../src/core/schemas/ledger.ts";
 import type { Snapshot } from "../../../src/core/schemas/snapshot.ts";
@@ -310,6 +310,23 @@ describe("dismissals (Story 4.6)", () => {
     expect(itemLines(otherText)["alice"]).toHaveLength(1);
     const otherStart = digest({ ...base, coordinator: claim([{ unit: "story:2.1", subject: "blocked `intent-gap`", since: DAY(5) }]) });
     expect(itemLines(otherStart)["alice"]).toHaveLength(1);
+  });
+
+  test("inboxOwner: a parked record's owner rules a unit that is also a Maintainer item; the Maintainer's otherwise (Epic 4 retro item 7)", () => {
+    const parkedItem = parked("9.9", { kind: "blocked", reason: "intent-gap", inbox_owner: "alice" }, { unit: ITEM });
+    const parkedHeading = parked("3.1", { kind: "awaiting-approval", reason: null, inbox_owner: "bob" });
+    const both = snapshotOf(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }], records: [parkedItem, parkedHeading], files: gates }));
+    expect(inboxOwner(both, ITEM)).toBe("alice");
+    expect(inboxInstance(both, ITEM)).toEqual({ subject: "blocked `intent-gap`", since: DAY(2) });
+    expect(inboxOwner(both, "story:3.1")).toBe("bob");
+    expect(inboxInstance(both, "story:3.1")).toEqual({ subject: "awaiting approval", since: DAY(2) });
+    // With no parked record, the same units are the Maintainer's.
+    const plain = snapshotOf(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }], files: gates }));
+    expect(inboxOwner(plain, ITEM)).toBe("edanisko");
+    expect(inboxOwner(plain, "story:3.1")).toBe("edanisko");
+    // A record not parked leaves the Maintainer item the Maintainer's.
+    const merging = snapshotOf(world({ epics: { 1: [], 2: ["1"], 3: ["1"] }, manifests: [{ id: "2.1" }], records: [storyRec("3.1", { state: "merging" })], files: gates }));
+    expect(inboxOwner(merging, "story:3.1")).toBe("edanisko");
   });
 
   test("an undated item matches a dismissal with since null", () => {

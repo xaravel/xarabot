@@ -182,9 +182,21 @@ export function rulingAdds(judged: readonly JudgedRuling[]): { readonly pending:
 
 export type RulingsDrops = { readonly pending: readonly PendingRuling[]; readonly dismissals: readonly Dismissal[] };
 
-/** Whether the snapshot shows a `reconcile` record's PR open: its `retro-gates.yaml` can still change what `main` shows. */
-function reconcilePrOpen(snapshot: Snapshot): boolean {
-  return snapshot.ledger.units.some((r) => unitKind(r.unit) === "reconcile" && snapshot.prs[r.unit]?.state === "open");
+/**
+ * Whether a `reconcile` record's PR can still change what the snapshot's
+ * `main` shows: its PR is open, or merged while the record is not yet
+ * `merged`. The snapshot reads `main` before the PRs, so the queue can merge
+ * a PR between the two reads (Epic 4 retro item 7): the PR shows merged, but
+ * `main`'s `retro-gates.yaml` may not have it. A record is marked `merged`
+ * only by a run that read the PR merged, so every later snapshot's `main`
+ * has the merge.
+ */
+function reconcilePrUnsettled(snapshot: Snapshot): boolean {
+  return snapshot.ledger.units.some((r) => {
+    if (unitKind(r.unit) !== "reconcile") return false;
+    const state = snapshot.prs[r.unit]?.state;
+    return state === "open" || (state === "merged" && r.state !== "merged");
+  });
 }
 
 /**
@@ -200,11 +212,13 @@ function reconcilePrOpen(snapshot: Snapshot): boolean {
  * carry an earlier ruling the entry superseded (a `block` an `unblock`
  * replaced), so `main` showing the entry now does not keep it once the PR
  * merges; the entry is written again by the next PR, and dropped once
- * `main` shows it with no reconcile PR open.
+ * `main` shows it with no reconcile PR open. A reconcile PR the snapshot
+ * shows merged keeps every entry too until its record is `merged` (Epic 4
+ * retro item 7): it may have merged after the snapshot read `main`.
  */
 export function rulingsDrops(view: Snapshot, snapshot: Snapshot): RulingsDrops {
   const lists = rulingListsOf(snapshot.ledger.coordinator);
-  const settled = snapshot.graph.ok && !reconcilePrOpen(snapshot);
+  const settled = snapshot.graph.ok && !reconcilePrUnsettled(snapshot);
   const pending = settled ? lists.pending.filter((e) => applyPendingRulings(snapshot.retro_gates, [e]).summary.length === 0) : [];
   const dismissals = lists.dismissals.filter((d) => {
     const now = inboxInstance(view, d.unit);
