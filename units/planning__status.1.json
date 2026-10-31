@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "planning:status.1",
-  "state": "parked",
+  "state": "released",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "coordinator",
@@ -11,7 +11,7 @@
     "_bmad-output/implementation-artifacts/retro-gates.yaml",
     "_bmad-output/implementation-artifacts/sprint-status.yaml"
   ],
-  "heartbeat_at": "2026-10-31T07:12:18.096Z",
+  "heartbeat_at": "2026-10-31T12:10:46Z",
   "pr": null,
   "pr_owner": null,
   "base_sha": "2d40d17d5ff2859f4091d933f11252ae825d0464",
@@ -23,13 +23,7 @@
   "approved_graph": null,
   "retro_result": null,
   "builder_providers": [],
-  "park": {
-    "kind": "blocked",
-    "reason": "readiness",
-    "inbox_owner": "edanisko",
-    "globs_held": [],
-    "text": "Sprint planning: readiness gate PASS; sprint-status.yaml is already in sync and left unchanged (the stock script would rename 3-2-the-pi-adapter to 3-2-the-pi-adapter-deferred-to-v1, but sprint-change-proposal-2026-10-25 C1 and stories/3.2.md keep the key). No context files were written. One open question:\nEpic 6\n- Story 6.1: Where does a lane's live state and wait reason come from? Today the lane state folder has only PID files (wait.pid just says `sleep`), STOP, outcome and the journal, and a span is journaled only once it ends. Readings: (a) 6.1 adds a state file that the lane and coordinator processes write (current unit, state, wait reason). Status then shows exact reasons such as usage-limit, CI wait or a waiting-on-maintainer idle, but 6.1's globs must widen to src/lane/** and src/ports/lane-store.ts, and the spine's AD-3 state table gains a row; (b) status works state out only from existing files plus the ledger claim and forge (claim merging means merge queue, an open PR means CI). It changes no lane code, but a usage-limit sleep or idle wait shows as waiting with the reason unknown."
-  },
+  "park": null,
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
