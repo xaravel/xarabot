@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "unit": "story:5.1",
-  "state": "claimed",
+  "state": "parked",
   "owner": "edanisko",
   "host": "4ca78cac-c4f2-4af2-8540-04c079ca8859",
   "lane": "builder-1",
@@ -17,7 +17,7 @@
     "test/cli/**",
     "test/core/join/**"
   ],
-  "heartbeat_at": "2026-10-31T13:30:18.945Z",
+  "heartbeat_at": "2026-10-31T13:30:28.172Z",
   "pr": 311,
   "pr_owner": "edanisko",
   "base_sha": "affd41f78b5ce4b6dde45945227c191c59fdec17",
@@ -31,7 +31,26 @@
   "builder_providers": [
     "anthropic"
   ],
-  "park": null,
+  "park": {
+    "kind": "awaiting-approval",
+    "reason": null,
+    "inbox_owner": "edanisko",
+    "globs_held": [
+      "_bmad-output/implementation-artifacts/spec-5-1-xarabot-join-creates-the-owner-s-app.md",
+      "bootstrap/join.ts",
+      "docs/maintainer/self-host.md",
+      "src/adapters/forge/github/app-manifest.ts",
+      "src/adapters/forge/github/http.ts",
+      "src/cli/join.ts",
+      "src/cli/main.ts",
+      "src/core/join/manifest.ts",
+      "test/adapters/forge/github/app-manifest.test.ts",
+      "test/adapters/forge/github/fake-github.ts",
+      "test/cli/join.test.ts",
+      "test/cli/main.test.ts",
+      "test/core/join/manifest.test.ts"
+    ]
+  },
   "attempts": 0,
   "loopbacks": 0,
   "ci_fixes": 0,
